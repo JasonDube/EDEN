@@ -1,5 +1,6 @@
 # Build artifacts (CMake, FetchContent deps, compiled libs)
 build/
+site/
 
 # Rust build artifacts
 modules/eden_script/grove/target/
@@ -7,6 +8,7 @@ modules/eden_script/grove/target/
 # Python virtual environments
 backend/.venv/
 backend/venv/
+.mkdocs-venv/
 backend/__pycache__/
 **/__pycache__/
 *.pyc

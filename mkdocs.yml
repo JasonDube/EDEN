@@ -1,0 +1,46 @@
+site_name: EDEN Documentation
+site_description: Grove scripting reference and guides for the EDEN world simulation engine
+site_url: https://jasondube.github.io/EDEN/
+repo_url: https://github.com/JasonDube/EDEN
+repo_name: JasonDube/EDEN
+
+theme:
+  name: material
+  palette:
+    - scheme: slate
+      primary: teal
+      accent: lime
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+    - scheme: default
+      primary: teal
+      accent: lime
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+  features:
+    - navigation.sections
+    - navigation.expand
+    - content.code.copy
+    - search.highlight
+
+markdown_extensions:
+  - tables
+  - admonition
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.superfences
+  - pymdownx.inlinehilite
+  - attr_list
+  - toc:
+      permalink: true
+
+nav:
+  - Home: index.md
+  - Grove Scripting:
+    - Language Basics: grove/basics.md
+    - Construction: grove/construction.md
+    - AlgoBot Programming: grove/algobots.md
+    - Economy & Land: grove/economy.md
+    - Function Reference: grove/reference.md
