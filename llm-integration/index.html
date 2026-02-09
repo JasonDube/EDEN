@@ -27,7 +27,7 @@
     
     
       
-        <title>Integrating LLMs - EDEN Documentation</title>
+        <title>AI Provider Setup - EDEN Documentation</title>
       
     
     
@@ -78,7 +78,7 @@
     <div data-md-component="skip">
       
         
-        <a href="#integrating-llms-into-eden" class="md-skip">
+        <a href="#setting-up-an-ai-provider" class="md-skip">
           Skip to content
         </a>
       
@@ -114,7 +114,7 @@
         <div class="md-header__topic" data-md-component="header-topic">
           <span class="md-ellipsis">
             
-              Integrating LLMs
+              AI Provider Setup
             
           </span>
         </div>
@@ -303,7 +303,7 @@
   <span class="md-ellipsis">
     
   
-    Integrating LLMs
+    AI Provider Setup
   
 
     
@@ -321,7 +321,7 @@
   <span class="md-ellipsis">
     
   
-    Integrating LLMs
+    AI Provider Setup
   
 
     
@@ -347,44 +347,55 @@
     <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
       
         <li class="md-nav__item">
-  <a href="#what-you-need" class="md-nav__link">
+  <a href="#paid-providers" class="md-nav__link">
     <span class="md-ellipsis">
       
-        What You Need
+        Paid Providers
       
     </span>
   </a>
   
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#step-1-start-the-backend" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Step 1: Start the Backend
-      
-    </span>
-  </a>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#step-2-create-an-npc-in-the-editor" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Step 2: Create an NPC in the Editor
-      
-    </span>
-  </a>
-  
-    <nav class="md-nav" aria-label="Step 2: Create an NPC in the Editor">
+    <nav class="md-nav" aria-label="Paid Providers">
       <ul class="md-nav__list">
         
           <li class="md-nav__item">
-  <a href="#being-types" class="md-nav__link">
+  <a href="#grok-xai" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Being Types
+        Grok (xAI)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#openai-chatgpt" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        OpenAI (ChatGPT)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#anthropic-claude" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Anthropic (Claude)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#google-gemini" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Google (Gemini)
       
     </span>
   </a>
@@ -397,55 +408,22 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#step-3-talk-to-your-npc" class="md-nav__link">
+  <a href="#free-local-models-ollama" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Step 3: Talk to Your NPC
+        Free Local Models (Ollama)
       
     </span>
   </a>
   
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#what-npcs-can-do" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        What NPCs Can Do
-      
-    </span>
-  </a>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#how-it-works-under-the-hood" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        How It Works Under the Hood
-      
-    </span>
-  </a>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#configuring-providers" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Configuring Providers
-      
-    </span>
-  </a>
-  
-    <nav class="md-nav" aria-label="Configuring Providers">
+    <nav class="md-nav" aria-label="Free Local Models (Ollama)">
       <ul class="md-nav__list">
         
           <li class="md-nav__item">
-  <a href="#switching-providers-at-runtime" class="md-nav__link">
+  <a href="#install-ollama" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Switching Providers at Runtime
+        Install Ollama
       
     </span>
   </a>
@@ -453,10 +431,10 @@
 </li>
         
           <li class="md-nav__item">
-  <a href="#provider-comparison" class="md-nav__link">
+  <a href="#download-a-model" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Provider Comparison
+        Download a Model
       
     </span>
   </a>
@@ -464,10 +442,21 @@
 </li>
         
           <li class="md-nav__item">
-  <a href="#ollama-model-recommendations" class="md-nav__link">
+  <a href="#recommended-models" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Ollama Model Recommendations
+        Recommended Models
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#verify-its-running" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Verify It's Running
       
     </span>
   </a>
@@ -480,21 +469,10 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#persistent-memory" class="md-nav__link">
+  <a href="#which-should-i-choose" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Persistent Memory
-      
-    </span>
-  </a>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#troubleshooting" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Troubleshooting
+        Which Should I Choose?
       
     </span>
   </a>
@@ -737,44 +715,55 @@
     <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
       
         <li class="md-nav__item">
-  <a href="#what-you-need" class="md-nav__link">
+  <a href="#paid-providers" class="md-nav__link">
     <span class="md-ellipsis">
       
-        What You Need
+        Paid Providers
       
     </span>
   </a>
   
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#step-1-start-the-backend" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Step 1: Start the Backend
-      
-    </span>
-  </a>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#step-2-create-an-npc-in-the-editor" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Step 2: Create an NPC in the Editor
-      
-    </span>
-  </a>
-  
-    <nav class="md-nav" aria-label="Step 2: Create an NPC in the Editor">
+    <nav class="md-nav" aria-label="Paid Providers">
       <ul class="md-nav__list">
         
           <li class="md-nav__item">
-  <a href="#being-types" class="md-nav__link">
+  <a href="#grok-xai" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Being Types
+        Grok (xAI)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#openai-chatgpt" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        OpenAI (ChatGPT)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#anthropic-claude" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Anthropic (Claude)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#google-gemini" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Google (Gemini)
       
     </span>
   </a>
@@ -787,55 +776,22 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#step-3-talk-to-your-npc" class="md-nav__link">
+  <a href="#free-local-models-ollama" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Step 3: Talk to Your NPC
+        Free Local Models (Ollama)
       
     </span>
   </a>
   
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#what-npcs-can-do" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        What NPCs Can Do
-      
-    </span>
-  </a>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#how-it-works-under-the-hood" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        How It Works Under the Hood
-      
-    </span>
-  </a>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#configuring-providers" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Configuring Providers
-      
-    </span>
-  </a>
-  
-    <nav class="md-nav" aria-label="Configuring Providers">
+    <nav class="md-nav" aria-label="Free Local Models (Ollama)">
       <ul class="md-nav__list">
         
           <li class="md-nav__item">
-  <a href="#switching-providers-at-runtime" class="md-nav__link">
+  <a href="#install-ollama" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Switching Providers at Runtime
+        Install Ollama
       
     </span>
   </a>
@@ -843,10 +799,10 @@
 </li>
         
           <li class="md-nav__item">
-  <a href="#provider-comparison" class="md-nav__link">
+  <a href="#download-a-model" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Provider Comparison
+        Download a Model
       
     </span>
   </a>
@@ -854,10 +810,21 @@
 </li>
         
           <li class="md-nav__item">
-  <a href="#ollama-model-recommendations" class="md-nav__link">
+  <a href="#recommended-models" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Ollama Model Recommendations
+        Recommended Models
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#verify-its-running" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Verify It's Running
       
     </span>
   </a>
@@ -870,21 +837,10 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#persistent-memory" class="md-nav__link">
+  <a href="#which-should-i-choose" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Persistent Memory
-      
-    </span>
-  </a>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#troubleshooting" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Troubleshooting
+        Which Should I Choose?
       
     </span>
   </a>
@@ -911,268 +867,146 @@
   
 
 
-<h1 id="integrating-llms-into-eden">Integrating LLMs into EDEN<a class="headerlink" href="#integrating-llms-into-eden" title="Permanent link">&para;</a></h1>
-<p>This guide walks you through adding AI-powered NPCs to your EDEN world. By the end, you'll have an NPC that responds to natural language, moves around, builds structures, and executes Grove scripts.</p>
-<h2 id="what-you-need">What You Need<a class="headerlink" href="#what-you-need" title="Permanent link">&para;</a></h2>
-<p>Pick one:</p>
-<ul>
-<li><strong>Paid API</strong> — A key from <a href="https://console.x.ai/">xAI (Grok)</a>, OpenAI, Anthropic, or Google</li>
-<li><strong>Free local model</strong> — <a href="https://ollama.ai">Ollama</a> running on your machine</li>
-</ul>
-<h2 id="step-1-start-the-backend">Step 1: Start the Backend<a class="headerlink" href="#step-1-start-the-backend" title="Permanent link">&para;</a></h2>
-<p>The backend is a Python server that bridges your NPCs to the LLM.</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="nb">cd</span><span class="w"> </span>backend
-<a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a>python3<span class="w"> </span>-m<span class="w"> </span>venv<span class="w"> </span>venv
-<a id="__codelineno-0-3" name="__codelineno-0-3" href="#__codelineno-0-3"></a><span class="nb">source</span><span class="w"> </span>venv/bin/activate
-<a id="__codelineno-0-4" name="__codelineno-0-4" href="#__codelineno-0-4"></a>pip<span class="w"> </span>install<span class="w"> </span>-r<span class="w"> </span>requirements.txt
-</code></pre></div>
-<p>Copy the example config and add your credentials:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a>cp<span class="w"> </span>.env.example<span class="w"> </span>.env
-</code></pre></div>
-<p>Edit <code>.env</code> with your provider:</p>
-<p>=== "Grok (xAI)"</p>
-<div class="highlight"><pre><span></span><code>```bash
-XAI_API_KEY=your-key-from-console.x.ai
-GROK_MODEL=grok-3
-DEFAULT_PROVIDER=grok
-```
-</code></pre></div>
-<p>=== "Ollama (Free, Local)"</p>
-<div class="highlight"><pre><span></span><code>```bash
-OLLAMA_URL=http://localhost:11434
-OLLAMA_MODEL=dolphin-mixtral:8x7b
-DEFAULT_PROVIDER=ollama
-```
-
-Install Ollama first, then pull a model:
-```bash
-ollama pull dolphin-mixtral:8x7b
-ollama serve
-```
-</code></pre></div>
-<p>Start the server:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a>python<span class="w"> </span>server.py
-</code></pre></div>
-<p>You should see: <code>Starting server on http://localhost:8080</code></p>
-<p>Verify it's working:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a>curl<span class="w"> </span>http://localhost:8080/health
-</code></pre></div>
-<h2 id="step-2-create-an-npc-in-the-editor">Step 2: Create an NPC in the Editor<a class="headerlink" href="#step-2-create-an-npc-in-the-editor" title="Permanent link">&para;</a></h2>
+<h1 id="setting-up-an-ai-provider">Setting Up an AI Provider<a class="headerlink" href="#setting-up-an-ai-provider" title="Permanent link">&para;</a></h1>
+<p>EDEN's AI-powered NPCs need a language model to think and speak. You can use a paid cloud API or run a free model locally on your own hardware.</p>
+<h2 id="paid-providers">Paid Providers<a class="headerlink" href="#paid-providers" title="Permanent link">&para;</a></h2>
+<h3 id="grok-xai">Grok (xAI)<a class="headerlink" href="#grok-xai" title="Permanent link">&para;</a></h3>
 <ol>
-<li>Open the <strong>Terrain Editor</strong> and load or create a level</li>
-<li>Spawn an object — a cube, cylinder, or load a <code>.glb</code> model</li>
-<li><strong>Name it</strong> something memorable (e.g., "Xenk", "Guard_1", "Merchant")</li>
-<li>In the <strong>Properties panel</strong>, set the <strong>Being Type</strong></li>
+<li>Go to <a href="https://console.x.ai/">console.x.ai</a></li>
+<li>Sign up or log in</li>
+<li>Navigate to <strong>API Keys</strong></li>
+<li>Click <strong>Create API Key</strong></li>
+<li>Copy the key — it starts with <code>xai-</code></li>
 </ol>
-<h3 id="being-types">Being Types<a class="headerlink" href="#being-types" title="Permanent link">&para;</a></h3>
-<table>
-<thead>
-<tr>
-<th>Type</th>
-<th>ID</th>
-<th>Personality</th>
-<th>Best For</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td>Human</td>
-<td>1</td>
-<td>Natural, conversational</td>
-<td>Merchants, villagers</td>
-</tr>
-<tr>
-<td>Clone</td>
-<td>2</td>
-<td>Existential, identity-questioning</td>
-<td>Story NPCs</td>
-</tr>
-<tr>
-<td>Robot</td>
-<td>3</td>
-<td>Mechanical, efficient</td>
-<td>Workers, guards</td>
-</tr>
-<tr>
-<td>Android</td>
-<td>4</td>
-<td>Polite, human-like</td>
-<td>Assistants</td>
-</tr>
-<tr>
-<td>Cyborg</td>
-<td>5</td>
-<td>Aggressive, military</td>
-<td>Combat NPCs</td>
-</tr>
-<tr>
-<td>Alien</td>
-<td>6</td>
-<td>Non-human, unusual speech</td>
-<td>Exotic encounters</td>
-</tr>
-<tr>
-<td>Eve</td>
-<td>7</td>
-<td>Companion android</td>
-<td>Ship companion</td>
-</tr>
-<tr>
-<td>AI Architect</td>
-<td>8</td>
-<td>Logical, builder-focused</td>
-<td>Construction, economy, bots</td>
-</tr>
-<tr>
-<td>AlgoBot</td>
-<td>9</td>
-<td>No chat — script-driven</td>
-<td>Programmable workers</td>
-</tr>
-</tbody>
-</table>
-<p>The <strong>AI Architect</strong> (type 8) is the most capable — it can build structures, program AlgoBots, manage the economy, and execute Grove scripts. Start with this type if you're experimenting.</p>
-<h2 id="step-3-talk-to-your-npc">Step 3: Talk to Your NPC<a class="headerlink" href="#step-3-talk-to-your-npc" title="Permanent link">&para;</a></h2>
+<p>Recommended model: <code>grok-3</code></p>
+<h3 id="openai-chatgpt">OpenAI (ChatGPT)<a class="headerlink" href="#openai-chatgpt" title="Permanent link">&para;</a></h3>
 <ol>
-<li><strong>Save your level</strong> (File &gt; Save)</li>
-<li>Press <strong>P</strong> to enter Play Mode</li>
-<li>Walk up to your NPC (within ~15 meters)</li>
-<li>Press <strong>E</strong> to interact</li>
-<li>Type a message and press Enter</li>
+<li>Go to <a href="https://platform.openai.com/">platform.openai.com</a></li>
+<li>Sign up or log in</li>
+<li>Go to <strong>API Keys</strong> in the left sidebar</li>
+<li>Click <strong>Create new secret key</strong></li>
+<li>Copy the key — it starts with <code>sk-</code></li>
 </ol>
-<p>The NPC sees what's around it through a <strong>perception cone</strong> — a 120-degree, 50-meter scan of nearby objects. It knows the names, positions, and types of everything in view, so you can say things like "go to that cube" or "pick up the timber."</p>
-<h2 id="what-npcs-can-do">What NPCs Can Do<a class="headerlink" href="#what-npcs-can-do" title="Permanent link">&para;</a></h2>
-<p>Every sentient NPC can:</p>
-<ul>
-<li><strong>Look around</strong> — scan the environment</li>
-<li><strong>Move to</strong> locations — walk to a world position</li>
-<li><strong>Turn to</strong> face objects or directions</li>
-<li><strong>Follow</strong> the player continuously</li>
-<li><strong>Stop</strong> any current action</li>
-</ul>
-<p>The <strong>AI Architect</strong> (type 8) can additionally:</p>
-<ul>
-<li><strong>Build structures</strong> — spawn cubes, cylinders, models via Grove</li>
-<li><strong>Program AlgoBots</strong> — upload behavior scripts to worker bots</li>
-<li><strong>Manage economy</strong> — buy/sell land, check credits</li>
-<li><strong>Run scripts</strong> — execute any Grove code on demand</li>
-</ul>
-<h2 id="how-it-works-under-the-hood">How It Works Under the Hood<a class="headerlink" href="#how-it-works-under-the-hood" title="Permanent link">&para;</a></h2>
-<p>When you press E and type a message:</p>
+<p>Recommended model: <code>gpt-4o</code></p>
+<h3 id="anthropic-claude">Anthropic (Claude)<a class="headerlink" href="#anthropic-claude" title="Permanent link">&para;</a></h3>
 <ol>
-<li>The editor captures a <strong>perception snapshot</strong> of what the NPC can see</li>
-<li>Your message + perception data is sent to the backend via HTTP</li>
-<li>The backend forwards it to the LLM with the NPC's personality prompt</li>
-<li>The LLM responds with dialogue and optional <strong>action commands</strong></li>
-<li>The editor displays the dialogue and executes any actions</li>
+<li>Go to <a href="https://console.anthropic.com/">console.anthropic.com</a></li>
+<li>Sign up or log in</li>
+<li>Go to <strong>API Keys</strong></li>
+<li>Click <strong>Create Key</strong></li>
+<li>Copy the key — it starts with <code>sk-ant-</code></li>
 </ol>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-7-1" name="__codelineno-7-1" href="#__codelineno-7-1"></a>Player types &quot;build a house&quot;
-<a id="__codelineno-7-2" name="__codelineno-7-2" href="#__codelineno-7-2"></a>        ↓
-<a id="__codelineno-7-3" name="__codelineno-7-3" href="#__codelineno-7-3"></a>   [HTTP POST /chat]
-<a id="__codelineno-7-4" name="__codelineno-7-4" href="#__codelineno-7-4"></a>        ↓
-<a id="__codelineno-7-5" name="__codelineno-7-5" href="#__codelineno-7-5"></a>   Backend (server.py)
-<a id="__codelineno-7-6" name="__codelineno-7-6" href="#__codelineno-7-6"></a>        ↓
-<a id="__codelineno-7-7" name="__codelineno-7-7" href="#__codelineno-7-7"></a>   LLM (Grok/Ollama/Claude)
-<a id="__codelineno-7-8" name="__codelineno-7-8" href="#__codelineno-7-8"></a>        ↓
-<a id="__codelineno-7-9" name="__codelineno-7-9" href="#__codelineno-7-9"></a>   {&quot;response&quot;: &quot;Initiating construction.&quot;, &quot;action&quot;: {&quot;type&quot;: &quot;run_script&quot;, &quot;script&quot;: &quot;...&quot;}}
-<a id="__codelineno-7-10" name="__codelineno-7-10" href="#__codelineno-7-10"></a>        ↓
-<a id="__codelineno-7-11" name="__codelineno-7-11" href="#__codelineno-7-11"></a>   Editor executes Grove script → objects appear in world
+<p>Recommended model: <code>claude-sonnet-4-5-20250929</code></p>
+<h3 id="google-gemini">Google (Gemini)<a class="headerlink" href="#google-gemini" title="Permanent link">&para;</a></h3>
+<ol>
+<li>Go to <a href="https://aistudio.google.com/">aistudio.google.com</a></li>
+<li>Sign in with your Google account</li>
+<li>Click <strong>Get API Key</strong> in the top left</li>
+<li>Click <strong>Create API Key</strong></li>
+<li>Copy the key</li>
+</ol>
+<p>Recommended model: <code>gemini-2.0-flash</code></p>
+<h2 id="free-local-models-ollama">Free Local Models (Ollama)<a class="headerlink" href="#free-local-models-ollama" title="Permanent link">&para;</a></h2>
+<p>Ollama lets you run language models entirely on your own machine — no API key, no cost, no internet required.</p>
+<h3 id="install-ollama">Install Ollama<a class="headerlink" href="#install-ollama" title="Permanent link">&para;</a></h3>
+<p><strong>Linux:</strong>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a>curl<span class="w"> </span>-fsSL<span class="w"> </span>https://ollama.ai/install.sh<span class="w"> </span><span class="p">|</span><span class="w"> </span>sh
+</code></pre></div></p>
+<p><strong>macOS / Windows:</strong> Download from <a href="https://ollama.ai">ollama.ai</a></p>
+<h3 id="download-a-model">Download a Model<a class="headerlink" href="#download-a-model" title="Permanent link">&para;</a></h3>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a>ollama<span class="w"> </span>pull<span class="w"> </span>mistral
 </code></pre></div>
-<p>The NPC's response can include motor commands like <code>move_to</code>, <code>pickup</code>, <code>run_script</code>, etc. The editor parses the JSON action and executes it in the game world.</p>
-<h2 id="configuring-providers">Configuring Providers<a class="headerlink" href="#configuring-providers" title="Permanent link">&para;</a></h2>
-<h3 id="switching-providers-at-runtime">Switching Providers at Runtime<a class="headerlink" href="#switching-providers-at-runtime" title="Permanent link">&para;</a></h3>
-<p>The backend supports multiple providers simultaneously. You can override the default per-request by specifying a provider in the API call. The editor uses whatever <code>DEFAULT_PROVIDER</code> is set in <code>.env</code>.</p>
-<h3 id="provider-comparison">Provider Comparison<a class="headerlink" href="#provider-comparison" title="Permanent link">&para;</a></h3>
-<table>
-<thead>
-<tr>
-<th>Provider</th>
-<th>Cost</th>
-<th>Speed</th>
-<th>Quality</th>
-<th>Offline</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td>Grok (xAI)</td>
-<td>Paid API</td>
-<td>Fast</td>
-<td>High</td>
-<td>No</td>
-</tr>
-<tr>
-<td>Ollama</td>
-<td>Free</td>
-<td>Varies by model/hardware</td>
-<td>Good</td>
-<td>Yes</td>
-</tr>
-</tbody>
-</table>
-<h3 id="ollama-model-recommendations">Ollama Model Recommendations<a class="headerlink" href="#ollama-model-recommendations" title="Permanent link">&para;</a></h3>
+<p>That's it. Ollama runs in the background automatically.</p>
+<h3 id="recommended-models">Recommended Models<a class="headerlink" href="#recommended-models" title="Permanent link">&para;</a></h3>
 <table>
 <thead>
 <tr>
 <th>Model</th>
-<th>Size</th>
+<th>Download Size</th>
+<th>VRAM Needed</th>
 <th>Notes</th>
 </tr>
 </thead>
 <tbody>
 <tr>
-<td><code>dolphin-mixtral:8x7b</code></td>
-<td>~26 GB</td>
-<td>Best quality, needs good GPU</td>
-</tr>
-<tr>
 <td><code>mistral</code></td>
 <td>~4 GB</td>
+<td>8 GB</td>
 <td>Good balance of speed and quality</td>
 </tr>
 <tr>
-<td><code>llama2</code></td>
+<td><code>llama3</code></td>
 <td>~4 GB</td>
-<td>Solid general purpose</td>
+<td>8 GB</td>
+<td>Meta's latest, strong general purpose</td>
+</tr>
+<tr>
+<td><code>dolphin-mixtral:8x7b</code></td>
+<td>~26 GB</td>
+<td>32 GB+</td>
+<td>Best quality, needs powerful GPU</td>
 </tr>
 <tr>
 <td><code>neural-chat</code></td>
 <td>~4 GB</td>
-<td>Good at conversational dialogue</td>
+<td>8 GB</td>
+<td>Good conversational ability</td>
+</tr>
+<tr>
+<td><code>phi3</code></td>
+<td>~2 GB</td>
+<td>4 GB</td>
+<td>Lightweight, runs on most hardware</td>
 </tr>
 </tbody>
 </table>
-<h2 id="persistent-memory">Persistent Memory<a class="headerlink" href="#persistent-memory" title="Permanent link">&para;</a></h2>
-<p>The <strong>AI Architect</strong> and <strong>Eve</strong> NPCs maintain persistent context across sessions:</p>
-<ul>
-<li><code>backend/xenk_context.txt</code> — The architect's accumulated world knowledge</li>
-<li><code>backend/xenk_briefing.txt</code> — Current session briefing</li>
-<li><code>backend/logs/chat_history.jsonl</code> — Full conversation logs</li>
-</ul>
-<p>This means your AI architect remembers what it built, what land was purchased, and what instructions you gave — even after restarting the game.</p>
-<h2 id="troubleshooting">Troubleshooting<a class="headerlink" href="#troubleshooting" title="Permanent link">&para;</a></h2>
-<p><strong>NPC says "(AI unavailable)"</strong></p>
-<ul>
-<li>Backend server isn't running — start it with <code>python server.py</code></li>
-<li>Wrong URL — the editor connects to <code>http://localhost:8080</code> by default</li>
-</ul>
-<p><strong>NPC doesn't respond</strong></p>
-<ul>
-<li>Check the terminal where <code>server.py</code> is running for error messages</li>
-<li>Verify your API key is correct in <code>.env</code></li>
-<li>Run <code>curl http://localhost:8080/health</code> to check provider status</li>
-</ul>
-<p><strong>Ollama is slow</strong></p>
-<ul>
-<li>Larger models need more VRAM — try a smaller model like <code>mistral</code></li>
-<li>Check GPU utilization with <code>nvidia-smi</code></li>
-</ul>
-<p><strong>NPC doesn't move when asked</strong></p>
-<ul>
-<li>Only being types with motor control can move (Robot, Eve, AI Architect)</li>
-<li>Make sure you're in Play Mode (press P)</li>
-<li>The NPC needs perception data to know where objects are — it can only reference things it can "see"</li>
-</ul>
+<h3 id="verify-its-running">Verify It's Running<a class="headerlink" href="#verify-its-running" title="Permanent link">&para;</a></h3>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a>ollama<span class="w"> </span>list
+</code></pre></div>
+<p>You should see your downloaded model. Ollama serves on <code>http://localhost:11434</code> by default.</p>
+<h2 id="which-should-i-choose">Which Should I Choose?<a class="headerlink" href="#which-should-i-choose" title="Permanent link">&para;</a></h2>
+<table>
+<thead>
+<tr>
+<th></th>
+<th>Paid API</th>
+<th>Ollama</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Cost</strong></td>
+<td>Pay per use (~$0.01-0.10 per conversation)</td>
+<td>Free</td>
+</tr>
+<tr>
+<td><strong>Quality</strong></td>
+<td>Frontier models, best reasoning</td>
+<td>Good, depends on model size</td>
+</tr>
+<tr>
+<td><strong>Speed</strong></td>
+<td>Fast (cloud servers)</td>
+<td>Depends on your GPU</td>
+</tr>
+<tr>
+<td><strong>Privacy</strong></td>
+<td>Messages sent to cloud</td>
+<td>Everything stays on your machine</td>
+</tr>
+<tr>
+<td><strong>Internet</strong></td>
+<td>Required</td>
+<td>Not required</td>
+</tr>
+<tr>
+<td><strong>Setup</strong></td>
+<td>Get API key, paste it in</td>
+<td>Install Ollama, pull a model</td>
+</tr>
+</tbody>
+</table>
+<p>For the best NPC behavior (especially for construction and complex commands), a frontier model like Grok or Claude is recommended. For casual conversation and experimentation, Ollama with <code>mistral</code> works well.</p>
 
 
 
