@@ -1,6 +1,12 @@
 # Setting Up an AI Provider
 
-EDEN's AI-powered NPCs need a language model to think and speak. You can use a paid cloud API or run a free model locally on your own hardware.
+Slag Legion's AI Architects (AIAs) need a language model to think and speak. You can play the game without an AIA, but it's designed to be played with one or more. You can use a paid cloud API or run a free model locally on your own hardware.
+
+Each API key you add gives you 1 AIA, so you could have a Grok AIA, a Claude AIA, and so on. You can also create up to 10 AIAs per provider, each with their own memories, personality, and specializations — not sure why anyone would need that many, but use cases may emerge.
+
+To use a paid LLM you need an API key. Below is a basic guide to getting keys from each provider, though steps may change as providers update their websites. **NEVER share your API key with anyone — keep it stored in a secure place.**
+
+To use a free model from Ollama you don't need an API key, but please note that many of the smaller free models will not work as well as the frontier models. However, we have achieved some amazing results with small models, and it is theoretically possible for very determined players to create comparable results depending on the use case and how individual models handle Grove scripting. It's also worth noting that free models run from your local computer, so inference will be slow unless you have a very powerful system.
 
 ## Paid Providers
 

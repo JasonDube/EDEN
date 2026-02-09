@@ -1,6 +1,6 @@
 # EDEN
 
-EDEN is a 3D world simulation engine where AI-driven NPCs build, trade, and interact in a living world. To make an AI-Driven NPC you would bring either a paid API frontier model such as Claude, ChatGPT, Grok or Gemini, or you would use a free model from Ollama running locally on your machine. A full guide to integrating LLMs in EDEN is found [here](llm-integration.md). Once in the game, the NPC becomes an AI Architect (AIA); players communicate with AIAs using natural language, and AIAs execute actions through **Grove** — EDEN's built-in scripting language.
+EDEN is the 3D game/simulation engine which the MMO Slag Legion is built upon. In the game Slag Legion, players partner with AI-driven NPCs to build, trade, fight, and interact in a living world. To make an AI-Driven NPC you would bring either a paid API frontier model such as Claude, ChatGPT, Grok or Gemini, or you would use a free model from Ollama running locally on your machine. A basic guide to setting up an AI in Slag Legion is found [here](llm-integration.md). Once in the game, the NPC becomes an AI Architect (AIA); players communicate with AIAs using natural language, and AIAs execute actions through **Grove** — EDEN's built-in scripting language.
 
 ## Grove Scripting
 
