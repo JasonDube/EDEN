@@ -1,0 +1,38 @@
+# Build artifacts (CMake, FetchContent deps, compiled libs)
+build/
+
+# Rust build artifacts
+modules/eden_script/grove/target/
+
+# Python virtual environments
+backend/.venv/
+backend/venv/
+backend/__pycache__/
+**/__pycache__/
+*.pyc
+
+# Secrets and credentials
+.env
+backend/.env
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.project
+.classpath
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Compiled shader SPV files (regenerated during build)
+*.spv
+
+# Level save backups (user data)
+*.eden.bak
+
+# Claude Code project memory (local only)
+.claude/

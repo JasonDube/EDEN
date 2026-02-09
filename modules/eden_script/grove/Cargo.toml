@@ -1,0 +1,8 @@
+[package]
+name = "grove"
+version = "0.1.0"
+edition = "2021"
+description = "Grove scripting language for EDEN — Lua-inspired, Rust-powered"
+
+[lib]
+crate-type = ["staticlib", "rlib"]
