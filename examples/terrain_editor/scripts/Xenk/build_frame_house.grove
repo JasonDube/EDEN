@@ -1,0 +1,72 @@
+-- build_frame_house.grove
+-- Frame house: pick up existing postholes, place at corners, then place timbers as posts
+
+local p = get_player_pos()
+local cx = p.x + 8
+local cz = p.z
+local hw = 2       -- half width (4m total)
+local hd = 2       -- half depth (4m total)
+
+bot_target("Xenk")
+bot_clear()
+
+-- Phase 1: Pick up existing postholes and place at corners
+pickup("posthole", true, 5.0)
+place_at(vec3(cx - hw, 0, cz - hd), true, 5.0)
+
+pickup("posthole_1", true, 5.0)
+place_at(vec3(cx + hw, 0, cz - hd), true, 5.0)
+
+pickup("posthole_2", true, 5.0)
+place_at(vec3(cx + hw, 0, cz + hd), true, 5.0)
+
+pickup("posthole_3", true, 5.0)
+place_at(vec3(cx - hw, 0, cz + hd), true, 5.0)
+
+-- Phase 2: Pick up timbers and place vertically into postholes
+pickup("timber6612_a", true, 5.0)
+place_vertical("posthole", true, 5.0)
+
+pickup("timber6612_b", true, 5.0)
+place_vertical("posthole_1", true, 5.0)
+
+pickup("timber6612_c", true, 5.0)
+place_vertical("posthole_2", true, 5.0)
+
+pickup("timber6612_d", true, 5.0)
+place_vertical("posthole_3", true, 5.0)
+
+-- Phase 3: Pick up timbers and place horizontally as cross-pieces (tops flush with posts)
+pickup("timber6612_e", true, 5.0)
+place_horizontal("posthole", "posthole_1", true, 5.0)
+
+pickup("timber6612_f", true, 5.0)
+place_horizontal("posthole_1", "posthole_2", true, 5.0)
+
+pickup("timber6612_g", true, 5.0)
+place_horizontal("posthole_2", "posthole_3", true, 5.0)
+
+pickup("timber6612_h", true, 5.0)
+place_horizontal("posthole_3", "posthole", true, 5.0)
+
+-- Phase 4: Pick up sidewalls and place around frame (front left open)
+-- Corners clockwise from above: posthole(FL) → posthole_1(FR) → posthole_2(BR) → posthole_3(BL)
+-- Right wall:  FR → BR
+pickup("sidewall", true, 5.0)
+place_wall("posthole_1", "posthole_2", true, 5.0)
+
+-- Back wall:   BR → BL
+pickup("sidewall_1", true, 5.0)
+place_wall("posthole_2", "posthole_3", true, 5.0)
+
+-- Left wall:   BL → FL
+pickup("sidewall_2", true, 5.0)
+place_wall("posthole_3", "posthole", true, 5.0)
+
+-- Phase 5: Pick up roof and place on top of frame
+pickup("roof", true, 5.0)
+place_roof("posthole", "posthole_1", "posthole_2", "posthole_3", true, 5.0)
+
+bot_loop(false)
+bot_run()
+log("Frame house build started.")

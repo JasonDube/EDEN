@@ -1262,7 +1262,7 @@ void EditorUI::renderModelsWindow() {
                         ImGui::PushID(static_cast<int>(bi));
 
                         // Behavior header with trigger type
-                        const char* triggerNames[] = { "ON_GAMESTART", "ON_GAME_TIME", "ON_INTERACT", "ON_PROXIMITY", "ON_SIGNAL", "ON_COLLISION", "MANUAL" };
+                        const char* triggerNames[] = { "ON_GAMESTART", "ON_GAME_TIME", "ON_INTERACT", "ON_PROXIMITY", "ON_SIGNAL", "ON_COLLISION", "ON_COMMAND", "MANUAL" };
                         int triggerIdx = static_cast<int>(beh.trigger);
 
                         std::string header = beh.name.empty() ?
@@ -1272,8 +1272,14 @@ void EditorUI::renderModelsWindow() {
                         // Use stable ID so changing trigger doesn't collapse the node
                         bool behaviorOpen = ImGui::TreeNodeEx("##behaviorNode", ImGuiTreeNodeFlags_None, "%s", header.c_str());
 
-                        // Delete behavior button (on same line)
-                        ImGui::SameLine(ImGui::GetWindowWidth() - 30);
+                        // Save + Delete behavior buttons (on same line)
+                        ImGui::SameLine(ImGui::GetWindowWidth() - 70);
+                        if (ImGui::SmallButton("Save")) {
+                            if (m_onSaveBotScript) {
+                                m_onSaveBotScript(selected, beh.name);
+                            }
+                        }
+                        ImGui::SameLine();
                         if (ImGui::SmallButton("X")) {
                             behaviors.erase(behaviors.begin() + bi);
                             if (behaviorOpen) ImGui::TreePop();
@@ -1284,7 +1290,7 @@ void EditorUI::renderModelsWindow() {
                         if (behaviorOpen) {
                             // A. Trigger
                             ImGui::TextColored(ImVec4(0.7f, 0.9f, 1.0f, 1.0f), "A. TRIGGER");
-                            if (ImGui::Combo("##trigger", &triggerIdx, triggerNames, 7)) {
+                            if (ImGui::Combo("##trigger", &triggerIdx, triggerNames, 8)) {
                                 beh.trigger = static_cast<TriggerType>(triggerIdx);
                             }
 
@@ -1316,7 +1322,8 @@ void EditorUI::renderModelsWindow() {
 
                             // List actions (must match ActionType enum order!)
                             const char* actionNames[] = { "ROTATE", "ROTATE_TO", "TURN_TO", "MOVE", "MOVE_TO", "SCALE", "WAIT",
-                                "SEND_SIGNAL", "SPAWN_ENTITY", "DESTROY_SELF", "SET_VISIBLE", "SET_PROPERTY", "PLAY_SOUND", "FOLLOW_PATH", "CUSTOM" };
+                                "SEND_SIGNAL", "SPAWN_ENTITY", "DESTROY_SELF", "SET_VISIBLE", "SET_PROPERTY", "PLAY_SOUND", "FOLLOW_PATH",
+                                "GROVE_COMMAND", "PICKUP", "PLACE_VERTICAL", "PLACE_AT", "PLACE_HORIZONTAL", "PLACE_ROOF", "PLACE_WALL", "CUSTOM" };
 
                             for (size_t ai = 0; ai < beh.actions.size(); ai++) {
                                 Action& act = beh.actions[ai];
@@ -1328,7 +1335,7 @@ void EditorUI::renderModelsWindow() {
                                 ImGui::SameLine();
 
                                 ImGui::SetNextItemWidth(120);
-                                if (ImGui::Combo("##type", &actionIdx, actionNames, 15)) {
+                                if (ImGui::Combo("##type", &actionIdx, actionNames, 21)) {
                                     act.type = static_cast<ActionType>(actionIdx);
                                 }
 
@@ -1547,6 +1554,55 @@ void EditorUI::renderModelsWindow() {
                                     if (ImGui::InputText("##signal", sigBuf, sizeof(sigBuf))) {
                                         act.stringParam = sigBuf;
                                     }
+                                } else if (act.type == ActionType::PICKUP || act.type == ActionType::PLACE_VERTICAL) {
+                                    ImGui::Text(act.type == ActionType::PICKUP ? "Pick up:" : "Place into:");
+                                    ImGui::SetNextItemWidth(180);
+                                    if (ImGui::BeginCombo("##objpick", act.stringParam.empty() ? "Select object..." : act.stringParam.c_str())) {
+                                        for (auto* obj : m_sceneObjects) {
+                                            if (!obj || obj == selected) continue;
+                                            const std::string& name = obj->getName();
+                                            if (name.empty()) continue;
+                                            bool isSelected = (act.stringParam == name);
+                                            if (ImGui::Selectable(name.c_str(), isSelected)) {
+                                                act.stringParam = name;
+                                                act.vec3Param = obj->getTransform().getPosition();
+                                            }
+                                        }
+                                        ImGui::EndCombo();
+                                    }
+                                    ImGui::SetNextItemWidth(80);
+                                    ImGui::InputFloat("Speed##pickspd", &act.floatParam, 0.5f, 1.0f, "%.1f");
+                                    if (act.floatParam <= 0.0f) act.floatParam = 2.0f;
+                                    ImGui::Checkbox("Ground movement", &act.boolParam);
+                                } else if (act.type == ActionType::PLACE_AT) {
+                                    ImGui::Text("Place at:");
+                                    ImGui::SetNextItemWidth(200);
+                                    ImGui::InputFloat3("##placepos", &act.vec3Param.x, "%.1f");
+                                    ImGui::SetNextItemWidth(80);
+                                    ImGui::InputFloat("Speed##placespd", &act.floatParam, 0.5f, 1.0f, "%.1f");
+                                    if (act.floatParam <= 0.0f) act.floatParam = 2.0f;
+                                    ImGui::Checkbox("Ground movement", &act.boolParam);
+                                } else if (act.type == ActionType::PLACE_HORIZONTAL) {
+                                    // Show the two target names (pipe-delimited in stringParam)
+                                    ImGui::Text("Targets: %s", act.stringParam.c_str());
+                                    ImGui::SetNextItemWidth(80);
+                                    ImGui::InputFloat("Speed##plhspd", &act.floatParam, 0.5f, 1.0f, "%.1f");
+                                    if (act.floatParam <= 0.0f) act.floatParam = 2.0f;
+                                    ImGui::Checkbox("Ground movement", &act.boolParam);
+                                } else if (act.type == ActionType::PLACE_ROOF) {
+                                    // Show the four corner names (pipe-delimited in stringParam)
+                                    ImGui::Text("Corners: %s", act.stringParam.c_str());
+                                    ImGui::SetNextItemWidth(80);
+                                    ImGui::InputFloat("Speed##plrspd", &act.floatParam, 0.5f, 1.0f, "%.1f");
+                                    if (act.floatParam <= 0.0f) act.floatParam = 2.0f;
+                                    ImGui::Checkbox("Ground movement", &act.boolParam);
+                                } else if (act.type == ActionType::PLACE_WALL) {
+                                    // Show the two post names (pipe-delimited in stringParam)
+                                    ImGui::Text("Posts: %s", act.stringParam.c_str());
+                                    ImGui::SetNextItemWidth(80);
+                                    ImGui::InputFloat("Speed##plwspd", &act.floatParam, 0.5f, 1.0f, "%.1f");
+                                    if (act.floatParam <= 0.0f) act.floatParam = 2.0f;
+                                    ImGui::Checkbox("Ground movement", &act.boolParam);
                                 }
 
                                 // Delete action button
@@ -1645,6 +1701,44 @@ void EditorUI::renderModelsWindow() {
 
                 ImGui::Separator();
 
+                // Bot scripts section — list scripts from this object's folder
+                if (m_onListBotScripts) {
+                    auto scripts = m_onListBotScripts(selected->getName());
+                    if (!scripts.empty()) {
+                        ImGui::TextColored(ImVec4(0.7f, 1.0f, 0.7f, 1.0f), "Scripts (%s)", selected->getName().c_str());
+                        for (const auto& scriptName : scripts) {
+                            ImGui::Bullet();
+                            ImGui::SameLine();
+                            ImGui::Text("%s", scriptName.c_str());
+                            ImGui::SameLine();
+                            std::string loadLabel = "Load##" + scriptName;
+                            if (ImGui::SmallButton(loadLabel.c_str())) {
+                                if (m_onLoadBotScript) {
+                                    m_onLoadBotScript(selected, scriptName);
+                                }
+                            }
+                            ImGui::SameLine();
+                            std::string editLabel = "Edit##" + scriptName;
+                            if (ImGui::SmallButton(editLabel.c_str())) {
+                                // Load script file into Grove editor and open it
+                                std::string path = "scripts/" + selected->getName() + "/" + scriptName;
+                                std::ifstream inFile(path);
+                                if (inFile.is_open()) {
+                                    std::string content((std::istreambuf_iterator<char>(inFile)),
+                                                         std::istreambuf_iterator<char>());
+                                    setGroveSource(content);
+                                    m_groveCurrentFile = path;
+                                    m_groveModified = false;
+                                    m_groveOutput.clear();
+                                    m_groveHasError = false;
+                                    m_showGroveEditor = true;
+                                }
+                            }
+                        }
+                        ImGui::Separator();
+                    }
+                }
+
                 // Add new behavior button
                 if (ImGui::Button("+ Add Behavior (ON_GAMESTART)")) {
                     Behavior newBeh;
@@ -1664,6 +1758,12 @@ void EditorUI::renderModelsWindow() {
                     newBeh.trigger = TriggerType::ON_INTERACT;
                     newBeh.actions.push_back(Action::Rotate(glm::vec3(0, 90, 0), 0.5f, Action::Easing::EASE_OUT));
                     selected->addBehavior(newBeh);
+                }
+
+                if (ImGui::Button("Load Grove Script")) {
+                    if (m_onLoadBehaviorScript) {
+                        m_onLoadBehaviorScript(selected);
+                    }
                 }
             }
 

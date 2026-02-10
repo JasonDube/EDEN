@@ -130,6 +130,85 @@ log("Build sequence started.")
 !!! note
     `bot_run()` must always be the last call. The NPC begins walking immediately if the game is in play mode.
 
+## Pickup & Place Construction
+
+For building realistic frame structures, Grove provides a **pickup/place** workflow. The NPC walks to materials, picks them up, carries them to the build site, and places them precisely.
+
+### Pickup
+
+```lua
+pickup("beam_01")                    -- walk to object, pick it up
+pickup("beam_01", true)              -- with gravity (follow terrain)
+pickup("beam_01", false, 3.0)       -- custom walk speed
+```
+
+### Placing
+
+| Function | Description |
+|----------|-------------|
+| `place_vertical(target)` | Walk to target post, insert carried item vertically into it |
+| `place_at(pos)` | Walk to position, set carried item down on terrain |
+| `place_horizontal(post_a, post_b)` | Walk to midpoint, place carried item as beam between two posts |
+| `place_roof(c1, c2, c3, c4)` | Walk to center of 4 corners, place carried item as roof |
+| `place_wall(post_a, post_b)` | Walk to midpoint, place carried item as wall panel between posts |
+
+All place functions accept optional `gravity` (bool) and `speed` (number) arguments after the required parameters.
+
+### Example: Build a Frame House
+
+This is how an AIA builds a full frame house — spawn materials, then have the bot pick up and place each piece:
+
+```lua
+local p = get_player_pos()
+local cx = p.x + 8
+local cz = p.z
+local w = 4
+
+-- Spawn corner posts as materials
+spawn_cylinder("post_sw", vec3(cx - w/2, 0, cz - w/2), 0.15, 3.0, 0.6, 0.4, 0.2)
+spawn_cylinder("post_se", vec3(cx + w/2, 0, cz - w/2), 0.15, 3.0, 0.6, 0.4, 0.2)
+spawn_cylinder("post_nw", vec3(cx - w/2, 0, cz + w/2), 0.15, 3.0, 0.6, 0.4, 0.2)
+spawn_cylinder("post_ne", vec3(cx + w/2, 0, cz + w/2), 0.15, 3.0, 0.6, 0.4, 0.2)
+
+-- Spawn beams and roof as materials nearby
+spawn_cube("beam_s", vec3(cx, 0, cz - w/2 - 2), 0.15, 0.6, 0.4, 0.2)
+spawn_cube("roof", vec3(cx + 3, 0, cz), 0.3, 0.5, 0.2, 0.2)
+
+bot_target("Xenk")
+bot_clear()
+
+-- Pick up beam, place as horizontal between south posts
+pickup("beam_s")
+place_horizontal("post_sw", "post_se")
+
+-- Pick up roof, place on all 4 corners
+pickup("roof")
+place_roof("post_sw", "post_se", "post_ne", "post_nw")
+
+bot_run()
+```
+
+### Cloning Objects
+
+Use `clone()` to duplicate an existing object:
+
+```lua
+-- Clone an existing model to a new position
+clone("tree_01", "tree_02", vec3(20, 0, 30))
+```
+
+Cloning copies the model, rotation, scale, and color properties from the source object.
+
+## Loading Scripts
+
+Use `run_file()` to execute another Grove script:
+
+```lua
+run_file("build_frame_house.grove")
+```
+
+The script is searched in the current directory, `scripts/`, and bot-specific subdirectories (`scripts/<bot_name>/`).
+
 ## Terrain Height
 
 On sloped terrain, each post may sit at a different height. Use `terrain_height()` to query the ground level:

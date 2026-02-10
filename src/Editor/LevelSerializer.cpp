@@ -109,6 +109,8 @@ static std::string actionTypeToString(ActionType type) {
         case ActionType::SET_PROPERTY: return "SET_PROPERTY";
         case ActionType::PLAY_SOUND:   return "PLAY_SOUND";
         case ActionType::FOLLOW_PATH:  return "FOLLOW_PATH";
+        case ActionType::PICKUP:       return "PICKUP";
+        case ActionType::PLACE_VERTICAL: return "PLACE_VERTICAL";
         case ActionType::CUSTOM:       return "CUSTOM";
         default:                       return "WAIT";
     }
@@ -129,6 +131,8 @@ static ActionType stringToActionType(const std::string& str) {
     if (str == "SET_PROPERTY") return ActionType::SET_PROPERTY;
     if (str == "PLAY_SOUND")   return ActionType::PLAY_SOUND;
     if (str == "FOLLOW_PATH")  return ActionType::FOLLOW_PATH;
+    if (str == "PICKUP")       return ActionType::PICKUP;
+    if (str == "PLACE_VERTICAL") return ActionType::PLACE_VERTICAL;
     if (str == "CUSTOM")       return ActionType::CUSTOM;
     return ActionType::WAIT;  // Default fallback
 }

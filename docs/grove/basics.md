@@ -1,3 +1,7 @@
+<div style="text-align: center; margin-bottom: 1em;">
+  <img src="../assets/grove_logo.png" alt="Grove" width="160">
+</div>
+
 # Language Basics
 
 Grove is a lightweight scripting language designed for EDEN. If you've used Lua, it will feel familiar.

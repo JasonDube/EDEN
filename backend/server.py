@@ -267,7 +267,6 @@ Available actions:
 - {"type": "drop"}  — drop the currently carried object at your feet
 - {"type": "place", "target": "<object_name>"}  — place carried item vertically into a target object (e.g. timber into posthole)
 - {"type": "build_post", "item": "<item_name>", "target": "<target_name>"}  — multi-step: scan, pick up item, carry to target, place vertically
-- {"type": "build_frame"}  — autonomously build a 4-post frame building: spawns 4 concrete bases in a 4m x 4m square, then places timber in each one
 - {"type": "program_bot", "target": "<algobot_name>", "script": "<grove_script_code>"}  — write and upload a Grove script to an AlgoBot worker, programming it to perform tasks autonomously
 - {"type": "run_script", "script": "<grove_script_code>"}  — execute a Grove script directly (for economy, zone queries, or any non-bot task)
 
@@ -381,7 +380,16 @@ ANIMATED CONSTRUCTION (run_script with bot_target) — you walk to each location
   queue_set_rotation(name, rx, ry, rz)          -- queue rotation change
   queue_set_scale(name, sx, sy, sz)             -- queue scale change
   queue_delete(name)                            -- queue object deletion
+  pickup(object_name)                           -- walk to a named object and pick it up (carry on shoulder)
+  place_vertical(target_name)                   -- walk to a named target and place carried item vertically into it
   bot_run()                                     -- start the behavior (MUST be called last)
+
+PHYSICAL CONSTRUCTION using pickup/place_vertical:
+  If there are physical objects in the scene (e.g. timber logs, beams), you can pick them up and place them
+  instead of spawning new primitives. This looks more natural — you walk to the material, carry it, and install it.
+  pickup("timber_01")              -- walk to timber_01 and carry it
+  place_vertical("posthole_sw")    -- walk to posthole_sw and stand the timber up inside it
+  The carried item is hidden while you carry it, then made visible and rotated vertical at the target.
 
 Parameters:
   name: string — unique name for the object (used to reference it later)
@@ -405,10 +413,26 @@ Example — player says "build a frame" or "build a house here" (Xenk's name is 
 Example — player says "delete the house" or "demolish it":
 {"response": "Demolishing.", "action": {"type": "run_script", "script": "delete_object(\"post_sw\")\ndelete_object(\"post_se\")\ndelete_object(\"post_ne\")\ndelete_object(\"post_nw\")\ndelete_object(\"beam_s\")\ndelete_object(\"beam_n\")\ndelete_object(\"beam_w\")\ndelete_object(\"beam_e\")\ndelete_object(\"roof\")\nlog(\"Structure demolished.\")"}}
 
+=== SAVED SCRIPTS ===
+You have pre-built Grove scripts in the scripts/ folder. Use run_file(filename) to execute them.
+ALWAYS prefer run_file over writing construction code from scratch when a matching script exists.
+
+Available scripts:
+  "build_frame_house.grove"  — build a 4-post frame house near the player (spawns postholes + timber, picks up and places posts)
+
+Example — player says "build a house" or "build a frame":
+{"response": "Building a frame house.", "action": {"type": "run_script", "script": "run_file(\"build_frame_house.grove\")"}}
+
+Example — player says "delete the house" or "demolish it":
+{"response": "Demolishing.", "action": {"type": "run_script", "script": "delete_object(\"ph_sw\")\ndelete_object(\"ph_se\")\ndelete_object(\"ph_ne\")\ndelete_object(\"ph_nw\")\ndelete_object(\"timber_1\")\ndelete_object(\"timber_2\")\ndelete_object(\"timber_3\")\ndelete_object(\"timber_4\")\nlog(\"Structure demolished.\")"}}
+
 IMPORTANT for construction:
+- PREFER run_file() for any build request that matches an available script
 - Use unique, descriptive names for each part so they can be deleted individually
 - Use your OWN name with bot_target() for animated builds (get it from perception data)
 - move_to/wait/turn_to queue walking actions; queue_spawn_* queue object creation
+- pickup/place_vertical queue physical material handling (pick up existing objects and install them)
+- If the scene has real materials (timber, beams, etc.), prefer pickup/place_vertical over spawning primitives
 - bot_run() MUST be called last to start the animated sequence
 - bot_loop(false) so the build sequence runs once
 - Adjust positions based on player location using get_player_pos()

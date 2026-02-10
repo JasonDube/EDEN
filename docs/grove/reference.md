@@ -1,6 +1,6 @@
 # Function Reference
 
-Complete list of all Grove host functions available in EDEN.
+Complete list of all 46 Grove host functions available in EDEN.
 
 ## Utility
 
@@ -19,7 +19,7 @@ These execute immediately when the script runs.
 | `spawn_cube(name, pos, size, r, g, b)` | bool | Spawn a colored cube. Bottom placed on terrain. |
 | `spawn_cylinder(name, pos, radius, height, r, g, b)` | bool | Spawn a colored cylinder. Bottom placed on terrain. |
 | `spawn_model(name, path, pos)` | bool | Load a `.glb` or `.lime` model at position. Bottom placed on terrain. |
-| `spawn(name, pos)` | object | Spawn a posthole object at position (legacy). |
+| `clone(source_name, new_name, pos)` | bool | Clone an existing scene object to a new position. Copies model, rotation, scale, and color. |
 | `set_object_rotation(name, rx, ry, rz)` | bool | Set euler rotation in degrees on a named object. |
 | `set_object_scale(name, sx, sy, sz)` | bool | Set scale on a named object. |
 | `delete_object(name)` | bool | Remove the first object matching the name from the scene. |
@@ -66,6 +66,12 @@ These queue actions on a target SceneObject's behavior. Call `bot_target()` firs
 | `send_signal(name, target?)` | — | Queue a signal broadcast. Optional target name. |
 | `follow_path(path_name)` | — | Queue following a named AI path. |
 | `bot_loop(bool)` | — | Set whether the behavior repeats. Default: false. |
+| `pickup(name, gravity?, speed?)` | bool | Queue walking to a named object and picking it up. Default speed 2.0. |
+| `place_vertical(target, gravity?, speed?)` | bool | Queue walking to target and placing carried item vertically into it. |
+| `place_at(pos, gravity?, speed?)` | bool | Queue walking to position and placing carried item on terrain. |
+| `place_horizontal(target_a, target_b, gravity?, speed?)` | bool | Queue placing carried item as horizontal beam between two targets. |
+| `place_roof(corner1, corner2, corner3, corner4, gravity?, speed?)` | bool | Queue placing carried item as roof on top of 4 corner posts. |
+| `place_wall(post_a, post_b, gravity?, speed?)` | bool | Queue placing carried item as wall panel between two posts. |
 | `bot_clear()` | — | Clear all queued actions on the target. |
 | `bot_run()` | — | Start the behavior. Must be called last. |
 
@@ -89,3 +95,9 @@ These queue actions on a target SceneObject's behavior. Call `bot_target()` firs
 | `zone_resource(vec3)` | string | Returns resource type: `"wood"`, `"limestone"`, `"iron"`, `"oil"`, `"none"`. |
 | `zone_owner(vec3)` | number | Returns owner ID of the plot (0 = unclaimed). |
 | `can_build(vec3)` | bool | Returns whether building is allowed at position. |
+
+## Script Loading
+
+| Function | Returns | Description |
+|----------|---------|-------------|
+| `run_file(path)` | bool | Load and execute a `.grove` script file. Searches `scripts/` and bot-specific subdirectories. |

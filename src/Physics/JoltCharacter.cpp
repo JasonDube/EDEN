@@ -527,54 +527,7 @@ glm::vec3 JoltCharacter::extendedUpdate(float deltaTime,
     // PhysicsSystem::Update() is called later to process kinematic body movement
     // (MoveKinematic sets velocity, Update moves the body to target position)
 
-    // Debug: Test raycast to see if kinematic body is detectable
-    static int raycastDebugCounter = 0;
-    if (raycastDebugCounter++ % 120 == 0) {  // Every 2 seconds
-        glm::vec3 charPos = getPosition();
-        glm::vec3 rayStart = charPos + glm::vec3(0, 1, 0);
-        glm::vec3 rayEnd = charPos + glm::vec3(0, -5, 0);
-        auto hitResult = raycast(rayStart, rayEnd);
-        if (hitResult.hit) {
-            std::cout << "Raycast hit at Y=" << hitResult.hitPoint.y
-                      << " (char at Y=" << charPos.y << ")" << std::endl;
-        } else {
-            std::cout << "Raycast no hit (char at Y=" << charPos.y << ")" << std::endl;
-        }
-
-        // Debug: List kinematic bodies
-        std::cout << "Kinematic bodies: " << m_kinematicBodies.size() << std::endl;
-        JPH::BodyInterface& bodyInterface = m_physicsSystem->GetBodyInterface();
-        for (const auto& kbId : m_kinematicBodies) {
-            if (!kbId.IsInvalid()) {
-                JPH::RVec3 pos = bodyInterface.GetPosition(kbId);
-                // Calculate distance from character to this kinematic body
-                float dist = glm::length(charPos - glm::vec3(pos.GetX(), pos.GetY(), pos.GetZ()));
-                std::cout << "  Body " << kbId.GetIndex()
-                          << " pos=(" << pos.GetX() << "," << pos.GetY() << "," << pos.GetZ() << ")"
-                          << " active=" << bodyInterface.IsActive(kbId)
-                          << " added=" << bodyInterface.IsAdded(kbId)
-                          << " dist=" << dist << std::endl;
-            }
-        }
-
-        // Debug: Query broadphase for bodies near character
-        JPH::AABox queryBox(
-            JPH::Vec3(charPos.x - 5.0f, charPos.y - 5.0f, charPos.z - 5.0f),
-            JPH::Vec3(charPos.x + 5.0f, charPos.y + 5.0f, charPos.z + 5.0f)
-        );
-        JPH::AllHitCollisionCollector<JPH::CollideShapeBodyCollector> collector;
-        m_physicsSystem->GetBroadPhaseQuery().CollideAABox(queryBox, collector);
-        std::cout << "Bodies near character (10m box): " << collector.mHits.size() << std::endl;
-        for (const auto& hit : collector.mHits) {
-            JPH::BodyLockRead lock(m_physicsSystem->GetBodyLockInterface(), hit);
-            if (lock.Succeeded()) {
-                const JPH::Body& body = lock.GetBody();
-                std::cout << "  Nearby body " << hit.GetIndex()
-                          << " motionType=" << (int)body.GetMotionType()
-                          << " layer=" << body.GetObjectLayer() << std::endl;
-            }
-        }
-    }
+    // Physics debug prints disabled (were spamming console every 2s)
 
     // Use default filters that allow all body interactions
     // The character is in ObjectLayers::MOVING and should collide with all layers
@@ -596,37 +549,7 @@ glm::vec3 JoltCharacter::extendedUpdate(float deltaTime,
         *m_tempAllocator
     );
 
-    // Debug: Check if character has any contacts with kinematic bodies
-    static int contactDebugCounter = 0;
-    if (contactDebugCounter++ % 60 == 0) {  // Once per second
-        const auto& contacts = m_character->GetActiveContacts();
-        int kinematicContacts = 0;
-        for (const auto& contact : contacts) {
-            JPH::BodyLockRead lock(m_physicsSystem->GetBodyLockInterface(), contact.mBodyB);
-            if (lock.Succeeded()) {
-                const JPH::Body& body = lock.GetBody();
-                if (body.GetMotionType() == JPH::EMotionType::Kinematic) {
-                    kinematicContacts++;
-                    std::cout << "KINEMATIC CONTACT: Body ID=" << contact.mBodyB.GetIndex()
-                              << " at (" << contact.mPosition.GetX() << ","
-                              << contact.mPosition.GetY() << ","
-                              << contact.mPosition.GetZ() << ")" << std::endl;
-                }
-            }
-        }
-        if (contacts.size() > 0 && kinematicContacts == 0) {
-            std::cout << "Character has " << contacts.size() << " contacts (none kinematic)" << std::endl;
-        }
-
-        // Show ground state and velocity
-        auto groundState = m_character->GetGroundState();
-        JPH::BodyID groundBody = m_character->GetGroundBodyID();
-        JPH::Vec3 groundVel = m_character->GetGroundVelocity();
-        std::cout << "Ground state=" << (int)groundState
-                  << " groundBody=" << (groundBody.IsInvalid() ? -1 : (int)groundBody.GetIndex())
-                  << " groundVel=(" << groundVel.GetX() << ","
-                  << groundVel.GetY() << "," << groundVel.GetZ() << ")" << std::endl;
-    }
+    // Contact/ground debug prints disabled (were spamming console every 1s)
 
     return getPosition();
 }

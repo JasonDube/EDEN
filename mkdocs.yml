@@ -6,6 +6,8 @@ repo_name: JasonDube/EDEN
 
 theme:
   name: material
+  logo: assets/grove_logo.png
+  favicon: assets/grove_logo.png
   palette:
     - scheme: slate
       primary: teal
@@ -38,6 +40,8 @@ markdown_extensions:
 
 nav:
   - Home: index.md
+  - Getting Started: getting-started.md
+  - Conventions: conventions.md
   - AI Provider Setup: llm-integration.md
   - Grove Scripting:
     - Language Basics: grove/basics.md

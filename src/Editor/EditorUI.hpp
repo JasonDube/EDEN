@@ -55,6 +55,12 @@ using AddCubeCallback = std::function<void(float size)>;
 using AddDoorCallback = std::function<void()>;
 using RunGameCallback = std::function<void()>;
 
+// Behavior script loading callbacks
+using LoadBehaviorScriptCallback = std::function<void(SceneObject* target)>;
+using ListBotScriptsCallback = std::function<std::vector<std::string>(const std::string& botName)>;
+using LoadBotScriptCallback = std::function<void(SceneObject* target, const std::string& scriptName)>;
+using SaveBotScriptCallback = std::function<void(SceneObject* target, const std::string& behaviorName)>;
+
 // Grove script editor callbacks
 using GroveRunCallback = std::function<void(const std::string& source)>;
 using GroveOpenCallback = std::function<void()>;
@@ -127,6 +133,7 @@ public:
 
     // Getters for brush settings
     BrushMode getBrushMode() const { return m_brushMode; }
+    void setBrushMode(BrushMode mode) { m_brushMode = mode; }
     float getBrushRadius() const { return m_brushRadius; }
     float getBrushStrength() const { return m_brushStrength; }
     float getBrushFalloff() const { return m_brushFalloff; }
@@ -230,6 +237,12 @@ public:
     bool& showTechTree() { return m_showTechTree; }
     bool& showGroveEditor() { return m_showGroveEditor; }
     bool& showZones() { return m_showZones; }
+
+    // Behavior script loading
+    void setLoadBehaviorScriptCallback(LoadBehaviorScriptCallback cb) { m_onLoadBehaviorScript = std::move(cb); }
+    void setListBotScriptsCallback(ListBotScriptsCallback cb) { m_onListBotScripts = std::move(cb); }
+    void setLoadBotScriptCallback(LoadBotScriptCallback cb) { m_onLoadBotScript = std::move(cb); }
+    void setSaveBotScriptCallback(SaveBotScriptCallback cb) { m_onSaveBotScript = std::move(cb); }
 
     // Grove script editor
     void setGroveRunCallback(GroveRunCallback cb) { m_onGroveRun = std::move(cb); }
@@ -506,6 +519,10 @@ private:
     int m_groveErrorLine = 0;
     bool m_groveHasError = false;
     bool m_groveModified = false;    // Unsaved changes indicator
+    LoadBehaviorScriptCallback m_onLoadBehaviorScript;
+    ListBotScriptsCallback m_onListBotScripts;
+    LoadBotScriptCallback m_onLoadBotScript;
+    SaveBotScriptCallback m_onSaveBotScript;
     GroveRunCallback m_onGroveRun;
     GroveOpenCallback m_onGroveOpen;
     GroveSaveCallback m_onGroveSave;

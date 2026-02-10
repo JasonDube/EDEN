@@ -41,6 +41,14 @@ enum class ActionType {
     // Grove construction commands (parsed from stringParam at execution time)
     GROVE_COMMAND,      // Execute a construction command (spawn, rotate, scale, delete)
 
+    // Object interaction (queued in behaviors)
+    PICKUP,             // Walk to named object (stringParam), pick it up (hide + carry)
+    PLACE_VERTICAL,     // Walk to named target (stringParam), place carried item vertically into it
+    PLACE_AT,           // Walk to vec3Param position, place carried item on terrain there
+    PLACE_HORIZONTAL,   // Walk to midpoint of two named targets (stringParam = "nameA|nameB"), place carried item as horizontal beam
+    PLACE_ROOF,         // Walk to center of 4 named corners (stringParam = "c1|c2|c3|c4"), place carried item as roof on top
+    PLACE_WALL,         // Walk to midpoint of two named posts (stringParam = "postA|postB"), place carried item as wall panel
+
     // Custom
     CUSTOM              // For game-specific actions via callback
 };
@@ -53,6 +61,7 @@ enum class TriggerType {
     ON_PROXIMITY,       // When player enters radius
     ON_SIGNAL,          // When receiving a named signal
     ON_COLLISION,       // When colliding with something
+    ON_COMMAND,         // Only when explicitly commanded (script, LLM, or programmatic call)
     MANUAL              // Only triggered via code
 };
 

@@ -66,8 +66,12 @@
 #include <stb_image.h>
 #include <grove.h>
 
+#include "grove_host.hpp"
+
 #include <iostream>
 #include <sstream>
+#include <csignal>
+#include <execinfo.h>
 #include <chrono>
 #include <algorithm>
 #include <array>
@@ -85,6 +89,8 @@ struct TerrainPushConstants {
     float fogStart;
     float fogEnd;
 };
+
+enum class TransformMode { Select, Move, Rotate, Scale };
 
 class TerrainEditor : public VulkanApplicationBase {
 public:
@@ -349,6 +355,26 @@ protected:
             m_editorUI.render();
             renderModulePanel();
             renderZoneOverlay();
+
+            // Transform mode indicator (shown when in MoveObject brush mode)
+            if (m_editorUI.getBrushMode() == BrushMode::MoveObject) {
+                ImGui::SetNextWindowPos(ImVec2(static_cast<float>(getWindow().getWidth()) / 2.0f - 150.0f, 8.0f));
+                ImGui::SetNextWindowSize(ImVec2(300.0f, 0.0f));
+                ImGui::Begin("##TransformMode", nullptr,
+                    ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
+                    ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_AlwaysAutoResize |
+                    ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoFocusOnAppearing);
+                auto activeCol = ImVec4(1.0f, 0.7f, 0.0f, 1.0f);
+                auto inactiveCol = ImVec4(0.5f, 0.5f, 0.5f, 1.0f);
+                ImGui::TextColored(m_transformMode == TransformMode::Select ? activeCol : inactiveCol, "[1]Select");
+                ImGui::SameLine();
+                ImGui::TextColored(m_transformMode == TransformMode::Move ? activeCol : inactiveCol, "[2]Move");
+                ImGui::SameLine();
+                ImGui::TextColored(m_transformMode == TransformMode::Rotate ? activeCol : inactiveCol, "[3]Rotate");
+                ImGui::SameLine();
+                ImGui::TextColored(m_transformMode == TransformMode::Scale ? activeCol : inactiveCol, "[4]Scale");
+                ImGui::End();
+            }
         }
 
         // Zone map (M key) — works in both editor and play mode
@@ -550,8 +576,142 @@ protected:
             m_brushRing->render(cmd, vp);
         }
 
-        if (m_gizmoRenderer && m_gizmo.isVisible()) {
-            m_gizmoRenderer->render(cmd, vp, m_gizmo);
+        // Draw line-based gizmo (matching model editor style)
+        if (m_selectedObjectIndex >= 0 && m_selectedObjectIndex < static_cast<int>(m_sceneObjects.size()) && !m_isPlayMode) {
+            SceneObject* selObj = m_sceneObjects[m_selectedObjectIndex].get();
+
+            // OBB selection box wireframe (rotates with object)
+            const AABB& lb = selObj->getLocalBounds();
+            if (lb.getSize().x > 0.001f || lb.getSize().y > 0.001f || lb.getSize().z > 0.001f) {
+                glm::mat4 m = selObj->getTransform().getMatrix();
+                glm::vec3 c[8];
+                c[0] = glm::vec3(m * glm::vec4(lb.min.x, lb.min.y, lb.min.z, 1.0f));
+                c[1] = glm::vec3(m * glm::vec4(lb.max.x, lb.min.y, lb.min.z, 1.0f));
+                c[2] = glm::vec3(m * glm::vec4(lb.max.x, lb.min.y, lb.max.z, 1.0f));
+                c[3] = glm::vec3(m * glm::vec4(lb.min.x, lb.min.y, lb.max.z, 1.0f));
+                c[4] = glm::vec3(m * glm::vec4(lb.min.x, lb.max.y, lb.min.z, 1.0f));
+                c[5] = glm::vec3(m * glm::vec4(lb.max.x, lb.max.y, lb.min.z, 1.0f));
+                c[6] = glm::vec3(m * glm::vec4(lb.max.x, lb.max.y, lb.max.z, 1.0f));
+                c[7] = glm::vec3(m * glm::vec4(lb.min.x, lb.max.y, lb.max.z, 1.0f));
+                std::vector<glm::vec3> boxLines = {
+                    c[0],c[1], c[1],c[2], c[2],c[3], c[3],c[0],
+                    c[4],c[5], c[5],c[6], c[6],c[7], c[7],c[4],
+                    c[0],c[4], c[1],c[5], c[2],c[6], c[3],c[7]
+                };
+                m_modelRenderer->renderLines(cmd, vp, boxLines, glm::vec3(1.0f, 0.7f, 0.0f));
+            }
+
+            // Transform gizmo (Move/Rotate/Scale modes only)
+            if (m_transformMode != TransformMode::Select && m_editorUI.getBrushMode() == BrushMode::MoveObject) {
+                glm::vec3 gizmoPos = selObj->getTransform().getPosition();
+                float dist = glm::length(m_camera.getPosition() - gizmoPos);
+                float size = dist * 0.08f;  // Scale with camera distance
+
+                GizmoAxis hovered = m_gizmoDragging ? m_gizmoActiveAxis : m_gizmoHoveredAxis;
+                glm::vec3 xColor = (hovered == GizmoAxis::X) ? glm::vec3(1.0f, 1.0f, 0.0f) : glm::vec3(1.0f, 0.2f, 0.2f);
+                glm::vec3 yColor = (hovered == GizmoAxis::Y) ? glm::vec3(1.0f, 1.0f, 0.0f) : glm::vec3(0.2f, 1.0f, 0.2f);
+                glm::vec3 zColor = (hovered == GizmoAxis::Z) ? glm::vec3(1.0f, 1.0f, 0.0f) : glm::vec3(0.2f, 0.2f, 1.0f);
+
+                glm::vec3 xAxis(1, 0, 0), yAxis(0, 1, 0), zAxis(0, 0, 1);
+
+                if (m_transformMode == TransformMode::Rotate) {
+                    // Circles around each axis
+                    auto makeCircle = [](glm::vec3 center, float radius, glm::vec3 axis, int segments = 32) {
+                        std::vector<glm::vec3> lines;
+                        glm::vec3 perp1, perp2;
+                        if (std::abs(axis.x) < 0.9f)
+                            perp1 = glm::normalize(glm::cross(axis, glm::vec3(1, 0, 0)));
+                        else
+                            perp1 = glm::normalize(glm::cross(axis, glm::vec3(0, 1, 0)));
+                        perp2 = glm::normalize(glm::cross(axis, perp1));
+                        for (int i = 0; i < segments; ++i) {
+                            float a1 = (float)i / segments * 2.0f * 3.14159265f;
+                            float a2 = (float)(i + 1) / segments * 2.0f * 3.14159265f;
+                            lines.push_back(center + (perp1 * std::cos(a1) + perp2 * std::sin(a1)) * radius);
+                            lines.push_back(center + (perp1 * std::cos(a2) + perp2 * std::sin(a2)) * radius);
+                        }
+                        return lines;
+                    };
+                    m_modelRenderer->renderLines(cmd, vp, makeCircle(gizmoPos, size * 0.9f, xAxis), xColor);
+                    m_modelRenderer->renderLines(cmd, vp, makeCircle(gizmoPos, size * 0.9f, yAxis), yColor);
+                    m_modelRenderer->renderLines(cmd, vp, makeCircle(gizmoPos, size * 0.9f, zAxis), zColor);
+                } else {
+                    // Move or Scale: axis lines with arrowheads or cube handles
+                    auto getArrowPerps = [](const glm::vec3& ax) -> std::pair<glm::vec3, glm::vec3> {
+                        glm::vec3 up = (std::abs(ax.y) < 0.9f) ? glm::vec3(0, 1, 0) : glm::vec3(1, 0, 0);
+                        glm::vec3 p1 = glm::normalize(glm::cross(ax, up));
+                        glm::vec3 p2 = glm::normalize(glm::cross(ax, p1));
+                        return {p1, p2};
+                    };
+                    auto makeCubeLines = [](glm::vec3 center, float halfSize) {
+                        float s = halfSize;
+                        std::vector<glm::vec3> lines;
+                        lines.push_back(center + glm::vec3(-s,-s,-s)); lines.push_back(center + glm::vec3( s,-s,-s));
+                        lines.push_back(center + glm::vec3( s,-s,-s)); lines.push_back(center + glm::vec3( s,-s, s));
+                        lines.push_back(center + glm::vec3( s,-s, s)); lines.push_back(center + glm::vec3(-s,-s, s));
+                        lines.push_back(center + glm::vec3(-s,-s, s)); lines.push_back(center + glm::vec3(-s,-s,-s));
+                        lines.push_back(center + glm::vec3(-s, s,-s)); lines.push_back(center + glm::vec3( s, s,-s));
+                        lines.push_back(center + glm::vec3( s, s,-s)); lines.push_back(center + glm::vec3( s, s, s));
+                        lines.push_back(center + glm::vec3( s, s, s)); lines.push_back(center + glm::vec3(-s, s, s));
+                        lines.push_back(center + glm::vec3(-s, s, s)); lines.push_back(center + glm::vec3(-s, s,-s));
+                        lines.push_back(center + glm::vec3(-s,-s,-s)); lines.push_back(center + glm::vec3(-s, s,-s));
+                        lines.push_back(center + glm::vec3( s,-s,-s)); lines.push_back(center + glm::vec3( s, s,-s));
+                        lines.push_back(center + glm::vec3( s,-s, s)); lines.push_back(center + glm::vec3( s, s, s));
+                        lines.push_back(center + glm::vec3(-s,-s, s)); lines.push_back(center + glm::vec3(-s, s, s));
+                        return lines;
+                    };
+                    bool isScale = (m_transformMode == TransformMode::Scale);
+                    float cubeSize = size * 0.12f;
+
+                    // X axis
+                    glm::vec3 xEnd = gizmoPos + xAxis * size;
+                    std::vector<glm::vec3> xLines = { gizmoPos, xEnd };
+                    if (isScale) {
+                        auto cl = makeCubeLines(xEnd, cubeSize);
+                        xLines.insert(xLines.end(), cl.begin(), cl.end());
+                    } else {
+                        auto [p1, p2] = getArrowPerps(xAxis);
+                        glm::vec3 ab = gizmoPos + xAxis * (size * 0.85f);
+                        xLines.push_back(xEnd); xLines.push_back(ab + p1 * (size * 0.1f));
+                        xLines.push_back(xEnd); xLines.push_back(ab - p1 * (size * 0.1f));
+                        xLines.push_back(xEnd); xLines.push_back(ab + p2 * (size * 0.1f));
+                        xLines.push_back(xEnd); xLines.push_back(ab - p2 * (size * 0.1f));
+                    }
+                    m_modelRenderer->renderLines(cmd, vp, xLines, xColor);
+
+                    // Y axis
+                    glm::vec3 yEnd = gizmoPos + yAxis * size;
+                    std::vector<glm::vec3> yLines = { gizmoPos, yEnd };
+                    if (isScale) {
+                        auto cl = makeCubeLines(yEnd, cubeSize);
+                        yLines.insert(yLines.end(), cl.begin(), cl.end());
+                    } else {
+                        auto [p1, p2] = getArrowPerps(yAxis);
+                        glm::vec3 ab = gizmoPos + yAxis * (size * 0.85f);
+                        yLines.push_back(yEnd); yLines.push_back(ab + p1 * (size * 0.1f));
+                        yLines.push_back(yEnd); yLines.push_back(ab - p1 * (size * 0.1f));
+                        yLines.push_back(yEnd); yLines.push_back(ab + p2 * (size * 0.1f));
+                        yLines.push_back(yEnd); yLines.push_back(ab - p2 * (size * 0.1f));
+                    }
+                    m_modelRenderer->renderLines(cmd, vp, yLines, yColor);
+
+                    // Z axis
+                    glm::vec3 zEnd = gizmoPos + zAxis * size;
+                    std::vector<glm::vec3> zLines = { gizmoPos, zEnd };
+                    if (isScale) {
+                        auto cl = makeCubeLines(zEnd, cubeSize);
+                        zLines.insert(zLines.end(), cl.begin(), cl.end());
+                    } else {
+                        auto [p1, p2] = getArrowPerps(zAxis);
+                        glm::vec3 ab = gizmoPos + zAxis * (size * 0.85f);
+                        zLines.push_back(zEnd); zLines.push_back(ab + p1 * (size * 0.1f));
+                        zLines.push_back(zEnd); zLines.push_back(ab - p1 * (size * 0.1f));
+                        zLines.push_back(zEnd); zLines.push_back(ab + p2 * (size * 0.1f));
+                        zLines.push_back(zEnd); zLines.push_back(ab - p2 * (size * 0.1f));
+                    }
+                    m_modelRenderer->renderLines(cmd, vp, zLines, zColor);
+                }
+            }
         }
 
         if (m_splineRenderer && m_splineRenderer->isVisible()) {
@@ -1283,1003 +1443,6 @@ private:
         m_splashLoaded = false;
     }
 
-    // ── Grove scripting VM initialization ──────────────
-    static int32_t groveLogFn(const GroveValue* args, uint32_t argc, GroveValue* /*result*/, void* ud) {
-        auto* accum = static_cast<std::string*>(ud);
-        for (uint32_t i = 0; i < argc; i++) {
-            if (i > 0) accum->append("\t");
-            switch (args[i].tag) {
-                case GROVE_NIL:    accum->append("nil"); break;
-                case GROVE_BOOL:   accum->append(args[i].data.bool_val ? "true" : "false"); break;
-                case GROVE_NUMBER: {
-                    double n = args[i].data.number_val;
-                    if (n == static_cast<double>(static_cast<int64_t>(n)) && std::isfinite(n))
-                        accum->append(std::to_string(static_cast<int64_t>(n)));
-                    else
-                        accum->append(std::to_string(n));
-                    break;
-                }
-                case GROVE_STRING: {
-                    auto& sv = args[i].data.string_val;
-                    if (sv.ptr && sv.len > 0) accum->append(sv.ptr, sv.len);
-                    break;
-                }
-                case GROVE_VEC3: {
-                    auto& v = args[i].data.vec3_val;
-                    accum->append("vec3(" + std::to_string(v.x) + ", " + std::to_string(v.y) + ", " + std::to_string(v.z) + ")");
-                    break;
-                }
-                case GROVE_OBJECT:
-                    accum->append("<object:" + std::to_string(args[i].data.object_handle) + ">");
-                    break;
-            }
-        }
-        accum->append("\n");
-        return 0;
-    }
-
-    static int32_t groveTerrainHeightFn(const GroveValue* args, uint32_t argc, GroveValue* result, void* ud) {
-        auto* self = static_cast<TerrainEditor*>(ud);
-        if (argc < 1 || args[0].tag != GROVE_VEC3) {
-            result->tag = GROVE_NUMBER;
-            result->data.number_val = 0.0;
-            return 0;
-        }
-        float x = static_cast<float>(args[0].data.vec3_val.x);
-        float z = static_cast<float>(args[0].data.vec3_val.z);
-        float h = self->m_terrain.getHeightAt(x, z);
-        result->tag = GROVE_NUMBER;
-        result->data.number_val = static_cast<double>(h);
-        return 0;
-    }
-
-    static int32_t groveSpawnFn(const GroveValue* args, uint32_t argc, GroveValue* result, void* ud) {
-        auto* self = static_cast<TerrainEditor*>(ud);
-        // spawn(name_string, position_vec3)
-        std::string name = "grove_object";
-        glm::vec3 pos(0.0f);
-
-        if (argc >= 1 && args[0].tag == GROVE_STRING) {
-            auto& sv = args[0].data.string_val;
-            if (sv.ptr && sv.len > 0) name = std::string(sv.ptr, sv.len);
-        }
-        if (argc >= 2 && args[1].tag == GROVE_VEC3) {
-            pos.x = static_cast<float>(args[1].data.vec3_val.x);
-            pos.y = static_cast<float>(args[1].data.vec3_val.y);
-            pos.z = static_cast<float>(args[1].data.vec3_val.z);
-        }
-
-        SceneObject* obj = self->spawnPostholeAt(pos, name);
-        result->tag = GROVE_OBJECT;
-        result->data.object_handle = obj ? static_cast<uint64_t>(reinterpret_cast<uintptr_t>(obj)) : 0;
-        return 0;
-    }
-
-    // ─── Construction primitives for Grove scripts ───
-
-    // get_player_pos() → vec3
-    static int32_t groveGetPlayerPos(const GroveValue* args, uint32_t argc, GroveValue* result, void* ud) {
-        auto* self = static_cast<TerrainEditor*>(ud);
-        glm::vec3 pos = self->m_camera.getPosition();
-        result->tag = GROVE_VEC3;
-        result->data.vec3_val.x = static_cast<double>(pos.x);
-        result->data.vec3_val.y = static_cast<double>(pos.y);
-        result->data.vec3_val.z = static_cast<double>(pos.z);
-        return 0;
-    }
-
-    // spawn_cube(name, pos, size, r, g, b) → bool
-    static int32_t groveSpawnCubeFn(const GroveValue* args, uint32_t argc, GroveValue* result, void* ud) {
-        auto* self = static_cast<TerrainEditor*>(ud);
-        result->tag = GROVE_BOOL;
-        result->data.bool_val = 0;
-
-        if (argc < 6 || args[0].tag != GROVE_STRING || args[1].tag != GROVE_VEC3 ||
-            args[2].tag != GROVE_NUMBER || args[3].tag != GROVE_NUMBER ||
-            args[4].tag != GROVE_NUMBER || args[5].tag != GROVE_NUMBER) return 0;
-
-        auto& sv = args[0].data.string_val;
-        std::string name = (sv.ptr && sv.len > 0) ? std::string(sv.ptr, sv.len) : "grove_cube";
-        float size = static_cast<float>(args[2].data.number_val);
-        float r = static_cast<float>(args[3].data.number_val);
-        float g = static_cast<float>(args[4].data.number_val);
-        float b = static_cast<float>(args[5].data.number_val);
-        glm::vec4 color(r, g, b, 1.0f);
-
-        auto meshData = PrimitiveMeshBuilder::createCube(size, color);
-        auto obj = std::make_unique<SceneObject>(name);
-        uint32_t handle = self->m_modelRenderer->createModel(meshData.vertices, meshData.indices);
-        obj->setBufferHandle(handle);
-        obj->setIndexCount(static_cast<uint32_t>(meshData.indices.size()));
-        obj->setVertexCount(static_cast<uint32_t>(meshData.vertices.size()));
-        obj->setLocalBounds(meshData.bounds);
-        obj->setModelPath("");
-        obj->setMeshData(meshData.vertices, meshData.indices);
-        obj->setPrimitiveType(PrimitiveType::Cube);
-        obj->setPrimitiveSize(size);
-        obj->setPrimitiveColor(color);
-
-        // Position bottom on terrain
-        float posX = static_cast<float>(args[1].data.vec3_val.x);
-        float posZ = static_cast<float>(args[1].data.vec3_val.z);
-        float terrainY = self->m_terrain.getHeightAt(posX, posZ);
-        float halfSize = size * 0.5f;
-        obj->getTransform().setPosition(glm::vec3(posX, terrainY + halfSize, posZ));
-
-        self->m_sceneObjects.push_back(std::move(obj));
-        std::cout << "[Grove] Spawned cube '" << name << "' at (" << posX << ", " << terrainY + halfSize << ", " << posZ << ")" << std::endl;
-        result->data.bool_val = 1;
-        return 0;
-    }
-
-    // spawn_cylinder(name, pos, radius, height, r, g, b) → bool
-    static int32_t groveSpawnCylinderFn(const GroveValue* args, uint32_t argc, GroveValue* result, void* ud) {
-        auto* self = static_cast<TerrainEditor*>(ud);
-        result->tag = GROVE_BOOL;
-        result->data.bool_val = 0;
-
-        if (argc < 7 || args[0].tag != GROVE_STRING || args[1].tag != GROVE_VEC3 ||
-            args[2].tag != GROVE_NUMBER || args[3].tag != GROVE_NUMBER ||
-            args[4].tag != GROVE_NUMBER || args[5].tag != GROVE_NUMBER ||
-            args[6].tag != GROVE_NUMBER) return 0;
-
-        auto& sv = args[0].data.string_val;
-        std::string name = (sv.ptr && sv.len > 0) ? std::string(sv.ptr, sv.len) : "grove_cylinder";
-        float radius = static_cast<float>(args[2].data.number_val);
-        float height = static_cast<float>(args[3].data.number_val);
-        float r = static_cast<float>(args[4].data.number_val);
-        float g = static_cast<float>(args[5].data.number_val);
-        float b = static_cast<float>(args[6].data.number_val);
-        glm::vec4 color(r, g, b, 1.0f);
-
-        auto meshData = PrimitiveMeshBuilder::createCylinder(radius, height, 12, color);
-        auto obj = std::make_unique<SceneObject>(name);
-        uint32_t handle = self->m_modelRenderer->createModel(meshData.vertices, meshData.indices);
-        obj->setBufferHandle(handle);
-        obj->setIndexCount(static_cast<uint32_t>(meshData.indices.size()));
-        obj->setVertexCount(static_cast<uint32_t>(meshData.vertices.size()));
-        obj->setLocalBounds(meshData.bounds);
-        obj->setModelPath("");
-        obj->setMeshData(meshData.vertices, meshData.indices);
-        obj->setPrimitiveType(PrimitiveType::Cylinder);
-        obj->setPrimitiveRadius(radius);
-        obj->setPrimitiveHeight(height);
-        obj->setPrimitiveSegments(12);
-        obj->setPrimitiveColor(color);
-
-        // Position bottom on terrain
-        float posX = static_cast<float>(args[1].data.vec3_val.x);
-        float posZ = static_cast<float>(args[1].data.vec3_val.z);
-        float terrainY = self->m_terrain.getHeightAt(posX, posZ);
-        // Cylinder mesh is centered at origin, so offset by half height
-        float halfHeight = height * 0.5f;
-        obj->getTransform().setPosition(glm::vec3(posX, terrainY + halfHeight, posZ));
-
-        self->m_sceneObjects.push_back(std::move(obj));
-        std::cout << "[Grove] Spawned cylinder '" << name << "' at (" << posX << ", " << terrainY + halfHeight << ", " << posZ << ")" << std::endl;
-        result->data.bool_val = 1;
-        return 0;
-    }
-
-    // spawn_model(name, path, pos) → bool
-    static int32_t groveSpawnModelFn(const GroveValue* args, uint32_t argc, GroveValue* result, void* ud) {
-        auto* self = static_cast<TerrainEditor*>(ud);
-        result->tag = GROVE_BOOL;
-        result->data.bool_val = 0;
-
-        if (argc < 3 || args[0].tag != GROVE_STRING || args[1].tag != GROVE_STRING ||
-            args[2].tag != GROVE_VEC3) return 0;
-
-        auto& nameSv = args[0].data.string_val;
-        std::string name = (nameSv.ptr && nameSv.len > 0) ? std::string(nameSv.ptr, nameSv.len) : "grove_model";
-        auto& pathSv = args[1].data.string_val;
-        std::string modelPath = (pathSv.ptr && pathSv.len > 0) ? std::string(pathSv.ptr, pathSv.len) : "";
-
-        if (modelPath.empty()) return 0;
-
-        // Resolve relative paths from current level directory
-        if (modelPath[0] != '/' && !self->m_currentLevelPath.empty()) {
-            size_t lastSlash = self->m_currentLevelPath.find_last_of("/\\");
-            if (lastSlash != std::string::npos) {
-                modelPath = self->m_currentLevelPath.substr(0, lastSlash + 1) + modelPath;
-            }
-        }
-
-        bool isLime = modelPath.size() >= 5 && modelPath.substr(modelPath.size() - 5) == ".lime";
-        std::unique_ptr<SceneObject> obj;
-
-        if (isLime) {
-            auto loadResult = LimeLoader::load(modelPath);
-            if (loadResult.success) {
-                obj = LimeLoader::createSceneObject(loadResult.mesh, *self->m_modelRenderer);
-            }
-        } else {
-            auto loadResult = GLBLoader::load(modelPath);
-            if (loadResult.success && !loadResult.meshes.empty()) {
-                obj = GLBLoader::createSceneObject(loadResult.meshes[0], *self->m_modelRenderer);
-            }
-        }
-
-        if (!obj) {
-            std::cout << "[Grove] Failed to load model: " << modelPath << std::endl;
-            return 0;
-        }
-
-        obj->setName(name);
-        obj->setModelPath(modelPath);
-
-        // Position bottom on terrain using min-vertex-Y offset
-        float posX = static_cast<float>(args[2].data.vec3_val.x);
-        float posZ = static_cast<float>(args[2].data.vec3_val.z);
-        float terrainY = self->m_terrain.getHeightAt(posX, posZ);
-
-        glm::vec3 scale = obj->getTransform().getScale();
-        float minVertexY = 0.0f;
-        if (obj->hasMeshData()) {
-            const auto& verts = obj->getVertices();
-            if (!verts.empty()) {
-                minVertexY = verts[0].position.y;
-                for (const auto& v : verts) {
-                    if (v.position.y < minVertexY) minVertexY = v.position.y;
-                }
-            }
-        }
-        float bottomOffset = -minVertexY * scale.y;
-        obj->getTransform().setPosition(glm::vec3(posX, terrainY + bottomOffset, posZ));
-
-        self->m_sceneObjects.push_back(std::move(obj));
-        std::cout << "[Grove] Spawned model '" << name << "' at (" << posX << ", " << terrainY + bottomOffset << ", " << posZ << ")" << std::endl;
-        result->data.bool_val = 1;
-        return 0;
-    }
-
-    // set_object_rotation(name, rx, ry, rz) → bool
-    static int32_t groveSetObjectRotation(const GroveValue* args, uint32_t argc, GroveValue* result, void* ud) {
-        auto* self = static_cast<TerrainEditor*>(ud);
-        result->tag = GROVE_BOOL;
-        result->data.bool_val = 0;
-
-        if (argc < 4 || args[0].tag != GROVE_STRING ||
-            args[1].tag != GROVE_NUMBER || args[2].tag != GROVE_NUMBER || args[3].tag != GROVE_NUMBER) return 0;
-
-        auto& sv = args[0].data.string_val;
-        std::string name = (sv.ptr && sv.len > 0) ? std::string(sv.ptr, sv.len) : "";
-        float rx = static_cast<float>(args[1].data.number_val);
-        float ry = static_cast<float>(args[2].data.number_val);
-        float rz = static_cast<float>(args[3].data.number_val);
-
-        for (auto& obj : self->m_sceneObjects) {
-            if (obj && obj->getName() == name) {
-                obj->setEulerRotation(glm::vec3(rx, ry, rz));
-                result->data.bool_val = 1;
-                return 0;
-            }
-        }
-        return 0;
-    }
-
-    // set_object_scale(name, sx, sy, sz) → bool
-    static int32_t groveSetObjectScale(const GroveValue* args, uint32_t argc, GroveValue* result, void* ud) {
-        auto* self = static_cast<TerrainEditor*>(ud);
-        result->tag = GROVE_BOOL;
-        result->data.bool_val = 0;
-
-        if (argc < 4 || args[0].tag != GROVE_STRING ||
-            args[1].tag != GROVE_NUMBER || args[2].tag != GROVE_NUMBER || args[3].tag != GROVE_NUMBER) return 0;
-
-        auto& sv = args[0].data.string_val;
-        std::string name = (sv.ptr && sv.len > 0) ? std::string(sv.ptr, sv.len) : "";
-        float sx = static_cast<float>(args[1].data.number_val);
-        float sy = static_cast<float>(args[2].data.number_val);
-        float sz = static_cast<float>(args[3].data.number_val);
-
-        for (auto& obj : self->m_sceneObjects) {
-            if (obj && obj->getName() == name) {
-                obj->getTransform().setScale(glm::vec3(sx, sy, sz));
-                result->data.bool_val = 1;
-                return 0;
-            }
-        }
-        return 0;
-    }
-
-    // delete_object(name) → bool
-    static int32_t groveDeleteObject(const GroveValue* args, uint32_t argc, GroveValue* result, void* ud) {
-        auto* self = static_cast<TerrainEditor*>(ud);
-        result->tag = GROVE_BOOL;
-        result->data.bool_val = 0;
-
-        if (argc < 1 || args[0].tag != GROVE_STRING) return 0;
-
-        auto& sv = args[0].data.string_val;
-        std::string name = (sv.ptr && sv.len > 0) ? std::string(sv.ptr, sv.len) : "";
-
-        for (auto it = self->m_sceneObjects.begin(); it != self->m_sceneObjects.end(); ++it) {
-            if (*it && (*it)->getName() == name) {
-                self->m_sceneObjects.erase(it);
-                std::cout << "[Grove] Deleted object '" << name << "'" << std::endl;
-                result->data.bool_val = 1;
-                return 0;
-            }
-        }
-        return 0;
-    }
-
-    // ─── Queued construction commands (execute during behavior sequence) ───
-    // These queue GROVE_COMMAND actions on the bot target's behavior.
-    // The command is stored as a pipe-delimited string in stringParam,
-    // position in vec3Param. Parsed and executed by updateActiveBehavior.
-
-    // queue_spawn_cube(name, pos, size, r, g, b) — queue a cube spawn
-    static int32_t groveQueueSpawnCube(const GroveValue* args, uint32_t argc, GroveValue* result, void* ud) {
-        auto* self = static_cast<TerrainEditor*>(ud);
-        result->tag = GROVE_BOOL;
-        result->data.bool_val = 0;
-        if (!self->m_groveBotTarget || argc < 6) return 0;
-
-        Behavior* b = self->getBotScriptBehavior();
-        if (!b) return 0;
-
-        if (args[0].tag != GROVE_STRING || args[1].tag != GROVE_VEC3 ||
-            args[2].tag != GROVE_NUMBER || args[3].tag != GROVE_NUMBER ||
-            args[4].tag != GROVE_NUMBER || args[5].tag != GROVE_NUMBER) return 0;
-
-        auto& sv = args[0].data.string_val;
-        std::string name = (sv.ptr && sv.len > 0) ? std::string(sv.ptr, sv.len) : "cube";
-
-        glm::vec3 pos(static_cast<float>(args[1].data.vec3_val.x),
-                      static_cast<float>(args[1].data.vec3_val.y),
-                      static_cast<float>(args[1].data.vec3_val.z));
-
-        // Encode: "cube|name|size|r|g|b"
-        std::string cmd = "cube|" + name + "|" +
-            std::to_string(args[2].data.number_val) + "|" +
-            std::to_string(args[3].data.number_val) + "|" +
-            std::to_string(args[4].data.number_val) + "|" +
-            std::to_string(args[5].data.number_val);
-
-        Action a;
-        a.type = ActionType::GROVE_COMMAND;
-        a.stringParam = cmd;
-        a.vec3Param = pos;
-        a.duration = 0.0f;
-        b->actions.push_back(a);
-
-        result->data.bool_val = 1;
-        return 0;
-    }
-
-    // queue_spawn_cylinder(name, pos, radius, height, r, g, b) — queue a cylinder spawn
-    static int32_t groveQueueSpawnCylinder(const GroveValue* args, uint32_t argc, GroveValue* result, void* ud) {
-        auto* self = static_cast<TerrainEditor*>(ud);
-        result->tag = GROVE_BOOL;
-        result->data.bool_val = 0;
-        if (!self->m_groveBotTarget || argc < 7) return 0;
-
-        Behavior* b = self->getBotScriptBehavior();
-        if (!b) return 0;
-
-        if (args[0].tag != GROVE_STRING || args[1].tag != GROVE_VEC3 ||
-            args[2].tag != GROVE_NUMBER || args[3].tag != GROVE_NUMBER ||
-            args[4].tag != GROVE_NUMBER || args[5].tag != GROVE_NUMBER ||
-            args[6].tag != GROVE_NUMBER) return 0;
-
-        auto& sv = args[0].data.string_val;
-        std::string name = (sv.ptr && sv.len > 0) ? std::string(sv.ptr, sv.len) : "cylinder";
-
-        glm::vec3 pos(static_cast<float>(args[1].data.vec3_val.x),
-                      static_cast<float>(args[1].data.vec3_val.y),
-                      static_cast<float>(args[1].data.vec3_val.z));
-
-        // Encode: "cylinder|name|radius|height|r|g|b"
-        std::string cmd = "cylinder|" + name + "|" +
-            std::to_string(args[2].data.number_val) + "|" +
-            std::to_string(args[3].data.number_val) + "|" +
-            std::to_string(args[4].data.number_val) + "|" +
-            std::to_string(args[5].data.number_val) + "|" +
-            std::to_string(args[6].data.number_val);
-
-        Action a;
-        a.type = ActionType::GROVE_COMMAND;
-        a.stringParam = cmd;
-        a.vec3Param = pos;
-        a.duration = 0.0f;
-        b->actions.push_back(a);
-
-        result->data.bool_val = 1;
-        return 0;
-    }
-
-    // queue_set_rotation(name, rx, ry, rz) — queue a rotation change
-    static int32_t groveQueueSetRotation(const GroveValue* args, uint32_t argc, GroveValue* result, void* ud) {
-        auto* self = static_cast<TerrainEditor*>(ud);
-        result->tag = GROVE_BOOL;
-        result->data.bool_val = 0;
-        if (!self->m_groveBotTarget || argc < 4) return 0;
-
-        Behavior* b = self->getBotScriptBehavior();
-        if (!b) return 0;
-
-        if (args[0].tag != GROVE_STRING || args[1].tag != GROVE_NUMBER ||
-            args[2].tag != GROVE_NUMBER || args[3].tag != GROVE_NUMBER) return 0;
-
-        auto& sv = args[0].data.string_val;
-        std::string name = (sv.ptr && sv.len > 0) ? std::string(sv.ptr, sv.len) : "";
-
-        // Encode: "set_rotation|name|rx|ry|rz"
-        std::string cmd = "set_rotation|" + name + "|" +
-            std::to_string(args[1].data.number_val) + "|" +
-            std::to_string(args[2].data.number_val) + "|" +
-            std::to_string(args[3].data.number_val);
-
-        Action a;
-        a.type = ActionType::GROVE_COMMAND;
-        a.stringParam = cmd;
-        a.duration = 0.0f;
-        b->actions.push_back(a);
-
-        result->data.bool_val = 1;
-        return 0;
-    }
-
-    // queue_set_scale(name, sx, sy, sz) — queue a scale change
-    static int32_t groveQueueSetScale(const GroveValue* args, uint32_t argc, GroveValue* result, void* ud) {
-        auto* self = static_cast<TerrainEditor*>(ud);
-        result->tag = GROVE_BOOL;
-        result->data.bool_val = 0;
-        if (!self->m_groveBotTarget || argc < 4) return 0;
-
-        Behavior* b = self->getBotScriptBehavior();
-        if (!b) return 0;
-
-        if (args[0].tag != GROVE_STRING || args[1].tag != GROVE_NUMBER ||
-            args[2].tag != GROVE_NUMBER || args[3].tag != GROVE_NUMBER) return 0;
-
-        auto& sv = args[0].data.string_val;
-        std::string name = (sv.ptr && sv.len > 0) ? std::string(sv.ptr, sv.len) : "";
-
-        // Encode: "set_scale|name|sx|sy|sz"
-        std::string cmd = "set_scale|" + name + "|" +
-            std::to_string(args[1].data.number_val) + "|" +
-            std::to_string(args[2].data.number_val) + "|" +
-            std::to_string(args[3].data.number_val);
-
-        Action a;
-        a.type = ActionType::GROVE_COMMAND;
-        a.stringParam = cmd;
-        a.duration = 0.0f;
-        b->actions.push_back(a);
-
-        result->data.bool_val = 1;
-        return 0;
-    }
-
-    // queue_delete(name) — queue an object deletion
-    static int32_t groveQueueDelete(const GroveValue* args, uint32_t argc, GroveValue* result, void* ud) {
-        auto* self = static_cast<TerrainEditor*>(ud);
-        result->tag = GROVE_BOOL;
-        result->data.bool_val = 0;
-        if (!self->m_groveBotTarget || argc < 1 || args[0].tag != GROVE_STRING) return 0;
-
-        Behavior* b = self->getBotScriptBehavior();
-        if (!b) return 0;
-
-        auto& sv = args[0].data.string_val;
-        std::string name = (sv.ptr && sv.len > 0) ? std::string(sv.ptr, sv.len) : "";
-
-        std::string cmd = "delete|" + name;
-
-        Action a;
-        a.type = ActionType::GROVE_COMMAND;
-        a.stringParam = cmd;
-        a.duration = 0.0f;
-        b->actions.push_back(a);
-
-        result->data.bool_val = 1;
-        return 0;
-    }
-
-    // Zone system Grove bindings — return static strings (valid for VM lifetime)
-    static int32_t groveZoneTypeFn(const GroveValue* args, uint32_t argc, GroveValue* result, void* ud) {
-        auto* self = static_cast<TerrainEditor*>(ud);
-        if (!self->m_zoneSystem || argc < 1 || args[0].tag != GROVE_VEC3) {
-            result->tag = GROVE_STRING;
-            result->data.string_val.ptr = "unknown";
-            result->data.string_val.len = 7;
-            return 0;
-        }
-        float x = static_cast<float>(args[0].data.vec3_val.x);
-        float z = static_cast<float>(args[0].data.vec3_val.z);
-        const char* name = ZoneSystem::zoneTypeName(self->m_zoneSystem->getZoneType(x, z));
-        result->tag = GROVE_STRING;
-        result->data.string_val.ptr = name;
-        result->data.string_val.len = static_cast<uint32_t>(strlen(name));
-        return 0;
-    }
-
-    static int32_t groveZoneResourceFn(const GroveValue* args, uint32_t argc, GroveValue* result, void* ud) {
-        auto* self = static_cast<TerrainEditor*>(ud);
-        if (!self->m_zoneSystem || argc < 1 || args[0].tag != GROVE_VEC3) {
-            result->tag = GROVE_STRING;
-            result->data.string_val.ptr = "none";
-            result->data.string_val.len = 4;
-            return 0;
-        }
-        float x = static_cast<float>(args[0].data.vec3_val.x);
-        float z = static_cast<float>(args[0].data.vec3_val.z);
-        const char* name = ZoneSystem::resourceTypeName(self->m_zoneSystem->getResource(x, z));
-        result->tag = GROVE_STRING;
-        result->data.string_val.ptr = name;
-        result->data.string_val.len = static_cast<uint32_t>(strlen(name));
-        return 0;
-    }
-
-    static int32_t groveZoneOwnerFn(const GroveValue* args, uint32_t argc, GroveValue* result, void* ud) {
-        auto* self = static_cast<TerrainEditor*>(ud);
-        if (!self->m_zoneSystem || argc < 1 || args[0].tag != GROVE_VEC3) {
-            result->tag = GROVE_NUMBER;
-            result->data.number_val = 0.0;
-            return 0;
-        }
-        float x = static_cast<float>(args[0].data.vec3_val.x);
-        float z = static_cast<float>(args[0].data.vec3_val.z);
-        result->tag = GROVE_NUMBER;
-        result->data.number_val = static_cast<double>(self->m_zoneSystem->getOwner(x, z));
-        return 0;
-    }
-
-    static int32_t groveCanBuildFn(const GroveValue* args, uint32_t argc, GroveValue* result, void* ud) {
-        auto* self = static_cast<TerrainEditor*>(ud);
-        if (!self->m_zoneSystem || argc < 1 || args[0].tag != GROVE_VEC3) {
-            result->tag = GROVE_BOOL;
-            result->data.bool_val = 0;
-            return 0;
-        }
-        float x = static_cast<float>(args[0].data.vec3_val.x);
-        float z = static_cast<float>(args[0].data.vec3_val.z);
-        // Use player ID 1 as default for script queries
-        result->tag = GROVE_BOOL;
-        result->data.bool_val = self->m_zoneSystem->canBuild(x, z, 1) ? 1 : 0;
-        return 0;
-    }
-
-    static int32_t grovePlotPriceFn(const GroveValue* args, uint32_t argc, GroveValue* result, void* ud) {
-        auto* self = static_cast<TerrainEditor*>(ud);
-        if (!self->m_zoneSystem || argc < 1 || args[0].tag != GROVE_VEC3) {
-            result->tag = GROVE_NUMBER;
-            result->data.number_val = 0.0;
-            return 0;
-        }
-        float x = static_cast<float>(args[0].data.vec3_val.x);
-        float z = static_cast<float>(args[0].data.vec3_val.z);
-        auto g = self->m_zoneSystem->worldToGrid(x, z);
-        result->tag = GROVE_NUMBER;
-        result->data.number_val = static_cast<double>(self->m_zoneSystem->getPlotPrice(g.x, g.y));
-        return 0;
-    }
-
-    // ─── AlgoBot behavior host functions ───
-    // These queue actions onto a target SceneObject's behavior list.
-    // Usage from Grove:
-    //   bot_target("Worker1")    -- select which object to program
-    //   move_to(vec3(10, 0, 20)) -- queue a move action
-    //   wait(2.0)                -- queue a wait
-    //   rotate_to(vec3(0, 90, 0))
-    //   bot_run()                -- trigger the behavior
-
-    // bot_target(name_string) — select a scene object by name
-    static int32_t groveBotTargetFn(const GroveValue* args, uint32_t argc, GroveValue* result, void* ud) {
-        auto* self = static_cast<TerrainEditor*>(ud);
-        result->tag = GROVE_BOOL;
-        result->data.bool_val = 0;
-        if (argc < 1 || args[0].tag != GROVE_STRING) return 0;
-
-        auto& sv = args[0].data.string_val;
-        std::string name(sv.ptr, sv.len);
-        self->m_groveBotTarget = nullptr;
-        for (auto& obj : self->m_sceneObjects) {
-            if (obj->getName() == name) {
-                self->m_groveBotTarget = obj.get();
-                // Ensure it has a "grove_script" behavior we can append to
-                bool found = false;
-                for (auto& b : obj->getBehaviors()) {
-                    if (b.name == "grove_script") { found = true; break; }
-                }
-                if (!found) {
-                    Behavior b;
-                    b.name = "grove_script";
-                    b.trigger = TriggerType::MANUAL;
-                    b.loop = false;
-                    b.enabled = true;
-                    obj->addBehavior(b);
-                }
-                result->data.bool_val = 1;
-                return 0;
-            }
-        }
-        return 0;
-    }
-
-    // Helper: get the "grove_script" behavior on the current bot target
-    Behavior* getBotScriptBehavior() {
-        if (!m_groveBotTarget) return nullptr;
-        for (auto& b : m_groveBotTarget->getBehaviors()) {
-            if (b.name == "grove_script") return &b;
-        }
-        return nullptr;
-    }
-
-    // move_to(vec3) — queue MOVE_TO action
-    static int32_t groveMoveTo(const GroveValue* args, uint32_t argc, GroveValue* result, void* ud) {
-        auto* self = static_cast<TerrainEditor*>(ud);
-        result->tag = GROVE_NIL;
-        if (!self->m_groveBotTarget || argc < 1 || args[0].tag != GROVE_VEC3) return 0;
-
-        Behavior* b = self->getBotScriptBehavior();
-        if (!b) return 0;
-
-        glm::vec3 target(
-            static_cast<float>(args[0].data.vec3_val.x),
-            static_cast<float>(args[0].data.vec3_val.y),
-            static_cast<float>(args[0].data.vec3_val.z));
-
-        float duration = (argc >= 2 && args[1].tag == GROVE_NUMBER) ? static_cast<float>(args[1].data.number_val) : 2.0f;
-
-        Action a = Action::MoveTo(target, duration);
-        // Optional animation param
-        if (argc >= 3 && args[2].tag == GROVE_STRING) {
-            auto& asv = args[2].data.string_val;
-            a.animationParam = std::string(asv.ptr, asv.len);
-        }
-        b->actions.push_back(a);
-        return 0;
-    }
-
-    // rotate_to(vec3) — queue ROTATE_TO action (euler degrees)
-    static int32_t groveRotateTo(const GroveValue* args, uint32_t argc, GroveValue* result, void* ud) {
-        auto* self = static_cast<TerrainEditor*>(ud);
-        result->tag = GROVE_NIL;
-        if (!self->m_groveBotTarget || argc < 1 || args[0].tag != GROVE_VEC3) return 0;
-
-        Behavior* b = self->getBotScriptBehavior();
-        if (!b) return 0;
-
-        glm::vec3 target(
-            static_cast<float>(args[0].data.vec3_val.x),
-            static_cast<float>(args[0].data.vec3_val.y),
-            static_cast<float>(args[0].data.vec3_val.z));
-
-        float duration = (argc >= 2 && args[1].tag == GROVE_NUMBER) ? static_cast<float>(args[1].data.number_val) : 1.0f;
-
-        b->actions.push_back(Action::RotateTo(target, duration));
-        return 0;
-    }
-
-    // turn_to(vec3) — queue TURN_TO action (face a world position, yaw only)
-    static int32_t groveTurnTo(const GroveValue* args, uint32_t argc, GroveValue* result, void* ud) {
-        auto* self = static_cast<TerrainEditor*>(ud);
-        result->tag = GROVE_NIL;
-        if (!self->m_groveBotTarget || argc < 1 || args[0].tag != GROVE_VEC3) return 0;
-
-        Behavior* b = self->getBotScriptBehavior();
-        if (!b) return 0;
-
-        glm::vec3 target(
-            static_cast<float>(args[0].data.vec3_val.x),
-            static_cast<float>(args[0].data.vec3_val.y),
-            static_cast<float>(args[0].data.vec3_val.z));
-
-        float duration = (argc >= 2 && args[1].tag == GROVE_NUMBER) ? static_cast<float>(args[1].data.number_val) : 0.5f;
-
-        Action a;
-        a.type = ActionType::TURN_TO;
-        a.vec3Param = target;
-        a.duration = duration;
-        b->actions.push_back(a);
-        return 0;
-    }
-
-    // wait(seconds) — queue WAIT action
-    static int32_t groveWait(const GroveValue* args, uint32_t argc, GroveValue* result, void* ud) {
-        auto* self = static_cast<TerrainEditor*>(ud);
-        result->tag = GROVE_NIL;
-        if (!self->m_groveBotTarget || argc < 1 || args[0].tag != GROVE_NUMBER) return 0;
-
-        Behavior* b = self->getBotScriptBehavior();
-        if (!b) return 0;
-
-        float seconds = static_cast<float>(args[0].data.number_val);
-        b->actions.push_back(Action::Wait(seconds));
-        return 0;
-    }
-
-    // set_visible(bool) — queue SET_VISIBLE action
-    static int32_t groveSetVisible(const GroveValue* args, uint32_t argc, GroveValue* result, void* ud) {
-        auto* self = static_cast<TerrainEditor*>(ud);
-        result->tag = GROVE_NIL;
-        if (!self->m_groveBotTarget || argc < 1 || args[0].tag != GROVE_BOOL) return 0;
-
-        Behavior* b = self->getBotScriptBehavior();
-        if (!b) return 0;
-
-        b->actions.push_back(Action::SetVisible(args[0].data.bool_val != 0));
-        return 0;
-    }
-
-    // play_anim(name_string, duration?) — queue WAIT with animation param (plays anim for duration)
-    static int32_t grovePlayAnim(const GroveValue* args, uint32_t argc, GroveValue* result, void* ud) {
-        auto* self = static_cast<TerrainEditor*>(ud);
-        result->tag = GROVE_NIL;
-        if (!self->m_groveBotTarget || argc < 1 || args[0].tag != GROVE_STRING) return 0;
-
-        Behavior* b = self->getBotScriptBehavior();
-        if (!b) return 0;
-
-        float duration = (argc >= 2 && args[1].tag == GROVE_NUMBER) ? static_cast<float>(args[1].data.number_val) : 0.0f;
-
-        Action a = Action::Wait(duration);
-        auto& asv = args[0].data.string_val;
-        a.animationParam = std::string(asv.ptr, asv.len);
-        b->actions.push_back(a);
-        return 0;
-    }
-
-    // send_signal(signal_name, target_entity?) — queue SEND_SIGNAL action
-    static int32_t groveSendSignal(const GroveValue* args, uint32_t argc, GroveValue* result, void* ud) {
-        auto* self = static_cast<TerrainEditor*>(ud);
-        result->tag = GROVE_NIL;
-        if (!self->m_groveBotTarget || argc < 1 || args[0].tag != GROVE_STRING) return 0;
-
-        Behavior* b = self->getBotScriptBehavior();
-        if (!b) return 0;
-
-        auto& ssv = args[0].data.string_val;
-        std::string signalName(ssv.ptr, ssv.len);
-        std::string targetEntity;
-        if (argc >= 2 && args[1].tag == GROVE_STRING) {
-            auto& tsv = args[1].data.string_val;
-            targetEntity = std::string(tsv.ptr, tsv.len);
-        }
-
-        b->actions.push_back(Action::SendSignal(signalName, targetEntity));
-        return 0;
-    }
-
-    // follow_path(path_name) — queue FOLLOW_PATH action
-    static int32_t groveFollowPath(const GroveValue* args, uint32_t argc, GroveValue* result, void* ud) {
-        auto* self = static_cast<TerrainEditor*>(ud);
-        result->tag = GROVE_NIL;
-        if (!self->m_groveBotTarget || argc < 1 || args[0].tag != GROVE_STRING) return 0;
-
-        Behavior* b = self->getBotScriptBehavior();
-        if (!b) return 0;
-
-        auto& fsv = args[0].data.string_val;
-        b->actions.push_back(Action::FollowPath(std::string(fsv.ptr, fsv.len)));
-        return 0;
-    }
-
-    // bot_loop(bool) — set whether the grove_script behavior loops
-    static int32_t groveBotLoop(const GroveValue* args, uint32_t argc, GroveValue* result, void* ud) {
-        auto* self = static_cast<TerrainEditor*>(ud);
-        result->tag = GROVE_NIL;
-        if (!self->m_groveBotTarget) return 0;
-
-        Behavior* b = self->getBotScriptBehavior();
-        if (!b) return 0;
-
-        b->loop = (argc >= 1 && args[0].tag == GROVE_BOOL && args[0].data.bool_val != 0);
-        return 0;
-    }
-
-    // bot_clear() — clear all queued actions on current target
-    static int32_t groveBotClear(const GroveValue* args, uint32_t argc, GroveValue* result, void* ud) {
-        auto* self = static_cast<TerrainEditor*>(ud);
-        result->tag = GROVE_NIL;
-        if (!self->m_groveBotTarget) return 0;
-
-        Behavior* b = self->getBotScriptBehavior();
-        if (b) b->actions.clear();
-        return 0;
-    }
-
-    // bot_run() — mark the grove_script behavior as ready and start it if in play mode
-    static int32_t groveBotRun(const GroveValue* args, uint32_t argc, GroveValue* result, void* ud) {
-        auto* self = static_cast<TerrainEditor*>(ud);
-        result->tag = GROVE_BOOL;
-        result->data.bool_val = 0;
-        if (!self->m_groveBotTarget) return 0;
-
-        Behavior* b = self->getBotScriptBehavior();
-        if (!b) return 0;
-
-        // Set trigger to ON_GAMESTART so it runs when play mode starts
-        b->trigger = TriggerType::ON_GAMESTART;
-        b->enabled = true;
-        result->data.bool_val = 1;
-
-        // If already in play mode, start the behavior immediately
-        if (self->m_isPlayMode && !b->actions.empty()) {
-            auto& behaviors = self->m_groveBotTarget->getBehaviors();
-            for (size_t i = 0; i < behaviors.size(); i++) {
-                if (&behaviors[i] == b) {
-                    self->m_groveBotTarget->setActiveBehaviorIndex(static_cast<int>(i));
-                    self->m_groveBotTarget->setActiveActionIndex(0);
-                    self->m_groveBotTarget->resetPathComplete();
-                    self->m_groveBotTarget->clearPathWaypoints();
-
-                    if (b->actions[0].type == ActionType::FOLLOW_PATH) {
-                        self->loadPathForAction(self->m_groveBotTarget, b->actions[0]);
-                    }
-                    break;
-                }
-            }
-        }
-        return 0;
-    }
-
-    // ─── Player economy host functions ───
-
-    // get_credits() → number
-    static int32_t groveGetCredits(const GroveValue* args, uint32_t argc, GroveValue* result, void* ud) {
-        auto* self = static_cast<TerrainEditor*>(ud);
-        result->tag = GROVE_NUMBER;
-        result->data.number_val = static_cast<double>(self->m_playerCredits);
-        return 0;
-    }
-
-    // add_credits(amount) → number (new balance)
-    static int32_t groveAddCredits(const GroveValue* args, uint32_t argc, GroveValue* result, void* ud) {
-        auto* self = static_cast<TerrainEditor*>(ud);
-        result->tag = GROVE_NUMBER;
-        if (argc >= 1 && args[0].tag == GROVE_NUMBER) {
-            float amount = static_cast<float>(args[0].data.number_val);
-            if (amount > 0) self->m_playerCredits += amount;
-        }
-        result->data.number_val = static_cast<double>(self->m_playerCredits);
-        return 0;
-    }
-
-    // deduct_credits(amount) → bool (true if sufficient funds, false if not)
-    static int32_t groveDeductCredits(const GroveValue* args, uint32_t argc, GroveValue* result, void* ud) {
-        auto* self = static_cast<TerrainEditor*>(ud);
-        result->tag = GROVE_BOOL;
-        result->data.bool_val = 0;
-        if (argc >= 1 && args[0].tag == GROVE_NUMBER) {
-            float amount = static_cast<float>(args[0].data.number_val);
-            if (amount > 0 && self->m_playerCredits >= amount) {
-                self->m_playerCredits -= amount;
-                result->data.bool_val = 1;
-            }
-        }
-        return 0;
-    }
-
-    // buy_plot(vec3) → bool (true if purchased, false if can't afford or already owned)
-    static int32_t groveBuyPlot(const GroveValue* args, uint32_t argc, GroveValue* result, void* ud) {
-        auto* self = static_cast<TerrainEditor*>(ud);
-        result->tag = GROVE_BOOL;
-        result->data.bool_val = 0;
-        if (!self->m_zoneSystem || argc < 1 || args[0].tag != GROVE_VEC3) return 0;
-
-        float x = static_cast<float>(args[0].data.vec3_val.x);
-        float z = static_cast<float>(args[0].data.vec3_val.z);
-
-        // Check if plot is already owned
-        uint32_t owner = self->m_zoneSystem->getOwner(x, z);
-        if (owner != 0) return 0;  // Already owned
-
-        // Check if zone allows building/purchasing
-        ZoneType zt = self->m_zoneSystem->getZoneType(x, z);
-        if (zt == ZoneType::Battlefield || zt == ZoneType::SpawnSafe) return 0;  // Can't buy these
-
-        // Get price
-        auto g = self->m_zoneSystem->worldToGrid(x, z);
-        float price = self->m_zoneSystem->getPlotPrice(g.x, g.y);
-
-        // Check funds
-        if (self->m_playerCredits < price) return 0;  // Can't afford
-
-        // Purchase!
-        self->m_playerCredits -= price;
-        self->m_zoneSystem->setOwner(g.x, g.y, 1);  // Player ID 1
-
-        std::cout << "[Economy] Purchased plot (" << g.x << ", " << g.y << ") for "
-                  << static_cast<int>(price) << " CR. Balance: "
-                  << static_cast<int>(self->m_playerCredits) << " CR" << std::endl;
-
-        // Spawn corner boundary posts
-        self->spawnPlotPosts(g.x, g.y);
-
-        result->data.bool_val = 1;
-        return 0;
-    }
-
-    // sell_plot(vec3) → bool (true if sold, refunds 50% of current price)
-    static int32_t groveSellPlot(const GroveValue* args, uint32_t argc, GroveValue* result, void* ud) {
-        auto* self = static_cast<TerrainEditor*>(ud);
-        result->tag = GROVE_BOOL;
-        result->data.bool_val = 0;
-        if (!self->m_zoneSystem || argc < 1 || args[0].tag != GROVE_VEC3) return 0;
-
-        float x = static_cast<float>(args[0].data.vec3_val.x);
-        float z = static_cast<float>(args[0].data.vec3_val.z);
-
-        // Must own this plot
-        uint32_t owner = self->m_zoneSystem->getOwner(x, z);
-        if (owner != 1) return 0;  // Not our plot
-
-        auto g = self->m_zoneSystem->worldToGrid(x, z);
-        float price = self->m_zoneSystem->getPlotPrice(g.x, g.y);
-        float refund = price * 0.5f;
-
-        self->m_playerCredits += refund;
-        self->m_zoneSystem->setOwner(g.x, g.y, 0);  // Unown
-
-        std::cout << "[Economy] Sold plot (" << g.x << ", " << g.y << ") for "
-                  << static_cast<int>(refund) << " CR. Balance: "
-                  << static_cast<int>(self->m_playerCredits) << " CR" << std::endl;
-
-        // Remove corner boundary posts
-        self->removePlotPosts(g.x, g.y);
-
-        result->data.bool_val = 1;
-        return 0;
-    }
-
-    // plot_status(vec3) → string ("available", "owned", "spawn_zone", "battlefield", "too_expensive")
-    static int32_t grovePlotStatus(const GroveValue* args, uint32_t argc, GroveValue* result, void* ud) {
-        auto* self = static_cast<TerrainEditor*>(ud);
-        result->tag = GROVE_STRING;
-
-        static const char* s_available = "available";
-        static const char* s_owned = "owned";
-        static const char* s_spawn = "spawn_zone";
-        static const char* s_battlefield = "battlefield";
-        static const char* s_expensive = "too_expensive";
-        static const char* s_unknown = "unknown";
-
-        if (!self->m_zoneSystem || argc < 1 || args[0].tag != GROVE_VEC3) {
-            result->data.string_val.ptr = s_unknown;
-            result->data.string_val.len = 7;
-            return 0;
-        }
-
-        float x = static_cast<float>(args[0].data.vec3_val.x);
-        float z = static_cast<float>(args[0].data.vec3_val.z);
-
-        ZoneType zt = self->m_zoneSystem->getZoneType(x, z);
-        if (zt == ZoneType::SpawnSafe) {
-            result->data.string_val.ptr = s_spawn;
-            result->data.string_val.len = static_cast<uint32_t>(strlen(s_spawn));
-            return 0;
-        }
-        if (zt == ZoneType::Battlefield) {
-            result->data.string_val.ptr = s_battlefield;
-            result->data.string_val.len = static_cast<uint32_t>(strlen(s_battlefield));
-            return 0;
-        }
-
-        uint32_t owner = self->m_zoneSystem->getOwner(x, z);
-        if (owner != 0) {
-            result->data.string_val.ptr = s_owned;
-            result->data.string_val.len = static_cast<uint32_t>(strlen(s_owned));
-            return 0;
-        }
-
-        auto g = self->m_zoneSystem->worldToGrid(x, z);
-        float price = self->m_zoneSystem->getPlotPrice(g.x, g.y);
-        if (self->m_playerCredits < price) {
-            result->data.string_val.ptr = s_expensive;
-            result->data.string_val.len = static_cast<uint32_t>(strlen(s_expensive));
-            return 0;
-        }
-
-        result->data.string_val.ptr = s_available;
-        result->data.string_val.len = static_cast<uint32_t>(strlen(s_available));
-        return 0;
-    }
-
     void initGroveVM() {
         m_groveVm = grove_new();
         if (!m_groveVm) {
@@ -2288,54 +1451,24 @@ private:
         }
         grove_set_instruction_limit(m_groveVm, 1000000);
 
-        // Register host functions
-        grove_register_fn(m_groveVm, "log", groveLogFn, &m_groveOutputAccum);
-        grove_register_fn(m_groveVm, "terrain_height", groveTerrainHeightFn, this);
-        grove_register_fn(m_groveVm, "spawn", groveSpawnFn, this);
+        // Populate context for grove host functions
+        m_groveContext.sceneObjects = &m_sceneObjects;
+        m_groveContext.terrain = &m_terrain;
+        m_groveContext.camera = &m_camera;
+        m_groveContext.modelRenderer = m_modelRenderer.get();
+        m_groveContext.zoneSystem = m_zoneSystem.get();
+        m_groveContext.groveVm = m_groveVm;
+        m_groveContext.groveOutputAccum = &m_groveOutputAccum;
+        m_groveContext.groveBotTarget = &m_groveBotTarget;
+        m_groveContext.groveCurrentScriptName = &m_groveCurrentScriptName;
+        m_groveContext.playerCredits = &m_playerCredits;
+        m_groveContext.isPlayMode = &m_isPlayMode;
+        m_groveContext.currentLevelPath = &m_currentLevelPath;
+        m_groveContext.spawnPlotPosts = [this](int gx, int gz) { spawnPlotPosts(gx, gz); };
+        m_groveContext.removePlotPosts = [this](int gx, int gz) { removePlotPosts(gx, gz); };
+        m_groveContext.loadPathForAction = [this](SceneObject* o, const Action& a) { loadPathForAction(o, a); };
 
-        // Construction primitives
-        grove_register_fn(m_groveVm, "get_player_pos", groveGetPlayerPos, this);
-        grove_register_fn(m_groveVm, "spawn_cube", groveSpawnCubeFn, this);
-        grove_register_fn(m_groveVm, "spawn_cylinder", groveSpawnCylinderFn, this);
-        grove_register_fn(m_groveVm, "spawn_model", groveSpawnModelFn, this);
-        grove_register_fn(m_groveVm, "set_object_rotation", groveSetObjectRotation, this);
-        grove_register_fn(m_groveVm, "set_object_scale", groveSetObjectScale, this);
-        grove_register_fn(m_groveVm, "delete_object", groveDeleteObject, this);
-
-        // Queued construction commands (for behavior sequences)
-        grove_register_fn(m_groveVm, "queue_spawn_cube", groveQueueSpawnCube, this);
-        grove_register_fn(m_groveVm, "queue_spawn_cylinder", groveQueueSpawnCylinder, this);
-        grove_register_fn(m_groveVm, "queue_set_rotation", groveQueueSetRotation, this);
-        grove_register_fn(m_groveVm, "queue_set_scale", groveQueueSetScale, this);
-        grove_register_fn(m_groveVm, "queue_delete", groveQueueDelete, this);
-
-        grove_register_fn(m_groveVm, "zone_type", groveZoneTypeFn, this);
-        grove_register_fn(m_groveVm, "zone_resource", groveZoneResourceFn, this);
-        grove_register_fn(m_groveVm, "zone_owner", groveZoneOwnerFn, this);
-        grove_register_fn(m_groveVm, "can_build", groveCanBuildFn, this);
-        grove_register_fn(m_groveVm, "plot_price", grovePlotPriceFn, this);
-
-        // AlgoBot behavior functions
-        grove_register_fn(m_groveVm, "bot_target", groveBotTargetFn, this);
-        grove_register_fn(m_groveVm, "move_to", groveMoveTo, this);
-        grove_register_fn(m_groveVm, "rotate_to", groveRotateTo, this);
-        grove_register_fn(m_groveVm, "turn_to", groveTurnTo, this);
-        grove_register_fn(m_groveVm, "wait", groveWait, this);
-        grove_register_fn(m_groveVm, "set_visible", groveSetVisible, this);
-        grove_register_fn(m_groveVm, "play_anim", grovePlayAnim, this);
-        grove_register_fn(m_groveVm, "send_signal", groveSendSignal, this);
-        grove_register_fn(m_groveVm, "follow_path", groveFollowPath, this);
-        grove_register_fn(m_groveVm, "bot_loop", groveBotLoop, this);
-        grove_register_fn(m_groveVm, "bot_clear", groveBotClear, this);
-        grove_register_fn(m_groveVm, "bot_run", groveBotRun, this);
-
-        // Player economy functions
-        grove_register_fn(m_groveVm, "get_credits", groveGetCredits, this);
-        grove_register_fn(m_groveVm, "add_credits", groveAddCredits, this);
-        grove_register_fn(m_groveVm, "deduct_credits", groveDeductCredits, this);
-        grove_register_fn(m_groveVm, "buy_plot", groveBuyPlot, this);
-        grove_register_fn(m_groveVm, "sell_plot", groveSellPlot, this);
-        grove_register_fn(m_groveVm, "plot_status", grovePlotStatus, this);
+        registerGroveHostFunctions(m_groveVm, &m_groveContext);
 
         // Pass logo descriptor to EditorUI
         if (m_groveLogoLoaded) {
@@ -2416,6 +1549,267 @@ private:
                 std::sort(files.begin(), files.end());
             }
             return files;
+        });
+
+        // Wire up behavior script loading (Load Grove Script button in behavior editor)
+        m_editorUI.setLoadBehaviorScriptCallback([this](SceneObject* target) {
+            nfdchar_t* outPath = nullptr;
+            nfdfilteritem_t filters[1] = {{"Grove Script", "grove"}};
+            nfdresult_t result = NFD_OpenDialog(&outPath, filters, 1, "scripts");
+            if (result == NFD_OKAY) {
+                std::ifstream file(outPath);
+                if (file.is_open()) {
+                    std::string source((std::istreambuf_iterator<char>(file)),
+                                        std::istreambuf_iterator<char>());
+                    file.close();
+
+                    // Pre-set bot target to the selected object so queued
+                    // functions land on it (script can still override with bot_target)
+                    SceneObject* prevTarget = m_groveBotTarget;
+                    m_groveBotTarget = target;
+
+                    // Set behavior name to script filename (without .grove extension)
+                    std::string prevScriptName = m_groveCurrentScriptName;
+                    std::filesystem::path fp(outPath);
+                    std::string baseName = fp.stem().string();
+                    if (!baseName.empty()) {
+                        m_groveCurrentScriptName = baseName;
+                    }
+
+                    std::cout << "[Grove] Loading script onto '" << target->getName()
+                              << "': " << outPath << " (" << source.size() << " bytes)" << std::endl;
+
+                    m_groveOutputAccum.clear();
+                    int32_t ret = grove_eval(m_groveVm, source.c_str());
+                    if (ret != 0) {
+                        const char* err = grove_last_error(m_groveVm);
+                        std::cerr << "[Grove] Script error: " << (err ? err : "unknown") << std::endl;
+                    }
+
+                    m_groveCurrentScriptName = prevScriptName;
+                    // Restore previous bot target if script didn't change it
+                    if (m_groveBotTarget == target) {
+                        m_groveBotTarget = prevTarget;
+                    }
+                }
+                NFD_FreePath(outPath);
+            }
+        });
+
+        // List scripts for a bot by name (looks in scripts/<name>/)
+        m_editorUI.setListBotScriptsCallback([](const std::string& botName) -> std::vector<std::string> {
+            std::vector<std::string> scripts;
+            std::string dir = "scripts/" + botName;
+            if (std::filesystem::exists(dir) && std::filesystem::is_directory(dir)) {
+                for (const auto& entry : std::filesystem::directory_iterator(dir)) {
+                    if (entry.path().extension() == ".grove") {
+                        scripts.push_back(entry.path().filename().string());
+                    }
+                }
+                std::sort(scripts.begin(), scripts.end());
+            }
+            return scripts;
+        });
+
+        // Load a specific bot script by name
+        m_editorUI.setLoadBotScriptCallback([this](SceneObject* target, const std::string& scriptName) {
+            std::string path = "scripts/" + target->getName() + "/" + scriptName;
+            std::ifstream file(path);
+            if (!file.is_open()) {
+                std::cerr << "[Grove] Could not open: " << path << std::endl;
+                return;
+            }
+            std::string source((std::istreambuf_iterator<char>(file)),
+                                std::istreambuf_iterator<char>());
+            file.close();
+
+            SceneObject* prevTarget = m_groveBotTarget;
+            m_groveBotTarget = target;
+
+            // Set behavior name to script filename (without .grove extension)
+            std::string prevScriptName = m_groveCurrentScriptName;
+            std::string baseName = scriptName;
+            if (baseName.size() > 6 && baseName.substr(baseName.size() - 6) == ".grove") {
+                baseName = baseName.substr(0, baseName.size() - 6);
+            }
+            m_groveCurrentScriptName = baseName;
+
+            std::cout << "[Grove] Loading '" << scriptName << "' for " << target->getName()
+                      << " (" << source.size() << " bytes)" << std::endl;
+
+            m_groveOutputAccum.clear();
+            int32_t ret = grove_eval(m_groveVm, source.c_str());
+            if (ret != 0) {
+                const char* err = grove_last_error(m_groveVm);
+                std::cerr << "[Grove] Script error: " << (err ? err : "unknown") << std::endl;
+            }
+
+            m_groveCurrentScriptName = prevScriptName;
+            if (m_groveBotTarget == target) {
+                m_groveBotTarget = prevTarget;
+            }
+        });
+
+        // Save a behavior back to a .grove script file
+        m_editorUI.setSaveBotScriptCallback([this](SceneObject* target, const std::string& behaviorName) {
+            if (!target) return;
+
+            // Find the behavior by name
+            Behavior* beh = nullptr;
+            for (auto& b : target->getBehaviors()) {
+                if (b.name == behaviorName) { beh = &b; break; }
+            }
+            if (!beh || beh->actions.empty()) {
+                std::cerr << "[Grove] No actions to save in behavior '" << behaviorName << "'" << std::endl;
+                return;
+            }
+
+            // Generate Grove script from behavior actions
+            std::ostringstream ss;
+            ss << "-- " << behaviorName << ".grove\n";
+            ss << "-- Auto-saved from behavior editor\n\n";
+            ss << "bot_target(\"" << target->getName() << "\")\n";
+            ss << "bot_clear()\n\n";
+
+            for (const auto& act : beh->actions) {
+                switch (act.type) {
+                    case ActionType::PICKUP:
+                        ss << "pickup(\"" << act.stringParam << "\"";
+                        if (act.boolParam || act.floatParam != 2.0f) {
+                            ss << ", " << (act.boolParam ? "true" : "false");
+                            if (act.floatParam != 2.0f) {
+                                ss << ", " << act.floatParam;
+                            }
+                        }
+                        ss << ")\n";
+                        break;
+                    case ActionType::PLACE_VERTICAL:
+                        ss << "place_vertical(\"" << act.stringParam << "\"";
+                        if (act.boolParam || act.floatParam != 2.0f) {
+                            ss << ", " << (act.boolParam ? "true" : "false");
+                            if (act.floatParam != 2.0f) {
+                                ss << ", " << act.floatParam;
+                            }
+                        }
+                        ss << ")\n";
+                        break;
+                    case ActionType::PLACE_AT:
+                        ss << "place_at(vec3(" << act.vec3Param.x << ", "
+                           << act.vec3Param.y << ", " << act.vec3Param.z << ")";
+                        if (act.boolParam || act.floatParam != 2.0f) {
+                            ss << ", " << (act.boolParam ? "true" : "false");
+                            if (act.floatParam != 2.0f) {
+                                ss << ", " << act.floatParam;
+                            }
+                        }
+                        ss << ")\n";
+                        break;
+                    case ActionType::PLACE_HORIZONTAL: {
+                        // stringParam = "nameA|nameB"
+                        size_t pipePos = act.stringParam.find('|');
+                        std::string nA = (pipePos != std::string::npos) ? act.stringParam.substr(0, pipePos) : act.stringParam;
+                        std::string nB = (pipePos != std::string::npos) ? act.stringParam.substr(pipePos + 1) : "";
+                        ss << "place_horizontal(\"" << nA << "\", \"" << nB << "\"";
+                        if (act.boolParam || act.floatParam != 2.0f) {
+                            ss << ", " << (act.boolParam ? "true" : "false");
+                            if (act.floatParam != 2.0f) {
+                                ss << ", " << act.floatParam;
+                            }
+                        }
+                        ss << ")\n";
+                        break;
+                    }
+                    case ActionType::PLACE_ROOF: {
+                        // stringParam = "c1|c2|c3|c4"
+                        std::string roofNames[4];
+                        size_t rStart = 0;
+                        for (int ri = 0; ri < 4; ri++) {
+                            size_t rPipe = act.stringParam.find('|', rStart);
+                            if (rPipe != std::string::npos) {
+                                roofNames[ri] = act.stringParam.substr(rStart, rPipe - rStart);
+                                rStart = rPipe + 1;
+                            } else {
+                                roofNames[ri] = act.stringParam.substr(rStart);
+                            }
+                        }
+                        ss << "place_roof(\"" << roofNames[0] << "\", \"" << roofNames[1]
+                           << "\", \"" << roofNames[2] << "\", \"" << roofNames[3] << "\"";
+                        if (act.boolParam || act.floatParam != 2.0f) {
+                            ss << ", " << (act.boolParam ? "true" : "false");
+                            if (act.floatParam != 2.0f) {
+                                ss << ", " << act.floatParam;
+                            }
+                        }
+                        ss << ")\n";
+                        break;
+                    }
+                    case ActionType::PLACE_WALL: {
+                        // stringParam = "postA|postB"
+                        size_t wPipe = act.stringParam.find('|');
+                        std::string wA = (wPipe != std::string::npos) ? act.stringParam.substr(0, wPipe) : act.stringParam;
+                        std::string wB = (wPipe != std::string::npos) ? act.stringParam.substr(wPipe + 1) : "";
+                        ss << "place_wall(\"" << wA << "\", \"" << wB << "\"";
+                        if (act.boolParam || act.floatParam != 2.0f) {
+                            ss << ", " << (act.boolParam ? "true" : "false");
+                            if (act.floatParam != 2.0f) {
+                                ss << ", " << act.floatParam;
+                            }
+                        }
+                        ss << ")\n";
+                        break;
+                    }
+                    case ActionType::MOVE_TO:
+                        ss << "move_to(vec3(" << act.vec3Param.x << ", "
+                           << act.vec3Param.y << ", " << act.vec3Param.z << "))\n";
+                        break;
+                    case ActionType::WAIT:
+                        ss << "wait(" << act.floatParam << ")\n";
+                        break;
+                    case ActionType::ROTATE_TO:
+                        ss << "rotate_to(vec3(" << act.vec3Param.x << ", "
+                           << act.vec3Param.y << ", " << act.vec3Param.z << "))\n";
+                        break;
+                    case ActionType::TURN_TO:
+                        ss << "turn_to(vec3(" << act.vec3Param.x << ", "
+                           << act.vec3Param.y << ", " << act.vec3Param.z << "))\n";
+                        break;
+                    case ActionType::SET_VISIBLE:
+                        ss << "set_visible(" << (act.boolParam ? "true" : "false") << ")\n";
+                        break;
+                    case ActionType::PLAY_SOUND:
+                        ss << "play_anim(\"" << act.stringParam << "\")\n";
+                        break;
+                    case ActionType::SEND_SIGNAL:
+                        ss << "send_signal(\"" << act.stringParam << "\")\n";
+                        break;
+                    case ActionType::FOLLOW_PATH:
+                        ss << "follow_path(\"" << act.stringParam << "\")\n";
+                        break;
+                    default:
+                        ss << "-- unsupported action type " << static_cast<int>(act.type) << "\n";
+                        break;
+                }
+            }
+
+            ss << "\nbot_loop(" << (beh->loop ? "true" : "false") << ")\n";
+            ss << "bot_run()\n";
+
+            std::string script = ss.str();
+
+            // Save to bot's scripts folder (both source and build)
+            std::string filename = behaviorName + ".grove";
+            std::string dir = "scripts/" + target->getName();
+            std::filesystem::create_directories(dir);
+            std::string path = dir + "/" + filename;
+
+            std::ofstream out(path);
+            if (out.is_open()) {
+                out << script;
+                out.close();
+                std::cout << "[Grove] Saved script: " << path << " (" << script.size() << " bytes)" << std::endl;
+            } else {
+                std::cerr << "[Grove] Failed to save: " << path << std::endl;
+            }
         });
 
         std::cout << "Grove scripting VM initialized\n";
@@ -3252,15 +2646,15 @@ private:
         }
         wasDeleteDown = deleteDown;
 
-        // Ctrl+D - duplicate selected object
-        static bool wasDKeyDown = false;
-        bool dKeyDown = Input::isKeyDown(Input::KEY_D);
-        if (ctrlDown && dKeyDown && !wasDKeyDown && !ImGui::GetIO().WantTextInput && !m_isPlayMode) {
+        // Ctrl+V - duplicate selected object
+        static bool wasVKeyDown = false;
+        bool vKeyDown = Input::isKeyDown(Input::KEY_V);
+        if (ctrlDown && vKeyDown && !wasVKeyDown && !ImGui::GetIO().WantTextInput && !m_isPlayMode) {
             if (m_selectedObjectIndex >= 0) {
                 duplicateObject(m_selectedObjectIndex);
             }
         }
-        wasDKeyDown = dKeyDown;
+        wasVKeyDown = vKeyDown;
 
         static bool wasFKeyDown = false;
         bool fKeyDown = Input::isKeyDown(Input::KEY_F);
@@ -3268,6 +2662,25 @@ private:
             focusOnSelectedObject();
         }
         wasFKeyDown = fKeyDown;
+
+        // Number keys 1-4: switch transform mode (2/3/4 auto-enter MoveObject brush mode)
+        if (!m_isPlayMode && !ImGui::GetIO().WantTextInput) {
+            if (Input::isKeyPressed(Input::KEY_1)) {
+                m_transformMode = TransformMode::Select;
+                if (m_editorUI.getBrushMode() == BrushMode::MoveObject) {
+                    m_editorUI.setBrushMode(m_prevBrushMode);
+                }
+            }
+            if (Input::isKeyPressed(Input::KEY_2) || Input::isKeyPressed(Input::KEY_3) || Input::isKeyPressed(Input::KEY_4)) {
+                if (Input::isKeyPressed(Input::KEY_2)) m_transformMode = TransformMode::Move;
+                if (Input::isKeyPressed(Input::KEY_3)) m_transformMode = TransformMode::Rotate;
+                if (Input::isKeyPressed(Input::KEY_4)) m_transformMode = TransformMode::Scale;
+                if (m_editorUI.getBrushMode() != BrushMode::MoveObject) {
+                    m_prevBrushMode = m_editorUI.getBrushMode();
+                    m_editorUI.setBrushMode(BrushMode::MoveObject);
+                }
+            }
+        }
 
         // X key - snap selected object to nearest horizontal edge of another object
         static bool wasXKeyDown = false;
@@ -3325,18 +2738,8 @@ private:
             m_gameModule->setPlayerPosition(m_camera.getPosition());
         }
         
-        // Ensure m_currentInteractObject stays set for active compound/blueprint actions
-        if (m_aiActionActive) {
-            if (m_compoundActionActive && m_compoundNPC) {
-                m_currentInteractObject = m_compoundNPC;
-            } else if (m_blueprintActive && m_blueprintNPC) {
-                m_currentInteractObject = m_blueprintNPC;
-            }
-        }
         // Update AI motor control actions (look_around, turn_to, etc.)
         updateAIAction(deltaTime);
-        updateCompoundAction();   // Advance compound action state machine (build_post etc.)
-        updateBlueprintAction();  // Advance blueprint state machine (build_frame etc.)
 
         // Update player avatar position to track camera
         updatePlayerAvatar();
@@ -3393,6 +2796,7 @@ private:
 
         // Process any pending spawns/destroys (after behavior loop to avoid iterator invalidation)
         processPendingSpawns();
+        flushGroveSpawns();
         processPendingDestroys();
 
         // Update AI follow AFTER scene loop so follow position isn't overwritten by patrol/behaviors
@@ -4191,6 +3595,8 @@ private:
 
     // Parse and execute a GROVE_COMMAND action's pipe-delimited command string
     void executeGroveCommand(const std::string& cmd, const glm::vec3& pos) {
+        std::cout << "[Grove CMD] Executing: " << cmd << " at (" << pos.x << "," << pos.y << "," << pos.z << ")" << std::endl;
+        try {
         // Split by '|'
         std::vector<std::string> parts;
         std::istringstream ss(cmd);
@@ -4226,7 +3632,7 @@ private:
 
             float terrainY = m_terrain.getHeightAt(pos.x, pos.z);
             obj->getTransform().setPosition(glm::vec3(pos.x, terrainY + size * 0.5f, pos.z));
-            m_sceneObjects.push_back(std::move(obj));
+            m_pendingGroveSpawns.push_back(std::move(obj));
             std::cout << "[Grove CMD] Spawned cube '" << name << "'" << std::endl;
         }
         else if (type == "cylinder" && parts.size() >= 7) {
@@ -4256,7 +3662,7 @@ private:
 
             float terrainY = m_terrain.getHeightAt(pos.x, pos.z);
             obj->getTransform().setPosition(glm::vec3(pos.x, terrainY + height * 0.5f, pos.z));
-            m_sceneObjects.push_back(std::move(obj));
+            m_pendingGroveSpawns.push_back(std::move(obj));
             std::cout << "[Grove CMD] Spawned cylinder '" << name << "'" << std::endl;
         }
         else if (type == "set_rotation" && parts.size() >= 5) {
@@ -4288,15 +3694,19 @@ private:
             }
         }
         else if (type == "delete" && parts.size() >= 2) {
-            // delete|name
+            // delete|name — defer to destroy queue to avoid iterator invalidation
             std::string name = parts[1];
-            for (auto it = m_sceneObjects.begin(); it != m_sceneObjects.end(); ++it) {
-                if (*it && (*it)->getName() == name) {
-                    m_sceneObjects.erase(it);
-                    std::cout << "[Grove CMD] Deleted '" << name << "'" << std::endl;
+            for (auto& o : m_sceneObjects) {
+                if (o && o->getName() == name) {
+                    m_objectsToDestroy.push_back(o.get());
+                    std::cout << "[Grove CMD] Queued delete '" << name << "'" << std::endl;
                     break;
                 }
             }
+        }
+        } catch (const std::exception& e) {
+            std::cerr << "[Grove CMD] EXCEPTION: " << e.what() << std::endl;
+            std::cerr.flush();
         }
     }
 
@@ -4573,6 +3983,692 @@ private:
                 }
             }
         }
+        else if (currentAction.type == ActionType::PICKUP) {
+            // Three-phase: turn to face → walk to target → pick up
+            // Resolve target position at runtime (not from baked vec3Param) since objects may have moved
+            glm::vec3 targetPos = currentAction.vec3Param;
+            for (auto& o : m_sceneObjects) {
+                if (o && o->getName() == currentAction.stringParam && o->isVisible()) {
+                    targetPos = o->getTransform().getPosition();
+                    break;
+                }
+            }
+            glm::vec3 currentPos = obj->getTransform().getPosition();
+            bool useGravity = currentAction.boolParam;
+            float speed = currentAction.floatParam > 0.0f ? currentAction.floatParam : 2.0f;
+
+            // Phase 1: Turn to face target
+            if (!obj->isTurning() && !obj->isMovingTo()) {
+                glm::vec3 dir = targetPos - currentPos;
+                dir.y = 0.0f;
+                if (glm::length(dir) > 0.01f) {
+                    dir = glm::normalize(dir);
+                    float targetYaw = glm::degrees(atan2(dir.x, dir.z));
+                    float currentYaw = obj->getEulerRotation().y;
+                    float deltaYaw = targetYaw - currentYaw;
+                    while (deltaYaw > 180.0f) deltaYaw -= 360.0f;
+                    while (deltaYaw < -180.0f) deltaYaw += 360.0f;
+                    if (std::abs(deltaYaw) > 1.0f) {
+                        obj->startTurnTo(currentYaw, currentYaw + deltaYaw, 0.3f);
+                        std::cout << "PICKUP: Turning to face '" << currentAction.stringParam << "'" << std::endl;
+                        return;  // Wait for turn to complete
+                    }
+                }
+                // No turn needed or target too close — start walking immediately
+                float distance = glm::length(targetPos - currentPos);
+                float duration = distance / speed;
+                if (duration < 0.1f) duration = 0.1f;
+                obj->startMoveTo(currentPos, targetPos, duration, true);
+                if (obj->isSkinned()) {
+                    m_skinnedModelRenderer->playAnimation(obj->getSkinnedModelHandle(), "walk", true);
+                    obj->setCurrentAnimation("walk");
+                }
+                std::cout << "PICKUP: Walking to '" << currentAction.stringParam
+                          << "' speed=" << speed << (useGravity ? " [ground]" : " [fly]") << std::endl;
+            }
+
+            // Phase 1 continued: update turn
+            if (obj->isTurning()) {
+                obj->updateTurnTo(deltaTime);
+                if (!obj->isTurning()) {
+                    // Turn done — start walking
+                    currentPos = obj->getTransform().getPosition();
+                    float distance = glm::length(targetPos - currentPos);
+                    float duration = distance / speed;
+                    if (duration < 0.1f) duration = 0.1f;
+                    obj->startMoveTo(currentPos, targetPos, duration, true);
+                    if (obj->isSkinned()) {
+                        m_skinnedModelRenderer->playAnimation(obj->getSkinnedModelHandle(), "walk", true);
+                        obj->setCurrentAnimation("walk");
+                    }
+                    std::cout << "PICKUP: Walking to '" << currentAction.stringParam
+                              << "' speed=" << speed << (useGravity ? " [ground]" : " [fly]") << std::endl;
+                }
+                return;
+            }
+
+            // Phase 2: Walk
+            if (obj->isMovingTo()) {
+                obj->updateMoveTo(deltaTime);
+                if (useGravity) {
+                    glm::vec3 pos = obj->getTransform().getPosition();
+                    pos.y = m_terrain.getHeightAt(pos.x, pos.z);
+                    obj->getTransform().setPosition(pos);
+                }
+            }
+
+            // Phase 3: Arrived — pick up
+            if (!obj->isMovingTo() && !obj->isTurning()) {
+                glm::vec3 finalPos = targetPos;
+                if (useGravity) finalPos.y = m_terrain.getHeightAt(finalPos.x, finalPos.z);
+                obj->getTransform().setPosition(finalPos);
+                std::string itemName = currentAction.stringParam;
+
+                SceneObject* target = nullptr;
+                for (auto& o : m_sceneObjects) {
+                    if (o && o->getName() == itemName && o->isVisible()) {
+                        target = o.get();
+                        break;
+                    }
+                }
+
+                if (target && !obj->isCarrying()) {
+                    target->setVisible(false);
+                    obj->setCarriedItem(itemName, target);
+                    std::cout << "PICKUP: Picked up '" << itemName << "'" << std::endl;
+                } else if (!target) {
+                    std::cout << "PICKUP: Target '" << itemName << "' not found or not visible" << std::endl;
+                }
+
+                obj->setActiveActionIndex(actionIdx + 1);
+            }
+        }
+        else if (currentAction.type == ActionType::PLACE_VERTICAL) {
+            // Three-phase: turn to face → walk to target → place item
+            // Resolve target position at runtime (not from baked vec3Param) since objects may have moved
+            glm::vec3 targetPos = currentAction.vec3Param;
+            for (auto& o : m_sceneObjects) {
+                if (o && o->getName() == currentAction.stringParam) {
+                    targetPos = o->getTransform().getPosition();
+                    break;
+                }
+            }
+            glm::vec3 currentPos = obj->getTransform().getPosition();
+            bool useGravity = currentAction.boolParam;
+            float speed = currentAction.floatParam > 0.0f ? currentAction.floatParam : 2.0f;
+
+            // Phase 1: Turn to face target
+            if (!obj->isTurning() && !obj->isMovingTo()) {
+                glm::vec3 dir = targetPos - currentPos;
+                dir.y = 0.0f;
+                if (glm::length(dir) > 0.01f) {
+                    dir = glm::normalize(dir);
+                    float targetYaw = glm::degrees(atan2(dir.x, dir.z));
+                    float currentYaw = obj->getEulerRotation().y;
+                    float deltaYaw = targetYaw - currentYaw;
+                    while (deltaYaw > 180.0f) deltaYaw -= 360.0f;
+                    while (deltaYaw < -180.0f) deltaYaw += 360.0f;
+                    if (std::abs(deltaYaw) > 1.0f) {
+                        obj->startTurnTo(currentYaw, currentYaw + deltaYaw, 0.3f);
+                        std::cout << "PLACE_VERTICAL: Turning to face '" << currentAction.stringParam << "'" << std::endl;
+                        return;
+                    }
+                }
+                float distance = glm::length(targetPos - currentPos);
+                float duration = distance / speed;
+                if (duration < 0.1f) duration = 0.1f;
+                obj->startMoveTo(currentPos, targetPos, duration, true);
+                if (obj->isSkinned()) {
+                    m_skinnedModelRenderer->playAnimation(obj->getSkinnedModelHandle(), "walk", true);
+                    obj->setCurrentAnimation("walk");
+                }
+                std::cout << "PLACE_VERTICAL: Walking to '" << currentAction.stringParam
+                          << "' speed=" << speed << (useGravity ? " [ground]" : " [fly]") << std::endl;
+            }
+
+            if (obj->isTurning()) {
+                obj->updateTurnTo(deltaTime);
+                if (!obj->isTurning()) {
+                    currentPos = obj->getTransform().getPosition();
+                    float distance = glm::length(targetPos - currentPos);
+                    float duration = distance / speed;
+                    if (duration < 0.1f) duration = 0.1f;
+                    obj->startMoveTo(currentPos, targetPos, duration, true);
+                    if (obj->isSkinned()) {
+                        m_skinnedModelRenderer->playAnimation(obj->getSkinnedModelHandle(), "walk", true);
+                        obj->setCurrentAnimation("walk");
+                    }
+                    std::cout << "PLACE_VERTICAL: Walking to '" << currentAction.stringParam
+                              << "' speed=" << speed << (useGravity ? " [ground]" : " [fly]") << std::endl;
+                }
+                return;
+            }
+
+            // Phase 2: Walk
+            if (obj->isMovingTo()) {
+                obj->updateMoveTo(deltaTime);
+                if (useGravity) {
+                    glm::vec3 pos = obj->getTransform().getPosition();
+                    pos.y = m_terrain.getHeightAt(pos.x, pos.z);
+                    obj->getTransform().setPosition(pos);
+                }
+            }
+
+            // Phase 3: Arrived — place item
+            if (!obj->isMovingTo() && !obj->isTurning()) {
+                glm::vec3 finalPos = targetPos;
+                if (useGravity) finalPos.y = m_terrain.getHeightAt(finalPos.x, finalPos.z);
+                obj->getTransform().setPosition(finalPos);
+                std::string placeName = currentAction.stringParam;
+
+                SceneObject* placeTarget = nullptr;
+                for (auto& o : m_sceneObjects) {
+                    if (o && o->getName() == placeName) {
+                        placeTarget = o.get();
+                        break;
+                    }
+                }
+
+                if (placeTarget && obj->isCarrying()) {
+                    std::string carriedName = obj->getCarriedItemName();
+                    placeCarriedItemAt(obj, placeTarget);
+                    std::cout << "PLACE_VERTICAL: Placed '" << carriedName
+                              << "' into '" << placeName << "'" << std::endl;
+                } else if (!obj->isCarrying()) {
+                    std::cout << "PLACE_VERTICAL: Not carrying anything" << std::endl;
+                } else {
+                    std::cout << "PLACE_VERTICAL: Target '" << placeName << "' not found" << std::endl;
+                }
+
+                obj->setActiveActionIndex(actionIdx + 1);
+            }
+        }
+        else if (currentAction.type == ActionType::PLACE_AT) {
+            // Three-phase: turn to face → walk to position → place carried item on terrain
+            glm::vec3 targetPos = currentAction.vec3Param;
+            // Resolve Y to terrain height
+            targetPos.y = m_terrain.getHeightAt(targetPos.x, targetPos.z);
+            glm::vec3 currentPos = obj->getTransform().getPosition();
+            bool useGravity = currentAction.boolParam;
+            float speed = currentAction.floatParam > 0.0f ? currentAction.floatParam : 2.0f;
+
+            // Phase 1: Turn to face target
+            if (!obj->isTurning() && !obj->isMovingTo()) {
+                glm::vec3 dir = targetPos - currentPos;
+                dir.y = 0.0f;
+                if (glm::length(dir) > 0.01f) {
+                    dir = glm::normalize(dir);
+                    float targetYaw = glm::degrees(atan2(dir.x, dir.z));
+                    float currentYaw = obj->getEulerRotation().y;
+                    float deltaYaw = targetYaw - currentYaw;
+                    while (deltaYaw > 180.0f) deltaYaw -= 360.0f;
+                    while (deltaYaw < -180.0f) deltaYaw += 360.0f;
+                    if (std::abs(deltaYaw) > 1.0f) {
+                        obj->startTurnTo(currentYaw, currentYaw + deltaYaw, 0.3f);
+                        std::cout << "PLACE_AT: Turning to face target position" << std::endl;
+                        return;
+                    }
+                }
+                float distance = glm::length(targetPos - currentPos);
+                float duration = distance / speed;
+                if (duration < 0.1f) duration = 0.1f;
+                obj->startMoveTo(currentPos, targetPos, duration, true);
+                if (obj->isSkinned()) {
+                    m_skinnedModelRenderer->playAnimation(obj->getSkinnedModelHandle(), "walk", true);
+                    obj->setCurrentAnimation("walk");
+                }
+                std::cout << "PLACE_AT: Walking to position" << std::endl;
+            }
+
+            if (obj->isTurning()) {
+                obj->updateTurnTo(deltaTime);
+                if (!obj->isTurning()) {
+                    currentPos = obj->getTransform().getPosition();
+                    float distance = glm::length(targetPos - currentPos);
+                    float duration = distance / speed;
+                    if (duration < 0.1f) duration = 0.1f;
+                    obj->startMoveTo(currentPos, targetPos, duration, true);
+                    if (obj->isSkinned()) {
+                        m_skinnedModelRenderer->playAnimation(obj->getSkinnedModelHandle(), "walk", true);
+                        obj->setCurrentAnimation("walk");
+                    }
+                    std::cout << "PLACE_AT: Walking to position" << std::endl;
+                }
+                return;
+            }
+
+            // Phase 2: Walk
+            if (obj->isMovingTo()) {
+                obj->updateMoveTo(deltaTime);
+                if (useGravity) {
+                    glm::vec3 pos = obj->getTransform().getPosition();
+                    pos.y = m_terrain.getHeightAt(pos.x, pos.z);
+                    obj->getTransform().setPosition(pos);
+                }
+            }
+
+            // Phase 3: Arrived — place carried item on terrain
+            if (!obj->isMovingTo() && !obj->isTurning()) {
+                glm::vec3 finalPos = targetPos;
+                finalPos.y = m_terrain.getHeightAt(finalPos.x, finalPos.z);
+                obj->getTransform().setPosition(finalPos);
+
+                if (obj->isCarrying()) {
+                    std::string carriedName = obj->getCarriedItemName();
+                    // Find the carried object and make it visible at this position
+                    for (auto& o : m_sceneObjects) {
+                        if (o && o->getName() == carriedName) {
+                            // Place bottom on terrain using min-vertex-Y offset
+                            glm::vec3 scale = o->getTransform().getScale();
+                            float minVertexY = 0.0f;
+                            if (o->hasMeshData()) {
+                                const auto& verts = o->getVertices();
+                                for (const auto& v : verts) {
+                                    if (v.position.y < minVertexY) minVertexY = v.position.y;
+                                }
+                            }
+                            float bottomOffset = -minVertexY * scale.y;
+                            o->getTransform().setPosition(glm::vec3(finalPos.x, finalPos.y + bottomOffset, finalPos.z));
+                            o->setEulerRotation(glm::vec3(0));  // Upright
+                            o->setVisible(true);
+                            std::cout << "PLACE_AT: Placed '" << carriedName << "' at ("
+                                      << finalPos.x << ", " << finalPos.y << ", " << finalPos.z << ")" << std::endl;
+                            break;
+                        }
+                    }
+                    obj->clearCarriedItem();
+                } else {
+                    std::cout << "PLACE_AT: Not carrying anything" << std::endl;
+                }
+
+                obj->setActiveActionIndex(actionIdx + 1);
+            }
+        }
+        else if (currentAction.type == ActionType::PLACE_HORIZONTAL) {
+            // Three-phase: turn to face midpoint → walk there → place carried item as horizontal beam
+            // stringParam = "nameA|nameB" (pipe-delimited target names)
+            // Resolve target positions at runtime (objects may have moved since script was parsed)
+            std::string params = currentAction.stringParam;
+            size_t pipePos = params.find('|');
+            std::string nameA = (pipePos != std::string::npos) ? params.substr(0, pipePos) : params;
+            std::string nameB = (pipePos != std::string::npos) ? params.substr(pipePos + 1) : "";
+            glm::vec3 posA(0), posB(0);
+            for (auto& o : m_sceneObjects) {
+                if (o && o->getName() == nameA) posA = o->getTransform().getPosition();
+                if (o && o->getName() == nameB) posB = o->getTransform().getPosition();
+            }
+            glm::vec3 targetPos = (posA + posB) * 0.5f;
+            targetPos.y = m_terrain.getHeightAt(targetPos.x, targetPos.z);
+            glm::vec3 currentPos = obj->getTransform().getPosition();
+            bool useGravity = currentAction.boolParam;
+            float speed = currentAction.floatParam > 0.0f ? currentAction.floatParam : 2.0f;
+
+            // Phase 1: Turn to face midpoint
+            if (!obj->isTurning() && !obj->isMovingTo()) {
+                glm::vec3 dir = targetPos - currentPos;
+                dir.y = 0.0f;
+                if (glm::length(dir) > 0.01f) {
+                    dir = glm::normalize(dir);
+                    float targetYaw = glm::degrees(atan2(dir.x, dir.z));
+                    float currentYaw = obj->getEulerRotation().y;
+                    float deltaYaw = targetYaw - currentYaw;
+                    while (deltaYaw > 180.0f) deltaYaw -= 360.0f;
+                    while (deltaYaw < -180.0f) deltaYaw += 360.0f;
+                    if (std::abs(deltaYaw) > 1.0f) {
+                        obj->startTurnTo(currentYaw, currentYaw + deltaYaw, 0.3f);
+                        std::cout << "PLACE_HORIZONTAL: Turning to face midpoint" << std::endl;
+                        return;
+                    }
+                }
+                float distance = glm::length(targetPos - currentPos);
+                float duration = distance / speed;
+                if (duration < 0.1f) duration = 0.1f;
+                obj->startMoveTo(currentPos, targetPos, duration, true);
+                if (obj->isSkinned()) {
+                    m_skinnedModelRenderer->playAnimation(obj->getSkinnedModelHandle(), "walk", true);
+                    obj->setCurrentAnimation("walk");
+                }
+                std::cout << "PLACE_HORIZONTAL: Walking to midpoint" << std::endl;
+            }
+
+            if (obj->isTurning()) {
+                obj->updateTurnTo(deltaTime);
+                if (!obj->isTurning()) {
+                    currentPos = obj->getTransform().getPosition();
+                    float distance = glm::length(targetPos - currentPos);
+                    float duration = distance / speed;
+                    if (duration < 0.1f) duration = 0.1f;
+                    obj->startMoveTo(currentPos, targetPos, duration, true);
+                    if (obj->isSkinned()) {
+                        m_skinnedModelRenderer->playAnimation(obj->getSkinnedModelHandle(), "walk", true);
+                        obj->setCurrentAnimation("walk");
+                    }
+                    std::cout << "PLACE_HORIZONTAL: Walking to midpoint" << std::endl;
+                }
+                return;
+            }
+
+            // Phase 2: Walk
+            if (obj->isMovingTo()) {
+                obj->updateMoveTo(deltaTime);
+                if (useGravity) {
+                    glm::vec3 pos = obj->getTransform().getPosition();
+                    pos.y = m_terrain.getHeightAt(pos.x, pos.z);
+                    obj->getTransform().setPosition(pos);
+                }
+            }
+
+            // Phase 3: Arrived — place carried item as horizontal beam between the two targets
+            if (!obj->isMovingTo() && !obj->isTurning()) {
+                glm::vec3 finalPos = targetPos;
+                finalPos.y = m_terrain.getHeightAt(finalPos.x, finalPos.z);
+                obj->getTransform().setPosition(finalPos);
+
+                if (obj->isCarrying()) {
+                    // Re-resolve positions at placement time (already have nameA/nameB from top)
+                    posA = glm::vec3(0); posB = glm::vec3(0);
+                    for (auto& o : m_sceneObjects) {
+                        if (o && o->getName() == nameA) posA = o->getTransform().getPosition();
+                        if (o && o->getName() == nameB) posB = o->getTransform().getPosition();
+                    }
+
+                    std::string carriedName = obj->getCarriedItemName();
+                    placeCarriedItemHorizontal(obj, posA, posB);
+                    std::cout << "PLACE_HORIZONTAL: Placed '" << carriedName
+                              << "' between '" << nameA << "' and '" << nameB << "'" << std::endl;
+                } else {
+                    std::cout << "PLACE_HORIZONTAL: Not carrying anything" << std::endl;
+                }
+
+                obj->setActiveActionIndex(actionIdx + 1);
+            }
+        }
+        else if (currentAction.type == ActionType::PLACE_ROOF) {
+            // Three-phase: turn to face center → walk there → place carried item as roof on top
+            // stringParam = "c1|c2|c3|c4" (pipe-delimited corner names)
+            // Resolve corner positions and center at runtime
+            std::string params = currentAction.stringParam;
+            std::string cornerNames[4];
+            glm::vec3 cornerPos[4] = {};
+            {
+                size_t start = 0;
+                for (int i = 0; i < 4; i++) {
+                    size_t pipePos = params.find('|', start);
+                    if (pipePos != std::string::npos) {
+                        cornerNames[i] = params.substr(start, pipePos - start);
+                        start = pipePos + 1;
+                    } else {
+                        cornerNames[i] = params.substr(start);
+                    }
+                }
+            }
+            for (auto& o : m_sceneObjects) {
+                if (!o) continue;
+                for (int i = 0; i < 4; i++) {
+                    if (o->getName() == cornerNames[i]) cornerPos[i] = o->getTransform().getPosition();
+                }
+            }
+            glm::vec3 targetPos = (cornerPos[0] + cornerPos[1] + cornerPos[2] + cornerPos[3]) * 0.25f;
+            targetPos.y = m_terrain.getHeightAt(targetPos.x, targetPos.z);
+            glm::vec3 currentPos = obj->getTransform().getPosition();
+            bool useGravity = currentAction.boolParam;
+            float speed = currentAction.floatParam > 0.0f ? currentAction.floatParam : 2.0f;
+
+            // Phase 1: Turn to face center
+            if (!obj->isTurning() && !obj->isMovingTo()) {
+                glm::vec3 dir = targetPos - currentPos;
+                dir.y = 0.0f;
+                if (glm::length(dir) > 0.01f) {
+                    dir = glm::normalize(dir);
+                    float targetYaw = glm::degrees(atan2(dir.x, dir.z));
+                    float currentYaw = obj->getEulerRotation().y;
+                    float deltaYaw = targetYaw - currentYaw;
+                    while (deltaYaw > 180.0f) deltaYaw -= 360.0f;
+                    while (deltaYaw < -180.0f) deltaYaw += 360.0f;
+                    if (std::abs(deltaYaw) > 1.0f) {
+                        obj->startTurnTo(currentYaw, currentYaw + deltaYaw, 0.3f);
+                        std::cout << "PLACE_ROOF: Turning to face center" << std::endl;
+                        return;
+                    }
+                }
+                float distance = glm::length(targetPos - currentPos);
+                float duration = distance / speed;
+                if (duration < 0.1f) duration = 0.1f;
+                obj->startMoveTo(currentPos, targetPos, duration, true);
+                if (obj->isSkinned()) {
+                    m_skinnedModelRenderer->playAnimation(obj->getSkinnedModelHandle(), "walk", true);
+                    obj->setCurrentAnimation("walk");
+                }
+                std::cout << "PLACE_ROOF: Walking to center" << std::endl;
+            }
+
+            if (obj->isTurning()) {
+                obj->updateTurnTo(deltaTime);
+                if (!obj->isTurning()) {
+                    currentPos = obj->getTransform().getPosition();
+                    float distance = glm::length(targetPos - currentPos);
+                    float duration = distance / speed;
+                    if (duration < 0.1f) duration = 0.1f;
+                    obj->startMoveTo(currentPos, targetPos, duration, true);
+                    if (obj->isSkinned()) {
+                        m_skinnedModelRenderer->playAnimation(obj->getSkinnedModelHandle(), "walk", true);
+                        obj->setCurrentAnimation("walk");
+                    }
+                    std::cout << "PLACE_ROOF: Walking to center" << std::endl;
+                }
+                return;
+            }
+
+            // Phase 2: Walk
+            if (obj->isMovingTo()) {
+                obj->updateMoveTo(deltaTime);
+                if (useGravity) {
+                    glm::vec3 pos = obj->getTransform().getPosition();
+                    pos.y = m_terrain.getHeightAt(pos.x, pos.z);
+                    obj->getTransform().setPosition(pos);
+                }
+            }
+
+            // Phase 3: Arrived — place roof on top of frame
+            if (!obj->isMovingTo() && !obj->isTurning()) {
+                glm::vec3 finalPos = targetPos;
+                finalPos.y = m_terrain.getHeightAt(finalPos.x, finalPos.z);
+                obj->getTransform().setPosition(finalPos);
+
+                if (obj->isCarrying()) {
+                    SceneObject* carried = obj->getCarriedItemObject();
+                    if (carried) {
+                        // Re-resolve corner positions
+                        for (int i = 0; i < 4; i++) cornerPos[i] = glm::vec3(0);
+                        for (auto& o : m_sceneObjects) {
+                            if (!o) continue;
+                            for (int i = 0; i < 4; i++) {
+                                if (o->getName() == cornerNames[i]) cornerPos[i] = o->getTransform().getPosition();
+                            }
+                        }
+                        glm::vec3 center = (cornerPos[0] + cornerPos[1] + cornerPos[2] + cornerPos[3]) * 0.25f;
+
+                        // Find top Y by scanning objects near corners
+                        float topY = cornerPos[0].y;
+                        for (auto& sceneObj : m_sceneObjects) {
+                            if (!sceneObj || !sceneObj->isVisible()) continue;
+                            glm::vec3 objPos = sceneObj->getTransform().getPosition();
+                            for (int i = 0; i < 4; i++) {
+                                float dist = glm::length(glm::vec2(objPos.x - cornerPos[i].x, objPos.z - cornerPos[i].z));
+                                if (dist < 1.5f) {
+                                    AABB bounds = sceneObj->getWorldBounds();
+                                    topY = std::max(topY, bounds.max.y);
+                                }
+                            }
+                        }
+
+                        // Derive front direction from corner0→corner1 edge
+                        glm::vec3 frontEdgeMid = (cornerPos[0] + cornerPos[1]) * 0.5f;
+                        glm::vec3 frontDir = frontEdgeMid - center;
+                        frontDir.y = 0.0f;
+                        float frontYaw = 0.0f;
+                        if (glm::length(frontDir) > 0.01f) {
+                            frontDir = glm::normalize(frontDir);
+                            frontYaw = glm::degrees(atan2(frontDir.x, frontDir.z));
+                        }
+
+                        // Position roof at center, on top of structure
+                        glm::vec3 placePos = center;
+                        placePos.y = topY;
+
+                        // Offset toward front for asymmetric overhang
+                        float frontOffset = 0.5f;
+                        placePos += frontDir * frontOffset;
+
+                        // Rotate 90° so the longer dimension runs front-to-back
+                        carried->setEulerRotation(glm::vec3(0.0f, frontYaw + 90.0f, 0.0f));
+                        carried->getTransform().setPosition(placePos);
+                        carried->setVisible(true);
+
+                        std::string carriedName = obj->getCarriedItemName();
+                        obj->clearCarriedItem();
+                        std::cout << "PLACE_ROOF: Placed '" << carriedName << "' at ("
+                                  << placePos.x << ", " << placePos.y << ", " << placePos.z
+                                  << ") frontYaw=" << frontYaw << std::endl;
+                    }
+                } else {
+                    std::cout << "PLACE_ROOF: Not carrying anything" << std::endl;
+                }
+
+                obj->setActiveActionIndex(actionIdx + 1);
+            }
+        }
+        else if (currentAction.type == ActionType::PLACE_WALL) {
+            // Three-phase: turn to face midpoint → walk there → place carried item as wall panel
+            // stringParam = "postA|postB" (pipe-delimited post names)
+            // Resolve positions at runtime
+            std::string params = currentAction.stringParam;
+            size_t pipePos = params.find('|');
+            std::string nameA = (pipePos != std::string::npos) ? params.substr(0, pipePos) : params;
+            std::string nameB = (pipePos != std::string::npos) ? params.substr(pipePos + 1) : "";
+            glm::vec3 posA(0), posB(0);
+            for (auto& o : m_sceneObjects) {
+                if (o && o->getName() == nameA) posA = o->getTransform().getPosition();
+                if (o && o->getName() == nameB) posB = o->getTransform().getPosition();
+            }
+            glm::vec3 targetPos = (posA + posB) * 0.5f;
+            targetPos.y = m_terrain.getHeightAt(targetPos.x, targetPos.z);
+            glm::vec3 currentPos = obj->getTransform().getPosition();
+            bool useGravity = currentAction.boolParam;
+            float speed = currentAction.floatParam > 0.0f ? currentAction.floatParam : 2.0f;
+
+            // Phase 1: Turn to face midpoint
+            if (!obj->isTurning() && !obj->isMovingTo()) {
+                glm::vec3 dir = targetPos - currentPos;
+                dir.y = 0.0f;
+                if (glm::length(dir) > 0.01f) {
+                    dir = glm::normalize(dir);
+                    float targetYaw = glm::degrees(atan2(dir.x, dir.z));
+                    float currentYaw = obj->getEulerRotation().y;
+                    float deltaYaw = targetYaw - currentYaw;
+                    while (deltaYaw > 180.0f) deltaYaw -= 360.0f;
+                    while (deltaYaw < -180.0f) deltaYaw += 360.0f;
+                    if (std::abs(deltaYaw) > 1.0f) {
+                        obj->startTurnTo(currentYaw, currentYaw + deltaYaw, 0.3f);
+                        std::cout << "PLACE_WALL: Turning to face midpoint" << std::endl;
+                        return;
+                    }
+                }
+                float distance = glm::length(targetPos - currentPos);
+                float duration = distance / speed;
+                if (duration < 0.1f) duration = 0.1f;
+                obj->startMoveTo(currentPos, targetPos, duration, true);
+                if (obj->isSkinned()) {
+                    m_skinnedModelRenderer->playAnimation(obj->getSkinnedModelHandle(), "walk", true);
+                    obj->setCurrentAnimation("walk");
+                }
+                std::cout << "PLACE_WALL: Walking to midpoint" << std::endl;
+            }
+
+            if (obj->isTurning()) {
+                obj->updateTurnTo(deltaTime);
+                if (!obj->isTurning()) {
+                    currentPos = obj->getTransform().getPosition();
+                    float distance = glm::length(targetPos - currentPos);
+                    float duration = distance / speed;
+                    if (duration < 0.1f) duration = 0.1f;
+                    obj->startMoveTo(currentPos, targetPos, duration, true);
+                    if (obj->isSkinned()) {
+                        m_skinnedModelRenderer->playAnimation(obj->getSkinnedModelHandle(), "walk", true);
+                        obj->setCurrentAnimation("walk");
+                    }
+                    std::cout << "PLACE_WALL: Walking to midpoint" << std::endl;
+                }
+                return;
+            }
+
+            // Phase 2: Walk
+            if (obj->isMovingTo()) {
+                obj->updateMoveTo(deltaTime);
+                if (useGravity) {
+                    glm::vec3 pos = obj->getTransform().getPosition();
+                    pos.y = m_terrain.getHeightAt(pos.x, pos.z);
+                    obj->getTransform().setPosition(pos);
+                }
+            }
+
+            // Phase 3: Arrived — place wall panel between the two posts
+            if (!obj->isMovingTo() && !obj->isTurning()) {
+                glm::vec3 finalPos = targetPos;
+                finalPos.y = m_terrain.getHeightAt(finalPos.x, finalPos.z);
+                obj->getTransform().setPosition(finalPos);
+
+                if (obj->isCarrying()) {
+                    SceneObject* carried = obj->getCarriedItemObject();
+                    if (carried) {
+                        // Re-resolve post positions at placement time
+                        posA = glm::vec3(0); posB = glm::vec3(0);
+                        for (auto& o : m_sceneObjects) {
+                            if (o && o->getName() == nameA) posA = o->getTransform().getPosition();
+                            if (o && o->getName() == nameB) posB = o->getTransform().getPosition();
+                        }
+
+                        // Position at midpoint of the edge
+                        glm::vec3 placePos = (posA + posB) * 0.5f;
+
+                        // Terrain height + bottom offset
+                        float terrainY = m_terrain.getHeightAt(placePos.x, placePos.z);
+                        glm::vec3 scale = carried->getTransform().getScale();
+                        float minVertexY = 0.0f;
+                        if (carried->hasMeshData()) {
+                            const auto& verts = carried->getVertices();
+                            for (const auto& v : verts) {
+                                if (v.position.y < minVertexY) minVertexY = v.position.y;
+                            }
+                        }
+                        float bottomOffset = -minVertexY * scale.y;
+                        placePos.y = terrainY + bottomOffset;
+
+                        // Compute outward normal (left perpendicular for clockwise winding)
+                        glm::vec3 edgeDir = posB - posA;
+                        edgeDir.y = 0.0f;
+                        if (glm::length(edgeDir) > 0.01f) {
+                            edgeDir = glm::normalize(edgeDir);
+                        }
+                        glm::vec3 outward(edgeDir.z, 0.0f, -edgeDir.x);
+                        float wallYaw = glm::degrees(atan2(outward.x, outward.z));
+
+                        carried->setEulerRotation(glm::vec3(0.0f, wallYaw, 0.0f));
+                        carried->getTransform().setPosition(placePos);
+                        carried->setVisible(true);
+
+                        std::string carriedName = obj->getCarriedItemName();
+                        obj->clearCarriedItem();
+                        std::cout << "PLACE_WALL: Placed '" << carriedName << "' between '"
+                                  << nameA << "' and '" << nameB << "' yaw=" << wallYaw << std::endl;
+                    }
+                } else {
+                    std::cout << "PLACE_WALL: Not carrying anything" << std::endl;
+                }
+
+                obj->setActiveActionIndex(actionIdx + 1);
+            }
+        }
         else if (currentAction.type == ActionType::GROVE_COMMAND) {
             // Parse and execute a construction command from stringParam
             // Format: "type|name|param1|param2|..."
@@ -4621,6 +4717,17 @@ private:
         }
 
         m_pendingSpawns.clear();
+    }
+
+    void flushGroveSpawns() {
+        if (m_pendingGroveSpawns.empty()) return;
+        std::cout << "[Grove] Flushing " << m_pendingGroveSpawns.size() << " spawns into scene (total was " << m_sceneObjects.size() << ")" << std::endl;
+        for (auto& obj : m_pendingGroveSpawns) {
+            std::cout << "[Grove] Adding '" << obj->getName() << "' handle=" << obj->getBufferHandle() << std::endl;
+            m_sceneObjects.push_back(std::move(obj));
+        }
+        m_pendingGroveSpawns.clear();
+        std::cout << "[Grove] Scene now has " << m_sceneObjects.size() << " objects" << std::endl;
     }
 
     void processPendingDestroys() {
@@ -4850,12 +4957,69 @@ private:
         }
 
         bool inMoveObjectMode = m_editorUI.getBrushMode() == BrushMode::MoveObject;
+        bool inTransformMode = inMoveObjectMode && m_transformMode != TransformMode::Select;
+        bool hasSelection = m_selectedObjectIndex >= 0 && m_selectedObjectIndex < static_cast<int>(m_sceneObjects.size());
 
-        if (inMoveObjectMode && m_selectedObjectIndex >= 0 && m_selectedObjectIndex < static_cast<int>(m_sceneObjects.size())) {
+        // Ray-axis distance helper (same algorithm as model editor)
+        auto rayAxisDist = [](const glm::vec3& rayOrigin, const glm::vec3& rayDir,
+                              const glm::vec3& axisOrigin, const glm::vec3& axisDir, float axisLen) -> float {
+            glm::vec3 w0 = rayOrigin - axisOrigin;
+            float a = glm::dot(rayDir, rayDir);
+            float b2 = glm::dot(rayDir, axisDir);
+            float c = glm::dot(axisDir, axisDir);
+            float d = glm::dot(rayDir, w0);
+            float e = glm::dot(axisDir, w0);
+            float denom = a * c - b2 * b2;
+            if (std::abs(denom) < 0.0001f) return FLT_MAX;
+            float t = (b2 * e - c * d) / denom;
+            float s = (a * e - b2 * d) / denom;
+            s = std::clamp(s, 0.0f, axisLen);
+            return glm::length((rayOrigin + rayDir * t) - (axisOrigin + axisDir * s));
+        };
+
+        // Pick gizmo axis from ray (matching model editor)
+        auto pickAxis = [&](const glm::vec3& rayOrigin, const glm::vec3& rayDir,
+                            const glm::vec3& gizmoPos, float size) -> GizmoAxis {
+            float threshold = 0.15f * size;
+
+            if (m_transformMode == TransformMode::Rotate) {
+                float circleRadius = size * 0.9f;
+                float ringThreshold = threshold * 1.5f;
+                auto checkCircle = [&](const glm::vec3& normal) -> float {
+                    float denom = glm::dot(rayDir, normal);
+                    if (std::abs(denom) < 0.0001f) return 999.0f;
+                    float t = glm::dot(gizmoPos - rayOrigin, normal) / denom;
+                    if (t < 0) return 999.0f;
+                    glm::vec3 hitPoint = rayOrigin + rayDir * t;
+                    return std::abs(glm::length(hitPoint - gizmoPos) - circleRadius);
+                };
+                float dX = checkCircle(glm::vec3(1,0,0));
+                float dY = checkCircle(glm::vec3(0,1,0));
+                float dZ = checkCircle(glm::vec3(0,0,1));
+                float minD = std::min({dX, dY, dZ});
+                if (minD > ringThreshold) return GizmoAxis::None;
+                if (minD == dX) return GizmoAxis::X;
+                if (minD == dY) return GizmoAxis::Y;
+                return GizmoAxis::Z;
+            }
+
+            // Move/Scale: pick axis lines
+            float dX = rayAxisDist(rayOrigin, rayDir, gizmoPos, glm::vec3(1,0,0), size);
+            float dY = rayAxisDist(rayOrigin, rayDir, gizmoPos, glm::vec3(0,1,0), size);
+            float dZ = rayAxisDist(rayOrigin, rayDir, gizmoPos, glm::vec3(0,0,1), size);
+            float minD = std::min({dX, dY, dZ});
+            if (minD > threshold) return GizmoAxis::None;
+            if (minD == dX) return GizmoAxis::X;
+            if (minD == dY) return GizmoAxis::Y;
+            return GizmoAxis::Z;
+        };
+
+        if (inMoveObjectMode && inTransformMode && hasSelection) {
             SceneObject* selected = m_sceneObjects[m_selectedObjectIndex].get();
             if (selected) {
-                m_gizmo.setPosition(selected->getTransform().getPosition());
-                m_gizmo.setVisible(true);
+                glm::vec3 gizmoPos = selected->getTransform().getPosition();
+                float dist = glm::length(m_camera.getPosition() - gizmoPos);
+                float gizmoSize = dist * 0.08f;
 
                 float aspect = static_cast<float>(getWindow().getWidth()) / getWindow().getHeight();
                 glm::vec2 mousePos = Input::getMousePosition();
@@ -4874,41 +5038,83 @@ private:
                 glm::vec3 rayOrigin = glm::vec3(nearPoint);
                 glm::vec3 rayDir = glm::normalize(glm::vec3(farPoint - nearPoint));
 
+                // Update hover every frame for visual feedback
+                if (!m_gizmoDragging) {
+                    m_gizmoHoveredAxis = pickAxis(rayOrigin, rayDir, gizmoPos, gizmoSize);
+                }
+
                 bool leftMousePressed = Input::isMouseButtonPressed(Input::MOUSE_LEFT) && !ImGui::GetIO().WantCaptureMouse;
 
                 if (leftMousePressed && !m_gizmoDragging) {
-                    m_gizmo.updateHover(rayOrigin, rayDir);
-                    if (m_gizmo.beginDrag(rayOrigin, rayDir)) {
+                    GizmoAxis picked = pickAxis(rayOrigin, rayDir, gizmoPos, gizmoSize);
+                    if (picked != GizmoAxis::None) {
                         m_gizmoDragging = true;
+                        m_gizmoActiveAxis = picked;
+                        m_lastMousePos = mousePos;
                     } else {
                         pickObjectAtMouse();
                     }
                 } else if (m_gizmoDragging && Input::isMouseButtonDown(Input::MOUSE_LEFT)) {
-                    glm::vec3 delta = m_gizmo.updateDrag(rayOrigin, rayDir);
-                    selected->getTransform().setPosition(selected->getTransform().getPosition() + delta);
-                    m_gizmo.setPosition(selected->getTransform().getPosition());
+                    glm::vec2 mouseDelta = mousePos - m_lastMousePos;
+                    m_lastMousePos = mousePos;
+
+                    if (m_transformMode == TransformMode::Move) {
+                        // Project mouse delta onto the active axis in screen space
+                        glm::vec3 axisDir(0);
+                        if (m_gizmoActiveAxis == GizmoAxis::X) axisDir = glm::vec3(1,0,0);
+                        else if (m_gizmoActiveAxis == GizmoAxis::Y) axisDir = glm::vec3(0,1,0);
+                        else if (m_gizmoActiveAxis == GizmoAxis::Z) axisDir = glm::vec3(0,0,1);
+
+                        // Project axis to screen space to get movement direction
+                        glm::mat4 vpMat = proj * view;
+                        glm::vec4 screenPos = vpMat * glm::vec4(gizmoPos, 1.0f);
+                        glm::vec4 screenEnd = vpMat * glm::vec4(gizmoPos + axisDir, 1.0f);
+                        glm::vec2 screenDir = glm::vec2(screenEnd.x/screenEnd.w - screenPos.x/screenPos.w,
+                                                         screenEnd.y/screenEnd.w - screenPos.y/screenPos.w);
+                        float screenLen = glm::length(screenDir);
+                        if (screenLen > 0.0001f) {
+                            screenDir /= screenLen;
+                            // Map mouse pixel delta to normalized coords
+                            glm::vec2 normalizedDelta(mouseDelta.x / getWindow().getWidth() * 2.0f,
+                                                       -mouseDelta.y / getWindow().getHeight() * 2.0f);
+                            float axisDelta = glm::dot(normalizedDelta, screenDir) / screenLen;
+                            selected->getTransform().setPosition(selected->getTransform().getPosition() + axisDir * axisDelta);
+                        }
+                    } else if (m_transformMode == TransformMode::Rotate) {
+                        float angleDelta = mouseDelta.x * 0.5f;
+                        glm::vec3 euler = selected->getEulerRotation();
+                        if (m_gizmoActiveAxis == GizmoAxis::X) euler.x += angleDelta;
+                        else if (m_gizmoActiveAxis == GizmoAxis::Y) euler.y += angleDelta;
+                        else if (m_gizmoActiveAxis == GizmoAxis::Z) euler.z += angleDelta;
+                        selected->setEulerRotation(euler);
+                    } else if (m_transformMode == TransformMode::Scale) {
+                        float scaleFactor = 1.0f + mouseDelta.x * 0.005f;
+                        if (scaleFactor < 0.01f) scaleFactor = 0.01f;
+                        glm::vec3 s = selected->getTransform().getScale();
+                        if (m_gizmoActiveAxis == GizmoAxis::X) s.x *= scaleFactor;
+                        else if (m_gizmoActiveAxis == GizmoAxis::Y) s.y *= scaleFactor;
+                        else if (m_gizmoActiveAxis == GizmoAxis::Z) s.z *= scaleFactor;
+                        selected->getTransform().setScale(s);
+                    }
                 } else if (m_gizmoDragging && !Input::isMouseButtonDown(Input::MOUSE_LEFT)) {
                     m_gizmoDragging = false;
-                    m_gizmo.endDrag();
-                }
-
-                if (!m_gizmoDragging && leftMousePressed) {
-                    m_gizmo.updateHover(rayOrigin, rayDir);
-                    if (m_gizmo.getActiveAxis() == GizmoAxis::None) {
-                        pickObjectAtMouse();
-                    }
+                    m_gizmoActiveAxis = GizmoAxis::None;
                 }
             }
         } else if (inMoveObjectMode) {
-            m_gizmo.setVisible(false);
+            // Select mode or no selection: allow picking
+            m_gizmoDragging = false;
+            m_gizmoHoveredAxis = GizmoAxis::None;
+            m_gizmoActiveAxis = GizmoAxis::None;
 
             bool leftMousePressed = Input::isMouseButtonPressed(Input::MOUSE_LEFT) && !ImGui::GetIO().WantCaptureMouse;
             if (leftMousePressed) {
                 pickObjectAtMouse();
             }
         } else {
-            m_gizmo.setVisible(false);
             m_gizmoDragging = false;
+            m_gizmoHoveredAxis = GizmoAxis::None;
+            m_gizmoActiveAxis = GizmoAxis::None;
         }
 
         m_editorUI.setFPS(m_fps);
@@ -8511,6 +8717,12 @@ private:
     void spawnPlotPosts(int gridX, int gridZ) {
         if (!m_zoneSystem) return;
 
+        // Check if posts already exist (avoid duplicates on reload)
+        std::string baseName = "PlotPost_" + std::to_string(gridX) + "_" + std::to_string(gridZ);
+        for (const auto& obj : m_sceneObjects) {
+            if (obj->getName().find(baseName) == 0) return;  // Already exist
+        }
+
         glm::vec2 center = m_zoneSystem->gridToWorld(gridX, gridZ);
         float half = m_zoneSystem->getCellSize() / 2.0f;
 
@@ -8524,8 +8736,6 @@ private:
         float postRadius = 0.15f;
         float postHeight = 4.0f;
         glm::vec4 postColor(1.0f, 0.85f, 0.0f, 1.0f);  // Golden yellow
-
-        std::string baseName = "PlotPost_" + std::to_string(gridX) + "_" + std::to_string(gridZ);
 
         for (int i = 0; i < 4; i++) {
             auto meshData = PrimitiveMeshBuilder::createCylinder(postRadius, postHeight, 8, postColor);
@@ -9581,190 +9791,6 @@ private:
                 }
             }
         }
-        else if (actionType == "build_post") {
-            // Compound action: scan → walk to item → pickup → scan → walk to target → place
-            std::cout << "[AI Action] ENTERED build_post handler" << std::endl;
-            std::string itemName = action.value("item", "");
-            std::string targetName = action.value("target", "");
-            if (itemName.empty() || targetName.empty()) {
-                std::cout << "[AI Action] build_post: need both 'item' and 'target'" << std::endl;
-            } else if (m_currentInteractObject->isCarrying()) {
-                std::cout << "[AI Action] build_post: already carrying " << m_currentInteractObject->getCarriedItemName() << std::endl;
-            } else if (m_compoundActionActive) {
-                std::cout << "[AI Action] build_post: compound action already in progress" << std::endl;
-            } else {
-                m_compoundActionActive = true;
-                m_compoundStep = 0;
-                m_compoundItemName = itemName;
-                m_compoundTargetName = targetName;
-                m_compoundItemObj = nullptr;
-                m_compoundTargetObj = nullptr;
-                m_compoundNPC = m_currentInteractObject;  // Persist NPC ref beyond chat lifetime
-
-                // Kick off step 0: start 360° scan to find the item
-                m_aiActionActive = true;
-                m_aiActionType = "look_around";
-                m_aiActionDuration = 2.0f;
-                m_aiActionTimer = 0.0f;
-                m_aiActionStartYaw = m_currentInteractObject->getEulerRotation().y;
-                std::cout << "[AI Compound] build_post started: item='" << itemName << "' target='" << targetName << "'" << std::endl;
-            }
-        }
-        else if (actionType == "build_frame") {
-            // Blueprint action: autonomously build a 4-post frame building
-            if (m_blueprintActive) {
-                std::cout << "[AI Action] build_frame: blueprint already in progress" << std::endl;
-            } else if (m_compoundActionActive) {
-                std::cout << "[AI Action] build_frame: compound action already in progress" << std::endl;
-            } else {
-                glm::vec3 npcPos = m_currentInteractObject->getTransform().getPosition();
-                m_blueprintNPC = m_currentInteractObject;
-
-                // 4m x 4m frame centered 6m in front of the NPC, axis-aligned to world grid
-                float yawRad = glm::radians(m_currentInteractObject->getEulerRotation().y);
-                glm::vec3 forward(sin(yawRad), 0.0f, cos(yawRad));
-                glm::vec3 center = npcPos + forward * 6.0f;
-                float halfSize = 2.0f;
-
-                // World-axis-aligned corners — sample terrain height at each corner
-                // so postholes sit on top of the terrain surface
-                glm::vec3 corners[4] = {
-                    {center.x - halfSize, m_terrain.getHeightAt(center.x - halfSize, center.z - halfSize), center.z - halfSize},  // SW
-                    {center.x + halfSize, m_terrain.getHeightAt(center.x + halfSize, center.z - halfSize), center.z - halfSize},  // SE
-                    {center.x + halfSize, m_terrain.getHeightAt(center.x + halfSize, center.z + halfSize), center.z + halfSize},  // NE
-                    {center.x - halfSize, m_terrain.getHeightAt(center.x - halfSize, center.z + halfSize), center.z + halfSize},  // NW
-                };
-                m_blueprintGroundY = m_terrain.getHeightAt(center.x, center.z);
-
-                // Pre-generate unique posthole names
-                int maxNum = 0;
-                for (const auto& obj : m_sceneObjects) {
-                    const std::string& name = obj->getName();
-                    if (name.size() > 9 && name.substr(0, 9) == "posthole_") {
-                        std::string suffix = name.substr(9);
-                        bool allDigits = true;
-                        for (char c : suffix) { if (!std::isdigit(c)) { allDigits = false; break; } }
-                        if (allDigits && !suffix.empty()) {
-                            int n = std::stoi(suffix);
-                            if (n > maxNum) maxNum = n;
-                        }
-                    }
-                }
-
-                m_blueprintSteps.clear();
-                m_blueprintCurrentStep = 0;
-                m_blueprintSubStep = 0;
-                m_blueprintUsedTimbers.clear();
-
-                // Find an existing posthole to use as template (clone its model/texture/scale)
-                m_blueprintPostholeTemplate = nullptr;
-                for (auto& obj : m_sceneObjects) {
-                    if (!obj) continue;
-                    std::string lowerName = obj->getName();
-                    std::transform(lowerName.begin(), lowerName.end(), lowerName.begin(), ::tolower);
-                    if (lowerName.find("posthole") != std::string::npos) {
-                        m_blueprintPostholeTemplate = obj.get();
-                        std::cout << "[AI Blueprint] Using '" << obj->getName()
-                                  << "' as posthole template (model=" << obj->getModelPath() << ")" << std::endl;
-                        break;
-                    }
-                }
-
-                // Phase 1: Spawn 4 postholes at corners (Y already set to terrain height)
-                for (int i = 0; i < 4; i++) {
-                    BlueprintStep step;
-                    step.type = BlueprintStep::SPAWN_POSTHOLE;
-                    step.position = corners[i];
-                    step.targetName = "posthole_" + std::to_string(maxNum + 1 + i);
-                    m_blueprintSteps.push_back(step);
-                }
-
-                // Phase 2: Build post in each posthole (find nearest timber automatically)
-                for (int i = 0; i < 4; i++) {
-                    BlueprintStep step;
-                    step.type = BlueprintStep::BUILD_POST;
-                    step.targetName = "posthole_" + std::to_string(maxNum + 1 + i);
-                    m_blueprintSteps.push_back(step);
-                }
-
-                // Phase 3: Place 4 horizontal top rails connecting adjacent corners
-                for (int i = 0; i < 4; i++) {
-                    BlueprintStep step;
-                    step.type = BlueprintStep::BUILD_BEAM;
-                    step.beamStart = corners[i];
-                    step.beamEnd = corners[(i + 1) % 4];  // SW→SE, SE→NE, NE→NW, NW→SW
-                    m_blueprintSteps.push_back(step);
-                }
-
-                // Find sidewall template
-                m_blueprintSidewallTemplate = nullptr;
-                for (auto& obj : m_sceneObjects) {
-                    if (!obj) continue;
-                    std::string lowerName = obj->getName();
-                    std::transform(lowerName.begin(), lowerName.end(), lowerName.begin(), ::tolower);
-                    if (lowerName.find("sidewall") != std::string::npos) {
-                        m_blueprintSidewallTemplate = obj.get();
-                        std::cout << "[AI Blueprint] Using '" << obj->getName()
-                                  << "' as sidewall template (model=" << obj->getModelPath() << ")" << std::endl;
-                        break;
-                    }
-                }
-
-                // Phase 4: Place sidewalls on left and right sides of the frame
-                if (m_blueprintSidewallTemplate) {
-                    float npcYawRad = glm::radians(m_currentInteractObject->getEulerRotation().y);
-                    glm::vec3 frontDir(sin(npcYawRad), 0.0f, cos(npcYawRad));
-                    glm::vec3 rightDir(cos(npcYawRad), 0.0f, -sin(npcYawRad));
-
-                    // Classify each edge — side walls have outward normals aligned with left/right
-                    for (int i = 0; i < 4; i++) {
-                        glm::vec3 edgeMid = (corners[i] + corners[(i + 1) % 4]) * 0.5f;
-                        glm::vec3 outward = glm::normalize(glm::vec3(edgeMid.x - center.x, 0.0f, edgeMid.z - center.z));
-                        float dotRight = glm::dot(outward, rightDir);
-                        float dotFront = glm::dot(outward, frontDir);
-
-                        if (std::abs(dotRight) > std::abs(dotFront)) {
-                            BlueprintStep step;
-                            step.type = BlueprintStep::SPAWN_SIDEWALL;
-                            step.wallStart = corners[i];
-                            step.wallEnd = corners[(i + 1) % 4];
-                            step.wallYaw = glm::degrees(std::atan2(outward.x, outward.z));
-                            m_blueprintSteps.push_back(step);
-                        }
-                    }
-                }
-
-                // Find roof template
-                m_blueprintRoofTemplate = nullptr;
-                for (auto& obj : m_sceneObjects) {
-                    if (!obj) continue;
-                    std::string lowerName = obj->getName();
-                    std::transform(lowerName.begin(), lowerName.end(), lowerName.begin(), ::tolower);
-                    if (lowerName.find("roof") != std::string::npos) {
-                        m_blueprintRoofTemplate = obj.get();
-                        std::cout << "[AI Blueprint] Using '" << obj->getName()
-                                  << "' as roof template (model=" << obj->getModelPath() << ")" << std::endl;
-                        break;
-                    }
-                }
-
-                // Phase 5: Place roof on top of the frame
-                if (m_blueprintRoofTemplate) {
-                    BlueprintStep step;
-                    step.type = BlueprintStep::SPAWN_ROOF;
-                    step.roofCenter = center;
-                    for (int i = 0; i < 4; i++) step.roofCorners[i] = corners[i];
-                    // Front is the direction the NPC was facing when building
-                    step.roofFrontYaw = m_currentInteractObject->getEulerRotation().y;
-                    m_blueprintSteps.push_back(step);
-                }
-
-                m_blueprintActive = true;
-                std::cout << "[AI Blueprint] build_frame started: 4x4 frame at ("
-                          << center.x << ", " << center.z << ") with "
-                          << m_blueprintSteps.size() << " steps" << std::endl;
-            }
-        }
         else if (actionType == "run_script") {
             // Execute a Grove script directly (for economy, zone queries, etc.)
             std::string script = action.value("script", "");
@@ -9829,12 +9855,13 @@ private:
                             std::cout << "[AI Action] Grove output: " << m_groveOutputAccum;
                         }
 
-                        // If we're in play mode, immediately start the behavior
+                        // If we're in play mode, immediately start the last non-empty behavior
+                        // (the one the script just created — name may vary depending on run_file)
                         if (m_isPlayMode && targetBot->hasBehaviors()) {
                             auto& behaviors = targetBot->getBehaviors();
-                            for (size_t i = 0; i < behaviors.size(); i++) {
-                                if (behaviors[i].name == "grove_script" && !behaviors[i].actions.empty()) {
-                                    targetBot->setActiveBehaviorIndex(static_cast<int>(i));
+                            for (int i = static_cast<int>(behaviors.size()) - 1; i >= 0; i--) {
+                                if (!behaviors[i].actions.empty()) {
+                                    targetBot->setActiveBehaviorIndex(i);
                                     targetBot->setActiveActionIndex(0);
                                     targetBot->resetPathComplete();
                                     targetBot->clearPathWaypoints();
@@ -9845,7 +9872,8 @@ private:
                                     }
 
                                     std::cout << "[AI Action] AlgoBot '" << targetName
-                                              << "' program started (" << behaviors[i].actions.size()
+                                              << "' program started behavior '" << behaviors[i].name
+                                              << "' (" << behaviors[i].actions.size()
                                               << " actions, loop=" << (behaviors[i].loop ? "yes" : "no") << ")" << std::endl;
                                     break;
                                 }
@@ -9862,20 +9890,6 @@ private:
                     [this](const AIFollowState& fs) { return fs.npc == m_currentInteractObject; }),
                 m_aiFollowers.end());
             m_aiActionActive = false;
-            // Cancel any active compound action for this NPC
-            if (m_compoundActionActive && m_compoundNPC == m_currentInteractObject) {
-                std::cout << "[AI Compound] Cancelled by stop action" << std::endl;
-                m_compoundActionActive = false;
-                m_compoundNPC = nullptr;
-            }
-            // Cancel any active blueprint for this NPC
-            if (m_blueprintActive && m_blueprintNPC == m_currentInteractObject) {
-                std::cout << "[AI Blueprint] Cancelled by stop action" << std::endl;
-                m_blueprintActive = false;
-                m_blueprintNPC = nullptr;
-                m_blueprintSteps.clear();
-                m_blueprintUsedTimbers.clear();
-            }
             std::cout << "[AI Action] Stopped for " << m_currentInteractObject->getName()
                       << " (remaining followers: " << m_aiFollowers.size() << ")" << std::endl;
         }
@@ -10267,720 +10281,6 @@ private:
     }
 
     /**
-     * Update compound action state machine (build_post etc.)
-     * Called each frame after updateAIAction(). Waits for each sub-action to complete,
-     * then advances to the next step.
-     */
-    void updateCompoundAction() {
-        if (!m_compoundActionActive || !m_compoundNPC) return;
-
-        // Wait for current sub-action to finish
-        if (m_aiActionActive) return;
-
-        std::cout << "[AI Compound] Advancing step " << m_compoundStep
-                  << " (interactObj=" << (m_currentInteractObject ? m_currentInteractObject->getName() : "NULL")
-                  << ", compoundNPC=" << m_compoundNPC->getName() << ")" << std::endl;
-
-        switch (m_compoundStep) {
-            case 0: {
-                // SCAN_ITEM just completed — find the item
-                SceneObject* foundItem = m_compoundItemObj;  // May be pre-set by blueprint
-                if (!foundItem) {
-                    // Normal path: search scan results for item by name
-                    std::cout << "[AI Compound] Scan found " << m_lastFullScanResult.visibleObjects.size() << " objects, looking for '" << m_compoundItemName << "'" << std::endl;
-                    for (const auto& vis : m_lastFullScanResult.visibleObjects) {
-                        if (vis.name == m_compoundItemName) {
-                            for (auto& obj : m_sceneObjects) {
-                                if (obj && obj->getName() == m_compoundItemName && obj->isVisible()) {
-                                    foundItem = obj.get();
-                                    break;
-                                }
-                            }
-                            break;
-                        }
-                    }
-                } else {
-                    std::cout << "[AI Compound] Using pre-set item '" << m_compoundItemName << "'" << std::endl;
-                }
-                if (!foundItem) {
-                    std::cout << "[AI Compound] ABORT: item '" << m_compoundItemName << "' not found in scan" << std::endl;
-                    m_compoundActionActive = false;
-                    return;
-                }
-                m_compoundItemObj = foundItem;
-
-                // Start move_to toward item
-                glm::vec3 itemPos = foundItem->getTransform().getPosition();
-                m_aiActionStartPos = m_compoundNPC->getTransform().getPosition();
-                m_aiActionTargetPos = itemPos;
-                m_aiActionTargetPos.y = m_aiActionStartPos.y;
-                m_aiActionSpeed = 5.0f;
-                float distance = glm::length(m_aiActionTargetPos - m_aiActionStartPos);
-                m_aiActionDuration = distance / m_aiActionSpeed;
-
-                if (m_aiActionDuration > 0.01f) {
-                    m_currentInteractObject = m_compoundNPC;  // Ensure set for updateAIAction
-                    m_aiActionActive = true;
-                    m_aiActionType = "move_to";
-                    m_aiActionTimer = 0.0f;
-                    glm::vec3 direction = glm::normalize(m_aiActionTargetPos - m_aiActionStartPos);
-                    m_aiActionTargetYaw = glm::degrees(atan2(direction.x, direction.z));
-                    m_aiActionStartYaw = m_compoundNPC->getEulerRotation().y;
-                    std::cout << "[AI Compound] Step 1: Moving to item '" << m_compoundItemName << "'" << std::endl;
-                }
-                m_compoundStep = 1;
-                break;
-            }
-            case 1: {
-                // GOTO_ITEM complete — pick up the item
-                if (m_compoundItemObj && !m_compoundNPC->isCarrying()) {
-                    m_compoundItemObj->setVisible(false);
-                    m_compoundNPC->setCarriedItem(m_compoundItemName, m_compoundItemObj);
-                    std::cout << "[AI Compound] Step 2: Picked up '" << m_compoundItemName << "'" << std::endl;
-                } else {
-                    std::cout << "[AI Compound] ABORT: couldn't pick up item" << std::endl;
-                    m_compoundActionActive = false;
-                    return;
-                }
-                m_compoundStep = 2;
-                break;
-            }
-            case 2: {
-                // PICKUP done — start 360° scan to find target
-                m_currentInteractObject = m_compoundNPC;
-                m_aiActionActive = true;
-                m_aiActionType = "look_around";
-                m_aiActionDuration = 2.0f;
-                m_aiActionTimer = 0.0f;
-                m_aiActionStartYaw = m_compoundNPC->getEulerRotation().y;
-                std::cout << "[AI Compound] Step 3: Scanning for target '" << m_compoundTargetName << "'" << std::endl;
-                m_compoundStep = 3;
-                break;
-            }
-            case 3: {
-                // SCAN_TARGET complete — search scan results for target
-                SceneObject* foundTarget = nullptr;
-                for (const auto& vis : m_lastFullScanResult.visibleObjects) {
-                    if (vis.name == m_compoundTargetName) {
-                        for (auto& obj : m_sceneObjects) {
-                            if (obj && obj->getName() == m_compoundTargetName && obj->isVisible()) {
-                                foundTarget = obj.get();
-                                break;
-                            }
-                        }
-                        break;
-                    }
-                }
-                if (!foundTarget) {
-                    std::cout << "[AI Compound] ABORT: target '" << m_compoundTargetName << "' not found in scan — dropping item" << std::endl;
-                    // Drop the carried item so it's not lost
-                    SceneObject* carried = m_compoundNPC->getCarriedItemObject();
-                    if (carried) {
-                        glm::vec3 dropPos = m_compoundNPC->getTransform().getPosition();
-                        float yawRad = glm::radians(m_compoundNPC->getEulerRotation().y);
-                        glm::vec3 forward(sin(yawRad), 0.0f, cos(yawRad));
-                        dropPos += forward * 1.5f;
-                        dropPos.y = carried->getTransform().getPosition().y;
-                        carried->getTransform().setPosition(dropPos);
-                        carried->setVisible(true);
-                    }
-                    m_compoundNPC->clearCarriedItem();
-                    m_compoundActionActive = false;
-                    return;
-                }
-                m_compoundTargetObj = foundTarget;
-
-                // Start move_to toward target — stop 2m short so NPC doesn't clip into it
-                glm::vec3 targetPos = foundTarget->getTransform().getPosition();
-                m_aiActionStartPos = m_compoundNPC->getTransform().getPosition();
-                glm::vec3 toTarget = targetPos - m_aiActionStartPos;
-                toTarget.y = 0.0f;
-                float distToTarget = glm::length(toTarget);
-                float standoff = 2.0f;
-                if (distToTarget > standoff) {
-                    m_aiActionTargetPos = m_aiActionStartPos + glm::normalize(toTarget) * (distToTarget - standoff);
-                } else {
-                    m_aiActionTargetPos = m_aiActionStartPos;  // Already close enough
-                }
-                m_aiActionTargetPos.y = m_aiActionStartPos.y;
-                m_aiActionSpeed = 5.0f;
-                float distance = glm::length(m_aiActionTargetPos - m_aiActionStartPos);
-                m_aiActionDuration = distance / m_aiActionSpeed;
-
-                if (m_aiActionDuration > 0.01f) {
-                    m_currentInteractObject = m_compoundNPC;
-                    m_aiActionActive = true;
-                    m_aiActionType = "move_to";
-                    m_aiActionTimer = 0.0f;
-                    glm::vec3 direction = glm::normalize(m_aiActionTargetPos - m_aiActionStartPos);
-                    m_aiActionTargetYaw = glm::degrees(atan2(direction.x, direction.z));
-                    m_aiActionStartYaw = m_compoundNPC->getEulerRotation().y;
-                    std::cout << "[AI Compound] Step 4: Moving to target '" << m_compoundTargetName << "'" << std::endl;
-                }
-                m_compoundStep = 4;
-                break;
-            }
-            case 4: {
-                // GOTO_TARGET complete — place the item
-                if (m_compoundTargetObj && m_compoundNPC->isCarrying()) {
-                    placeCarriedItemAt(m_compoundNPC, m_compoundTargetObj);
-                    std::cout << "[AI Compound] Step 5: Placed '" << m_compoundItemName << "' in '" << m_compoundTargetName << "'" << std::endl;
-                } else {
-                    std::cout << "[AI Compound] ABORT: couldn't place item" << std::endl;
-                }
-                m_compoundStep = 5;
-                break;
-            }
-            case 5: {
-                // All done — clear compound state
-                std::cout << "[AI Compound] build_post complete!" << std::endl;
-                m_compoundActionActive = false;
-                m_compoundStep = 0;
-                m_compoundItemObj = nullptr;
-                m_compoundTargetObj = nullptr;
-                m_compoundNPC = nullptr;
-                break;
-            }
-        }
-    }
-
-    /**
-     * Spawn a posthole at a given position with a given name.
-     * Clones m_blueprintPostholeTemplate if available; falls back to a primitive cube.
-     * Returns a pointer to the new object (owned by m_sceneObjects).
-     */
-    SceneObject* spawnPostholeAt(const glm::vec3& position, const std::string& name) {
-        std::unique_ptr<SceneObject> obj;
-
-        if (m_blueprintPostholeTemplate && !m_blueprintPostholeTemplate->getModelPath().empty()) {
-            // Clone from existing posthole's model file
-            std::string modelPath = m_blueprintPostholeTemplate->getModelPath();
-            bool isLime = modelPath.size() >= 5 && modelPath.substr(modelPath.size() - 5) == ".lime";
-
-            if (isLime) {
-                auto result = LimeLoader::load(modelPath);
-                if (result.success) {
-                    obj = LimeLoader::createSceneObject(result.mesh, *m_modelRenderer);
-                }
-            } else {
-                auto result = GLBLoader::load(modelPath);
-                if (result.success && !result.meshes.empty()) {
-                    obj = GLBLoader::createSceneObject(result.meshes[0], *m_modelRenderer);
-                }
-            }
-
-            if (obj) {
-                obj->setModelPath(modelPath);
-                obj->setEulerRotation(m_blueprintPostholeTemplate->getEulerRotation());
-                obj->getTransform().setScale(m_blueprintPostholeTemplate->getTransform().getScale());
-                obj->setHueShift(m_blueprintPostholeTemplate->getHueShift());
-                obj->setSaturation(m_blueprintPostholeTemplate->getSaturation());
-                obj->setBrightness(m_blueprintPostholeTemplate->getBrightness());
-            }
-        } else if (m_blueprintPostholeTemplate && m_blueprintPostholeTemplate->hasMeshData()) {
-            // Clone from existing posthole's mesh data (primitive)
-            const auto& verts = m_blueprintPostholeTemplate->getVertices();
-            const auto& inds = m_blueprintPostholeTemplate->getIndices();
-            uint32_t handle = m_modelRenderer->createModel(verts, inds);
-            obj = std::make_unique<SceneObject>(name);
-            obj->setBufferHandle(handle);
-            obj->setVertexCount(static_cast<uint32_t>(verts.size()));
-            obj->setIndexCount(static_cast<uint32_t>(inds.size()));
-            obj->setLocalBounds(m_blueprintPostholeTemplate->getLocalBounds());
-            obj->setModelPath("");
-            obj->setMeshData(verts, inds);
-            obj->setEulerRotation(m_blueprintPostholeTemplate->getEulerRotation());
-            obj->getTransform().setScale(m_blueprintPostholeTemplate->getTransform().getScale());
-        }
-
-        if (!obj) {
-            // Fallback: create a primitive cube
-            float size = 0.5f;
-            glm::vec4 color(0.65f, 0.63f, 0.58f, 1.0f);
-            auto meshData = PrimitiveMeshBuilder::createCube(size, color);
-            obj = std::make_unique<SceneObject>(name);
-            uint32_t handle = m_modelRenderer->createModel(meshData.vertices, meshData.indices);
-            obj->setBufferHandle(handle);
-            obj->setIndexCount(static_cast<uint32_t>(meshData.indices.size()));
-            obj->setVertexCount(static_cast<uint32_t>(meshData.vertices.size()));
-            obj->setLocalBounds(meshData.bounds);
-            obj->setModelPath("");
-            obj->setMeshData(meshData.vertices, meshData.indices);
-            obj->setPrimitiveType(PrimitiveType::Cube);
-            obj->setPrimitiveSize(size);
-            obj->setPrimitiveColor(color);
-        }
-
-        obj->setName(name);
-        obj->setDescription("Concrete base for a fence post");
-
-        // Offset Y so the bottom of the object sits on the terrain surface
-        // Compute min vertex Y directly from mesh data (bypasses potentially unset bounds)
-        glm::vec3 placePos = position;
-        glm::vec3 scale = obj->getTransform().getScale();
-        float minVertexY = 0.0f;
-        if (obj->hasMeshData()) {
-            const auto& verts = obj->getVertices();
-            if (!verts.empty()) {
-                minVertexY = verts[0].position.y;
-                for (const auto& v : verts) {
-                    if (v.position.y < minVertexY) minVertexY = v.position.y;
-                }
-            }
-        }
-        float bottomOffset = -minVertexY * scale.y;
-        placePos.y = position.y + bottomOffset;
-
-        std::cout << "[AI Blueprint] minVertexY=" << minVertexY
-                  << " scale.y=" << scale.y
-                  << " bottomOffset=" << bottomOffset
-                  << " terrainY=" << position.y
-                  << " finalY=" << placePos.y << std::endl;
-
-        obj->getTransform().setPosition(placePos);
-
-        SceneObject* ptr = obj.get();
-        m_sceneObjects.push_back(std::move(obj));
-        std::cout << "[AI Blueprint] Spawned '" << name << "' at ("
-                  << placePos.x << ", " << placePos.y << ", " << placePos.z << ")" << std::endl;
-        return ptr;
-    }
-
-    /**
-     * Spawn a sidewall panel between two corner posts.
-     * Clones m_blueprintSidewallTemplate. Positions at midpoint of the edge, on the terrain.
-     */
-    SceneObject* spawnSidewallAt(const glm::vec3& start, const glm::vec3& end, float wallYaw) {
-        if (!m_blueprintSidewallTemplate) return nullptr;
-
-        std::unique_ptr<SceneObject> obj;
-        std::string modelPath = m_blueprintSidewallTemplate->getModelPath();
-
-        if (!modelPath.empty()) {
-            bool isLime = modelPath.size() >= 5 && modelPath.substr(modelPath.size() - 5) == ".lime";
-            if (isLime) {
-                auto result = LimeLoader::load(modelPath);
-                if (result.success) {
-                    obj = LimeLoader::createSceneObject(result.mesh, *m_modelRenderer);
-                }
-            } else {
-                auto result = GLBLoader::load(modelPath);
-                if (result.success && !result.meshes.empty()) {
-                    obj = GLBLoader::createSceneObject(result.meshes[0], *m_modelRenderer);
-                }
-            }
-
-            if (obj) {
-                obj->setModelPath(modelPath);
-                obj->getTransform().setScale(m_blueprintSidewallTemplate->getTransform().getScale());
-                obj->setHueShift(m_blueprintSidewallTemplate->getHueShift());
-                obj->setSaturation(m_blueprintSidewallTemplate->getSaturation());
-                obj->setBrightness(m_blueprintSidewallTemplate->getBrightness());
-            }
-        }
-
-        if (!obj) {
-            std::cout << "[AI Blueprint] Failed to clone sidewall template" << std::endl;
-            return nullptr;
-        }
-
-        obj->setName("sidewall_building");
-        obj->setDescription("Side wall panel for frame building");
-
-        // Position at midpoint of the edge between two corners
-        glm::vec3 placePos = (start + end) * 0.5f;
-
-        // Sample actual terrain height at the wall's midpoint
-        float terrainY = m_terrain.getHeightAt(placePos.x, placePos.z);
-        glm::vec3 scale = obj->getTransform().getScale();
-
-        // Compute bottom offset from mesh vertices
-        float minVertexY = 0.0f;
-        if (obj->hasMeshData()) {
-            const auto& verts = obj->getVertices();
-            if (!verts.empty()) {
-                minVertexY = verts[0].position.y;
-                for (const auto& v : verts) {
-                    if (v.position.y < minVertexY) minVertexY = v.position.y;
-                }
-            }
-        }
-        float bottomOffset = -minVertexY * scale.y;
-        placePos.y = terrainY + bottomOffset;
-
-        obj->setEulerRotation(glm::vec3(0.0f, wallYaw, 0.0f));
-        obj->getTransform().setPosition(placePos);
-
-        SceneObject* ptr = obj.get();
-        m_sceneObjects.push_back(std::move(obj));
-        std::cout << "[AI Blueprint] Spawned sidewall at ("
-                  << placePos.x << ", " << placePos.y << ", " << placePos.z
-                  << ") yaw=" << wallYaw << std::endl;
-        return ptr;
-    }
-
-    /**
-     * Spawn a roof at the top of a frame structure.
-     * Clones m_blueprintRoofTemplate. Positions it centered over the frame with a front overhang offset.
-     * corners[4] are the frame corner positions used to find the top of the structure.
-     * frontYaw is the NPC's facing direction — the front overhang goes that way.
-     */
-    SceneObject* spawnRoofAt(const glm::vec3& center, const glm::vec3 corners[4], float frontYaw) {
-        if (!m_blueprintRoofTemplate) return nullptr;
-
-        std::unique_ptr<SceneObject> obj;
-        std::string modelPath = m_blueprintRoofTemplate->getModelPath();
-
-        if (!modelPath.empty()) {
-            bool isLime = modelPath.size() >= 5 && modelPath.substr(modelPath.size() - 5) == ".lime";
-            if (isLime) {
-                auto result = LimeLoader::load(modelPath);
-                if (result.success) {
-                    obj = LimeLoader::createSceneObject(result.mesh, *m_modelRenderer);
-                }
-            } else {
-                auto result = GLBLoader::load(modelPath);
-                if (result.success && !result.meshes.empty()) {
-                    obj = GLBLoader::createSceneObject(result.meshes[0], *m_modelRenderer);
-                }
-            }
-
-            if (obj) {
-                obj->setModelPath(modelPath);
-                obj->getTransform().setScale(m_blueprintRoofTemplate->getTransform().getScale());
-                obj->setHueShift(m_blueprintRoofTemplate->getHueShift());
-                obj->setSaturation(m_blueprintRoofTemplate->getSaturation());
-                obj->setBrightness(m_blueprintRoofTemplate->getBrightness());
-            }
-        }
-
-        if (!obj) {
-            std::cout << "[AI Blueprint] Failed to clone roof template" << std::endl;
-            return nullptr;
-        }
-
-        obj->setName("roof_building");
-        obj->setDescription("Roof panel for frame building");
-
-        // Find the top of the structure by scanning objects near the corners
-        float topY = corners[0].y;
-        for (auto& sceneObj : m_sceneObjects) {
-            if (!sceneObj || !sceneObj->isVisible()) continue;
-            glm::vec3 objPos = sceneObj->getTransform().getPosition();
-            for (int i = 0; i < 4; i++) {
-                float dist = glm::length(glm::vec2(objPos.x - corners[i].x, objPos.z - corners[i].z));
-                if (dist < 1.5f) {
-                    AABB bounds = sceneObj->getWorldBounds();
-                    topY = std::max(topY, bounds.max.y);
-                }
-            }
-        }
-
-        // Position roof at center of frame, on top of the structure
-        glm::vec3 placePos = center;
-        placePos.y = topY;
-
-        // Offset toward front for asymmetric overhang (front gets more overhang)
-        float yawRad = glm::radians(frontYaw);
-        glm::vec3 frontDir(sin(yawRad), 0.0f, cos(yawRad));
-        float frontOffset = 0.5f;  // Shift roof forward by 0.5m for front overhang
-        placePos += frontDir * frontOffset;
-
-        // Rotate 90° so the longer dimension runs front-to-back
-        obj->setEulerRotation(glm::vec3(0.0f, frontYaw + 90.0f, 0.0f));
-        obj->getTransform().setPosition(placePos);
-
-        SceneObject* ptr = obj.get();
-        m_sceneObjects.push_back(std::move(obj));
-        std::cout << "[AI Blueprint] Spawned roof at ("
-                  << placePos.x << ", " << placePos.y << ", " << placePos.z
-                  << ") frontYaw=" << frontYaw << std::endl;
-        return ptr;
-    }
-
-    /**
-     * Update blueprint action state machine (build_frame etc.)
-     * Called each frame after updateCompoundAction(). Processes blueprint steps sequentially.
-     * Each step either walks + spawns a posthole, or triggers a build_post compound action.
-     */
-    void updateBlueprintAction() {
-        if (!m_blueprintActive || !m_blueprintNPC) return;
-
-        // Wait for any compound action to finish (BUILD_POST steps)
-        if (m_compoundActionActive) return;
-
-        // Wait for any AI action to finish (walking steps)
-        if (m_aiActionActive) return;
-
-        // Check if all steps are done
-        if (m_blueprintCurrentStep >= static_cast<int>(m_blueprintSteps.size())) {
-            std::cout << "[AI Blueprint] All " << m_blueprintSteps.size() << " steps complete!" << std::endl;
-            m_blueprintActive = false;
-            m_blueprintNPC = nullptr;
-            m_blueprintSteps.clear();
-            m_blueprintUsedTimbers.clear();
-            return;
-        }
-
-        auto& step = m_blueprintSteps[m_blueprintCurrentStep];
-
-        if (step.type == BlueprintStep::SPAWN_POSTHOLE) {
-            switch (m_blueprintSubStep) {
-                case 0: {
-                    // Start walking to the posthole position
-                    glm::vec3 targetPos = step.position;
-                    targetPos.y = m_blueprintNPC->getTransform().getPosition().y;
-                    m_aiActionStartPos = m_blueprintNPC->getTransform().getPosition();
-
-                    // Stop 1.5m short of the exact position
-                    glm::vec3 toTarget = targetPos - m_aiActionStartPos;
-                    toTarget.y = 0.0f;
-                    float dist = glm::length(toTarget);
-                    float standoff = 1.5f;
-                    if (dist > standoff) {
-                        m_aiActionTargetPos = m_aiActionStartPos + glm::normalize(toTarget) * (dist - standoff);
-                    } else {
-                        m_aiActionTargetPos = m_aiActionStartPos;
-                    }
-                    m_aiActionTargetPos.y = m_aiActionStartPos.y;
-                    m_aiActionSpeed = 5.0f;
-                    float distance = glm::length(m_aiActionTargetPos - m_aiActionStartPos);
-                    m_aiActionDuration = distance / m_aiActionSpeed;
-
-                    if (m_aiActionDuration > 0.01f) {
-                        m_currentInteractObject = m_blueprintNPC;
-                        m_aiActionActive = true;
-                        m_aiActionType = "move_to";
-                        m_aiActionTimer = 0.0f;
-                        glm::vec3 direction = glm::normalize(m_aiActionTargetPos - m_aiActionStartPos);
-                        m_aiActionTargetYaw = glm::degrees(atan2(direction.x, direction.z));
-                        m_aiActionStartYaw = m_blueprintNPC->getEulerRotation().y;
-                    }
-
-                    std::cout << "[AI Blueprint] Step " << m_blueprintCurrentStep
-                              << ": Walking to spawn '" << step.targetName << "'" << std::endl;
-                    m_blueprintSubStep = 1;
-                    break;
-                }
-                case 1: {
-                    // Arrived — spawn the posthole
-                    spawnPostholeAt(step.position, step.targetName);
-
-                    // Advance to next blueprint step
-                    m_blueprintCurrentStep++;
-                    m_blueprintSubStep = 0;
-                    std::cout << "[AI Blueprint] Progress: " << m_blueprintCurrentStep
-                              << "/" << m_blueprintSteps.size() << " steps done" << std::endl;
-                    break;
-                }
-            }
-        }
-        else if (step.type == BlueprintStep::BUILD_POST) {
-            switch (m_blueprintSubStep) {
-                case 0: {
-                    // Find nearest available timber (visible, name contains "timber")
-                    SceneObject* nearestTimber = nullptr;
-                    float nearestDist = std::numeric_limits<float>::max();
-                    glm::vec3 npcPos = m_blueprintNPC->getTransform().getPosition();
-
-                    for (auto& obj : m_sceneObjects) {
-                        if (!obj || !obj->isVisible()) continue;
-                        std::string lowerName = obj->getName();
-                        std::transform(lowerName.begin(), lowerName.end(), lowerName.begin(), ::tolower);
-                        if (lowerName.find("timber") == std::string::npos) continue;
-                        // Skip timbers already placed by this blueprint (tracked by pointer)
-                        if (m_blueprintUsedTimbers.count(obj.get())) continue;
-                        float dist = glm::length(obj->getTransform().getPosition() - npcPos);
-                        if (dist < nearestDist) {
-                            nearestDist = dist;
-                            nearestTimber = obj.get();
-                        }
-                    }
-
-                    if (!nearestTimber) {
-                        std::cout << "[AI Blueprint] ABORT at step " << m_blueprintCurrentStep
-                                  << ": no timber available for '" << step.targetName << "'" << std::endl;
-                        m_blueprintActive = false;
-                        m_blueprintNPC = nullptr;
-                        m_blueprintSteps.clear();
-                        m_blueprintUsedTimbers.clear();
-                        return;
-                    }
-
-                    std::cout << "[AI Blueprint] Step " << m_blueprintCurrentStep
-                              << ": build_post with '" << nearestTimber->getName()
-                              << "' → '" << step.targetName << "'" << std::endl;
-
-                    // Programmatically kick off the build_post compound action
-                    // Pre-set m_compoundItemObj so compound step 0 uses this exact pointer
-                    // (avoids wrong match when multiple timbers share the same name)
-                    m_compoundActionActive = true;
-                    m_compoundStep = 0;
-                    m_compoundItemName = nearestTimber->getName();
-                    m_compoundTargetName = step.targetName;
-                    m_compoundItemObj = nearestTimber;  // Pre-set — compound step 0 will use this
-                    m_compoundTargetObj = nullptr;
-                    m_compoundNPC = m_blueprintNPC;
-
-                    // Start step 0 of compound: 360° scan
-                    m_currentInteractObject = m_blueprintNPC;
-                    m_aiActionActive = true;
-                    m_aiActionType = "look_around";
-                    m_aiActionDuration = 2.0f;
-                    m_aiActionTimer = 0.0f;
-                    m_aiActionStartYaw = m_blueprintNPC->getEulerRotation().y;
-
-                    // Save the timber pointer for tracking (compound step 5 clears m_compoundItemObj)
-                    m_blueprintUsedTimbers.insert(nearestTimber);
-                    m_blueprintSubStep = 1;
-                    break;
-                }
-                case 1: {
-                    // Compound action finished — advance to next step
-                    std::cout << "[AI Blueprint] build_post for '" << step.targetName
-                              << "' complete (used timber: '" << m_compoundItemName << "')" << std::endl;
-                    m_blueprintCurrentStep++;
-                    m_blueprintSubStep = 0;
-                    std::cout << "[AI Blueprint] Progress: " << m_blueprintCurrentStep
-                              << "/" << m_blueprintSteps.size() << " steps done" << std::endl;
-                    break;
-                }
-            }
-        }
-        else if (step.type == BlueprintStep::BUILD_BEAM) {
-            switch (m_blueprintSubStep) {
-                case 0: {
-                    // Find nearest available timber
-                    SceneObject* nearestTimber = nullptr;
-                    float nearestDist = std::numeric_limits<float>::max();
-                    glm::vec3 npcPos = m_blueprintNPC->getTransform().getPosition();
-
-                    for (auto& obj : m_sceneObjects) {
-                        if (!obj || !obj->isVisible()) continue;
-                        std::string lowerName = obj->getName();
-                        std::transform(lowerName.begin(), lowerName.end(), lowerName.begin(), ::tolower);
-                        if (lowerName.find("timber") == std::string::npos) continue;
-                        if (m_blueprintUsedTimbers.count(obj.get())) continue;
-                        float dist = glm::length(obj->getTransform().getPosition() - npcPos);
-                        if (dist < nearestDist) {
-                            nearestDist = dist;
-                            nearestTimber = obj.get();
-                        }
-                    }
-
-                    if (!nearestTimber) {
-                        std::cout << "[AI Blueprint] ABORT at step " << m_blueprintCurrentStep
-                                  << ": no timber available for beam" << std::endl;
-                        m_blueprintActive = false;
-                        m_blueprintNPC = nullptr;
-                        m_blueprintSteps.clear();
-                        m_blueprintUsedTimbers.clear();
-                        return;
-                    }
-
-                    m_blueprintBeamTimber = nearestTimber;
-                    m_blueprintUsedTimbers.insert(nearestTimber);
-
-                    // Start walk to the timber
-                    glm::vec3 timberPos = nearestTimber->getTransform().getPosition();
-                    m_aiActionStartPos = npcPos;
-                    m_aiActionTargetPos = timberPos;
-                    m_aiActionTargetPos.y = m_aiActionStartPos.y;
-                    m_aiActionSpeed = 5.0f;
-                    float distance = glm::length(m_aiActionTargetPos - m_aiActionStartPos);
-                    m_aiActionDuration = distance / m_aiActionSpeed;
-
-                    if (m_aiActionDuration > 0.01f) {
-                        m_currentInteractObject = m_blueprintNPC;
-                        m_aiActionActive = true;
-                        m_aiActionType = "move_to";
-                        m_aiActionTimer = 0.0f;
-                        glm::vec3 direction = glm::normalize(m_aiActionTargetPos - m_aiActionStartPos);
-                        m_aiActionTargetYaw = glm::degrees(atan2(direction.x, direction.z));
-                        m_aiActionStartYaw = m_blueprintNPC->getEulerRotation().y;
-                    }
-
-                    std::cout << "[AI Blueprint] Step " << m_blueprintCurrentStep
-                              << ": Walking to timber '" << nearestTimber->getName() << "' for beam" << std::endl;
-                    m_blueprintSubStep = 1;
-                    break;
-                }
-                case 1: {
-                    // Arrived at timber — pick it up
-                    if (m_blueprintBeamTimber && !m_blueprintNPC->isCarrying()) {
-                        m_blueprintBeamTimber->setVisible(false);
-                        m_blueprintNPC->setCarriedItem(m_blueprintBeamTimber->getName(), m_blueprintBeamTimber);
-                        std::cout << "[AI Blueprint] Picked up '" << m_blueprintBeamTimber->getName() << "' for beam" << std::endl;
-                    }
-
-                    // Start walk to beam midpoint (with standoff)
-                    glm::vec3 midpoint = (step.beamStart + step.beamEnd) * 0.5f;
-                    midpoint.y = m_blueprintNPC->getTransform().getPosition().y;
-                    m_aiActionStartPos = m_blueprintNPC->getTransform().getPosition();
-                    glm::vec3 toMid = midpoint - m_aiActionStartPos;
-                    toMid.y = 0.0f;
-                    float dist = glm::length(toMid);
-                    float standoff = 2.0f;
-                    if (dist > standoff) {
-                        m_aiActionTargetPos = m_aiActionStartPos + glm::normalize(toMid) * (dist - standoff);
-                    } else {
-                        m_aiActionTargetPos = m_aiActionStartPos;
-                    }
-                    m_aiActionTargetPos.y = m_aiActionStartPos.y;
-                    m_aiActionSpeed = 5.0f;
-                    float distance = glm::length(m_aiActionTargetPos - m_aiActionStartPos);
-                    m_aiActionDuration = distance / m_aiActionSpeed;
-
-                    if (m_aiActionDuration > 0.01f) {
-                        m_currentInteractObject = m_blueprintNPC;
-                        m_aiActionActive = true;
-                        m_aiActionType = "move_to";
-                        m_aiActionTimer = 0.0f;
-                        glm::vec3 direction = glm::normalize(m_aiActionTargetPos - m_aiActionStartPos);
-                        m_aiActionTargetYaw = glm::degrees(atan2(direction.x, direction.z));
-                        m_aiActionStartYaw = m_blueprintNPC->getEulerRotation().y;
-                    }
-
-                    std::cout << "[AI Blueprint] Walking to beam position" << std::endl;
-                    m_blueprintSubStep = 2;
-                    break;
-                }
-                case 2: {
-                    // Arrived at beam position — place timber horizontally
-                    if (m_blueprintNPC->isCarrying()) {
-                        placeCarriedItemHorizontal(m_blueprintNPC, step.beamStart, step.beamEnd);
-                    }
-                    m_blueprintBeamTimber = nullptr;
-
-                    m_blueprintCurrentStep++;
-                    m_blueprintSubStep = 0;
-                    std::cout << "[AI Blueprint] Progress: " << m_blueprintCurrentStep
-                              << "/" << m_blueprintSteps.size() << " steps done" << std::endl;
-                    break;
-                }
-            }
-        }
-        else if (step.type == BlueprintStep::SPAWN_SIDEWALL) {
-            // Spawn sidewall immediately
-            spawnSidewallAt(step.wallStart, step.wallEnd, step.wallYaw);
-
-            m_blueprintCurrentStep++;
-            m_blueprintSubStep = 0;
-            std::cout << "[AI Blueprint] Progress: " << m_blueprintCurrentStep
-                      << "/" << m_blueprintSteps.size() << " steps done" << std::endl;
-        }
-        else if (step.type == BlueprintStep::SPAWN_ROOF) {
-            // Spawn the roof immediately (no walking needed — NPC is already near the frame)
-            spawnRoofAt(step.roofCenter, step.roofCorners, step.roofFrontYaw);
-
-            m_blueprintCurrentStep++;
-            m_blueprintSubStep = 0;
-            std::cout << "[AI Blueprint] Progress: " << m_blueprintCurrentStep
-                      << "/" << m_blueprintSteps.size() << " steps done" << std::endl;
-        }
-    }
-
-    /**
      * Update carried items — position them on the NPC's shoulder each frame
      */
     void updateCarriedItems() {
@@ -11210,20 +10510,32 @@ private:
         }
 
         if (!original->getModelPath().empty()) {
-            auto result = GLBLoader::load(original->getModelPath());
-            if (!result.success || result.meshes.empty()) {
-                std::cerr << "Failed to reload model for duplication: " << original->getModelPath() << std::endl;
-                return;
+            std::unique_ptr<SceneObject> newObj;
+            std::string modelPath = original->getModelPath();
+            std::string ext = modelPath.substr(modelPath.find_last_of('.') + 1);
+
+            if (ext == "lime") {
+                auto result = LimeLoader::load(modelPath);
+                if (!result.success) {
+                    std::cerr << "Failed to reload .lime model for duplication: " << modelPath << std::endl;
+                    return;
+                }
+                newObj = LimeLoader::createSceneObject(result.mesh, *m_modelRenderer);
+            } else {
+                auto result = GLBLoader::load(modelPath);
+                if (!result.success || result.meshes.empty()) {
+                    std::cerr << "Failed to reload model for duplication: " << modelPath << std::endl;
+                    return;
+                }
+                newObj = GLBLoader::createSceneObject(result.meshes[0], *m_modelRenderer);
             }
 
-            const auto& mesh = result.meshes[0];
-            auto newObj = GLBLoader::createSceneObject(mesh, *m_modelRenderer);
             if (!newObj) {
                 std::cerr << "Failed to create duplicate scene object" << std::endl;
                 return;
             }
 
-            newObj->setModelPath(original->getModelPath());
+            newObj->setModelPath(modelPath);
             newObj->setName(generateUniqueName(original->getName()));
 
             glm::vec3 pos = original->getTransform().getPosition();
@@ -11418,40 +10730,6 @@ private:
     PerceptionData m_lastFullScanResult;
     bool m_hasFullScanResult = false;
 
-    // Compound action state machine (build_post etc.)
-    bool m_compoundActionActive = false;
-    int m_compoundStep = 0;               // 0-5 for the 6 steps
-    std::string m_compoundItemName;       // e.g. "timber6612"
-    std::string m_compoundTargetName;     // e.g. "posthole_01"
-    SceneObject* m_compoundItemObj = nullptr;
-    SceneObject* m_compoundTargetObj = nullptr;
-    SceneObject* m_compoundNPC = nullptr; // NPC performing the compound action (persists after chat ends)
-
-    // Blueprint system (build_frame etc.)
-    struct BlueprintStep {
-        enum Type { SPAWN_POSTHOLE, BUILD_POST, BUILD_BEAM, SPAWN_SIDEWALL, SPAWN_ROOF } type;
-        glm::vec3 position{0.0f};     // SPAWN_POSTHOLE/SPAWN_ROOF: where to place it
-        std::string targetName;        // Posthole name (used by SPAWN_POSTHOLE and BUILD_POST)
-        glm::vec3 beamStart{0.0f};    // BUILD_BEAM: first corner position
-        glm::vec3 beamEnd{0.0f};      // BUILD_BEAM: second corner position
-        glm::vec3 wallStart{0.0f};    // SPAWN_SIDEWALL: one corner of the wall
-        glm::vec3 wallEnd{0.0f};      // SPAWN_SIDEWALL: other corner of the wall
-        float wallYaw = 0.0f;         // SPAWN_SIDEWALL: rotation of the wall panel
-        glm::vec3 roofCenter{0.0f};   // SPAWN_ROOF: center of the frame
-        glm::vec3 roofCorners[4];     // SPAWN_ROOF: corner positions for height reference
-        float roofFrontYaw = 0.0f;    // SPAWN_ROOF: NPC yaw at build time (front direction)
-    };
-    bool m_blueprintActive = false;
-    std::vector<BlueprintStep> m_blueprintSteps;
-    int m_blueprintCurrentStep = 0;
-    int m_blueprintSubStep = 0;        // Sub-state within current step
-    SceneObject* m_blueprintNPC = nullptr;
-    float m_blueprintGroundY = 0.0f;   // Ground level for the building
-    std::set<SceneObject*> m_blueprintUsedTimbers;  // Timber pointers already placed by this blueprint
-    SceneObject* m_blueprintPostholeTemplate = nullptr;  // Existing posthole to clone
-    SceneObject* m_blueprintRoofTemplate = nullptr;      // Existing roof to clone
-    SceneObject* m_blueprintSidewallTemplate = nullptr;  // Existing sidewall to clone
-    SceneObject* m_blueprintBeamTimber = nullptr;  // Current timber being placed as beam
 
     Gizmo m_gizmo;
 
@@ -11473,6 +10751,8 @@ private:
     std::string m_groveOutputAccum;  // accumulates log() output during eval
     std::string m_groveScriptsDir;   // ~/eden/scripts/
     SceneObject* m_groveBotTarget = nullptr;  // Current AlgoBot target for behavior functions
+    std::string m_groveCurrentScriptName = "grove_script";  // Name for behavior created by current script
+    GroveContext m_groveContext;
 
     // Grove logo texture
     VkImage m_groveLogoImage = VK_NULL_HANDLE;
@@ -11541,6 +10821,11 @@ private:
     int m_selectedObjectIndex = -1;
     std::set<int> m_selectedObjectIndices;  // For multi-select
     bool m_gizmoDragging = false;
+    TransformMode m_transformMode = TransformMode::Select;
+    glm::vec2 m_lastMousePos{0};
+    BrushMode m_prevBrushMode = BrushMode::Raise;
+    GizmoAxis m_gizmoHoveredAxis = GizmoAxis::None;
+    GizmoAxis m_gizmoActiveAxis = GizmoAxis::None;
 
     // Object groups (for organization only) - uses EditorUI::ObjectGroup
     std::vector<EditorUI::ObjectGroup> m_objectGroups;
@@ -11553,6 +10838,9 @@ private:
         glm::vec3 scale;
     };
     std::vector<SpawnRequest> m_pendingSpawns;
+
+    // Pending grove-spawned objects (buffered to avoid invalidating m_sceneObjects during iteration)
+    std::vector<std::unique_ptr<SceneObject>> m_pendingGroveSpawns;
 
     // Objects marked for destruction (processed after behavior updates)
     std::vector<SceneObject*> m_objectsToDestroy;
@@ -11689,12 +10977,25 @@ private:
     std::vector<Pirate> m_pirates;
 };
 
+static void crashHandler(int sig) {
+    std::cerr << "\n=== CRASH: signal " << sig << " ===" << std::endl;
+    void* frames[32];
+    int n = backtrace(frames, 32);
+    backtrace_symbols_fd(frames, n, STDERR_FILENO);
+    std::cerr << "=== END CRASH ===" << std::endl;
+    _exit(1);
+}
+
 int main() {
+    signal(SIGSEGV, crashHandler);
+    signal(SIGABRT, crashHandler);
+    signal(SIGFPE, crashHandler);
     try {
         TerrainEditor editor;
         editor.run();
     } catch (const std::exception& e) {
-        std::cerr << "Error: " << e.what() << std::endl;
+        std::cerr << "\n=== EXCEPTION: " << e.what() << " ===" << std::endl;
+        std::cerr.flush();
         return EXIT_FAILURE;
     }
 

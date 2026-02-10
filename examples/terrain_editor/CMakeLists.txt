@@ -1,4 +1,4 @@
-add_executable(terrain_editor main.cpp)
+add_executable(terrain_editor main.cpp grove_host.cpp)
 
 target_link_libraries(terrain_editor PRIVATE eden)
 
@@ -72,4 +72,12 @@ add_custom_command(TARGET terrain_editor POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
         ${CMAKE_CURRENT_SOURCE_DIR}/assets/grove_logo.png
         $<TARGET_FILE_DIR:terrain_editor>/grove_logo.png
+)
+
+# Copy Grove scripts to build directory
+add_custom_command(TARGET terrain_editor POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E make_directory $<TARGET_FILE_DIR:terrain_editor>/scripts
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+        ${CMAKE_CURRENT_SOURCE_DIR}/scripts
+        $<TARGET_FILE_DIR:terrain_editor>/scripts
 )
