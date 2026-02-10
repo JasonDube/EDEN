@@ -20,7 +20,7 @@
         
       
       
-      <link rel="icon" href="../../assets/images/favicon.png">
+      <link rel="icon" href="../../assets/grove_logo.png">
       <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.1">
     
     
@@ -94,8 +94,7 @@
   <nav class="md-header__inner md-grid" aria-label="Header">
     <a href="../.." title="EDEN Documentation" class="md-header__button md-logo" aria-label="EDEN Documentation" data-md-component="logo">
       
-  
-  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+  <img src="../../assets/grove_logo.png" alt="logo">
 
     </a>
     <label class="md-header__button md-icon" for="__drawer">
@@ -230,8 +229,7 @@
   <label class="md-nav__title" for="__drawer">
     <a href="../.." title="EDEN Documentation" class="md-nav__button md-logo" aria-label="EDEN Documentation" data-md-component="logo">
       
-  
-  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+  <img src="../../assets/grove_logo.png" alt="logo">
 
     </a>
     EDEN Documentation
@@ -266,6 +264,60 @@
     
   
     Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../getting-started/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Getting Started
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../conventions/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Conventions
   
 
     
@@ -327,10 +379,10 @@
       
         
         
-        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3" checked>
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5" checked>
         
           
-          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="">
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="">
             
   
   
@@ -348,8 +400,8 @@
             <span class="md-nav__icon md-icon"></span>
           </label>
         
-        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="true">
-          <label class="md-nav__title" for="__nav_3">
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_5">
             <span class="md-nav__icon md-icon"></span>
             
   
@@ -620,6 +672,17 @@
   
 </li>
       
+        <li class="md-nav__item">
+  <a href="#script-loading" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Script Loading
+      
+    </span>
+  </a>
+  
+</li>
+      
     </ul>
   
 </nav>
@@ -745,6 +808,17 @@
   
 </li>
       
+        <li class="md-nav__item">
+  <a href="#script-loading" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Script Loading
+      
+    </span>
+  </a>
+  
+</li>
+      
     </ul>
   
 </nav>
@@ -766,7 +840,7 @@
 
 
 <h1 id="function-reference">Function Reference<a class="headerlink" href="#function-reference" title="Permanent link">&para;</a></h1>
-<p>Complete list of all Grove host functions available in EDEN.</p>
+<p>Complete list of all 46 Grove host functions available in EDEN.</p>
 <h2 id="utility">Utility<a class="headerlink" href="#utility" title="Permanent link">&para;</a></h2>
 <table>
 <thead>
@@ -821,9 +895,9 @@
 <td>Load a <code>.glb</code> or <code>.lime</code> model at position. Bottom placed on terrain.</td>
 </tr>
 <tr>
-<td><code>spawn(name, pos)</code></td>
-<td>object</td>
-<td>Spawn a posthole object at position (legacy).</td>
+<td><code>clone(source_name, new_name, pos)</code></td>
+<td>bool</td>
+<td>Clone an existing scene object to a new position. Copies model, rotation, scale, and color.</td>
 </tr>
 <tr>
 <td><code>set_object_rotation(name, rx, ry, rz)</code></td>
@@ -999,6 +1073,36 @@
 <td>Set whether the behavior repeats. Default: false.</td>
 </tr>
 <tr>
+<td><code>pickup(name, gravity?, speed?)</code></td>
+<td>bool</td>
+<td>Queue walking to a named object and picking it up. Default speed 2.0.</td>
+</tr>
+<tr>
+<td><code>place_vertical(target, gravity?, speed?)</code></td>
+<td>bool</td>
+<td>Queue walking to target and placing carried item vertically into it.</td>
+</tr>
+<tr>
+<td><code>place_at(pos, gravity?, speed?)</code></td>
+<td>bool</td>
+<td>Queue walking to position and placing carried item on terrain.</td>
+</tr>
+<tr>
+<td><code>place_horizontal(target_a, target_b, gravity?, speed?)</code></td>
+<td>bool</td>
+<td>Queue placing carried item as horizontal beam between two targets.</td>
+</tr>
+<tr>
+<td><code>place_roof(corner1, corner2, corner3, corner4, gravity?, speed?)</code></td>
+<td>bool</td>
+<td>Queue placing carried item as roof on top of 4 corner posts.</td>
+</tr>
+<tr>
+<td><code>place_wall(post_a, post_b, gravity?, speed?)</code></td>
+<td>bool</td>
+<td>Queue placing carried item as wall panel between two posts.</td>
+</tr>
+<tr>
 <td><code>bot_clear()</code></td>
 <td>—</td>
 <td>Clear all queued actions on the target.</td>
@@ -1086,6 +1190,23 @@
 <td><code>can_build(vec3)</code></td>
 <td>bool</td>
 <td>Returns whether building is allowed at position.</td>
+</tr>
+</tbody>
+</table>
+<h2 id="script-loading">Script Loading<a class="headerlink" href="#script-loading" title="Permanent link">&para;</a></h2>
+<table>
+<thead>
+<tr>
+<th>Function</th>
+<th>Returns</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>run_file(path)</code></td>
+<td>bool</td>
+<td>Load and execute a <code>.grove</code> script file. Searches <code>scripts/</code> and bot-specific subdirectories.</td>
 </tr>
 </tbody>
 </table>
