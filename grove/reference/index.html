@@ -673,6 +673,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#math" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Math
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#script-loading" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -809,6 +820,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#math" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Math
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#script-loading" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -840,7 +862,7 @@
 
 
 <h1 id="function-reference">Function Reference<a class="headerlink" href="#function-reference" title="Permanent link">&para;</a></h1>
-<p>Complete list of all 46 Grove host functions available in EDEN.</p>
+<p>Complete list of all 56 Grove host functions available in EDEN.</p>
 <h2 id="utility">Utility<a class="headerlink" href="#utility" title="Permanent link">&para;</a></h2>
 <table>
 <thead>
@@ -890,6 +912,11 @@
 <td>Spawn a colored cylinder. Bottom placed on terrain.</td>
 </tr>
 <tr>
+<td><code>spawn_beam(name, pos1, pos2, thickness, r, g, b)</code></td>
+<td>bool</td>
+<td>Spawn a beam (stretched cube) between two positions. pos.y = height above terrain. Auto-computes length, rotation, and position.</td>
+</tr>
+<tr>
 <td><code>spawn_model(name, path, pos)</code></td>
 <td>bool</td>
 <td>Load a <code>.glb</code> or <code>.lime</code> model at position. Bottom placed on terrain.</td>
@@ -898,6 +925,11 @@
 <td><code>clone(source_name, new_name, pos)</code></td>
 <td>bool</td>
 <td>Clone an existing scene object to a new position. Copies model, rotation, scale, and color.</td>
+</tr>
+<tr>
+<td><code>object_pos(name)</code></td>
+<td>vec3 or nil</td>
+<td>Returns the world position of a named scene object. Returns nil if not found.</td>
 </tr>
 <tr>
 <td><code>set_object_rotation(name, rx, ry, rz)</code></td>
@@ -993,6 +1025,26 @@
 <td><code>queue_spawn_cylinder(name, pos, radius, height, r, g, b)</code></td>
 <td>bool</td>
 <td>Queue a cylinder spawn in the behavior sequence.</td>
+</tr>
+<tr>
+<td><code>queue_spawn_beam(name, pos1, pos2, thickness, r, g, b)</code></td>
+<td>bool</td>
+<td>Queue a primitive beam spawn in the behavior sequence.</td>
+</tr>
+<tr>
+<td><code>queue_spawn_beam_model(name, path, pos1, pos2)</code></td>
+<td>bool</td>
+<td>Queue a textured beam model between two points. Auto-computes rotation and scales to span length.</td>
+</tr>
+<tr>
+<td><code>queue_spawn_wall_panel(name, path, pos1, pos2)</code></td>
+<td>bool</td>
+<td>Queue a wall panel between two posts. Auto-computes midpoint, rotation, and width scaling. Works at any angle.</td>
+</tr>
+<tr>
+<td><code>queue_spawn_model(name, path, pos)</code></td>
+<td>bool</td>
+<td>Queue a model (.lime/.glb) spawn in the behavior sequence.</td>
 </tr>
 <tr>
 <td><code>queue_set_rotation(name, rx, ry, rz)</code></td>
@@ -1190,6 +1242,43 @@
 <td><code>can_build(vec3)</code></td>
 <td>bool</td>
 <td>Returns whether building is allowed at position.</td>
+</tr>
+</tbody>
+</table>
+<h2 id="math">Math<a class="headerlink" href="#math" title="Permanent link">&para;</a></h2>
+<table>
+<thead>
+<tr>
+<th>Function</th>
+<th>Returns</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>sin(radians)</code></td>
+<td>number</td>
+<td>Sine of angle in radians.</td>
+</tr>
+<tr>
+<td><code>cos(radians)</code></td>
+<td>number</td>
+<td>Cosine of angle in radians.</td>
+</tr>
+<tr>
+<td><code>atan2(y, x)</code></td>
+<td>number</td>
+<td>Arctangent of y/x in radians. Returns angle from -pi to pi.</td>
+</tr>
+<tr>
+<td><code>sqrt(n)</code></td>
+<td>number</td>
+<td>Square root.</td>
+</tr>
+<tr>
+<td><code>abs(n)</code></td>
+<td>number</td>
+<td>Absolute value.</td>
 </tr>
 </tbody>
 </table>
