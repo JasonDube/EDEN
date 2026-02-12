@@ -1,6 +1,6 @@
 # Function Reference
 
-Complete list of all 52 Grove host functions available in EDEN.
+Complete list of all 56 Grove host functions available in EDEN.
 
 ## Utility
 
