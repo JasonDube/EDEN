@@ -133,8 +133,8 @@ private:
     // Character state
     glm::vec3 m_position{0.0f};
     glm::vec3 m_velocity{0.0f};
-    float m_characterHeight = 1.8f;
-    float m_characterRadius = 0.3f;
+    float m_characterHeight = 0.9f;
+    float m_characterRadius = 0.15f;
     bool m_onGround = false;
     bool m_onSteepGround = false;
     glm::vec3 m_groundNormal{0, 1, 0};

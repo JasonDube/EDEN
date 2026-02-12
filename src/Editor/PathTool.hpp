@@ -26,7 +26,8 @@ public:
     void applyToPath(BrushMode mode, float radius, float strength, float falloff,
                      const glm::vec3& paintColor = glm::vec3(0.5f),
                      int textureIndex = 0,
-                     float texHue = 0.0f, float texSat = 1.0f, float texBright = 1.0f);
+                     float texHue = 0.0f, float texSat = 1.0f, float texBright = 1.0f,
+                     float targetElevation = 0.0f);
 
     // Preview position update (call each frame when in path mode)
     void updatePreview(float normalizedMouseX, float normalizedMouseY, float aspect);
@@ -43,6 +44,12 @@ public:
     // Generate tube mesh along the spline path
     LoadedMesh generateTubeMesh(float radius = 0.1f, int segments = 8,
                                  const glm::vec3& color = glm::vec3(0.2f, 0.2f, 0.2f)) const;
+
+    // Generate flat road mesh along the spline path
+    LoadedMesh generateRoadMesh(float width = 4.0f,
+                                 const glm::vec3& color = glm::vec3(0.4f, 0.4f, 0.4f),
+                                 bool useFixedY = false,
+                                 float fixedY = 0.0f) const;
 
 private:
     Terrain& m_terrain;

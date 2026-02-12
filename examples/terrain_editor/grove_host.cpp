@@ -53,6 +53,43 @@ static int32_t groveLogFn(const GroveValue* args, uint32_t argc, GroveValue* /*r
     return 0;
 }
 
+// ─── Math functions ───
+
+static int32_t groveSinFn(const GroveValue* args, uint32_t argc, GroveValue* result, void* /*ud*/) {
+    result->tag = GROVE_NUMBER;
+    if (argc < 1 || args[0].tag != GROVE_NUMBER) { result->data.number_val = 0.0; return 0; }
+    result->data.number_val = std::sin(args[0].data.number_val);
+    return 0;
+}
+
+static int32_t groveCosFn(const GroveValue* args, uint32_t argc, GroveValue* result, void* /*ud*/) {
+    result->tag = GROVE_NUMBER;
+    if (argc < 1 || args[0].tag != GROVE_NUMBER) { result->data.number_val = 0.0; return 0; }
+    result->data.number_val = std::cos(args[0].data.number_val);
+    return 0;
+}
+
+static int32_t groveAtan2Fn(const GroveValue* args, uint32_t argc, GroveValue* result, void* /*ud*/) {
+    result->tag = GROVE_NUMBER;
+    if (argc < 2 || args[0].tag != GROVE_NUMBER || args[1].tag != GROVE_NUMBER) { result->data.number_val = 0.0; return 0; }
+    result->data.number_val = std::atan2(args[0].data.number_val, args[1].data.number_val);
+    return 0;
+}
+
+static int32_t groveSqrtFn(const GroveValue* args, uint32_t argc, GroveValue* result, void* /*ud*/) {
+    result->tag = GROVE_NUMBER;
+    if (argc < 1 || args[0].tag != GROVE_NUMBER) { result->data.number_val = 0.0; return 0; }
+    result->data.number_val = std::sqrt(args[0].data.number_val);
+    return 0;
+}
+
+static int32_t groveAbsFn(const GroveValue* args, uint32_t argc, GroveValue* result, void* /*ud*/) {
+    result->tag = GROVE_NUMBER;
+    if (argc < 1 || args[0].tag != GROVE_NUMBER) { result->data.number_val = 0.0; return 0; }
+    result->data.number_val = std::abs(args[0].data.number_val);
+    return 0;
+}
+
 static int32_t groveTerrainHeightFn(const GroveValue* args, uint32_t argc, GroveValue* result, void* ud) {
     auto* ctx = static_cast<GroveContext*>(ud);
     if (argc < 1 || args[0].tag != GROVE_VEC3) {
@@ -160,15 +197,85 @@ static int32_t groveSpawnCylinderFn(const GroveValue* args, uint32_t argc, Grove
     obj->setPrimitiveSegments(12);
     obj->setPrimitiveColor(color);
 
-    // Position bottom on terrain
+    // Position bottom on terrain (mesh origin is at bottom, y=0 to y=height)
     float posX = static_cast<float>(args[1].data.vec3_val.x);
     float posZ = static_cast<float>(args[1].data.vec3_val.z);
     float terrainY = ctx->terrain->getHeightAt(posX, posZ);
-    float halfHeight = height * 0.5f;
-    obj->getTransform().setPosition(glm::vec3(posX, terrainY + halfHeight, posZ));
+    obj->getTransform().setPosition(glm::vec3(posX, terrainY, posZ));
 
     ctx->sceneObjects->push_back(std::move(obj));
-    std::cout << "[Grove] Spawned cylinder '" << name << "' at (" << posX << ", " << terrainY + halfHeight << ", " << posZ << ")" << std::endl;
+    std::cout << "[Grove] Spawned cylinder '" << name << "' at (" << posX << ", " << terrainY << ", " << posZ << ")" << std::endl;
+    result->data.bool_val = 1;
+    return 0;
+}
+
+// spawn_beam(name, pos1, pos2, thickness, r, g, b) → bool
+// Creates a beam (stretched cube) between two world positions.
+// pos.y values are height above terrain at that X,Z.
+static int32_t groveSpawnBeamFn(const GroveValue* args, uint32_t argc, GroveValue* result, void* ud) {
+    auto* ctx = static_cast<GroveContext*>(ud);
+    result->tag = GROVE_BOOL;
+    result->data.bool_val = 0;
+
+    if (argc < 7 || args[0].tag != GROVE_STRING || args[1].tag != GROVE_VEC3 ||
+        args[2].tag != GROVE_VEC3 || args[3].tag != GROVE_NUMBER ||
+        args[4].tag != GROVE_NUMBER || args[5].tag != GROVE_NUMBER || args[6].tag != GROVE_NUMBER) return 0;
+
+    auto& sv = args[0].data.string_val;
+    std::string name = (sv.ptr && sv.len > 0) ? std::string(sv.ptr, sv.len) : "grove_beam";
+    float thickness = static_cast<float>(args[3].data.number_val);
+    float r = static_cast<float>(args[4].data.number_val);
+    float g = static_cast<float>(args[5].data.number_val);
+    float b = static_cast<float>(args[6].data.number_val);
+    glm::vec4 color(r, g, b, 1.0f);
+
+    // Compute endpoint positions (Y = terrain height + pos.y offset)
+    float x1 = static_cast<float>(args[1].data.vec3_val.x);
+    float z1 = static_cast<float>(args[1].data.vec3_val.z);
+    float y1 = ctx->terrain->getHeightAt(x1, z1) + static_cast<float>(args[1].data.vec3_val.y);
+
+    float x2 = static_cast<float>(args[2].data.vec3_val.x);
+    float z2 = static_cast<float>(args[2].data.vec3_val.z);
+    float y2 = ctx->terrain->getHeightAt(x2, z2) + static_cast<float>(args[2].data.vec3_val.y);
+
+    // Compute beam geometry
+    float dx = x2 - x1;
+    float dy = y2 - y1;
+    float dz = z2 - z1;
+    float length = std::sqrt(dx * dx + dy * dy + dz * dz);
+    if (length < 0.001f) return 0;
+
+    float midX = (x1 + x2) * 0.5f;
+    float midY = (y1 + y2) * 0.5f;
+    float midZ = (z1 + z2) * 0.5f;
+
+    // Y rotation aligns local Z with horizontal direction
+    float rotY = std::atan2(dx, dz) * 180.0f / 3.14159265f;
+    // X rotation (pitch) for height differences
+    float horizDist = std::sqrt(dx * dx + dz * dz);
+    float rotX = -std::atan2(dy, horizDist) * 180.0f / 3.14159265f;
+
+    // Create unit cube, scale to beam dimensions (Z = length axis)
+    auto meshData = PrimitiveMeshBuilder::createCube(1.0f, color);
+    auto obj = std::make_unique<SceneObject>(name);
+    uint32_t handle = ctx->modelRenderer->createModel(meshData.vertices, meshData.indices);
+    obj->setBufferHandle(handle);
+    obj->setIndexCount(static_cast<uint32_t>(meshData.indices.size()));
+    obj->setVertexCount(static_cast<uint32_t>(meshData.vertices.size()));
+    obj->setLocalBounds(meshData.bounds);
+    obj->setModelPath("");
+    obj->setMeshData(meshData.vertices, meshData.indices);
+    obj->setPrimitiveType(PrimitiveType::Cube);
+    obj->setPrimitiveSize(1.0f);
+    obj->setPrimitiveColor(color);
+
+    obj->getTransform().setPosition(glm::vec3(midX, midY, midZ));
+    obj->getTransform().setScale(glm::vec3(thickness, thickness, length));
+    obj->setEulerRotation(glm::vec3(rotX, rotY, 0.0f));
+
+    ctx->sceneObjects->push_back(std::move(obj));
+    std::cout << "[Grove] Spawned beam '" << name << "' from (" << x1 << "," << y1 << "," << z1
+              << ") to (" << x2 << "," << y2 << "," << z2 << "), length=" << length << std::endl;
     result->data.bool_val = 1;
     return 0;
 }
@@ -189,11 +296,35 @@ static int32_t groveSpawnModelFn(const GroveValue* args, uint32_t argc, GroveVal
 
     if (modelPath.empty()) return 0;
 
-    // Resolve relative paths from current level directory
-    if (modelPath[0] != '/' && !ctx->currentLevelPath->empty()) {
-        size_t lastSlash = ctx->currentLevelPath->find_last_of("/\\");
-        if (lastSlash != std::string::npos) {
-            modelPath = ctx->currentLevelPath->substr(0, lastSlash + 1) + modelPath;
+    // Resolve relative paths — search multiple locations
+    if (modelPath[0] != '/') {
+        std::string resolved;
+        std::vector<std::string> searchPaths;
+
+        // 1. Same directory as current level file
+        if (!ctx->currentLevelPath->empty()) {
+            size_t lastSlash = ctx->currentLevelPath->find_last_of("/\\");
+            if (lastSlash != std::string::npos) {
+                searchPaths.push_back(ctx->currentLevelPath->substr(0, lastSlash + 1) + modelPath);
+            }
+        }
+        // 2. levels/ subdirectory
+        searchPaths.push_back("levels/" + modelPath);
+        // 3. CWD itself
+        searchPaths.push_back(modelPath);
+
+        for (const auto& candidate : searchPaths) {
+            std::ifstream test(candidate);
+            if (test.good()) {
+                resolved = candidate;
+                break;
+            }
+        }
+
+        if (!resolved.empty()) {
+            modelPath = resolved;
+        } else {
+            std::cout << "[Grove] Model not found in any search path for: " << modelPath << std::endl;
         }
     }
 
@@ -333,6 +464,30 @@ static int32_t groveCloneFn(const GroveValue* args, uint32_t argc, GroveValue* r
     return 0;
 }
 
+// object_pos(name) → vec3 or nil
+// Returns the world position of a named scene object. Useful for loops in Phase 2+.
+static int32_t groveObjectPos(const GroveValue* args, uint32_t argc, GroveValue* result, void* ud) {
+    auto* ctx = static_cast<GroveContext*>(ud);
+    result->tag = GROVE_NIL;
+
+    if (argc < 1 || args[0].tag != GROVE_STRING) return 0;
+
+    auto& sv = args[0].data.string_val;
+    std::string name = (sv.ptr && sv.len > 0) ? std::string(sv.ptr, sv.len) : "";
+
+    for (auto& obj : *ctx->sceneObjects) {
+        if (obj && obj->getName() == name) {
+            glm::vec3 pos = obj->getTransform().getPosition();
+            result->tag = GROVE_VEC3;
+            result->data.vec3_val.x = static_cast<double>(pos.x);
+            result->data.vec3_val.y = static_cast<double>(pos.y);
+            result->data.vec3_val.z = static_cast<double>(pos.z);
+            return 0;
+        }
+    }
+    return 0;  // returns nil if not found
+}
+
 // set_object_rotation(name, rx, ry, rz) → bool
 static int32_t groveSetObjectRotation(const GroveValue* args, uint32_t argc, GroveValue* result, void* ud) {
     auto* ctx = static_cast<GroveContext*>(ud);
@@ -405,14 +560,24 @@ static int32_t groveDeleteObject(const GroveValue* args, uint32_t argc, GroveVal
     return 0;
 }
 
-// ─── Helper: get the current script's behavior on the current bot target ───
+// ─── Helper: get the current script's behavior INDEX on the current bot target ───
+// Returns -1 if not found. Using index instead of pointer avoids dangling pointer
+// if the behaviors vector reallocates (e.g. addBehavior from another script).
 
-static Behavior* getBotScriptBehavior(GroveContext* ctx) {
-    if (!*ctx->groveBotTarget) return nullptr;
-    for (auto& b : (*ctx->groveBotTarget)->getBehaviors()) {
-        if (b.name == *ctx->groveCurrentScriptName) return &b;
+static int getBotScriptBehaviorIndex(GroveContext* ctx) {
+    if (!*ctx->groveBotTarget) return -1;
+    auto& behaviors = (*ctx->groveBotTarget)->getBehaviors();
+    for (size_t i = 0; i < behaviors.size(); i++) {
+        if (behaviors[i].name == *ctx->groveCurrentScriptName) return static_cast<int>(i);
     }
-    return nullptr;
+    return -1;
+}
+
+// Convenience: get pointer from index (call fresh each time, never cache the pointer)
+static Behavior* getBotScriptBehavior(GroveContext* ctx) {
+    int idx = getBotScriptBehaviorIndex(ctx);
+    if (idx < 0) return nullptr;
+    return &(*ctx->groveBotTarget)->getBehaviors()[idx];
 }
 
 // ─── Queued construction commands (execute during behavior sequence) ───
@@ -485,6 +650,164 @@ static int32_t groveQueueSpawnCylinder(const GroveValue* args, uint32_t argc, Gr
         std::to_string(args[4].data.number_val) + "|" +
         std::to_string(args[5].data.number_val) + "|" +
         std::to_string(args[6].data.number_val);
+
+    Action a;
+    a.type = ActionType::GROVE_COMMAND;
+    a.stringParam = cmd;
+    a.vec3Param = pos;
+    a.duration = 0.0f;
+    b->actions.push_back(a);
+
+    result->data.bool_val = 1;
+    return 0;
+}
+
+// queue_spawn_beam(name, pos1, pos2, thickness, r, g, b) — queue a beam spawn
+static int32_t groveQueueSpawnBeam(const GroveValue* args, uint32_t argc, GroveValue* result, void* ud) {
+    auto* ctx = static_cast<GroveContext*>(ud);
+    result->tag = GROVE_BOOL;
+    result->data.bool_val = 0;
+    if (!*ctx->groveBotTarget || argc < 7) return 0;
+
+    Behavior* b = getBotScriptBehavior(ctx);
+    if (!b) return 0;
+
+    if (args[0].tag != GROVE_STRING || args[1].tag != GROVE_VEC3 ||
+        args[2].tag != GROVE_VEC3 || args[3].tag != GROVE_NUMBER ||
+        args[4].tag != GROVE_NUMBER || args[5].tag != GROVE_NUMBER ||
+        args[6].tag != GROVE_NUMBER) return 0;
+
+    auto& sv = args[0].data.string_val;
+    std::string name = (sv.ptr && sv.len > 0) ? std::string(sv.ptr, sv.len) : "beam";
+
+    // pos1 goes in vec3Param
+    glm::vec3 pos1(static_cast<float>(args[1].data.vec3_val.x),
+                   static_cast<float>(args[1].data.vec3_val.y),
+                   static_cast<float>(args[1].data.vec3_val.z));
+
+    // Encode: "beam|name|p2x|p2y|p2z|thickness|r|g|b"
+    std::string cmd = "beam|" + name + "|" +
+        std::to_string(args[2].data.vec3_val.x) + "|" +
+        std::to_string(args[2].data.vec3_val.y) + "|" +
+        std::to_string(args[2].data.vec3_val.z) + "|" +
+        std::to_string(args[3].data.number_val) + "|" +
+        std::to_string(args[4].data.number_val) + "|" +
+        std::to_string(args[5].data.number_val) + "|" +
+        std::to_string(args[6].data.number_val);
+
+    Action a;
+    a.type = ActionType::GROVE_COMMAND;
+    a.stringParam = cmd;
+    a.vec3Param = pos1;
+    a.duration = 0.0f;
+    b->actions.push_back(a);
+
+    result->data.bool_val = 1;
+    return 0;
+}
+
+// queue_spawn_beam_model(name, path, pos1, pos2) — queue a model beam between two points
+static int32_t groveQueueSpawnBeamModel(const GroveValue* args, uint32_t argc, GroveValue* result, void* ud) {
+    auto* ctx = static_cast<GroveContext*>(ud);
+    result->tag = GROVE_BOOL;
+    result->data.bool_val = 0;
+    if (!*ctx->groveBotTarget || argc < 4) return 0;
+
+    Behavior* b = getBotScriptBehavior(ctx);
+    if (!b) return 0;
+
+    if (args[0].tag != GROVE_STRING || args[1].tag != GROVE_STRING ||
+        args[2].tag != GROVE_VEC3 || args[3].tag != GROVE_VEC3) return 0;
+
+    auto& nameSv = args[0].data.string_val;
+    std::string name = (nameSv.ptr && nameSv.len > 0) ? std::string(nameSv.ptr, nameSv.len) : "beam";
+    auto& pathSv = args[1].data.string_val;
+    std::string path = (pathSv.ptr && pathSv.len > 0) ? std::string(pathSv.ptr, pathSv.len) : "";
+
+    glm::vec3 pos1(static_cast<float>(args[2].data.vec3_val.x),
+                   static_cast<float>(args[2].data.vec3_val.y),
+                   static_cast<float>(args[2].data.vec3_val.z));
+
+    // Encode: "beam_model|name|path|p2x|p2y|p2z"
+    std::string cmd = "beam_model|" + name + "|" + path + "|" +
+        std::to_string(args[3].data.vec3_val.x) + "|" +
+        std::to_string(args[3].data.vec3_val.y) + "|" +
+        std::to_string(args[3].data.vec3_val.z);
+
+    Action a;
+    a.type = ActionType::GROVE_COMMAND;
+    a.stringParam = cmd;
+    a.vec3Param = pos1;
+    a.duration = 0.0f;
+    b->actions.push_back(a);
+
+    result->data.bool_val = 1;
+    return 0;
+}
+
+// queue_spawn_wall_panel(name, path, pos1, pos2) — queue a wall panel between two posts
+static int32_t groveQueueSpawnWallPanel(const GroveValue* args, uint32_t argc, GroveValue* result, void* ud) {
+    auto* ctx = static_cast<GroveContext*>(ud);
+    result->tag = GROVE_BOOL;
+    result->data.bool_val = 0;
+    if (!*ctx->groveBotTarget || argc < 4) return 0;
+
+    Behavior* b = getBotScriptBehavior(ctx);
+    if (!b) return 0;
+
+    if (args[0].tag != GROVE_STRING || args[1].tag != GROVE_STRING ||
+        args[2].tag != GROVE_VEC3 || args[3].tag != GROVE_VEC3) return 0;
+
+    auto& nameSv = args[0].data.string_val;
+    std::string name = (nameSv.ptr && nameSv.len > 0) ? std::string(nameSv.ptr, nameSv.len) : "wall";
+    auto& pathSv = args[1].data.string_val;
+    std::string path = (pathSv.ptr && pathSv.len > 0) ? std::string(pathSv.ptr, pathSv.len) : "";
+
+    glm::vec3 pos1(static_cast<float>(args[2].data.vec3_val.x),
+                   static_cast<float>(args[2].data.vec3_val.y),
+                   static_cast<float>(args[2].data.vec3_val.z));
+
+    // Encode: "wall_panel|name|path|p2x|p2y|p2z"
+    std::string cmd = "wall_panel|" + name + "|" + path + "|" +
+        std::to_string(args[3].data.vec3_val.x) + "|" +
+        std::to_string(args[3].data.vec3_val.y) + "|" +
+        std::to_string(args[3].data.vec3_val.z);
+
+    Action a;
+    a.type = ActionType::GROVE_COMMAND;
+    a.stringParam = cmd;
+    a.vec3Param = pos1;
+    a.duration = 0.0f;
+    b->actions.push_back(a);
+
+    result->data.bool_val = 1;
+    return 0;
+}
+
+// queue_spawn_model(name, path, pos) — queue a model spawn
+static int32_t groveQueueSpawnModel(const GroveValue* args, uint32_t argc, GroveValue* result, void* ud) {
+    auto* ctx = static_cast<GroveContext*>(ud);
+    result->tag = GROVE_BOOL;
+    result->data.bool_val = 0;
+    if (!*ctx->groveBotTarget || argc < 3) return 0;
+
+    Behavior* b = getBotScriptBehavior(ctx);
+    if (!b) return 0;
+
+    if (args[0].tag != GROVE_STRING || args[1].tag != GROVE_STRING ||
+        args[2].tag != GROVE_VEC3) return 0;
+
+    auto& nameSv = args[0].data.string_val;
+    std::string name = (nameSv.ptr && nameSv.len > 0) ? std::string(nameSv.ptr, nameSv.len) : "model";
+    auto& pathSv = args[1].data.string_val;
+    std::string path = (pathSv.ptr && pathSv.len > 0) ? std::string(pathSv.ptr, pathSv.len) : "";
+
+    glm::vec3 pos(static_cast<float>(args[2].data.vec3_val.x),
+                  static_cast<float>(args[2].data.vec3_val.y),
+                  static_cast<float>(args[2].data.vec3_val.z));
+
+    // Encode: "model|name|path"
+    std::string cmd = "model|" + name + "|" + path;
 
     Action a;
     a.type = ActionType::GROVE_COMMAND;
@@ -879,6 +1202,13 @@ static int32_t groveRunFile(const GroveValue* args, uint32_t argc, GroveValue* r
         path,
         "scripts/" + path,
     };
+    // Search relative to the loaded level file
+    if (ctx->currentLevelPath && !ctx->currentLevelPath->empty()) {
+        size_t lastSlash = ctx->currentLevelPath->find_last_of("/\\");
+        if (lastSlash != std::string::npos) {
+            searchPaths.push_back(ctx->currentLevelPath->substr(0, lastSlash + 1) + path);
+        }
+    }
     // Also search in the bot target's own scripts folder
     if (*ctx->groveBotTarget) {
         searchPaths.push_back("scripts/" + (*ctx->groveBotTarget)->getName() + "/" + path);
@@ -1229,29 +1559,29 @@ static int32_t groveBotRun(const GroveValue* args, uint32_t argc, GroveValue* re
     result->data.bool_val = 0;
     if (!*ctx->groveBotTarget) return 0;
 
-    Behavior* b = getBotScriptBehavior(ctx);
-    if (!b) return 0;
+    // Use index to avoid pointer invalidation
+    int bIdx = getBotScriptBehaviorIndex(ctx);
+    if (bIdx < 0) return 0;
+
+    auto& behaviors = (*ctx->groveBotTarget)->getBehaviors();
+    if (bIdx >= static_cast<int>(behaviors.size())) return 0;  // bounds check
+
+    Behavior& b = behaviors[bIdx];
 
     // Set trigger to ON_COMMAND — only runs when explicitly triggered
-    b->trigger = TriggerType::ON_COMMAND;
-    b->enabled = true;
+    b.trigger = TriggerType::ON_COMMAND;
+    b.enabled = true;
     result->data.bool_val = 1;
 
     // If already in play mode, start the behavior immediately
-    if (*ctx->isPlayMode && !b->actions.empty()) {
-        auto& behaviors = (*ctx->groveBotTarget)->getBehaviors();
-        for (size_t i = 0; i < behaviors.size(); i++) {
-            if (&behaviors[i] == b) {
-                (*ctx->groveBotTarget)->setActiveBehaviorIndex(static_cast<int>(i));
-                (*ctx->groveBotTarget)->setActiveActionIndex(0);
-                (*ctx->groveBotTarget)->resetPathComplete();
-                (*ctx->groveBotTarget)->clearPathWaypoints();
+    if (*ctx->isPlayMode && !b.actions.empty()) {
+        (*ctx->groveBotTarget)->setActiveBehaviorIndex(bIdx);
+        (*ctx->groveBotTarget)->setActiveActionIndex(0);
+        (*ctx->groveBotTarget)->resetPathComplete();
+        (*ctx->groveBotTarget)->clearPathWaypoints();
 
-                if (b->actions[0].type == ActionType::FOLLOW_PATH) {
-                    ctx->loadPathForAction(*ctx->groveBotTarget, b->actions[0]);
-                }
-                break;
-            }
+        if (b.actions[0].type == ActionType::FOLLOW_PATH) {
+            ctx->loadPathForAction(*ctx->groveBotTarget, b.actions[0]);
         }
     }
     return 0;
@@ -1424,13 +1754,20 @@ static int32_t grovePlotStatus(const GroveValue* args, uint32_t argc, GroveValue
 void registerGroveHostFunctions(GroveVm* vm, GroveContext* ctx) {
     grove_register_fn(vm, "log", groveLogFn, ctx->groveOutputAccum);
     grove_register_fn(vm, "terrain_height", groveTerrainHeightFn, ctx);
+    grove_register_fn(vm, "sin", groveSinFn, ctx);
+    grove_register_fn(vm, "cos", groveCosFn, ctx);
+    grove_register_fn(vm, "atan2", groveAtan2Fn, ctx);
+    grove_register_fn(vm, "sqrt", groveSqrtFn, ctx);
+    grove_register_fn(vm, "abs", groveAbsFn, ctx);
 
     // Construction primitives
     grove_register_fn(vm, "get_player_pos", groveGetPlayerPos, ctx);
     grove_register_fn(vm, "spawn_cube", groveSpawnCubeFn, ctx);
     grove_register_fn(vm, "spawn_cylinder", groveSpawnCylinderFn, ctx);
+    grove_register_fn(vm, "spawn_beam", groveSpawnBeamFn, ctx);
     grove_register_fn(vm, "spawn_model", groveSpawnModelFn, ctx);
     grove_register_fn(vm, "clone", groveCloneFn, ctx);
+    grove_register_fn(vm, "object_pos", groveObjectPos, ctx);
     grove_register_fn(vm, "set_object_rotation", groveSetObjectRotation, ctx);
     grove_register_fn(vm, "set_object_scale", groveSetObjectScale, ctx);
     grove_register_fn(vm, "delete_object", groveDeleteObject, ctx);
@@ -1438,6 +1775,10 @@ void registerGroveHostFunctions(GroveVm* vm, GroveContext* ctx) {
     // Queued construction commands (for behavior sequences)
     grove_register_fn(vm, "queue_spawn_cube", groveQueueSpawnCube, ctx);
     grove_register_fn(vm, "queue_spawn_cylinder", groveQueueSpawnCylinder, ctx);
+    grove_register_fn(vm, "queue_spawn_beam", groveQueueSpawnBeam, ctx);
+    grove_register_fn(vm, "queue_spawn_model", groveQueueSpawnModel, ctx);
+    grove_register_fn(vm, "queue_spawn_beam_model", groveQueueSpawnBeamModel, ctx);
+    grove_register_fn(vm, "queue_spawn_wall_panel", groveQueueSpawnWallPanel, ctx);
     grove_register_fn(vm, "queue_set_rotation", groveQueueSetRotation, ctx);
     grove_register_fn(vm, "queue_set_scale", groveQueueSetScale, ctx);
     grove_register_fn(vm, "queue_delete", groveQueueDelete, ctx);

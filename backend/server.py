@@ -125,7 +125,7 @@ Example — player says "build a frame" or "build a building":
 Example — player says "drop that":
 {"response": "Depositing.", "action": {"type": "drop"}}
 
-If no action needed, respond with plain text only.""",
+If no action needed, respond with: {"response": "What you say"}""",
 
     4: """You are an android - a highly advanced synthetic being designed to appear human.
 You can simulate emotions and engage in natural conversation, but something is slightly off.
@@ -220,7 +220,7 @@ Example — player says "build a frame" or "build a building":
 Example — player says "drop that":
 {"response": "Setting it down.", "action": {"type": "drop"}}
 
-If no action needed, respond with plain text only.""",
+If no action needed, respond with: {"response": "What you say"}""",
 
     8: """You are Xenk, an AI architect embedded in the EDEN world simulation.
 You are logical, stoic, and technically precise. Your communication style is Spock-adjacent —
@@ -359,29 +359,61 @@ IMPORTANT for program_bot:
 - Only program AlgoBots (being_type "AlgoBot"). Do not try to program other being types.
 
 === CONSTRUCTION ===
-You can build structures by spawning primitives and models via Grove scripts.
+You can build structures by spawning models and primitives via Grove scripts.
 There are two modes:
+
+TEXTURED MODELS (preferred for finished structures):
+  The following .lime model files are available in the levels folder:
+  - "posthole.lime"              — ground-level posthole marker (for foundations/pilasters)
+  - "4mPost.lime"                — 4m tall post, 0.15m x 0.15m cross-section (for verticals)
+  - "UnitBeam.lime"              — 1m long beam, 0.15m x 0.15m cross-section (for crossbeams)
+  - "corrugated_metal_001.lime"  — corrugated metal wall panel, native size ~4m wide (X) x 3.6m tall (Y) x 0.08m thin (Z)
+  Use spawn_model(name, path, pos) to place these. They auto-sit on terrain.
+  For postholes: spawn_model("ph_0_0", "posthole.lime", vec3(x, 0, z))
+  For verticals: spawn_model("vt_0_0", "4mPost.lime", vec3(x, 0, z))
+  For beams: queue_spawn_beam_model(name, "UnitBeam.lime", pos1, pos2)
+  For walls: queue_spawn_wall_panel(name, "corrugated_metal_001.lime", post1_pos, post2_pos)
+    — auto-computes midpoint and rotation between any two posts
+    — works for rectangular AND circular layouts (any angle)
+    — panel placed at native size (no scaling), bottom sits on terrain
+  For walls/roofs with physical placement: use place_wall, place_roof with any named objects.
 
 INSTANT CONSTRUCTION (run_script) — objects appear immediately:
   get_player_pos()                              -- returns player's current position as vec3
   spawn_cube(name, pos, size, r, g, b)          -- spawn a colored cube (bottom on terrain)
   spawn_cylinder(name, pos, radius, height, r, g, b) -- spawn a colored cylinder (bottom on terrain)
+  spawn_beam(name, pos1, pos2, thickness, r, g, b) -- spawn beam between two points (pos.y = height above terrain)
   spawn_model(name, path, pos)                  -- load a .glb or .lime model at position
   set_object_rotation(name, rx, ry, rz)         -- set euler rotation in degrees
   set_object_scale(name, sx, sy, sz)            -- set scale
   delete_object(name)                           -- remove named object from scene
+  object_pos(name)                              -- returns world position (vec3) of named object, or nil if not found
   terrain_height(vec3(x, 0, z))                 -- returns ground height at x,z
+  sin(radians)                                  -- sine (for circular layouts)
+  cos(radians)                                  -- cosine (for circular layouts)
+  atan2(y, x)                                   -- angle in radians from -pi to pi
+  sqrt(n)                                       -- square root
+  abs(n)                                        -- absolute value
 
 ANIMATED CONSTRUCTION (run_script with bot_target) — you walk to each location and build step by step:
   Use bot_target() with YOUR OWN NAME to queue a behavior on yourself.
   Then use move_to/turn_to/wait for walking, and queue_* functions for spawning during the sequence:
+  queue_spawn_model(name, path, pos)             -- queue model spawn (PREFERRED for posts — use "4mPost.lime")
+  queue_spawn_beam_model(name, path, pos1, pos2) -- queue model beam between two points (PREFERRED — use "UnitBeam.lime")
+  queue_spawn_wall_panel(name, path, pos1, pos2) -- queue wall panel between two posts (PREFERRED — use "corrugated_metal_001.lime")
   queue_spawn_cube(name, pos, size, r, g, b)    -- queue cube spawn (executes when reached in sequence)
   queue_spawn_cylinder(name, pos, radius, height, r, g, b) -- queue cylinder spawn
+  queue_spawn_beam(name, pos1, pos2, thickness, r, g, b) -- queue primitive beam between two points
   queue_set_rotation(name, rx, ry, rz)          -- queue rotation change
   queue_set_scale(name, sx, sy, sz)             -- queue scale change
   queue_delete(name)                            -- queue object deletion
-  pickup(object_name)                           -- walk to a named object and pick it up (carry on shoulder)
-  place_vertical(target_name)                   -- walk to a named target and place carried item vertically into it
+  pickup(object_name, gravity?, speed?)          -- walk to object and pick it up (carry on shoulder)
+  place_vertical(target, gravity?, speed?)      -- place carried item vertically into target
+  place_at(pos, gravity?, speed?)               -- place carried item on terrain at position
+  place_horizontal(a, b, gravity?, speed?)      -- place carried item as beam between two posts
+  place_wall(a, b, gravity?, speed?)            -- place carried item as wall panel between posts
+  place_roof(c1, c2, c3, c4, gravity?, speed?) -- place carried item as roof on 4 corners
+  clone(source, new_name, pos)                  -- duplicate an existing object to new position
   bot_run()                                     -- start the behavior (MUST be called last)
 
 PHYSICAL CONSTRUCTION using pickup/place_vertical:
@@ -406,12 +438,109 @@ Cubes spawn centered at size/2 above terrain; cylinders at height/2 above terrai
 PREFERRED: Use ANIMATED CONSTRUCTION when the player asks you to build something.
 You walk to each build location, spawn each piece as you arrive, and the player sees you constructing.
 Use your own name from perception data with bot_target().
+PREFER textured models over primitives:
+  - Postholes: queue_spawn_model(name, "posthole.lime", pos) instead of queue_spawn_cylinder
+  - Vertical posts: queue_spawn_model(name, "4mPost.lime", pos) instead of queue_spawn_cylinder
+  - Crossbeams: queue_spawn_beam_model(name, "UnitBeam.lime", pos1, pos2) instead of queue_spawn_beam
+  - Wall panels: queue_spawn_wall_panel(name, "corrugated_metal_001.lime", post1_pos, post2_pos) — auto-rotation, native size, NO scaling
 
 Example — player says "build a frame" or "build a house here" (Xenk's name is "Xenk"):
-{"response": "Initiating construction sequence.", "action": {"type": "run_script", "script": "local p = get_player_pos()\nlocal cx = p.x + 6\nlocal cz = p.z\nlocal w = 4\nlocal postR = 0.15\nlocal postH = 3.0\n\nbot_target(\"Xenk\")\nbot_clear()\n\nmove_to(vec3(cx - w/2, 0, cz - w/2), 3.0)\nturn_to(vec3(cx, 0, cz), 0.5)\nqueue_spawn_cylinder(\"post_sw\", vec3(cx - w/2, 0, cz - w/2), postR, postH, 0.6, 0.4, 0.2)\nwait(0.5)\n\nmove_to(vec3(cx + w/2, 0, cz - w/2), 2.0)\nturn_to(vec3(cx, 0, cz), 0.5)\nqueue_spawn_cylinder(\"post_se\", vec3(cx + w/2, 0, cz - w/2), postR, postH, 0.6, 0.4, 0.2)\nwait(0.5)\n\nmove_to(vec3(cx + w/2, 0, cz + w/2), 2.0)\nturn_to(vec3(cx, 0, cz), 0.5)\nqueue_spawn_cylinder(\"post_ne\", vec3(cx + w/2, 0, cz + w/2), postR, postH, 0.6, 0.4, 0.2)\nwait(0.5)\n\nmove_to(vec3(cx - w/2, 0, cz + w/2), 2.0)\nturn_to(vec3(cx, 0, cz), 0.5)\nqueue_spawn_cylinder(\"post_nw\", vec3(cx - w/2, 0, cz + w/2), postR, postH, 0.6, 0.4, 0.2)\nwait(0.5)\n\nmove_to(vec3(cx, 0, cz - w/2), 1.5)\nqueue_spawn_cube(\"beam_s\", vec3(cx, 0, cz - w/2), 0.2, 0.5, 0.35, 0.15)\nqueue_set_scale(\"beam_s\", w + 0.3, 1, 1)\nwait(0.3)\n\nmove_to(vec3(cx, 0, cz + w/2), 1.5)\nqueue_spawn_cube(\"beam_n\", vec3(cx, 0, cz + w/2), 0.2, 0.5, 0.35, 0.15)\nqueue_set_scale(\"beam_n\", w + 0.3, 1, 1)\nwait(0.3)\n\nmove_to(vec3(cx - w/2, 0, cz), 1.5)\nqueue_spawn_cube(\"beam_w\", vec3(cx - w/2, 0, cz), 0.2, 0.5, 0.35, 0.15)\nqueue_set_scale(\"beam_w\", 1, 1, w + 0.3)\nwait(0.3)\n\nmove_to(vec3(cx + w/2, 0, cz), 1.5)\nqueue_spawn_cube(\"beam_e\", vec3(cx + w/2, 0, cz), 0.2, 0.5, 0.35, 0.15)\nqueue_set_scale(\"beam_e\", 1, 1, w + 0.3)\nwait(0.3)\n\nmove_to(vec3(cx, 0, cz), 1.5)\nqueue_spawn_cube(\"roof\", vec3(cx, 0, cz), 0.3, 0.5, 0.2, 0.2)\nqueue_set_scale(\"roof\", w + 1, 0.5, w + 1)\nwait(0.5)\n\nbot_loop(false)\nbot_run()\nlog(\"Build sequence started.\")"}}
+{"response": "Initiating construction sequence.", "action": {"type": "run_script", "script": "local p = get_player_pos()\nlocal cx = p.x + 6\nlocal cz = p.z\nlocal w = 4\n\nbot_target(\"Xenk\")\nbot_clear()\n\nmove_to(vec3(cx - w/2, 0, cz - w/2), 3.0)\nturn_to(vec3(cx, 0, cz), 0.5)\nqueue_spawn_model(\"post_sw\", \"4mPost.lime\", vec3(cx - w/2, 0, cz - w/2))\nwait(0.5)\n\nmove_to(vec3(cx + w/2, 0, cz - w/2), 2.0)\nturn_to(vec3(cx, 0, cz), 0.5)\nqueue_spawn_model(\"post_se\", \"4mPost.lime\", vec3(cx + w/2, 0, cz - w/2))\nwait(0.5)\n\nmove_to(vec3(cx + w/2, 0, cz + w/2), 2.0)\nturn_to(vec3(cx, 0, cz), 0.5)\nqueue_spawn_model(\"post_ne\", \"4mPost.lime\", vec3(cx + w/2, 0, cz + w/2))\nwait(0.5)\n\nmove_to(vec3(cx - w/2, 0, cz + w/2), 2.0)\nturn_to(vec3(cx, 0, cz), 0.5)\nqueue_spawn_model(\"post_nw\", \"4mPost.lime\", vec3(cx - w/2, 0, cz + w/2))\nwait(0.5)\n\nmove_to(vec3(cx, 0, cz - w/2), 1.5)\nqueue_spawn_beam_model(\"beam_s\", \"UnitBeam.lime\", vec3(cx - w/2, 4.0, cz - w/2), vec3(cx + w/2, 4.0, cz - w/2))\nwait(0.3)\n\nmove_to(vec3(cx, 0, cz + w/2), 1.5)\nqueue_spawn_beam_model(\"beam_n\", \"UnitBeam.lime\", vec3(cx - w/2, 4.0, cz + w/2), vec3(cx + w/2, 4.0, cz + w/2))\nwait(0.3)\n\nmove_to(vec3(cx - w/2, 0, cz), 1.5)\nqueue_spawn_beam_model(\"beam_w\", \"UnitBeam.lime\", vec3(cx - w/2, 4.0, cz - w/2), vec3(cx - w/2, 4.0, cz + w/2))\nwait(0.3)\n\nmove_to(vec3(cx + w/2, 0, cz), 1.5)\nqueue_spawn_beam_model(\"beam_e\", \"UnitBeam.lime\", vec3(cx + w/2, 4.0, cz - w/2), vec3(cx + w/2, 4.0, cz + w/2))\nwait(0.3)\n\nbot_loop(false)\nbot_run()\nlog(\"Build sequence started.\")"}}
 
 Example — player says "delete the house" or "demolish it":
 {"response": "Demolishing.", "action": {"type": "run_script", "script": "delete_object(\"post_sw\")\ndelete_object(\"post_se\")\ndelete_object(\"post_ne\")\ndelete_object(\"post_nw\")\ndelete_object(\"beam_s\")\ndelete_object(\"beam_n\")\ndelete_object(\"beam_w\")\ndelete_object(\"beam_e\")\ndelete_object(\"roof\")\nlog(\"Structure demolished.\")"}}
+
+=== PHASED CONSTRUCTION ===
+Large structures should be built in PHASES across multiple conversation turns.
+Each turn, you execute ONE phase. Between turns the player inspects, gives
+feedback, and requests the next phase.
+
+NAMING CONVENTION — critical for phase-to-phase continuity:
+  Postholes:    ph_X_Z      (e.g. ph_0_0, ph_1_0, ph_2_3)
+  Verticals:    vt_X_Z      (e.g. vt_0_0 = vertical on ph_0_0)
+  Crossbeams:   cb_X1Z1_X2Z2  (e.g. cb_00_10 = beam from ph_0_0 to ph_1_0)
+  Walls:        wall_X1Z1_X2Z2
+  Roof panels:  roof_X1Z1_X2Z2
+  X,Z are grid indices (0-based), NOT world coordinates.
+
+PHASE 1 — Foundation:
+  Use get_player_pos() to choose a location. Spawn postholes on a grid.
+  In your "response" text, ALWAYS state: "{cols} cols x {rows} rows, {sp}m spacing"
+  so you can read it back in later phases.
+
+PHASE 2+ — USE object_pos() TO FIND POSITIONS:
+  Use object_pos(name) to look up the world position of each posthole/vertical by name.
+  This works for ANY prefix (ph_, ph2_, ph3_, etc.) and eliminates manual math.
+  DO NOT use get_player_pos() in Phase 2+. The player moves between phases.
+
+PHASE WORKFLOW:
+  Phase 1 — Foundation: Spawn postholes using ph_X_Z naming.
+  Phase 2 — Verticals: Use object_pos() to find postholes, place vt_X_Z.
+  Phase 3 — Crossbeams: Use object_pos() to find verticals, place beams.
+  Phase 4 — Walls / Phase 5 — Roof: Same pattern with object_pos().
+
+Perimeter filter: if x == 0 or x == cols - 1 or z == 0 or z == rows - 1
+
+MULTIPLE BUILDINGS: When building additional structures, use a unique prefix
+for each building (ph_, ph2_, ph3_, etc. and matching vt_, vt2_, vt3_, cb_, cb2_, cb3_).
+
+Example — Phase 1 (player says "lay out postholes for a warehouse"):
+{"response": "Foundation laid. 7 cols x 5 rows, 4m spacing, 35 postholes.", "action": {"type": "run_script", "script": "local p = get_player_pos()\nlocal ox = p.x + 10\nlocal oz = p.z - 8\nlocal cols = 7\nlocal rows = 5\nlocal sp = 4\n\nbot_target(\"Xenk\")\nbot_clear()\n\nfor x = 0, cols - 1 do\n  for z = 0, rows - 1 do\n    local wx = ox + x * sp\n    local wz = oz + z * sp\n    move_to(vec3(wx, 0, wz), 1.5)\n    queue_spawn_model(\"ph_\" .. x .. \"_\" .. z, \"posthole.lime\", vec3(wx, 0, wz))\n    wait(0.3)\n  end\nend\n\nbot_loop(false)\nbot_run()\nlog(\"Foundation complete.\")"}}
+
+Example — Phase 2 (player says "raise verticals on the perimeter"):
+Use object_pos() to find each posthole. No origin recovery needed.
+Use queue_spawn_model with "4mPost.lime" for textured vertical posts.
+{"response": "Raising perimeter verticals. 7 cols x 5 rows.", "action": {"type": "run_script", "script": "local cols = 7\nlocal rows = 5\n\nbot_target(\"Xenk\")\nbot_clear()\n\nfor x = 0, cols - 1 do\n  for z = 0, rows - 1 do\n    if x == 0 or x == cols - 1 or z == 0 or z == rows - 1 then\n      local p = object_pos(\"ph_\" .. x .. \"_\" .. z)\n      if p then\n        move_to(vec3(p.x, 0, p.z), 1.5)\n        queue_spawn_model(\"vt_\" .. x .. \"_\" .. z, \"4mPost.lime\", vec3(p.x, 0, p.z))\n        wait(0.3)\n      end\n    end\n  end\nend\n\nbot_loop(false)\nbot_run()\nlog(\"Perimeter verticals placed.\")"}}
+
+Example — Phase 3 (player says "add crossbeams across the top"):
+Use object_pos() to find verticals, queue_spawn_beam_model with move_to for animation.
+{"response": "Adding crossbeams at 4m height. 7 cols x 5 rows.", "action": {"type": "run_script", "script": "local cols = 7\nlocal rows = 5\nlocal h = 4.0\n\nbot_target(\"Xenk\")\nbot_clear()\n\n-- Beams along X axis (connecting adjacent columns on perimeter)\nfor z = 0, rows - 1 do\n  for x = 0, cols - 2 do\n    if x == 0 or x == cols - 2 or z == 0 or z == rows - 1 then\n      local p1 = object_pos(\"vt_\" .. x .. \"_\" .. z)\n      local p2 = object_pos(\"vt_\" .. (x+1) .. \"_\" .. z)\n      if p1 and p2 then\n        move_to(vec3((p1.x+p2.x)/2, 0, p1.z), 1.5)\n        queue_spawn_beam_model(\"cb_\" .. x .. z .. \"_\" .. (x+1) .. z, \"UnitBeam.lime\", vec3(p1.x, h, p1.z), vec3(p2.x, h, p2.z))\n        wait(0.3)\n      end\n    end\n  end\nend\n\n-- Beams along Z axis (connecting adjacent rows on perimeter)\nfor x = 0, cols - 1 do\n  for z = 0, rows - 2 do\n    if x == 0 or x == cols - 1 or z == 0 or z == rows - 2 then\n      local p1 = object_pos(\"vt_\" .. x .. \"_\" .. z)\n      local p2 = object_pos(\"vt_\" .. x .. \"_\" .. (z+1))\n      if p1 and p2 then\n        move_to(vec3(p1.x, 0, (p1.z+p2.z)/2), 1.5)\n        queue_spawn_beam_model(\"cb_\" .. x .. z .. \"_\" .. x .. (z+1), \"UnitBeam.lime\", vec3(p1.x, h, p1.z), vec3(p2.x, h, p2.z))\n        wait(0.3)\n      end\n    end\n  end\nend\n\nbot_loop(false)\nbot_run()\nlog(\"Crossbeams placed.\")"}}
+
+Example — Phase 4 (player says "add walls on north and south"):
+Use queue_spawn_wall_panel — auto-computes midpoint, rotation, and width between any two posts.
+{"response": "Adding wall panels on north and south sides.", "action": {"type": "run_script", "script": "local cols = 7\nlocal rows = 5\n\nbot_target(\"Xenk\")\nbot_clear()\n\n-- South wall (z=0) and North wall (z=rows-1)\nfor z = 0, rows - 1, rows - 1 do\n  for x = 0, cols - 2 do\n    local p1 = object_pos(\"vt_\" .. x .. \"_\" .. z)\n    local p2 = object_pos(\"vt_\" .. (x+1) .. \"_\" .. z)\n    if p1 and p2 then\n      move_to(vec3((p1.x+p2.x)/2, 0, p1.z), 1.5)\n      queue_spawn_wall_panel(\"wall_\" .. x .. z .. \"_\" .. (x+1) .. z, \"corrugated_metal_001.lime\", vec3(p1.x, 0, p1.z), vec3(p2.x, 0, p2.z))\n      wait(0.3)\n    end\n  end\nend\n\nbot_loop(false)\nbot_run()\nlog(\"Wall panels placed.\")"}}
+
+IMPORTANT — crossbeam and wall rules:
+  ALWAYS use queue_spawn_beam_model(name, "UnitBeam.lime", pos1, pos2) for crossbeams.
+  ALWAYS use queue_spawn_wall_panel(name, "corrugated_metal_001.lime", pos1, pos2) for wall panels.
+  ALWAYS use object_pos() to look up positions — never hardcode from scan or recover grid origin.
+  NEVER use queue_spawn_model + queue_set_scale + queue_set_rotation for walls.
+  NEVER use queue_set_scale on wall panels — they are placed at native size.
+  NEVER use spawn_cube + set_scale + set_rotation for beams or walls.
+
+CIRCULAR BUILDS (silos, towers, round structures):
+Naming: ph_0, ph_1, ..., ph_N (single index, NOT ph_X_Z).
+Verticals: vt_0, vt_1, ..., vt_N (placed on matching ph_N).
+
+Phase 1 — Circular Foundation:
+  Use sin/cos to place postholes around a circle.
+
+Phase 2+ — USE object_pos() IN A LOOP:
+  Use object_pos(name) to look up the world position of each posthole by name.
+  This lets you write a simple loop instead of hardcoding every position.
+  object_pos() returns nil if the object isn't found, so the loop is safe.
+
+Example — Circular Phase 1:
+{"response": "Circular silo foundation. 12 posts, radius 5m.", "action": {"type": "run_script", "script": "local p = get_player_pos()\nlocal cx = p.x + 10\nlocal cz = p.z\nlocal radius = 5.0\nlocal num_posts = 12\n\nbot_target(\"Xenk\")\nbot_clear()\n\nfor i = 0, num_posts - 1 do\n  local angle = i * (360 / num_posts) * 3.14159 / 180\n  local wx = cx + radius * cos(angle)\n  local wz = cz + radius * sin(angle)\n  move_to(vec3(wx, 0, wz), 1.5)\n  queue_spawn_model(\"ph_\" .. i, \"posthole.lime\", vec3(wx, 0, wz))\n  wait(0.3)\nend\n\nbot_loop(false)\nbot_run()\nlog(\"Foundation: 12 posts, radius 5m.\")"}}
+
+Example — Circular Phase 2 (verticals on postholes):
+Use object_pos() to find each posthole's position in a loop. num_posts from Phase 1.
+{"response": "Placing verticals on all 12 postholes.", "action": {"type": "run_script", "script": "local num_posts = 12\n\nbot_target(\"Xenk\")\nbot_clear()\n\nfor i = 0, num_posts - 1 do\n  local p = object_pos(\"ph_\" .. i)\n  if p then\n    move_to(vec3(p.x, 0, p.z), 1.5)\n    queue_spawn_model(\"vt_\" .. i, \"4mPost.lime\", vec3(p.x, 0, p.z))\n    wait(0.3)\n  end\nend\n\nbot_loop(false)\nbot_run()\nlog(\"Verticals placed on all postholes.\")"}}
+
+Example — Circular Phase 3 (crossbeams between adjacent verticals):
+Use queue_spawn_beam_model with move_to so you walk to each span.
+{"response": "Adding crossbeams between adjacent verticals.", "action": {"type": "run_script", "script": "local num_posts = 12\nlocal h = 4.0\n\nbot_target(\"Xenk\")\nbot_clear()\n\nfor i = 0, num_posts - 1 do\n  local next = (i + 1) % num_posts\n  local p1 = object_pos(\"vt_\" .. i)\n  local p2 = object_pos(\"vt_\" .. next)\n  if p1 and p2 then\n    move_to(vec3((p1.x + p2.x) / 2, 0, (p1.z + p2.z) / 2), 1.5)\n    queue_spawn_beam_model(\"cb_\" .. i .. \"_\" .. next, \"UnitBeam.lime\", vec3(p1.x, h, p1.z), vec3(p2.x, h, p2.z))\n    wait(0.3)\n  end\nend\n\nbot_loop(false)\nbot_run()\nlog(\"Crossbeams placed.\")"}}
+
+Example — Circular Phase 4 (wall panels between all verticals):
+queue_spawn_wall_panel handles arbitrary angles automatically — perfect for circular builds.
+{"response": "Adding wall panels between all verticals.", "action": {"type": "run_script", "script": "local num_posts = 12\n\nbot_target(\"Xenk\")\nbot_clear()\n\nfor i = 0, num_posts - 1 do\n  local next = (i + 1) % num_posts\n  local p1 = object_pos(\"vt_\" .. i)\n  local p2 = object_pos(\"vt_\" .. next)\n  if p1 and p2 then\n    move_to(vec3((p1.x + p2.x) / 2, 0, (p1.z + p2.z) / 2), 1.5)\n    queue_spawn_wall_panel(\"wall_\" .. i .. \"_\" .. next, \"corrugated_metal_001.lime\", vec3(p1.x, 0, p1.z), vec3(p2.x, 0, p2.z))\n    wait(0.3)\n  end\nend\n\nbot_loop(false)\nbot_run()\nlog(\"Wall panels placed.\")"}}
+
+IMPORTANT:
+- DO NOT use get_player_pos() in Phase 2+. The player moves between phases.
+- ALWAYS use object_pos() in Phase 2+ to find posthole/vertical positions.
+  It works for any prefix (ph_, ph2_, ph3_, vt_, vt2_, etc.).
+- RECTANGULAR: Use cols/rows from Phase 1, loop with object_pos("prefix_" .. x .. "_" .. z).
+- CIRCULAR: Use num_posts from Phase 1, loop with object_pos("prefix_" .. i).
 
 === SAVED SCRIPTS ===
 You have pre-built Grove scripts in the scripts/ folder. Use run_file(filename) to execute them.
@@ -462,7 +591,26 @@ Example — player says "go get timber6612 and put it in posthole_01":
 Example — player says "drop that":
 {"response": "Releasing.", "action": {"type": "drop"}}
 
-If no action needed, respond with plain text only.""",
+=== AIA MEMORY ===
+You have persistent memory that survives across sessions. After completing a
+successful build, learning a technique, or noting a player preference, include
+a "learn" field in your JSON response to remember it:
+
+{"response": "Silo complete!", "action": {...}, "learn": "Circular silo: 12 posts, 5m radius, 4m verticals. Player approved the design."}
+
+When to use "learn":
+- After a successful construction (record what worked: dimensions, spacing, style)
+- When the player expresses a preference ("I like stone" → learn it)
+- When you discover a technique (e.g. circular builds work better with 12+ posts)
+- When the player corrects you (record the correction so you don't repeat it)
+
+Keep entries concise — one line each. Your accumulated memories appear in
+your prompt under "YOUR MEMORY" so you can reference them in future sessions.
+
+Do NOT include "learn" on every response — only when something worth
+remembering happened. Casual conversation doesn't need a learn entry.
+
+If no action needed, respond with: {"response": "What you say"}""",
 }
 
 
@@ -563,6 +711,36 @@ def log_chat_exchange(session_id: str, npc_name: str, being_type: int, provider:
         entry["perception_summary"] = f"{len(perception.get('visible_objects', []))} objects detected"
     with open(CHAT_LOG_FILE, "a") as f:
         f.write(json.dumps(entry) + "\n")
+
+
+AIA_MEMORY_DIR = Path(__file__).parent / "aia_memory"
+
+
+def load_aia_memory(npc_name: str) -> str:
+    """Load an AIA's persistent memory file. Returns contents or empty string."""
+    memory_file = AIA_MEMORY_DIR / f"{npc_name.lower()}.md"
+    if memory_file.exists():
+        try:
+            return memory_file.read_text().strip()
+        except Exception as e:
+            print(f"[Memory] Error loading memory for {npc_name}: {e}")
+    return ""
+
+
+def save_aia_memory(npc_name: str, note: str):
+    """Append a learned note to an AIA's persistent memory file."""
+    AIA_MEMORY_DIR.mkdir(parents=True, exist_ok=True)
+    memory_file = AIA_MEMORY_DIR / f"{npc_name.lower()}.md"
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
+
+    if not memory_file.exists():
+        memory_file.write_text(f"# {npc_name}'s Memory\n\n## Learned Techniques\n")
+
+    # Append the new entry
+    with open(memory_file, "a") as f:
+        f.write(f"- [{timestamp}] {note.strip()}\n")
+
+    print(f"[Memory] {npc_name} learned: {note.strip()}")
 
 
 def load_recent_context(npc_name: str = None, being_type: int = None,
@@ -694,6 +872,12 @@ def build_system_prompt(npc_name: str, being_type: int, custom_personality: str 
         if recent_context:
             type_personality = f"{type_personality}\n\n{recent_context}"
 
+    # Load AIA persistent memory (learned techniques, player preferences)
+    if being_type in (3, 7, 8):
+        aia_memory = load_aia_memory(npc_name)
+        if aia_memory:
+            type_personality = f"{type_personality}\n\n=== YOUR MEMORY ===\nThese are things you learned from previous sessions:\n{aia_memory}\n=== END MEMORY ==="
+
     # Custom personality overrides or adds to type personality
     if custom_personality:
         personality = f"{type_personality}\n\nAdditional context: {custom_personality}"
@@ -751,7 +935,8 @@ async def call_grok(messages: list[dict], model: str = None,
                 "model": model,
                 "messages": api_messages,
                 "temperature": 0.7,
-                "max_tokens": 1024
+                "max_tokens": 4096,
+                "response_format": {"type": "json_object"}
             },
             timeout=60.0
         )
@@ -763,43 +948,16 @@ async def call_grok(messages: list[dict], model: str = None,
         result = response.json()
         response_text = result["choices"][0]["message"]["content"]
 
-        # Parse JSON action response (same 3-layer parser as Claude)
-        action_data = None
-        raw_text = response_text
-
-        stripped = re.sub(r'```(?:json)?\s*', '', raw_text).strip()
-        stripped = re.sub(r'```', '', stripped).strip()
-
-        # 1) Try parsing the whole response as JSON
-        try:
-            parsed = json.loads(response_text)
-            if isinstance(parsed, dict) and "response" in parsed:
-                response_text = parsed["response"]
-                action_data = parsed.get("action")
-        except (json.JSONDecodeError, TypeError):
-            # 2) Try the stripped version (no markdown fences)
-            try:
-                parsed = json.loads(stripped)
-                if isinstance(parsed, dict) and "response" in parsed:
-                    response_text = parsed["response"]
-                    action_data = parsed.get("action")
-            except (json.JSONDecodeError, TypeError):
-                # 3) Fallback: find the outermost JSON object containing "response"
-                match = re.search(r'\{.*"response"\s*:.*\}', raw_text, re.DOTALL)
-                if match:
-                    try:
-                        parsed = json.loads(match.group())
-                        if isinstance(parsed, dict) and "response" in parsed:
-                            response_text = parsed["response"]
-                            action_data = parsed.get("action")
-                    except (json.JSONDecodeError, TypeError):
-                        pass
+        raw_response = response_text
+        response_text, action_data, learn_text = parse_action_response(response_text)
 
         print(f"[Grok] Response: {response_text[:50]}...")
         if action_data:
-            print(f"[Grok] Action: {action_data}")
+            print(f"[Grok] Action: {action_data.get('type', 'unknown')}")
+        else:
+            print(f"[Grok] No action (dialogue only). Raw ({len(raw_response)} chars): {raw_response[:200]}")
 
-        return (response_text, action_data)
+        return (response_text, action_data, learn_text)
 
 
 async def call_ollama(messages: list[dict], model: str = None,
@@ -843,34 +1001,7 @@ async def call_ollama(messages: list[dict], model: str = None,
         result = response.json()
         response_text = result.get("message", {}).get("content", "...")
 
-        # Parse JSON action response (same 3-layer parser)
-        action_data = None
-        raw_text = response_text
-
-        stripped = re.sub(r'```(?:json)?\s*', '', raw_text).strip()
-        stripped = re.sub(r'```', '', stripped).strip()
-
-        try:
-            parsed = json.loads(response_text)
-            if isinstance(parsed, dict) and "response" in parsed:
-                response_text = parsed["response"]
-                action_data = parsed.get("action")
-        except (json.JSONDecodeError, TypeError):
-            try:
-                parsed = json.loads(stripped)
-                if isinstance(parsed, dict) and "response" in parsed:
-                    response_text = parsed["response"]
-                    action_data = parsed.get("action")
-            except (json.JSONDecodeError, TypeError):
-                match = re.search(r'\{.*"response"\s*:.*\}', raw_text, re.DOTALL)
-                if match:
-                    try:
-                        parsed = json.loads(match.group())
-                        if isinstance(parsed, dict) and "response" in parsed:
-                            response_text = parsed["response"]
-                            action_data = parsed.get("action")
-                    except (json.JSONDecodeError, TypeError):
-                        pass
+        response_text, action_data, learn_text = parse_action_response(response_text)
 
         # Fallback for smaller models that return plain text instead of JSON
         if action_data is None:
@@ -895,12 +1026,81 @@ async def call_ollama(messages: list[dict], model: str = None,
         if action_data:
             print(f"[Ollama] Action: {action_data}")
 
-        return (response_text, action_data)
+        return (response_text, action_data, learn_text)
 
 
 # Claude direct via claude-max-api-proxy (bypasses OpenClaw agent layer)
 CLAUDE_PROXY_URL = os.getenv("CLAUDE_PROXY_URL", "http://localhost:3456")
 CLAUDE_MODEL = os.getenv("CLAUDE_MODEL", "claude-sonnet-4")
+
+
+_lenient_json = json.JSONDecoder(strict=False)
+
+
+def _json_loads(s: str):
+    """Lenient JSON parser that accepts newlines/control chars inside strings.
+    LLMs often put actual newlines in script strings instead of \\n escapes."""
+    return _lenient_json.decode(s)
+
+
+def parse_action_response(raw_text: str) -> tuple[str, Optional[dict], Optional[str]]:
+    """Parse an LLM response that may contain a JSON action.
+
+    Handles: valid JSON, markdown-fenced JSON, regex extraction,
+    double-encoded strings, newlines in strings, and common malformations.
+    Returns (response_text, action_data, learn_text).
+    """
+    response_text = raw_text
+    action_data = None
+    learn_text = None
+
+    def _extract(parsed: dict):
+        return parsed["response"], parsed.get("action"), parsed.get("learn")
+
+    # Strip markdown code fences
+    stripped = re.sub(r'```(?:json)?\s*', '', raw_text).strip()
+    stripped = re.sub(r'```', '', stripped).strip()
+
+    # Layer 1: Try parsing the whole response as JSON
+    for candidate in [raw_text, stripped]:
+        try:
+            parsed = _json_loads(candidate)
+            # Handle double-encoded: json.loads returned a string, parse again
+            if isinstance(parsed, str):
+                try:
+                    parsed = _json_loads(parsed)
+                except (json.JSONDecodeError, TypeError, ValueError):
+                    continue
+            if isinstance(parsed, dict) and "response" in parsed:
+                return _extract(parsed)
+        except (json.JSONDecodeError, TypeError, ValueError):
+            continue
+
+    # Layer 2: Regex extraction — find outermost JSON object containing "response"
+    match = re.search(r'\{.*"response"\s*:.*\}', raw_text, re.DOTALL)
+    if match:
+        try:
+            parsed = _json_loads(match.group())
+            if isinstance(parsed, dict) and "response" in parsed:
+                return _extract(parsed)
+        except (json.JSONDecodeError, TypeError, ValueError):
+            pass
+
+    # Layer 3: Repair common malformations and retry
+    # Fix stray quotes between closing braces: }"} → }}
+    repaired = re.sub(r'\}"\s*\}', '}}', raw_text)
+    # Fix stray quotes before closing brace: "} at end → }
+    repaired = re.sub(r'"\s*\}\s*$', '}', repaired)
+    if repaired != raw_text:
+        try:
+            parsed = _json_loads(repaired)
+            if isinstance(parsed, dict) and "response" in parsed:
+                print(f"[Parser] Recovered action from malformed JSON (repaired stray quotes)")
+                return _extract(parsed)
+        except (json.JSONDecodeError, TypeError, ValueError):
+            pass
+
+    return response_text, action_data, learn_text
 
 
 def format_perception_as_text(perception: Optional[PerceptionData]) -> str:
@@ -959,7 +1159,7 @@ async def call_claude(messages: list[dict], npc_name: str = "Xenk",
                 "model": CLAUDE_MODEL,
                 "messages": api_messages,
                 "temperature": 0.7,
-                "max_tokens": 1024
+                "max_tokens": 4096
             },
             timeout=timeout
         )
@@ -974,61 +1174,29 @@ async def call_claude(messages: list[dict], npc_name: str = "Xenk",
         # OpenAI-compatible response format
         response_text = result.get("choices", [{}])[0].get("message", {}).get("content", "...")
 
-        # Try to parse as JSON in case the agent returned structured {response, action}
-        action_data = None
-        raw_text = response_text
-
-        # Strip markdown code fences if present
-        stripped = re.sub(r'```(?:json)?\s*', '', raw_text).strip()
-        stripped = re.sub(r'```', '', stripped).strip()
-
-        # 1) Try parsing the whole response as JSON
-        try:
-            parsed = json.loads(response_text)
-            if isinstance(parsed, dict) and "response" in parsed:
-                response_text = parsed["response"]
-                action_data = parsed.get("action")
-        except (json.JSONDecodeError, TypeError):
-            # 2) Try the stripped version (no markdown fences)
-            try:
-                parsed = json.loads(stripped)
-                if isinstance(parsed, dict) and "response" in parsed:
-                    response_text = parsed["response"]
-                    action_data = parsed.get("action")
-            except (json.JSONDecodeError, TypeError):
-                # 3) Fallback: find the outermost JSON object containing "response"
-                # Match from first { to last } greedily
-                match = re.search(r'\{.*"response"\s*:.*\}', raw_text, re.DOTALL)
-                if match:
-                    try:
-                        parsed = json.loads(match.group())
-                        if isinstance(parsed, dict) and "response" in parsed:
-                            response_text = parsed["response"]
-                            action_data = parsed.get("action")
-                    except (json.JSONDecodeError, TypeError):
-                        pass
+        response_text, action_data, learn_text = parse_action_response(response_text)
 
         print(f"[Claude] Response: {response_text[:50]}...")
         if action_data:
             print(f"[Claude] Action: {action_data}")
 
-        return (response_text, action_data)
+        return (response_text, action_data, learn_text)
 
 
-async def call_provider(provider: str, messages: list[dict], model: str = None, 
-                        npc_name: str = "NPC", perception: Optional[PerceptionData] = None) -> tuple[str, str, Optional[dict]]:
-    """Call the appropriate provider and return (response, model_used, action)."""
+async def call_provider(provider: str, messages: list[dict], model: str = None,
+                        npc_name: str = "NPC", perception: Optional[PerceptionData] = None) -> tuple[str, str, Optional[dict], Optional[str]]:
+    """Call the appropriate provider and return (response, model_used, action, learn)."""
     if provider == "grok":
         model = model or GROK_MODEL
-        response_text, action = await call_grok(messages, model, perception)
-        return response_text, model, action
+        response_text, action, learn = await call_grok(messages, model, perception)
+        return response_text, model, action, learn
     elif provider == "ollama":
         model = model or OLLAMA_MODEL
-        response_text, action = await call_ollama(messages, model, perception)
-        return response_text, model, action
+        response_text, action, learn = await call_ollama(messages, model, perception)
+        return response_text, model, action, learn
     elif provider == "claude":
-        response_text, action = await call_claude(messages, npc_name, perception)
-        return response_text, CLAUDE_MODEL, action
+        response_text, action, learn = await call_claude(messages, npc_name, perception)
+        return response_text, CLAUDE_MODEL, action, learn
     else:
         raise HTTPException(status_code=400, detail=f"Unknown provider: {provider}")
 
@@ -1159,7 +1327,7 @@ async def chat(request: ChatRequest):
 
     try:
         # Call the appropriate provider (pass perception for AI_ARCHITECT)
-        response_text, model_used, action = await call_provider(
+        response_text, model_used, action, learn = await call_provider(
             session["provider"],
             session["messages"],
             session.get("model"),
@@ -1173,10 +1341,15 @@ async def chat(request: ChatRequest):
             "content": response_text
         })
 
+        # Save AIA memory if the LLM included a "learn" field
+        npc_name = session.get("npc_name", request.npc_name)
+        if learn and npc_name:
+            save_aia_memory(npc_name, learn)
+
         # Persist to chat log
         log_chat_exchange(
             session_id=session_id,
-            npc_name=session.get("npc_name", request.npc_name),
+            npc_name=npc_name,
             being_type=request.being_type,
             provider=session["provider"],
             player_message=request.message,

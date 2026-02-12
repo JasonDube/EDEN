@@ -242,15 +242,19 @@ void EditorUI::renderMainWindow() {
     ImGui::Text("Brush Settings");
 
     // Brush mode
-    const char* modeNames[] = { "Raise", "Lower", "Smooth", "Flatten", "Paint", "Crack", "Texture", "Plateau", "Level Min", "Grab", "Select", "Deselect", "Move Object", "Spire", "Ridged", "Trench", "Path" };
+    const char* modeNames[] = { "Raise", "Lower", "Smooth", "Flatten", "Paint", "Crack", "Texture", "Plateau", "Level Min", "Grab", "Select", "Deselect", "Move Object", "Spire", "Ridged", "Trench", "Path", "Terrace", "Flatten to Y" };
     int currentMode = static_cast<int>(m_brushMode);
-    if (ImGui::Combo("Mode", &currentMode, modeNames, 17)) {
+    if (ImGui::Combo("Mode", &currentMode, modeNames, 19)) {
         m_brushMode = static_cast<BrushMode>(currentMode);
     }
 
     ImGui::SliderFloat("Radius", &m_brushRadius, 1.0f, 50.0f);
     ImGui::SliderFloat("Strength", &m_brushStrength, 0.1f, 50.0f);
     ImGui::SliderFloat("Falloff", &m_brushFalloff, 0.0f, 1.0f);
+
+    if (m_brushMode == BrushMode::FlattenToY) {
+        ImGui::SliderFloat("Target Y", &m_pathElevation, -50.0f, 100.0f, "%.1f m");
+    }
 
     // Brush shape selector
     const char* shapeNames[] = { "Circle", "Ellipse", "Square" };
@@ -267,6 +271,11 @@ void EditorUI::renderMainWindow() {
             m_brushShapeRotation = glm::radians(rotDegrees);
         }
     }
+
+    ImGui::Separator();
+    ImGui::Checkbox("Show Brush Ring", &m_showBrushRing);
+    const char* triModes[] = { "Default", "Alternating", "Adaptive" };
+    ImGui::Combo("Triangulation", &m_triangulationMode, triModes, 3);
 
     if (m_hasSelection) {
         ImGui::Separator();
@@ -1805,24 +1814,29 @@ void EditorUI::renderPathToolWindow() {
 
     // Brush to apply along path
     ImGui::Text("Brush to Apply:");
-    const char* pathBrushNames[] = { "Raise", "Lower", "Smooth", "Flatten", "Paint", "Crack", "Texture", "Plateau", "Level Min", "Spire", "Ridged", "Trench" };
+    const char* pathBrushNames[] = { "Raise", "Lower", "Smooth", "Flatten", "Paint", "Crack", "Texture", "Plateau", "Level Min", "Spire", "Ridged", "Trench", "Terrace", "Flatten to Y" };
     // Map indices to actual BrushMode values (skip Grab, Select, Deselect, MoveObject, PathMode)
     BrushMode pathBrushModes[] = {
         BrushMode::Raise, BrushMode::Lower, BrushMode::Smooth, BrushMode::Flatten,
         BrushMode::Paint, BrushMode::Crack, BrushMode::Texture, BrushMode::Plateau,
-        BrushMode::LevelMin, BrushMode::Spire, BrushMode::Ridged, BrushMode::Trench
+        BrushMode::LevelMin, BrushMode::Spire, BrushMode::Ridged, BrushMode::Trench,
+        BrushMode::Terrace, BrushMode::FlattenToY
     };
 
-    int currentPathBrush = 11; // Default to Trench
-    for (int i = 0; i < 12; i++) {
+    int currentPathBrush = 13; // Default to Flatten to Y
+    for (int i = 0; i < 14; i++) {
         if (pathBrushModes[i] == m_pathBrushMode) {
             currentPathBrush = i;
             break;
         }
     }
 
-    if (ImGui::Combo("##pathbrush", &currentPathBrush, pathBrushNames, 12)) {
+    if (ImGui::Combo("##pathbrush", &currentPathBrush, pathBrushNames, 14)) {
         m_pathBrushMode = pathBrushModes[currentPathBrush];
+    }
+
+    if (m_pathBrushMode == BrushMode::FlattenToY) {
+        ImGui::SliderFloat("Target Y", &m_pathElevation, -50.0f, 100.0f, "%.1f m");
     }
 
     ImGui::Separator();
@@ -1885,6 +1899,29 @@ void EditorUI::renderPathToolWindow() {
     if (ImGui::Button("Create Tube Mesh", ImVec2(-1, 30))) {
         if (m_onCreateTube) {
             m_onCreateTube(m_tubeRadius, m_tubeSegments, m_tubeColor);
+        }
+    }
+    if (!canApply) {
+        ImGui::EndDisabled();
+    }
+
+    ImGui::Separator();
+
+    // Road creation section
+    ImGui::Text("Create Road:");
+    ImGui::SliderFloat("Road Width", &m_roadWidth, 1.0f, 20.0f, "%.1f");
+    ImGui::ColorEdit3("Road Color", &m_roadColor.x);
+    ImGui::Checkbox("Fixed Y Level", &m_roadUseFixedY);
+    if (m_roadUseFixedY) {
+        ImGui::SliderFloat("Road Y", &m_roadFixedY, -50.0f, 200.0f, "%.1f");
+    }
+
+    if (!canApply) {
+        ImGui::BeginDisabled();
+    }
+    if (ImGui::Button("Create Road Mesh", ImVec2(-1, 30))) {
+        if (m_onCreateRoad) {
+            m_onCreateRoad(m_roadWidth, m_roadColor, m_roadUseFixedY, m_roadFixedY);
         }
     }
     if (!canApply) {
@@ -1983,6 +2020,7 @@ void EditorUI::renderCharacterController() {
             ImGui::SliderFloat("Distance", &m_thirdPersonDistance, 1.0f, 20.0f, "%.1f m");
             ImGui::SliderFloat("Height", &m_thirdPersonHeight, 0.0f, 10.0f, "%.1f m");
             ImGui::SliderFloat("Look At Height", &m_thirdPersonLookAtHeight, 0.0f, 3.0f, "%.1f m");
+            ImGui::Checkbox("Show Collision Hull", &m_showCollisionHull);
         }
     }
 

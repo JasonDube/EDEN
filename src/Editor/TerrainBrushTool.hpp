@@ -40,6 +40,7 @@ public:
         m_texSaturation = saturation;
         m_texBrightness = brightness;
     }
+    void setTargetElevation(float y) { m_targetElevation = y; }
 
     // Getters
     bool hasValidPosition() const { return m_hasValidPosition; }
@@ -61,6 +62,7 @@ private:
     float m_texHue = 0.0f;
     float m_texSaturation = 1.0f;
     float m_texBrightness = 1.0f;
+    float m_targetElevation = 0.0f;
 
     // Current brush position
     glm::vec3 m_position{0};

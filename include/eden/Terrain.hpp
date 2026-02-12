@@ -22,9 +22,11 @@ struct Vertex3D {
     glm::vec3 texHSB;      // Per-vertex texture color adjustment (hue, saturation, brightness)
 };
 
-enum class BrushMode { Raise, Lower, Smooth, Flatten, Paint, Crack, Texture, Plateau, LevelMin, Grab, Select, Deselect, MoveObject, Spire, Ridged, Trench, PathMode };
+enum class BrushMode { Raise, Lower, Smooth, Flatten, Paint, Crack, Texture, Plateau, LevelMin, Grab, Select, Deselect, MoveObject, Spire, Ridged, Trench, PathMode, Terrace, FlattenToY };
 
 enum class BrushShape { Circle, Ellipse, Square };
+
+enum class TriangulationMode { Default, Alternating, Adaptive };
 
 struct BrushShapeParams {
     BrushShape shape = BrushShape::Circle;
@@ -104,6 +106,7 @@ public:
                              const BrushShapeParams& shapeParams = BrushShapeParams{});
     void clearSelection();
     void regenerateMesh();
+    void setTriangulationMode(TriangulationMode mode);
     float getHeightAtLocal(int x, int z) const;
     void setHeightAtLocal(int x, int z, float height);
     float getSelectionAtLocal(int x, int z) const;
@@ -127,6 +130,7 @@ public:
 private:
     void generate(const TerrainConfig& config);
     void rebuildVerticesFromHeightmap();
+    void rebuildIndices();
     glm::vec3 getTerrainColor(float normalizedHeight);
     glm::vec3 calculateNormal(int x, int z);
 
@@ -146,6 +150,7 @@ private:
     std::vector<uint32_t> m_indices;
     uint32_t m_bufferHandle = UINT32_MAX;
     bool m_needsUpload = true;
+    TriangulationMode m_triMode = TriangulationMode::Default;
 };
 
 // Hash function for glm::ivec2
@@ -191,7 +196,8 @@ public:
 
     // Apply brush to terrain at world position
     void applyBrush(float worldX, float worldZ, float radius, float strength, float falloff, BrushMode mode,
-                    const BrushShapeParams& shapeParams = BrushShapeParams{});
+                    const BrushShapeParams& shapeParams = BrushShapeParams{},
+                    float targetHeightOverride = 0.0f);
     void applyColorBrush(float worldX, float worldZ, float radius, float strength, float falloff, const glm::vec3& color,
                          const BrushShapeParams& shapeParams = BrushShapeParams{});
     void applyTextureBrush(float worldX, float worldZ, float radius, float strength, float falloff, int textureIndex,
@@ -218,6 +224,9 @@ public:
     const std::unordered_map<glm::ivec2, std::shared_ptr<TerrainChunk>, IVec2Hash>& getAllChunks() const {
         return m_chunks;
     }
+
+    // Triangulation mode (affects cliff visual quality)
+    void setTriangulationMode(TriangulationMode mode);
 
     // Export terrain to OBJ file
     bool exportToOBJ(const std::string& filepath) const;

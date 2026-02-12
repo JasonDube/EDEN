@@ -78,6 +78,11 @@ AABB SceneObject::getWorldBounds() {
 }
 
 void SceneObject::addBehavior(const Behavior& behavior) {
+    // Pre-reserve to reduce reallocation risk (pointers/refs into this vector
+    // may be held by Grove host functions during script evaluation)
+    if (m_behaviors.size() == m_behaviors.capacity()) {
+        m_behaviors.reserve(m_behaviors.capacity() + 8);
+    }
     m_behaviors.push_back(behavior);
 }
 

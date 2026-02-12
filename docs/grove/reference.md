@@ -1,6 +1,6 @@
 # Function Reference
 
-Complete list of all 46 Grove host functions available in EDEN.
+Complete list of all 52 Grove host functions available in EDEN.
 
 ## Utility
 
@@ -18,8 +18,10 @@ These execute immediately when the script runs.
 |----------|---------|-------------|
 | `spawn_cube(name, pos, size, r, g, b)` | bool | Spawn a colored cube. Bottom placed on terrain. |
 | `spawn_cylinder(name, pos, radius, height, r, g, b)` | bool | Spawn a colored cylinder. Bottom placed on terrain. |
+| `spawn_beam(name, pos1, pos2, thickness, r, g, b)` | bool | Spawn a beam (stretched cube) between two positions. pos.y = height above terrain. Auto-computes length, rotation, and position. |
 | `spawn_model(name, path, pos)` | bool | Load a `.glb` or `.lime` model at position. Bottom placed on terrain. |
 | `clone(source_name, new_name, pos)` | bool | Clone an existing scene object to a new position. Copies model, rotation, scale, and color. |
+| `object_pos(name)` | vec3 or nil | Returns the world position of a named scene object. Returns nil if not found. |
 | `set_object_rotation(name, rx, ry, rz)` | bool | Set euler rotation in degrees on a named object. |
 | `set_object_scale(name, sx, sy, sz)` | bool | Set scale on a named object. |
 | `delete_object(name)` | bool | Remove the first object matching the name from the scene. |
@@ -46,6 +48,10 @@ These schedule actions in a behavior sequence. They only execute when the NPC re
 |----------|---------|-------------|
 | `queue_spawn_cube(name, pos, size, r, g, b)` | bool | Queue a cube spawn in the behavior sequence. |
 | `queue_spawn_cylinder(name, pos, radius, height, r, g, b)` | bool | Queue a cylinder spawn in the behavior sequence. |
+| `queue_spawn_beam(name, pos1, pos2, thickness, r, g, b)` | bool | Queue a primitive beam spawn in the behavior sequence. |
+| `queue_spawn_beam_model(name, path, pos1, pos2)` | bool | Queue a textured beam model between two points. Auto-computes rotation and scales to span length. |
+| `queue_spawn_wall_panel(name, path, pos1, pos2)` | bool | Queue a wall panel between two posts. Auto-computes midpoint, rotation, and width scaling. Works at any angle. |
+| `queue_spawn_model(name, path, pos)` | bool | Queue a model (.lime/.glb) spawn in the behavior sequence. |
 | `queue_set_rotation(name, rx, ry, rz)` | bool | Queue a rotation change in the behavior sequence. |
 | `queue_set_scale(name, sx, sy, sz)` | bool | Queue a scale change in the behavior sequence. |
 | `queue_delete(name)` | bool | Queue an object deletion in the behavior sequence. |
@@ -95,6 +101,16 @@ These queue actions on a target SceneObject's behavior. Call `bot_target()` firs
 | `zone_resource(vec3)` | string | Returns resource type: `"wood"`, `"limestone"`, `"iron"`, `"oil"`, `"none"`. |
 | `zone_owner(vec3)` | number | Returns owner ID of the plot (0 = unclaimed). |
 | `can_build(vec3)` | bool | Returns whether building is allowed at position. |
+
+## Math
+
+| Function | Returns | Description |
+|----------|---------|-------------|
+| `sin(radians)` | number | Sine of angle in radians. |
+| `cos(radians)` | number | Cosine of angle in radians. |
+| `atan2(y, x)` | number | Arctangent of y/x in radians. Returns angle from -pi to pi. |
+| `sqrt(n)` | number | Square root. |
+| `abs(n)` | number | Absolute value. |
 
 ## Script Loading
 

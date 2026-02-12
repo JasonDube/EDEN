@@ -85,6 +85,9 @@ public:
     // Create a unit cube with proper quad faces
     void buildCube(float size = 1.0f);
 
+    // Create a rectangular box with independent dimensions
+    void buildBox(float width, float height, float depth);
+
     // Create a cylinder with proper quad faces
     // capRings: number of concentric rings in each cap (2+ creates quad grid caps for edge loops)
     void buildCylinder(float radius = 0.5f, float height = 2.0f, int segments = 16, int divisions = 1, bool caps = true, int capRings = 2);

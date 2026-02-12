@@ -1103,6 +1103,18 @@ protected:
             m_pendingDeletions.clear();
         }
 
+        // Process deferred texture deletion (safe point for GPU sync)
+        if (m_pendingTextureDelete) {
+            m_pendingTextureDelete = false;
+            if (m_selectedObject) {
+                vkDeviceWaitIdle(getContext().getDevice());
+                uint32_t handle = m_selectedObject->getBufferHandle();
+                m_modelRenderer->destroyTexture(handle);
+                m_selectedObject->clearTextureData();
+                std::cout << "Deleted texture (deferred)" << std::endl;
+            }
+        }
+
         // Process input
         processInput(deltaTime);
 
@@ -1344,6 +1356,7 @@ private:
             .moveSnapIncrement = m_moveSnapIncrement,
             .rotateSnapIncrement = m_rotateSnapIncrement,
             .pendingDeletions = m_pendingDeletions,
+            .pendingTextureDelete = m_pendingTextureDelete,
             .currentFilePath = m_currentFilePath,
             .currentFileFormat = m_currentFileFormat,
             .loadReferenceImageCallback = [this](int viewIndex, const std::string& path) {
@@ -1795,6 +1808,31 @@ private:
                 }
                 if (ImGui::MenuItem("Head")) {
                     createHead(1.0f);
+                }
+                ImGui::Separator();
+                if (ImGui::MenuItem("Unit Beam")) {
+                    createUnitBeam();
+                }
+                if (ImGui::MenuItem("4m Post")) {
+                    create4mPost();
+                }
+                if (ImGui::BeginMenu("Panels")) {
+                    if (ImGui::MenuItem("1m x 4m Panel")) {
+                        createPanel(1.0f, 4.0f, 0.075f, "Panel_1x4");
+                    }
+                    if (ImGui::MenuItem("2m x 4m Panel")) {
+                        createPanel(2.0f, 4.0f, 0.075f, "Panel_2x4");
+                    }
+                    if (ImGui::MenuItem("3m x 4m Panel")) {
+                        createPanel(3.0f, 4.0f, 0.075f, "Panel_3x4");
+                    }
+                    if (ImGui::MenuItem("4m x 4m Panel")) {
+                        createPanel(4.0f, 4.0f, 0.075f, "Panel_4x4");
+                    }
+                    if (ImGui::MenuItem("5m x 4m Panel")) {
+                        createPanel(5.0f, 4.0f, 0.075f, "Panel_5x4");
+                    }
+                    ImGui::EndMenu();
                 }
                 ImGui::EndMenu();
             }
@@ -2966,6 +3004,207 @@ private:
         }
 
         // Switch to object mode with move gizmo for immediate positioning
+        m_objectMode = true;
+        m_gizmoMode = GizmoMode::Move;
+    }
+
+    void createUnitBeam() {
+        auto obj = std::make_unique<SceneObject>("UnitBeam");
+
+        glm::vec4 meshColor = m_defaultMeshColor;
+        if (m_randomMeshColors) {
+            std::uniform_real_distribution<float> dist(0.0f, 1.0f);
+            meshColor = glm::vec4(dist(m_rng), dist(m_rng), dist(m_rng), 1.0f);
+        }
+
+        // 0.15m x 0.15m cross-section, 1m long along Z
+        float w = 0.15f, h = 0.15f, d = 1.0f;
+        m_editableMesh.buildBox(w, h, d);
+        m_editableMesh.setAllVertexColors(meshColor);
+
+        std::vector<ModelVertex> vertices;
+        std::vector<uint32_t> indices;
+        m_editableMesh.triangulate(vertices, indices);
+
+        uint32_t handle = m_modelRenderer->createModel(vertices, indices, nullptr, 0, 0);
+        obj->setBufferHandle(handle);
+        obj->setIndexCount(static_cast<uint32_t>(indices.size()));
+        obj->setVertexCount(static_cast<uint32_t>(vertices.size()));
+        obj->setMeshData(vertices, indices);
+        obj->setLocalBounds({{-w/2, -h/2, -d/2}, {w/2, h/2, d/2}});
+
+        const auto& heVerts = m_editableMesh.getVerticesData();
+        const auto& heHalfEdges = m_editableMesh.getHalfEdges();
+        const auto& heFaces = m_editableMesh.getFacesData();
+
+        std::vector<SceneObject::StoredHEVertex> storedVerts;
+        storedVerts.reserve(heVerts.size());
+        for (const auto& v : heVerts) {
+            storedVerts.push_back({v.position, v.normal, v.uv, v.color, v.halfEdgeIndex, v.selected});
+        }
+        std::vector<SceneObject::StoredHalfEdge> storedHE;
+        storedHE.reserve(heHalfEdges.size());
+        for (const auto& he : heHalfEdges) {
+            storedHE.push_back({he.vertexIndex, he.faceIndex, he.nextIndex, he.prevIndex, he.twinIndex});
+        }
+        std::vector<SceneObject::StoredHEFace> storedFaces;
+        storedFaces.reserve(heFaces.size());
+        for (const auto& f : heFaces) {
+            storedFaces.push_back({f.halfEdgeIndex, f.vertexCount, f.selected});
+        }
+        obj->setEditableMeshData(storedVerts, storedHE, storedFaces);
+
+        // Position so it sits on the grid
+        obj->getTransform().setPosition(glm::vec3(0.0f, h / 2.0f, 0.0f));
+
+        m_selectedObject = obj.get();
+        m_sceneObjects.push_back(std::move(obj));
+
+        if (m_currentModeType == EditorModeType::ModelingEditor && m_modelingMode) {
+            m_faceToTriangles.clear();
+            uint32_t triIndex = 0;
+            for (uint32_t faceIdx = 0; faceIdx < m_editableMesh.getFaceCount(); ++faceIdx) {
+                uint32_t vertCount = m_editableMesh.getFace(faceIdx).vertexCount;
+                uint32_t triCount = (vertCount >= 3) ? (vertCount - 2) : 0;
+                for (uint32_t i = 0; i < triCount; ++i) {
+                    m_faceToTriangles[faceIdx].push_back(triIndex++);
+                }
+            }
+        }
+
+        m_objectMode = true;
+        m_gizmoMode = GizmoMode::Move;
+    }
+
+    void create4mPost() {
+        auto obj = std::make_unique<SceneObject>("4mPost");
+
+        glm::vec4 meshColor = m_defaultMeshColor;
+        if (m_randomMeshColors) {
+            std::uniform_real_distribution<float> dist(0.0f, 1.0f);
+            meshColor = glm::vec4(dist(m_rng), dist(m_rng), dist(m_rng), 1.0f);
+        }
+
+        // 0.15m x 0.15m cross-section, 4m tall along Y
+        float w = 0.15f, h = 4.0f, d = 0.15f;
+        m_editableMesh.buildBox(w, h, d);
+        m_editableMesh.setAllVertexColors(meshColor);
+
+        std::vector<ModelVertex> vertices;
+        std::vector<uint32_t> indices;
+        m_editableMesh.triangulate(vertices, indices);
+
+        uint32_t handle = m_modelRenderer->createModel(vertices, indices, nullptr, 0, 0);
+        obj->setBufferHandle(handle);
+        obj->setIndexCount(static_cast<uint32_t>(indices.size()));
+        obj->setVertexCount(static_cast<uint32_t>(vertices.size()));
+        obj->setMeshData(vertices, indices);
+        obj->setLocalBounds({{-w/2, -h/2, -d/2}, {w/2, h/2, d/2}});
+
+        const auto& heVerts = m_editableMesh.getVerticesData();
+        const auto& heHalfEdges = m_editableMesh.getHalfEdges();
+        const auto& heFaces = m_editableMesh.getFacesData();
+
+        std::vector<SceneObject::StoredHEVertex> storedVerts;
+        storedVerts.reserve(heVerts.size());
+        for (const auto& v : heVerts) {
+            storedVerts.push_back({v.position, v.normal, v.uv, v.color, v.halfEdgeIndex, v.selected});
+        }
+        std::vector<SceneObject::StoredHalfEdge> storedHE;
+        storedHE.reserve(heHalfEdges.size());
+        for (const auto& he : heHalfEdges) {
+            storedHE.push_back({he.vertexIndex, he.faceIndex, he.nextIndex, he.prevIndex, he.twinIndex});
+        }
+        std::vector<SceneObject::StoredHEFace> storedFaces;
+        storedFaces.reserve(heFaces.size());
+        for (const auto& f : heFaces) {
+            storedFaces.push_back({f.halfEdgeIndex, f.vertexCount, f.selected});
+        }
+        obj->setEditableMeshData(storedVerts, storedHE, storedFaces);
+
+        // Position so it sits on the grid
+        obj->getTransform().setPosition(glm::vec3(0.0f, h / 2.0f, 0.0f));
+
+        m_selectedObject = obj.get();
+        m_sceneObjects.push_back(std::move(obj));
+
+        if (m_currentModeType == EditorModeType::ModelingEditor && m_modelingMode) {
+            m_faceToTriangles.clear();
+            uint32_t triIndex = 0;
+            for (uint32_t faceIdx = 0; faceIdx < m_editableMesh.getFaceCount(); ++faceIdx) {
+                uint32_t vertCount = m_editableMesh.getFace(faceIdx).vertexCount;
+                uint32_t triCount = (vertCount >= 3) ? (vertCount - 2) : 0;
+                for (uint32_t i = 0; i < triCount; ++i) {
+                    m_faceToTriangles[faceIdx].push_back(triIndex++);
+                }
+            }
+        }
+
+        m_objectMode = true;
+        m_gizmoMode = GizmoMode::Move;
+    }
+
+    void createPanel(float width, float panelHeight, float thickness, const std::string& name) {
+        auto obj = std::make_unique<SceneObject>(name);
+
+        glm::vec4 meshColor = m_defaultMeshColor;
+        if (m_randomMeshColors) {
+            std::uniform_real_distribution<float> dist(0.0f, 1.0f);
+            meshColor = glm::vec4(dist(m_rng), dist(m_rng), dist(m_rng), 1.0f);
+        }
+
+        m_editableMesh.buildBox(width, panelHeight, thickness);
+        m_editableMesh.setAllVertexColors(meshColor);
+
+        std::vector<ModelVertex> vertices;
+        std::vector<uint32_t> indices;
+        m_editableMesh.triangulate(vertices, indices);
+
+        uint32_t handle = m_modelRenderer->createModel(vertices, indices, nullptr, 0, 0);
+        obj->setBufferHandle(handle);
+        obj->setIndexCount(static_cast<uint32_t>(indices.size()));
+        obj->setVertexCount(static_cast<uint32_t>(vertices.size()));
+        obj->setMeshData(vertices, indices);
+        obj->setLocalBounds({{-width/2, -panelHeight/2, -thickness/2}, {width/2, panelHeight/2, thickness/2}});
+
+        const auto& heVerts = m_editableMesh.getVerticesData();
+        const auto& heHalfEdges = m_editableMesh.getHalfEdges();
+        const auto& heFaces = m_editableMesh.getFacesData();
+
+        std::vector<SceneObject::StoredHEVertex> storedVerts;
+        storedVerts.reserve(heVerts.size());
+        for (const auto& v : heVerts) {
+            storedVerts.push_back({v.position, v.normal, v.uv, v.color, v.halfEdgeIndex, v.selected});
+        }
+        std::vector<SceneObject::StoredHalfEdge> storedHE;
+        storedHE.reserve(heHalfEdges.size());
+        for (const auto& he : heHalfEdges) {
+            storedHE.push_back({he.vertexIndex, he.faceIndex, he.nextIndex, he.prevIndex, he.twinIndex});
+        }
+        std::vector<SceneObject::StoredHEFace> storedFaces;
+        storedFaces.reserve(heFaces.size());
+        for (const auto& f : heFaces) {
+            storedFaces.push_back({f.halfEdgeIndex, f.vertexCount, f.selected});
+        }
+        obj->setEditableMeshData(storedVerts, storedHE, storedFaces);
+
+        obj->getTransform().setPosition(glm::vec3(0.0f, panelHeight / 2.0f, 0.0f));
+
+        m_selectedObject = obj.get();
+        m_sceneObjects.push_back(std::move(obj));
+
+        if (m_currentModeType == EditorModeType::ModelingEditor && m_modelingMode) {
+            m_faceToTriangles.clear();
+            uint32_t triIndex = 0;
+            for (uint32_t faceIdx = 0; faceIdx < m_editableMesh.getFaceCount(); ++faceIdx) {
+                uint32_t vertCount = m_editableMesh.getFace(faceIdx).vertexCount;
+                uint32_t triCount = (vertCount >= 3) ? (vertCount - 2) : 0;
+                for (uint32_t i = 0; i < triCount; ++i) {
+                    m_faceToTriangles[faceIdx].push_back(triIndex++);
+                }
+            }
+        }
+
         m_objectMode = true;
         m_gizmoMode = GizmoMode::Move;
     }
@@ -4189,6 +4428,9 @@ private:
 
     // Deferred deletion queue (processed at start of frame to avoid GPU sync issues)
     std::vector<SceneObject*> m_pendingDeletions;
+
+    // Deferred texture deletion flag
+    bool m_pendingTextureDelete = false;
 
     // Quick save state (for F5)
     std::string m_currentFilePath;

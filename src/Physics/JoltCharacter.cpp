@@ -398,7 +398,7 @@ void JoltCharacter::createCharacter(const glm::vec3& position, float height, flo
     // Character settings
     JPH::CharacterVirtualSettings settings;
     settings.mShape = standingShape;
-    settings.mMaxSlopeAngle = JPH::DegreesToRadians(50.0f);
+    settings.mMaxSlopeAngle = JPH::DegreesToRadians(75.0f);
     settings.mMaxStrength = 100.0f;
     settings.mBackFaceMode = JPH::EBackFaceMode::CollideWithBackFaces;
     settings.mCharacterPadding = 0.02f;

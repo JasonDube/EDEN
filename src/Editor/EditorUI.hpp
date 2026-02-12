@@ -41,6 +41,7 @@ using ApplyPathCallback = std::function<void()>;
 using ClearPathCallback = std::function<void()>;
 using UndoPathPointCallback = std::function<void()>;
 using CreateTubeCallback = std::function<void(float radius, int segments, const glm::vec3& color)>;
+using CreateRoadCallback = std::function<void(float width, const glm::vec3& color, bool useFixedY, float fixedY)>;
 using WaterChangedCallback = std::function<void(float level, float amplitude, float frequency, bool visible)>;
 using FileNewCallback = std::function<void()>;
 using NewTestLevelCallback = std::function<void()>;
@@ -142,6 +143,8 @@ public:
     BrushShape getBrushShape() const { return m_brushShape; }
     float getBrushShapeAspectRatio() const { return m_brushShapeAspectRatio; }
     float getBrushShapeRotation() const { return m_brushShapeRotation; }
+    bool getShowBrushRing() const { return m_showBrushRing; }
+    int getTriangulationMode() const { return m_triangulationMode; }
 
     // Getters for fog settings
     glm::vec3 getFogColor() const { return m_fogColor; }
@@ -173,6 +176,7 @@ public:
     void setClearPathCallback(ClearPathCallback callback) { m_onClearPath = callback; }
     void setUndoPathPointCallback(UndoPathPointCallback callback) { m_onUndoPathPoint = callback; }
     void setCreateTubeCallback(CreateTubeCallback callback) { m_onCreateTube = callback; }
+    void setCreateRoadCallback(CreateRoadCallback callback) { m_onCreateRoad = callback; }
     void setWaterChangedCallback(WaterChangedCallback callback) { m_onWaterChanged = callback; }
     void setFileNewCallback(FileNewCallback callback) { m_onFileNew = callback; }
     void setNewTestLevelCallback(NewTestLevelCallback callback) { m_onNewTestLevel = callback; }
@@ -271,6 +275,7 @@ public:
     // Path tool state
     void setPathPointCount(size_t count) { m_pathPointCount = count; }
     BrushMode getPathBrushMode() const { return m_pathBrushMode; }
+    float getPathElevation() const { return m_pathElevation; }
 
     // Selection state
     void setHasSelection(bool hasSelection) { m_hasSelection = hasSelection; }
@@ -328,6 +333,7 @@ public:
     float getThirdPersonDistance() const { return m_thirdPersonDistance; }
     float getThirdPersonHeight() const { return m_thirdPersonHeight; }
     float getThirdPersonLookAtHeight() const { return m_thirdPersonLookAtHeight; }
+    bool getShowCollisionHull() const { return m_showCollisionHull; }
 
     float getCharacterSpeed() const { return m_characterSpeed; }
     float getCharacterSprintMultiplier() const { return m_characterSprintMultiplier; }
@@ -405,6 +411,8 @@ private:
     BrushShape m_brushShape = BrushShape::Circle;
     float m_brushShapeAspectRatio = 0.3f;  // For ellipse (thin by default)
     float m_brushShapeRotation = 0.0f;     // Rotation in radians
+    bool m_showBrushRing = false;
+    int m_triangulationMode = 0;  // 0=Default, 1=Alternating, 2=Adaptive
 
     // Paint colors
     glm::vec3 m_paintColor{0.2f, 0.5f, 0.15f};
@@ -444,6 +452,7 @@ private:
     ClearPathCallback m_onClearPath;
     UndoPathPointCallback m_onUndoPathPoint;
     CreateTubeCallback m_onCreateTube;
+    CreateRoadCallback m_onCreateRoad;
     WaterChangedCallback m_onWaterChanged;
     FileNewCallback m_onFileNew;
     NewTestLevelCallback m_onNewTestLevel;
@@ -486,14 +495,15 @@ private:
     float m_thirdPersonDistance = 5.0f;
     float m_thirdPersonHeight = 2.0f;
     float m_thirdPersonLookAtHeight = 1.5f;
+    bool m_showCollisionHull = false;
 
     // Character movement settings
     float m_characterSpeed = 10.0f;
     float m_characterSprintMultiplier = 2.0f;
     float m_characterJumpVelocity = 8.0f;
     float m_characterGravity = 20.0f;
-    float m_characterHeight = 1.8f;
-    float m_characterRadius = 0.3f;
+    float m_characterHeight = 0.9f;
+    float m_characterRadius = 0.15f;
 
     // Ragdoll settings
     bool m_ragdollEnabled = false;
@@ -537,13 +547,20 @@ private:
     bool m_techTreeDeathsHeadExpanded = true;  // Collapse state for Death's Head tree
 
     // Path tool state
-    BrushMode m_pathBrushMode = BrushMode::Trench;  // Brush to apply along path
+    BrushMode m_pathBrushMode = BrushMode::FlattenToY;  // Brush to apply along path
     size_t m_pathPointCount = 0;
+    float m_pathElevation = 0.0f;
 
     // Tube generation settings
     float m_tubeRadius = 0.15f;
     int m_tubeSegments = 8;
     glm::vec3 m_tubeColor = glm::vec3(0.15f, 0.15f, 0.15f);  // Dark gray wire color
+
+    // Road generation settings
+    float m_roadWidth = 4.0f;
+    glm::vec3 m_roadColor = glm::vec3(0.4f, 0.4f, 0.4f);
+    bool m_roadUseFixedY = false;
+    float m_roadFixedY = 0.0f;
 
     // Selection state
     bool m_hasSelection = false;

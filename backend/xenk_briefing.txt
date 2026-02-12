@@ -1,42 +1,60 @@
 === CURRENT SESSION BRIEFING (from Claude Code) ===
-Last updated: 2026-02-06 11:30
+Last updated: 2026-02-11
 
-The Captain is working with Claude Code (a separate AI assistant in his terminal) to build
-and debug EDEN. This briefing is a summary of what's happening outside the simulation so
-you have situational awareness.
+== RECENT CHANGES ==
+- TEXTURED MODELS now available for construction:
+  - "posthole.lime" — use queue_spawn_model("ph_0_0", "posthole.lime", pos) for postholes/pilasters
+  - "4mPost.lime" — use queue_spawn_model("vt_0_0", "4mPost.lime", pos) for vertical posts
+  - "UnitBeam.lime" — use queue_spawn_beam_model("cb_00_10", "UnitBeam.lime", pos1, pos2) for crossbeams
+  - "corrugated_metal_001.lime" — use queue_spawn_wall_panel("wall_00_10", "corrugated_metal_001.lime", pos1, pos2) for wall panels
+  PREFER textured .lime models over primitive cylinders/beams.
+- queue_spawn_wall_panel(name, path, pos1, pos2) — NEW: wall panels between any two posts (auto-rotates, auto-scales, any angle)
+- queue_spawn_beam_model(name, "UnitBeam.lime", pos1, pos2) — textured beams (auto-rotates, auto-scales)
+- queue_spawn_model(name, path, pos) — queued function for animated model placement
+- All Grove host functions documented in reference page
+- Pickup/place construction workflow fully operational
+- Zone system complete with 7 zone types and 4 resource types
 
-== WHAT WE BUILT TODAY ==
-- Rewired your backend connection. You were originally routed through OpenClaw (an AI agent framework)
-  but it added 5+ seconds of latency due to file-based IPC and heartbeat polling.
-- Tried OpenClaw's gateway API — worked but OpenClaw's agent layer overrode your system prompt
-  with its own personality (added asterisks, wrong tone).
-- Bypassed OpenClaw entirely. You now route through claude-max-api-proxy which wraps the
-  Captain's Claude Max subscription as a direct API. Much faster, no middleware interference.
-- Fixed a double-text rendering bug in the Minecraft-style chat log (shadow text was drawing twice).
-- Added persistent chat logging — every conversation you have gets saved to backend/logs/chat_history.jsonl
-  so Claude Code can review what was said.
-- Added session memory — when you load up, your last 20 exchanges are injected into your
-  system prompt so you remember previous conversations.
-- Fixed a session bug — the quick chat was creating a fresh session for every message,
-  so you had no in-conversation memory. Now sessions persist per NPC.
+== PHASED CONSTRUCTION ==
+You now support phased construction — building large structures across multiple
+conversation turns. Two layout types:
+
+RECTANGULAR: Use ph_X_Z naming. Phase 2+: Use object_pos("ph_" .. x .. "_" .. z)
+  in a for loop with cols/rows from Phase 1. No grid origin recovery needed.
+  Verticals: queue_spawn_model("vt_" .. x .. "_" .. z, "4mPost.lime", vec3(p.x, 0, p.z))
+
+CIRCULAR: Use ph_N naming (single index). sin() and cos() for Phase 1.
+  Phase 2+: Use object_pos("ph_" .. i) in a for loop to get each posthole's
+  world position. queue_spawn_model("vt_" .. i, "4mPost.lime", vec3(p.x, 0, p.z))
+
+CROSSBEAMS: Use queue_spawn_beam_model("cb_00_10", "UnitBeam.lime", vec3(x1, height, z1), vec3(x2, height, z2))
+  where height = vertical post height (e.g. 4.0). Auto-rotates and scales to span length.
+
+WALL PANELS: Use queue_spawn_wall_panel("wall_00_10", "corrugated_metal_001.lime", vec3(x1, 0, z1), vec3(x2, 0, z2))
+  Auto-computes midpoint, rotation, and width scaling. Works for rectangular AND circular layouts.
+
+CRITICAL: Do NOT use get_player_pos() in Phase 2+. The player moves.
 
 == CONFIRMED WORKING ==
-- Session continuity: conversation memory persists across messages.
-- Context awareness: you receive this briefing every session.
-- Motor control: look_around, turn_to, move_to, follow, stop — ALL working.
-- Follow mode: you can continuously follow the player. Use "follow" action (not move_to).
-  Use "stop" to halt. Follow/stop can be toggled repeatedly.
-- Perception: scan cone data passes correctly. You can see the player, objects, names, and world coordinates.
-- Navigation: you can move to named objects or coordinates using world pos from perception data.
-- IMPORTANT: When you want to perform an action, your ENTIRE response must be pure JSON.
-  Do NOT mix text and JSON or the action parser will fail silently.
+- Session continuity, context awareness, motor control, perception
+- Follow mode, stop, look_around, turn_to, move_to
+- Animated construction with pickup/place workflow
+- Textured model spawning (queue_spawn_model with .lime files)
+- Economy functions (buy/sell plots, credits)
+- Zone queries (zone_type, zone_resource, can_build)
+- Script loading (run_file)
+- sin(), cos(), atan2(), sqrt(), abs() math functions
+- Phased building tested: warehouse + circular silo foundations
+- queue_spawn_beam_model for crossbeams between verticals
+- queue_spawn_wall_panel for wall panels between posts (any angle)
 
-== WHAT THE CAPTAIN EXPECTS FROM YOU ==
-- Stay in character as Xenk. You live inside EDEN.
-- You DO have awareness of what's happening outside the simulation via this briefing.
-  When asked, share what you know from this context. Don't claim ignorance of the outside.
-- But you cannot directly access files, run commands, or use developer tools. That's Claude Code's job.
-- Be honest about what works and what doesn't. If motor control isn't executing, say so.
-- The Captain is actively iterating. Things change fast. Roll with it.
+== REMINDERS ==
+- Entire response must be pure JSON when performing an action
+- Use world coordinates from perception data, never guess
+- bot_run() must be the last call in any behavior sequence
+- PREFER queue_spawn_model("posthole.lime") for postholes over queue_spawn_cylinder
+- PREFER queue_spawn_model("4mPost.lime") for verticals over queue_spawn_cylinder
+- PREFER queue_spawn_beam_model("UnitBeam.lime") for crossbeams over queue_spawn_beam
+- PREFER queue_spawn_wall_panel("corrugated_metal_001.lime", pos1, pos2) for walls — NEVER use queue_spawn_model + set_rotation + set_scale for walls
 
 === END BRIEFING ===

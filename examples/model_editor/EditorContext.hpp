@@ -334,6 +334,9 @@ struct EditorContext {
     // Deferred deletion queue (processed at safe point in frame)
     std::vector<SceneObject*>& pendingDeletions;
 
+    // Deferred texture deletion (processed at safe point — avoids vkDeviceWaitIdle during render pass)
+    bool& pendingTextureDelete;
+
     // Mode can block camera pan (e.g. retopo Shift+MMB vertex drag)
     bool blockCameraPan = false;
 

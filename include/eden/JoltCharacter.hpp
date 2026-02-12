@@ -277,8 +277,8 @@ private:
 
     // Settings
     float m_gravity = 20.0f;
-    float m_characterHeight = 1.8f;
-    float m_characterRadius = 0.3f;
+    float m_characterHeight = 0.9f;
+    float m_characterRadius = 0.15f;
 
     // Track bodies for cleanup
     std::vector<JPH::BodyID> m_staticBodies;

@@ -2258,12 +2258,9 @@ void ModelingMode::renderModelingEditorUI() {
             if (m_ctx.selectedObject) {
                 // Turn off paint mode first
                 m_ctx.isPainting = false;
-                // Destroy GPU texture
-                uint32_t handle = m_ctx.selectedObject->getBufferHandle();
-                m_ctx.modelRenderer.destroyTexture(handle);
-                // Clear CPU texture data
-                m_ctx.selectedObject->clearTextureData();
-                std::cout << "Deleted texture" << std::endl;
+                // Defer texture destruction to start of next frame
+                // (calling destroyTexture here would hang — vkDeviceWaitIdle during active render pass)
+                m_ctx.pendingTextureDelete = true;
             }
         }
         if (!hasTexture) ImGui::EndDisabled();

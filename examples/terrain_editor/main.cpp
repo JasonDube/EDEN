@@ -377,6 +377,62 @@ protected:
             }
         }
 
+        // Draw collision hull when in third-person with checkbox on (works in both modes)
+        if (m_editorUI.getCameraMode() == EditorUI::CameraMode::ThirdPerson &&
+            m_editorUI.getShowCollisionHull()) {
+            ImDrawList* hullDrawList = ImGui::GetForegroundDrawList();
+            VkExtent2D hullExtent = getSwapchain().getExtent();
+            float hullAspect = static_cast<float>(hullExtent.width) / static_cast<float>(hullExtent.height);
+            glm::mat4 hullVP = m_camera.getProjectionMatrix(hullAspect, 0.1f, 5000.0f) * m_camera.getViewMatrix();
+            float sw = static_cast<float>(hullExtent.width);
+            float sh = static_cast<float>(hullExtent.height);
+
+            auto proj3D = [&](const glm::vec3& wp, ImVec2& sp) -> bool {
+                glm::vec4 clip = hullVP * glm::vec4(wp, 1.0f);
+                if (clip.w <= 0.001f) return false;
+                glm::vec3 ndc = glm::vec3(clip) / clip.w;
+                sp.x = (ndc.x * 0.5f + 0.5f) * sw;
+                sp.y = (ndc.y * -0.5f + 0.5f) * sh;
+                return ndc.z >= 0.0f && ndc.z <= 1.0f;
+            };
+
+            glm::vec3 pp = m_thirdPersonPlayerPos;
+            float eyeH = m_collisionHullHeight;
+            float collR = m_collisionHullRadius;
+            float feetY = pp.y - eyeH;
+            ImU32 hullCol = IM_COL32(0, 255, 255, 200);
+
+            const int segs = 16;
+            for (int ring = 0; ring <= 2; ring++) {
+                float ringY = feetY + ring * (eyeH * 0.5f);
+                ImVec2 prev;
+                bool prevOk = false;
+                for (int i = 0; i <= segs; i++) {
+                    float angle = (float)i / segs * 6.28318f;
+                    glm::vec3 wp(pp.x + std::cos(angle) * collR, ringY, pp.z + std::sin(angle) * collR);
+                    ImVec2 sp;
+                    bool ok = proj3D(wp, sp);
+                    if (ok && prevOk) {
+                        hullDrawList->AddLine(prev, sp, hullCol, 1.5f);
+                    }
+                    prev = sp;
+                    prevOk = ok;
+                }
+            }
+
+            for (int i = 0; i < 4; i++) {
+                float angle = (float)i / 4 * 6.28318f;
+                float dx = std::cos(angle) * collR;
+                float dz = std::sin(angle) * collR;
+                ImVec2 bot, top;
+                bool botOk = proj3D(glm::vec3(pp.x + dx, feetY, pp.z + dz), bot);
+                bool topOk = proj3D(glm::vec3(pp.x + dx, feetY + eyeH, pp.z + dz), top);
+                if (botOk && topOk) {
+                    hullDrawList->AddLine(bot, top, hullCol, 1.5f);
+                }
+            }
+        }
+
         // Zone map (M key) — works in both editor and play mode
         if (m_showZoneMap) {
             renderZoneMap();
@@ -927,7 +983,8 @@ private:
                 m_editorUI.getSelectedTexture(),
                 m_editorUI.getSelectedTexHue(),
                 m_editorUI.getSelectedTexSaturation(),
-                m_editorUI.getSelectedTexBrightness()
+                m_editorUI.getSelectedTexBrightness(),
+                m_editorUI.getPathElevation()
             );
             m_chunkManager->updateModifiedChunks(m_terrain);
         });
@@ -955,6 +1012,21 @@ private:
                 m_sceneObjects.push_back(std::move(obj));
                 std::cout << "Created tube mesh with " << tubeMesh.vertices.size()
                           << " vertices, " << tubeMesh.indices.size() / 3 << " triangles" << std::endl;
+            }
+        });
+
+        m_editorUI.setCreateRoadCallback([this](float width, const glm::vec3& color, bool useFixedY, float fixedY) {
+            if (m_pathTool->getPointCount() < 2) return;
+
+            auto roadMesh = m_pathTool->generateRoadMesh(width, color, useFixedY, fixedY);
+            if (roadMesh.vertices.empty()) return;
+
+            auto obj = GLBLoader::createSceneObject(roadMesh, *m_modelRenderer);
+            if (obj) {
+                obj->setName("Road_" + std::to_string(m_sceneObjects.size()));
+                m_sceneObjects.push_back(std::move(obj));
+                std::cout << "Created road mesh with " << roadMesh.vertices.size()
+                          << " vertices, " << roadMesh.indices.size() / 3 << " triangles" << std::endl;
             }
         });
 
@@ -2093,7 +2165,7 @@ private:
         // In play mode, also check for non-Bullet objects we can stand on for jump detection
         // Bullet objects only block movement, they don't provide ground to stand on
         if (m_isPlayMode) {
-            const float playerRadius = 0.3f;
+            const float playerRadius = 0.15f;
             for (const auto& obj : m_sceneObjects) {
                 if (!obj || !obj->isVisible() || !obj->hasCollision()) continue;
                 if (obj->hasBulletCollision()) continue;  // Bullet objects block, not support
@@ -2152,7 +2224,7 @@ private:
         // Height query function - includes terrain, AABB objects, and Bullet raycasts
         auto heightQuery = [this](float x, float z) {
             float height = m_terrain.getHeightAt(x, z);
-            const float playerRadius = 0.3f;
+            const float playerRadius = 0.15f;
             glm::vec3 camPos = m_camera.getPosition();
 
             // Check AABB objects we can stand on
@@ -2238,10 +2310,10 @@ private:
 
             // Ensure we don't go below terrain
             // Character controller returns CENTER position (half height above feet)
-            const float characterHeight = 1.8f;  // Full character height
-            const float halfHeight = characterHeight * 0.5f;  // Center is 0.9m above feet
-            const float eyeHeight = 1.7f;        // Eye level from ground
-            const float centerToEye = eyeHeight - halfHeight;  // 0.8m from center to eyes
+            const float characterHeight = 0.9f;  // Full character height (halved)
+            const float halfHeight = characterHeight * 0.5f;  // Center above feet
+            const float eyeHeight = 0.85f;       // Eye level from ground
+            const float centerToEye = eyeHeight - halfHeight;
 
             float feetY = charPos.y - halfHeight;
             if (feetY < terrainHeight) {
@@ -2251,6 +2323,10 @@ private:
 
             // Camera positioning based on camera mode
             auto cameraMode = m_editorUI.getCameraMode();
+            // Store character eye-level position and hull dimensions for collision hull drawing
+            m_thirdPersonPlayerPos = glm::vec3(charPos.x, charPos.y + centerToEye, charPos.z);
+            m_collisionHullHeight = eyeHeight;
+            m_collisionHullRadius = m_editorUI.getCharacterRadius();
             if (cameraMode == EditorUI::CameraMode::FirstPerson) {
                 // First person: camera at eye level (center + 0.8m = 1.7m above feet)
                 m_camera.setPosition(glm::vec3(charPos.x, charPos.y + centerToEye, charPos.z));
@@ -2271,6 +2347,15 @@ private:
                 m_camera.setPosition(lookAtPos + cameraOffset);
             }
         } else {
+            // In third-person, restore player position before movement
+            // (camera was offset last frame for the view)
+            bool isThirdPerson = !useCharacterController &&
+                m_camera.getMovementMode() == MovementMode::Walk &&
+                m_editorUI.getCameraMode() == EditorUI::CameraMode::ThirdPerson;
+            if (isThirdPerson && m_thirdPersonPlayerPos != glm::vec3(0)) {
+                m_camera.setPosition(m_thirdPersonPlayerPos);
+            }
+
             // Camera handles movement (fly mode or editor mode)
             // During conversation or quick chat: arrow keys, otherwise WASD
             // When ImGui wants keyboard: no movement at all
@@ -2305,11 +2390,36 @@ private:
             }
         }
 
+        // Third-person camera for editor walk mode (non-character-controller path)
+        if (!useCharacterController && m_camera.getMovementMode() == MovementMode::Walk &&
+            m_editorUI.getCameraMode() == EditorUI::CameraMode::ThirdPerson) {
+            glm::vec3 playerPos = m_camera.getPosition();  // This is the "player" (eye level)
+            m_thirdPersonPlayerPos = playerPos;  // Store for collision hull drawing
+            m_collisionHullHeight = m_camera.getEyeHeight();
+            m_collisionHullRadius = 0.5f;  // Camera collision radius
+
+            float yaw = glm::radians(m_camera.getYaw());
+            float pitch = glm::radians(m_camera.getPitch());
+            float distance = m_editorUI.getThirdPersonDistance();
+            float height = m_editorUI.getThirdPersonHeight();
+
+            glm::vec3 cameraOffset(
+                -std::cos(yaw) * std::cos(pitch) * distance,
+                height + std::sin(pitch) * distance,
+                -std::sin(yaw) * std::cos(pitch) * distance
+            );
+
+            glm::vec3 lookAtPos = playerPos + glm::vec3(0, m_editorUI.getThirdPersonLookAtHeight() - m_camera.getEyeHeight(), 0);
+            m_camera.setPosition(lookAtPos + cameraOffset);
+        } else if (!useCharacterController) {
+            m_thirdPersonPlayerPos = m_camera.getPosition();
+        }
+
         // Post-movement AABB collision for play mode walk (fallback for non-Jolt objects)
         if (m_isPlayMode && m_camera.getMovementMode() == MovementMode::Walk && !useCharacterController) {
             glm::vec3 newPos = m_camera.getPosition();
-            const float playerRadius = 0.5f;
-            const float playerHeight = 1.7f;
+            const float playerRadius = 0.25f;
+            const float playerHeight = 0.85f;
 
             for (const auto& obj : m_sceneObjects) {
                 if (!obj || !obj->isVisible()) continue;
@@ -2483,6 +2593,30 @@ private:
             }
         }
         wasEscapeDown = escapeDown;
+
+        // F6 — run Grove test script (fast iteration, no LLM needed)
+        // Works in ANY mode: play, conversation, quick chat
+        {
+            static bool wasF6 = false;
+            bool f6 = Input::isKeyDown(295); // GLFW_KEY_F6 = 295
+            if (f6 && !wasF6 && m_isPlayMode) {
+                std::string script = "run_file(\"test_wall_panels.grove\")";
+                addChatMessage("System", "[F6] Running test...");
+                std::cout << "[F6] Executing: " << script << std::endl;
+                m_groveOutputAccum.clear();
+                int32_t ret = grove_eval(m_groveVm, script.c_str());
+                if (ret != 0) {
+                    const char* err = grove_last_error(m_groveVm);
+                    int line = static_cast<int>(grove_last_error_line(m_groveVm));
+                    std::string errMsg = std::string("Error (line ") + std::to_string(line) + "): " + (err ? err : "unknown");
+                    std::cout << "[F6] " << errMsg << std::endl;
+                    addChatMessage("System", errMsg);
+                } else if (!m_groveOutputAccum.empty()) {
+                    addChatMessage("System", m_groveOutputAccum);
+                }
+            }
+            wasF6 = f6;
+        }
 
         // Skip all other shortcuts when in conversation or quick chat (only Escape works)
         if (m_inConversation || m_quickChatMode) return;
@@ -3661,9 +3795,370 @@ private:
             obj->setPrimitiveColor(color);
 
             float terrainY = m_terrain.getHeightAt(pos.x, pos.z);
-            obj->getTransform().setPosition(glm::vec3(pos.x, terrainY + height * 0.5f, pos.z));
+            obj->getTransform().setPosition(glm::vec3(pos.x, terrainY, pos.z));
             m_pendingGroveSpawns.push_back(std::move(obj));
             std::cout << "[Grove CMD] Spawned cylinder '" << name << "'" << std::endl;
+        }
+        else if (type == "beam" && parts.size() >= 9) {
+            // beam|name|p2x|p2y|p2z|thickness|r|g|b
+            // pos (vec3Param) holds pos1, parts hold pos2
+            std::string name = parts[1];
+            float p2x = std::stof(parts[2]);
+            float p2y = std::stof(parts[3]);
+            float p2z = std::stof(parts[4]);
+            float thickness = std::stof(parts[5]);
+            float r = std::stof(parts[6]);
+            float g = std::stof(parts[7]);
+            float b = std::stof(parts[8]);
+            glm::vec4 color(r, g, b, 1.0f);
+
+            // Compute endpoint positions (Y = terrain + offset)
+            float x1 = pos.x, z1 = pos.z;
+            float y1 = m_terrain.getHeightAt(x1, z1) + pos.y;
+            float x2 = p2x, z2 = p2z;
+            float y2 = m_terrain.getHeightAt(x2, z2) + p2y;
+
+            float dx = x2 - x1, dy = y2 - y1, dz = z2 - z1;
+            float length = std::sqrt(dx * dx + dy * dy + dz * dz);
+            if (length < 0.001f) { std::cout << "[Grove CMD] Beam too short, skipped" << std::endl; }
+            else {
+                float midX = (x1 + x2) * 0.5f;
+                float midY = (y1 + y2) * 0.5f;
+                float midZ = (z1 + z2) * 0.5f;
+                float rotY = std::atan2(dx, dz) * 180.0f / 3.14159265f;
+                float horizDist = std::sqrt(dx * dx + dz * dz);
+                float rotX = -std::atan2(dy, horizDist) * 180.0f / 3.14159265f;
+
+                auto meshData = PrimitiveMeshBuilder::createCube(1.0f, color);
+                auto obj = std::make_unique<SceneObject>(name);
+                uint32_t handle = m_modelRenderer->createModel(meshData.vertices, meshData.indices);
+                obj->setBufferHandle(handle);
+                obj->setIndexCount(static_cast<uint32_t>(meshData.indices.size()));
+                obj->setVertexCount(static_cast<uint32_t>(meshData.vertices.size()));
+                obj->setLocalBounds(meshData.bounds);
+                obj->setModelPath("");
+                obj->setMeshData(meshData.vertices, meshData.indices);
+                obj->setPrimitiveType(PrimitiveType::Cube);
+                obj->setPrimitiveSize(1.0f);
+                obj->setPrimitiveColor(color);
+
+                obj->getTransform().setPosition(glm::vec3(midX, midY, midZ));
+                obj->getTransform().setScale(glm::vec3(thickness, thickness, length));
+                obj->setEulerRotation(glm::vec3(rotX, rotY, 0.0f));
+
+                m_pendingGroveSpawns.push_back(std::move(obj));
+                std::cout << "[Grove CMD] Spawned beam '" << name << "' length=" << length << std::endl;
+            }
+        }
+        else if (type == "beam_model" && parts.size() >= 6) {
+            // beam_model|name|path|p2x|p2y|p2z  (pos1 in vec3Param)
+            std::string name = parts[1];
+            std::string modelPath = parts[2];
+            float p2x = std::stof(parts[3]);
+            float p2y = std::stof(parts[4]);
+            float p2z = std::stof(parts[5]);
+
+            // Resolve path with multi-path search
+            if (!modelPath.empty() && modelPath[0] != '/') {
+                std::string resolved;
+                std::vector<std::string> searchPaths;
+                if (!m_currentLevelPath.empty()) {
+                    size_t lastSlash = m_currentLevelPath.find_last_of("/\\");
+                    if (lastSlash != std::string::npos)
+                        searchPaths.push_back(m_currentLevelPath.substr(0, lastSlash + 1) + modelPath);
+                }
+                searchPaths.push_back("levels/" + modelPath);
+                searchPaths.push_back(modelPath);
+                for (const auto& candidate : searchPaths) {
+                    std::ifstream test(candidate);
+                    if (test.good()) { resolved = candidate; break; }
+                }
+                if (!resolved.empty()) modelPath = resolved;
+            }
+
+            // Compute beam geometry (same math as primitive beam)
+            float x1 = pos.x, z1 = pos.z;
+            float y1 = m_terrain.getHeightAt(x1, z1) + pos.y;
+            float x2 = p2x, z2 = p2z;
+            float y2 = m_terrain.getHeightAt(x2, z2) + p2y;
+
+            float dx = x2 - x1, dy = y2 - y1, dz = z2 - z1;
+            float length = std::sqrt(dx * dx + dy * dy + dz * dz);
+            if (length < 0.001f) {
+                std::cout << "[Grove CMD] Beam model too short, skipped" << std::endl;
+            } else {
+                float midX = (x1 + x2) * 0.5f;
+                float midY = (y1 + y2) * 0.5f;
+                float midZ = (z1 + z2) * 0.5f;
+                float rotY = std::atan2(dx, dz) * 180.0f / 3.14159265f;
+                float horizDist = std::sqrt(dx * dx + dz * dz);
+                float rotX = -std::atan2(dy, horizDist) * 180.0f / 3.14159265f;
+
+                // Load model (with caching)
+                std::unique_ptr<SceneObject> obj;
+                auto cacheIt = m_modelCache.find(modelPath);
+
+                if (cacheIt != m_modelCache.end()) {
+                    auto& cached = cacheIt->second;
+                    obj = std::make_unique<SceneObject>(name);
+                    obj->setBufferHandle(cached.bufferHandle);
+                    obj->setIndexCount(cached.indexCount);
+                    obj->setVertexCount(cached.vertexCount);
+                    obj->setMeshData(cached.vertices, cached.indices);
+                    obj->setLocalBounds(cached.bounds);
+                    obj->getTransform().setScale(cached.scale);
+                    obj->setEulerRotation(cached.rotation);
+                } else {
+                    bool isLime = modelPath.size() >= 5 && modelPath.substr(modelPath.size() - 5) == ".lime";
+                    if (isLime) {
+                        auto loadResult = LimeLoader::load(modelPath);
+                        if (loadResult.success)
+                            obj = LimeLoader::createSceneObject(loadResult.mesh, *m_modelRenderer);
+                    } else {
+                        auto loadResult = GLBLoader::load(modelPath);
+                        if (loadResult.success && !loadResult.meshes.empty())
+                            obj = GLBLoader::createSceneObject(loadResult.meshes[0], *m_modelRenderer);
+                    }
+                    if (obj) {
+                        CachedModel cached;
+                        cached.bufferHandle = obj->getBufferHandle();
+                        cached.indexCount = obj->getIndexCount();
+                        cached.vertexCount = obj->getVertexCount();
+                        if (obj->hasMeshData()) {
+                            cached.vertices = obj->getVertices();
+                            cached.indices = obj->getIndices();
+                        }
+                        cached.bounds = obj->getLocalBounds();
+                        cached.scale = obj->getTransform().getScale();
+                        cached.rotation = obj->getEulerRotation();
+                        m_modelCache[modelPath] = std::move(cached);
+                    }
+                }
+
+                if (obj) {
+                    obj->setName(name);
+                    obj->setModelPath(modelPath);
+                    obj->getTransform().setPosition(glm::vec3(midX, midY, midZ));
+                    // UnitBeam is 1m along Z — scale Z to match span length
+                    obj->getTransform().setScale(glm::vec3(1.0f, 1.0f, length));
+                    obj->setEulerRotation(glm::vec3(rotX, rotY, 0.0f));
+                    m_pendingGroveSpawns.push_back(std::move(obj));
+                    std::cout << "[Grove CMD] Spawned beam model '" << name << "' length=" << length << std::endl;
+                } else {
+                    std::cout << "[Grove CMD] Failed to load beam model: " << modelPath << std::endl;
+                }
+            }
+        }
+        else if (type == "wall_panel" && parts.size() >= 6) {
+            // wall_panel|name|path|p2x|p2y|p2z  (pos1 in vec3Param)
+            std::string name = parts[1];
+            std::string modelPath = parts[2];
+            float p2x = std::stof(parts[3]);
+            float p2y = std::stof(parts[4]);
+            float p2z = std::stof(parts[5]);
+
+            // Resolve path with multi-path search
+            if (!modelPath.empty() && modelPath[0] != '/') {
+                std::string resolved;
+                std::vector<std::string> searchPaths;
+                if (!m_currentLevelPath.empty()) {
+                    size_t lastSlash = m_currentLevelPath.find_last_of("/\\");
+                    if (lastSlash != std::string::npos)
+                        searchPaths.push_back(m_currentLevelPath.substr(0, lastSlash + 1) + modelPath);
+                }
+                searchPaths.push_back("levels/" + modelPath);
+                searchPaths.push_back(modelPath);
+                for (const auto& candidate : searchPaths) {
+                    std::ifstream test(candidate);
+                    if (test.good()) { resolved = candidate; break; }
+                }
+                if (!resolved.empty()) modelPath = resolved;
+            }
+
+            // Compute wall geometry from two post positions
+            float x1 = pos.x, z1 = pos.z;
+            float x2 = p2x, z2 = p2z;
+
+            float dx = x2 - x1;
+            float dz = z2 - z1;
+            float distance = std::sqrt(dx * dx + dz * dz);
+            if (distance < 0.001f) {
+                std::cout << "[Grove CMD] Wall panel too short, skipped" << std::endl;
+            } else {
+                float midX = (x1 + x2) * 0.5f;
+                float midZ = (z1 + z2) * 0.5f;
+                float terrainY = m_terrain.getHeightAt(midX, midZ);
+
+                // Rotation: align panel's X-axis with direction from pos1 to pos2
+                // X-axis after Y-rotation = (cos(θ), 0, -sin(θ)), so θ = atan2(-dz, dx)
+                float rotY = std::atan2(-dz, dx) * 180.0f / 3.14159265f;
+
+                // Load model (with caching)
+                std::unique_ptr<SceneObject> obj;
+                auto cacheIt = m_modelCache.find(modelPath);
+
+                if (cacheIt != m_modelCache.end()) {
+                    auto& cached = cacheIt->second;
+                    obj = std::make_unique<SceneObject>(name);
+                    obj->setBufferHandle(cached.bufferHandle);
+                    obj->setIndexCount(cached.indexCount);
+                    obj->setVertexCount(cached.vertexCount);
+                    obj->setMeshData(cached.vertices, cached.indices);
+                    obj->setLocalBounds(cached.bounds);
+                    obj->getTransform().setScale(cached.scale);
+                    obj->setEulerRotation(cached.rotation);
+                } else {
+                    bool isLime = modelPath.size() >= 5 && modelPath.substr(modelPath.size() - 5) == ".lime";
+                    if (isLime) {
+                        auto loadResult = LimeLoader::load(modelPath);
+                        if (loadResult.success)
+                            obj = LimeLoader::createSceneObject(loadResult.mesh, *m_modelRenderer);
+                    } else {
+                        auto loadResult = GLBLoader::load(modelPath);
+                        if (loadResult.success && !loadResult.meshes.empty())
+                            obj = GLBLoader::createSceneObject(loadResult.meshes[0], *m_modelRenderer);
+                    }
+                    if (obj) {
+                        CachedModel cached;
+                        cached.bufferHandle = obj->getBufferHandle();
+                        cached.indexCount = obj->getIndexCount();
+                        cached.vertexCount = obj->getVertexCount();
+                        if (obj->hasMeshData()) {
+                            cached.vertices = obj->getVertices();
+                            cached.indices = obj->getIndices();
+                        }
+                        cached.bounds = obj->getLocalBounds();
+                        cached.scale = obj->getTransform().getScale();
+                        cached.rotation = obj->getEulerRotation();
+                        m_modelCache[modelPath] = std::move(cached);
+                    }
+                }
+
+                if (obj) {
+                    obj->setName(name);
+                    obj->setModelPath(modelPath);
+
+                    // Find min Y vertex and account for model's native scale
+                    float minVertexY = 0.0f;
+                    if (obj->hasMeshData()) {
+                        const auto& verts = obj->getVertices();
+                        if (!verts.empty()) {
+                            minVertexY = verts[0].position.y;
+                            for (const auto& v : verts)
+                                if (v.position.y < minVertexY) minVertexY = v.position.y;
+                        }
+                    }
+                    glm::vec3 scale = obj->getTransform().getScale();
+                    float bottomOffset = -minVertexY * scale.y;
+
+                    // Place at midpoint, native scale, only rotate to face between posts
+                    obj->getTransform().setPosition(glm::vec3(midX, terrainY + bottomOffset, midZ));
+                    obj->setEulerRotation(glm::vec3(0.0f, rotY, 0.0f));
+
+                    m_pendingGroveSpawns.push_back(std::move(obj));
+                    std::cout << "[Grove CMD] Spawned wall panel '" << name
+                              << "' rotY=" << rotY << std::endl;
+                } else {
+                    std::cout << "[Grove CMD] Failed to load wall panel model: " << modelPath << std::endl;
+                }
+            }
+        }
+        else if (type == "model" && parts.size() >= 3) {
+            // model|name|path
+            std::string name = parts[1];
+            std::string modelPath = parts[2];
+            std::cout << "[Grove CMD] model command: name='" << name << "' rawPath='" << modelPath << "'" << std::endl;
+
+            // Resolve relative paths — search multiple locations
+            if (!modelPath.empty() && modelPath[0] != '/') {
+                std::string resolved;
+                std::vector<std::string> searchPaths;
+                if (!m_currentLevelPath.empty()) {
+                    size_t lastSlash = m_currentLevelPath.find_last_of("/\\");
+                    if (lastSlash != std::string::npos)
+                        searchPaths.push_back(m_currentLevelPath.substr(0, lastSlash + 1) + modelPath);
+                }
+                searchPaths.push_back("levels/" + modelPath);
+                searchPaths.push_back(modelPath);
+                for (const auto& candidate : searchPaths) {
+                    std::ifstream test(candidate);
+                    if (test.good()) { resolved = candidate; break; }
+                }
+                if (!resolved.empty()) modelPath = resolved;
+                else std::cout << "[Grove CMD] Model not found in any search path for: " << modelPath << std::endl;
+            }
+
+            // Check model cache — reuse GPU buffer if same file was already loaded
+            std::unique_ptr<SceneObject> obj;
+            auto cacheIt = m_modelCache.find(modelPath);
+
+            if (cacheIt != m_modelCache.end()) {
+                // Cache hit — create SceneObject sharing the existing GPU buffer
+                auto& cached = cacheIt->second;
+                obj = std::make_unique<SceneObject>(name);
+                obj->setBufferHandle(cached.bufferHandle);
+                obj->setIndexCount(cached.indexCount);
+                obj->setVertexCount(cached.vertexCount);
+                obj->setMeshData(cached.vertices, cached.indices);
+                obj->setLocalBounds(cached.bounds);
+                obj->getTransform().setScale(cached.scale);
+                obj->setEulerRotation(cached.rotation);
+                std::cout << "[Grove CMD] model cache hit: " << modelPath << std::endl;
+            } else {
+                // Cache miss — load from disk
+                bool isLime = modelPath.size() >= 5 && modelPath.substr(modelPath.size() - 5) == ".lime";
+                if (isLime) {
+                    auto loadResult = LimeLoader::load(modelPath);
+                    if (loadResult.success)
+                        obj = LimeLoader::createSceneObject(loadResult.mesh, *m_modelRenderer);
+                } else {
+                    auto loadResult = GLBLoader::load(modelPath);
+                    if (loadResult.success && !loadResult.meshes.empty())
+                        obj = GLBLoader::createSceneObject(loadResult.meshes[0], *m_modelRenderer);
+                }
+                // Store in cache for future reuse
+                if (obj) {
+                    CachedModel cached;
+                    cached.bufferHandle = obj->getBufferHandle();
+                    cached.indexCount = obj->getIndexCount();
+                    cached.vertexCount = obj->getVertexCount();
+                    if (obj->hasMeshData()) {
+                        cached.vertices = obj->getVertices();
+                        cached.indices = obj->getIndices();
+                    }
+                    cached.bounds = obj->getLocalBounds();
+                    cached.scale = obj->getTransform().getScale();
+                    cached.rotation = obj->getEulerRotation();
+                    m_modelCache[modelPath] = std::move(cached);
+                    std::cout << "[Grove CMD] model cached: " << modelPath << std::endl;
+                }
+            }
+
+            if (obj) {
+                obj->setName(name);
+                obj->setModelPath(modelPath);
+
+                // Position bottom on terrain
+                float terrainY = m_terrain.getHeightAt(pos.x, pos.z);
+                glm::vec3 scale = obj->getTransform().getScale();
+                float minVertexY = 0.0f;
+                if (obj->hasMeshData()) {
+                    const auto& verts = obj->getVertices();
+                    if (!verts.empty()) {
+                        minVertexY = verts[0].position.y;
+                        for (const auto& v : verts) {
+                            if (v.position.y < minVertexY) minVertexY = v.position.y;
+                        }
+                    }
+                }
+                float bottomOffset = -minVertexY * scale.y;
+                obj->getTransform().setPosition(glm::vec3(pos.x, terrainY + bottomOffset, pos.z));
+
+                m_pendingGroveSpawns.push_back(std::move(obj));
+                std::cout << "[Grove CMD] Spawned model '" << name << "' from " << modelPath << std::endl;
+            } else {
+                std::cout << "[Grove CMD] Failed to load model: " << modelPath << std::endl;
+            }
         }
         else if (type == "set_rotation" && parts.size() >= 5) {
             // set_rotation|name|rx|ry|rz
@@ -3671,13 +4166,25 @@ private:
             float rx = std::stof(parts[2]);
             float ry = std::stof(parts[3]);
             float rz = std::stof(parts[4]);
+            bool found = false;
+            // Search m_sceneObjects first
             for (auto& o : m_sceneObjects) {
                 if (o && o->getName() == name) {
                     o->setEulerRotation(glm::vec3(rx, ry, rz));
-                    std::cout << "[Grove CMD] Set rotation on '" << name << "'" << std::endl;
-                    break;
+                    found = true; break;
                 }
             }
+            // Also check pending spawns (objects spawned in same behavior sequence)
+            if (!found) {
+                for (auto& o : m_pendingGroveSpawns) {
+                    if (o && o->getName() == name) {
+                        o->setEulerRotation(glm::vec3(rx, ry, rz));
+                        found = true; break;
+                    }
+                }
+            }
+            if (found) std::cout << "[Grove CMD] Set rotation on '" << name << "'" << std::endl;
+            else std::cout << "[Grove CMD] set_rotation: object '" << name << "' not found" << std::endl;
         }
         else if (type == "set_scale" && parts.size() >= 5) {
             // set_scale|name|sx|sy|sz
@@ -3685,13 +4192,23 @@ private:
             float sx = std::stof(parts[2]);
             float sy = std::stof(parts[3]);
             float sz = std::stof(parts[4]);
+            bool found = false;
             for (auto& o : m_sceneObjects) {
                 if (o && o->getName() == name) {
                     o->getTransform().setScale(glm::vec3(sx, sy, sz));
-                    std::cout << "[Grove CMD] Set scale on '" << name << "'" << std::endl;
-                    break;
+                    found = true; break;
                 }
             }
+            if (!found) {
+                for (auto& o : m_pendingGroveSpawns) {
+                    if (o && o->getName() == name) {
+                        o->getTransform().setScale(glm::vec3(sx, sy, sz));
+                        found = true; break;
+                    }
+                }
+            }
+            if (found) std::cout << "[Grove CMD] Set scale on '" << name << "'" << std::endl;
+            else std::cout << "[Grove CMD] set_scale: object '" << name << "' not found" << std::endl;
         }
         else if (type == "delete" && parts.size() >= 2) {
             // delete|name — defer to destroy queue to avoid iterator invalidation
@@ -3724,7 +4241,7 @@ private:
         int actionIdx = obj->getActiveActionIndex();
         if (actionIdx < 0 || actionIdx >= static_cast<int>(behavior.actions.size())) {
             // Behavior complete - all actions done
-            if (behavior.loop) {
+            if (behavior.loop && !behavior.actions.empty()) {
                 // Restart from first action
                 obj->setActiveActionIndex(0);
                 actionIdx = 0;
@@ -3739,6 +4256,12 @@ private:
                 obj->clearActiveBehavior();
                 return;
             }
+        }
+
+        // Safety: re-validate actionIdx after potential modification
+        if (actionIdx < 0 || actionIdx >= static_cast<int>(behavior.actions.size())) {
+            obj->clearActiveBehavior();
+            return;
         }
 
         Action& currentAction = behavior.actions[actionIdx];
@@ -4838,6 +5361,7 @@ private:
                 m_editorUI.getSelectedTexSaturation(),
                 m_editorUI.getSelectedTexBrightness()
             );
+            m_brushTool->setTargetElevation(m_editorUI.getPathElevation());
 
             glm::vec2 mousePos = Input::getMousePosition();
             float normalizedX = mousePos.x / getWindow().getWidth();
@@ -4851,13 +5375,22 @@ private:
             m_brushTool->setShapeAspectRatio(m_editorUI.getBrushShapeAspectRatio());
             m_brushTool->setShapeRotation(m_editorUI.getBrushShapeRotation());
 
-            // Update brush ring visualization (hidden in space levels - no terrain)
-            if (m_brushTool->hasValidPosition() && !m_isSpaceLevel) {
+            // Update brush ring visualization
+            if (m_brushTool->hasValidPosition() && !m_isSpaceLevel && m_editorUI.getShowBrushRing()) {
                 m_brushRing->update(m_brushTool->getPosition(), m_editorUI.getBrushRadius(),
                                    m_terrain, m_brushTool->getShapeParams());
                 m_brushRing->setVisible(true);
             } else {
                 m_brushRing->setVisible(false);
+            }
+
+            // Update triangulation mode
+            static int lastTriMode = -1;
+            int triMode = m_editorUI.getTriangulationMode();
+            if (triMode != lastTriMode) {
+                m_terrain.setTriangulationMode(static_cast<TriangulationMode>(triMode));
+                m_chunkManager->updateModifiedChunks(m_terrain);
+                lastTriMode = triMode;
             }
 
             bool leftMouseDown = Input::isMouseButtonDown(Input::MOUSE_LEFT) && !ImGui::GetIO().WantCaptureMouse;
@@ -5251,6 +5784,25 @@ private:
 
         std::cout << "Player said: " << playerMessage << std::endl;
 
+        // /run command — execute Grove script directly, bypass LLM
+        if (playerMessage.size() > 5 && playerMessage.substr(0, 5) == "/run ") {
+            std::string script = playerMessage.substr(5);
+            addChatMessage("System", "Running: " + script);
+            std::cout << "[/run] Executing: " << script << std::endl;
+            m_groveOutputAccum.clear();
+            int32_t ret = grove_eval(m_groveVm, script.c_str());
+            if (ret != 0) {
+                const char* err = grove_last_error(m_groveVm);
+                int line = static_cast<int>(grove_last_error_line(m_groveVm));
+                std::string errMsg = std::string("Error (line ") + std::to_string(line) + "): " + (err ? err : "unknown");
+                std::cout << "[/run] " << errMsg << std::endl;
+                addChatMessage("System", errMsg);
+            } else if (!m_groveOutputAccum.empty()) {
+                addChatMessage("System", m_groveOutputAccum);
+            }
+            return;
+        }
+
         // Send to AI backend
         if (m_httpClient && m_httpClient->isConnected()) {
             m_waitingForAIResponse = true;
@@ -5527,6 +6079,32 @@ private:
 
     void sendQuickChatMessage() {
         std::string message = m_quickChatBuffer;
+
+        // /run command — execute Grove script directly, no NPC needed
+        {
+            std::string lower = message;
+            std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
+            if (lower.rfind("run ", 0) == 0) {
+                std::string script = message.substr(4);
+                addChatMessage("System", "Running: " + script);
+                std::cout << "[/run] Executing: " << script << std::endl;
+                m_groveOutputAccum.clear();
+                int32_t ret = grove_eval(m_groveVm, script.c_str());
+                if (ret != 0) {
+                    const char* err = grove_last_error(m_groveVm);
+                    int line = static_cast<int>(grove_last_error_line(m_groveVm));
+                    std::string errMsg = std::string("Error (line ") + std::to_string(line) + "): " + (err ? err : "unknown");
+                    std::cout << "[/run] " << errMsg << std::endl;
+                    addChatMessage("System", errMsg);
+                } else if (!m_groveOutputAccum.empty()) {
+                    addChatMessage("System", m_groveOutputAccum);
+                }
+                m_quickChatMode = false;
+                m_quickChatBuffer[0] = '\0';
+                return;
+            }
+        }
+
         glm::vec3 playerPos = m_camera.getPosition();
 
         // Parse command prefix: /eve or /xenk to target a specific NPC
@@ -5732,6 +6310,8 @@ private:
 
         drawList->AddLine(ImVec2(cx - size, cy), ImVec2(cx + size, cy), color, thickness);
         drawList->AddLine(ImVec2(cx, cy - size), ImVec2(cx, cy + size), color, thickness);
+
+        // (collision hull drawing moved to common render path below)
 
         // Player health bar - HIDDEN for now (was overlapping chat text)
         // TODO: re-enable when UI layout is finalized
@@ -7535,8 +8115,8 @@ private:
                     float worldSizeZ = chunksZ * chunkSize;
 
                     // Sample count must be power of 2 + 1 for Jolt
-                    // Use 513 samples for good balance of accuracy and speed
-                    const int sampleCount = 513;
+                    // Use 2049 samples for accurate terrain collision (captures small features like valleys)
+                    const int sampleCount = 2049;
                     float sampleSpacingX = worldSizeX / (sampleCount - 1);
                     float sampleSpacingZ = worldSizeZ / (sampleCount - 1);
 
@@ -9803,8 +10383,9 @@ private:
                 if (ret != 0) {
                     const char* err = grove_last_error(m_groveVm);
                     int line = static_cast<int>(grove_last_error_line(m_groveVm));
-                    std::cout << "[AI Action] Grove error (line " << line << "): "
-                              << (err ? err : "unknown") << std::endl;
+                    std::string errMsg = std::string("Script error (line ") + std::to_string(line) + "): " + (err ? err : "unknown");
+                    std::cout << "[AI Action] " << errMsg << std::endl;
+                    addChatMessage("System", errMsg);
                 } else if (!m_groveOutputAccum.empty()) {
                     // Show Grove output in chat as a system message
                     std::cout << "[Grove] " << m_groveOutputAccum;
@@ -9848,8 +10429,9 @@ private:
                     if (ret != 0) {
                         const char* err = grove_last_error(m_groveVm);
                         int line = static_cast<int>(grove_last_error_line(m_groveVm));
-                        std::cout << "[AI Action] Grove script error (line " << line << "): "
-                                  << (err ? err : "unknown") << std::endl;
+                        std::string errMsg = std::string("Script error (line ") + std::to_string(line) + "): " + (err ? err : "unknown");
+                        std::cout << "[AI Action] " << errMsg << std::endl;
+                        addChatMessage("System", errMsg);
                     } else {
                         if (!m_groveOutputAccum.empty()) {
                             std::cout << "[AI Action] Grove output: " << m_groveOutputAccum;
@@ -10656,6 +11238,9 @@ private:
     DialogueBubbleRenderer m_dialogueRenderer;
     SceneObject* m_currentInteractObject = nullptr;
     SceneObject* m_playerAvatar = nullptr;  // Visual representation of player for AI perception
+    glm::vec3 m_thirdPersonPlayerPos{0};   // Player position for third-person camera
+    float m_collisionHullHeight{1.7f};     // Height of collision hull (feet to eye)
+    float m_collisionHullRadius{0.5f};     // Radius of collision hull
     glm::vec3 m_lastInteractBubblePos{0};
     bool m_inConversation = false;
     float m_conversationTargetYaw = 0.0f;
@@ -10841,6 +11426,21 @@ private:
 
     // Pending grove-spawned objects (buffered to avoid invalidating m_sceneObjects during iteration)
     std::vector<std::unique_ptr<SceneObject>> m_pendingGroveSpawns;
+
+    // Model cache: maps resolved file path → GPU buffer handle + mesh data
+    // Duplicate spawns of the same .lime file share GPU resources instead of
+    // creating separate Vulkan buffers/textures/descriptor sets per instance.
+    struct CachedModel {
+        uint32_t bufferHandle;
+        uint32_t indexCount;
+        uint32_t vertexCount;
+        std::vector<ModelVertex> vertices;
+        std::vector<uint32_t> indices;
+        AABB bounds;
+        glm::vec3 scale{1.0f};    // preserve LimeLoader's scale
+        glm::vec3 rotation{0.0f}; // preserve LimeLoader's rotation
+    };
+    std::unordered_map<std::string, CachedModel> m_modelCache;
 
     // Objects marked for destruction (processed after behavior updates)
     std::vector<SceneObject*> m_objectsToDestroy;

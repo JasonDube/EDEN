@@ -249,6 +249,74 @@ void EditableMesh::buildCube(float size) {
               << m_vertices.size() << " vertices" << std::endl;
 }
 
+void EditableMesh::buildBox(float width, float height, float depth) {
+    m_vertices.clear();
+    m_halfEdges.clear();
+    m_faces.clear();
+    m_edgeMap.clear();
+    m_selectedEdges.clear();
+
+    float hx = width * 0.5f;
+    float hy = height * 0.5f;
+    float hz = depth * 0.5f;
+    glm::vec4 white(1.0f, 1.0f, 1.0f, 1.0f);
+
+    // 24 vertices (4 per face × 6 faces) for unique normals
+    m_vertices = {
+        // Front face (z = +hz)
+        {{-hx, -hy,  hz}, { 0,  0,  1}, {0, 0}, white, UINT32_MAX, false},  // 0
+        {{ hx, -hy,  hz}, { 0,  0,  1}, {1, 0}, white, UINT32_MAX, false},  // 1
+        {{ hx,  hy,  hz}, { 0,  0,  1}, {1, 1}, white, UINT32_MAX, false},  // 2
+        {{-hx,  hy,  hz}, { 0,  0,  1}, {0, 1}, white, UINT32_MAX, false},  // 3
+        // Back face (z = -hz)
+        {{ hx, -hy, -hz}, { 0,  0, -1}, {0, 0}, white, UINT32_MAX, false},  // 4
+        {{-hx, -hy, -hz}, { 0,  0, -1}, {1, 0}, white, UINT32_MAX, false},  // 5
+        {{-hx,  hy, -hz}, { 0,  0, -1}, {1, 1}, white, UINT32_MAX, false},  // 6
+        {{ hx,  hy, -hz}, { 0,  0, -1}, {0, 1}, white, UINT32_MAX, false},  // 7
+        // Top face (y = +hy)
+        {{-hx,  hy,  hz}, { 0,  1,  0}, {0, 0}, white, UINT32_MAX, false},  // 8
+        {{ hx,  hy,  hz}, { 0,  1,  0}, {1, 0}, white, UINT32_MAX, false},  // 9
+        {{ hx,  hy, -hz}, { 0,  1,  0}, {1, 1}, white, UINT32_MAX, false},  // 10
+        {{-hx,  hy, -hz}, { 0,  1,  0}, {0, 1}, white, UINT32_MAX, false},  // 11
+        // Bottom face (y = -hy)
+        {{-hx, -hy, -hz}, { 0, -1,  0}, {0, 0}, white, UINT32_MAX, false},  // 12
+        {{ hx, -hy, -hz}, { 0, -1,  0}, {1, 0}, white, UINT32_MAX, false},  // 13
+        {{ hx, -hy,  hz}, { 0, -1,  0}, {1, 1}, white, UINT32_MAX, false},  // 14
+        {{-hx, -hy,  hz}, { 0, -1,  0}, {0, 1}, white, UINT32_MAX, false},  // 15
+        // Right face (x = +hx)
+        {{ hx, -hy,  hz}, { 1,  0,  0}, {0, 0}, white, UINT32_MAX, false},  // 16
+        {{ hx, -hy, -hz}, { 1,  0,  0}, {1, 0}, white, UINT32_MAX, false},  // 17
+        {{ hx,  hy, -hz}, { 1,  0,  0}, {1, 1}, white, UINT32_MAX, false},  // 18
+        {{ hx,  hy,  hz}, { 1,  0,  0}, {0, 1}, white, UINT32_MAX, false},  // 19
+        // Left face (x = -hx)
+        {{-hx, -hy, -hz}, {-1,  0,  0}, {0, 0}, white, UINT32_MAX, false},  // 20
+        {{-hx, -hy,  hz}, {-1,  0,  0}, {1, 0}, white, UINT32_MAX, false},  // 21
+        {{-hx,  hy,  hz}, {-1,  0,  0}, {1, 1}, white, UINT32_MAX, false},  // 22
+        {{-hx,  hy, -hz}, {-1,  0,  0}, {0, 1}, white, UINT32_MAX, false},  // 23
+    };
+
+    m_faces.reserve(6);
+    m_halfEdges.reserve(24);
+
+    std::vector<std::vector<uint32_t>> quadFaces = {
+        {0, 1, 2, 3},     // Front
+        {4, 5, 6, 7},     // Back
+        {8, 9, 10, 11},   // Top
+        {12, 13, 14, 15}, // Bottom
+        {16, 17, 18, 19}, // Right
+        {20, 21, 22, 23}  // Left
+    };
+
+    for (const auto& faceVerts : quadFaces) {
+        addFace(faceVerts);
+    }
+
+    linkTwinsByPosition();
+    rebuildEdgeMap();
+    std::cout << "Built box (" << width << "x" << height << "x" << depth << ") with "
+              << m_faces.size() << " quad faces, " << m_vertices.size() << " vertices" << std::endl;
+}
+
 void EditableMesh::buildCylinder(float radius, float height, int segments, int divisions, bool caps, int capRings) {
     m_vertices.clear();
     m_halfEdges.clear();

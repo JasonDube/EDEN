@@ -68,6 +68,22 @@ void TerrainBrushTool::apply(float deltaTime) {
             );
             break;
 
+        case BrushMode::Terrace:
+            m_terrain.applyBrush(
+                m_position.x, m_position.z,
+                m_radius, m_strength, m_falloff,
+                m_mode, m_shapeParams
+            );
+            break;
+
+        case BrushMode::FlattenToY:
+            m_terrain.applyBrush(
+                m_position.x, m_position.z,
+                m_radius, m_strength, m_falloff,
+                m_mode, m_shapeParams, m_targetElevation
+            );
+            break;
+
         default:
             m_terrain.applyBrush(
                 m_position.x, m_position.z,

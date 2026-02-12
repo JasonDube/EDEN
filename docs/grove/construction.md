@@ -220,3 +220,45 @@ log("Height difference: " .. (h2 - h1) .. " meters")
 ```
 
 Spawn functions handle this automatically — you only need `terrain_height()` when computing offsets between objects (e.g., angling a beam between posts at different heights).
+
+## Phased Construction
+
+Large structures benefit from building in phases across multiple conversations
+with your AIA. Each phase, the AIA reuses the grid formula from Phase 1 to
+compute positions, ensuring completeness even when its scan cone can't see
+the entire structure at once.
+
+### Naming Convention
+
+Consistent naming lets the AIA track objects between phases:
+
+| Prefix | Meaning | Example |
+|--------|---------|---------|
+| `ph_X_Z` | Posthole at grid position | `ph_0_0`, `ph_3_2` |
+| `vt_X_Z` | Vertical post on posthole | `vt_0_0` |
+| `cb_X1Z1_X2Z2` | Crossbeam between posts | `cb_00_10` |
+| `wall_X1Z1_X2Z2` | Wall panel | `wall_00_01` |
+| `roof_X1Z1_X2Z2` | Roof panel | `roof_00_11` |
+
+### How It Works
+
+1. **Phase 1** defines the grid: origin point, columns, rows, spacing
+2. **Phase 2+** reuses the same grid math in a `for` loop, adding a filter condition (e.g., perimeter only)
+3. The AIA's scan cone (~120° FOV) can't see every object in a large grid, so loop-based scripts ensure nothing is missed
+
+### Example Conversation
+
+> **Player:** Lay out postholes for a warehouse.
+> **Xenk:** *Places a 7x5 grid of postholes, 4m apart. Reports grid origin and dimensions.*
+>
+> **Player:** Make it wider — add two more columns on the east.
+> **Xenk:** *Extends the grid formula, adds columns 7 and 8 using a loop.*
+>
+> **Player:** Now raise verticals on the perimeter only.
+> **Xenk:** *Reuses grid formula with perimeter filter (x=0, x=max, z=0, z=max). Places all 20 vt_* posts.*
+>
+> **Player:** Walls on north, east, and west. Leave south open for loading.
+> **Xenk:** *Loops over north/east/west edges, places wall panels between adjacent verticals.*
+>
+> **Player:** Roof it.
+> **Xenk:** *Loops over groups of 4 adjacent verticals, places roof panels.*

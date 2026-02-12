@@ -86,6 +86,7 @@ public:
     void setGravity(float gravity) { m_gravity = gravity; }
     void setJumpVelocity(float velocity) { m_jumpVelocity = velocity; }
     void setEyeHeight(float height) { m_eyeHeight = height; }
+    float getEyeHeight() const { return m_eyeHeight; }
     void setDoubleTapWindow(float seconds) { m_doubleTapWindow = seconds; }
     void setMaxSlopeAngle(float degrees) { m_maxSlopeAngle = degrees; }
     void setCollisionRadius(float radius) { m_collisionRadius = radius; }
@@ -125,7 +126,7 @@ private:
     float m_jumpVelocity = 12.0f;   // Initial upward velocity when jumping
     float m_eyeHeight = 1.7f;       // Height of camera above feet (player ~6'1")
     float m_maxSlopeAngle = 60.0f;  // Maximum walkable slope in degrees
-    float m_collisionRadius = 1.0f; // Radius around player to check for terrain collision
+    float m_collisionRadius = 0.5f; // Radius around player to check for terrain collision
 
     // Double-tap detection for fly mode toggle
     float m_lastSpaceTime = -1.0f;

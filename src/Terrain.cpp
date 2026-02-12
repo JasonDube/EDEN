@@ -132,23 +132,58 @@ void TerrainChunk::rebuildVerticesFromHeightmap() {
         }
     }
 
-    // Generate indices for triangle strip (only if not already generated)
+    // Generate indices (only if not already generated)
     if (m_indices.empty()) {
-        m_indices.reserve((m_resolution - 1) * (m_resolution - 1) * 6);
+        rebuildIndices();
+    }
 
-        for (int z = 0; z < m_resolution - 1; z++) {
-            for (int x = 0; x < m_resolution - 1; x++) {
-                int topLeft = z * m_resolution + x;
-                int topRight = topLeft + 1;
-                int bottomLeft = (z + 1) * m_resolution + x;
-                int bottomRight = bottomLeft + 1;
+    m_needsUpload = true;
+}
 
-                // First triangle
+void TerrainChunk::regenerateMesh() {
+    rebuildVerticesFromHeightmap();
+    if (m_triMode == TriangulationMode::Adaptive) {
+        rebuildIndices();
+    }
+}
+
+void TerrainChunk::rebuildIndices() {
+    m_indices.clear();
+    m_indices.reserve((m_resolution - 1) * (m_resolution - 1) * 6);
+
+    for (int z = 0; z < m_resolution - 1; z++) {
+        for (int x = 0; x < m_resolution - 1; x++) {
+            int topLeft = z * m_resolution + x;
+            int topRight = topLeft + 1;
+            int bottomLeft = (z + 1) * m_resolution + x;
+            int bottomRight = bottomLeft + 1;
+
+            bool flipDiag = false;
+
+            if (m_triMode == TriangulationMode::Alternating) {
+                flipDiag = ((x + z) % 2 == 1);
+            } else if (m_triMode == TriangulationMode::Adaptive) {
+                // Choose diagonal that minimizes height difference
+                float diagA = std::abs(m_heightmap[topLeft] - m_heightmap[bottomRight]);
+                float diagB = std::abs(m_heightmap[topRight] - m_heightmap[bottomLeft]);
+                flipDiag = (diagB < diagA);
+            }
+
+            if (flipDiag) {
+                // Diagonal: topRight → bottomLeft
+                m_indices.push_back(topLeft);
+                m_indices.push_back(bottomLeft);
+                m_indices.push_back(bottomRight);
+
+                m_indices.push_back(topLeft);
+                m_indices.push_back(bottomRight);
+                m_indices.push_back(topRight);
+            } else {
+                // Diagonal: topLeft → bottomRight (default)
                 m_indices.push_back(topLeft);
                 m_indices.push_back(bottomLeft);
                 m_indices.push_back(topRight);
 
-                // Second triangle
                 m_indices.push_back(topRight);
                 m_indices.push_back(bottomLeft);
                 m_indices.push_back(bottomRight);
@@ -159,8 +194,10 @@ void TerrainChunk::rebuildVerticesFromHeightmap() {
     m_needsUpload = true;
 }
 
-void TerrainChunk::regenerateMesh() {
-    rebuildVerticesFromHeightmap();
+void TerrainChunk::setTriangulationMode(TriangulationMode mode) {
+    if (m_triMode == mode) return;
+    m_triMode = mode;
+    rebuildIndices();
 }
 
 float TerrainChunk::getHeightAtLocal(int x, int z) const {
@@ -289,6 +326,10 @@ void TerrainChunk::applyBrush(float worldX, float worldZ, float radius, float st
                         // Use the target height passed from Terrain class (consistent across chunks)
                         newHeight = currentHeight + (targetHeight - currentHeight) * strength * 0.05f * falloffMult;
                         break;
+                    case BrushMode::FlattenToY:
+                        // Flatten to a user-specified target height
+                        newHeight = currentHeight + (targetHeight - currentHeight) * falloffMult;
+                        break;
                     case BrushMode::Crack: {
                         // Sharp V-shaped cut - very steep walls, deep center
                         // Use exponential falloff for sharp edges
@@ -339,6 +380,12 @@ void TerrainChunk::applyBrush(float worldX, float worldZ, float radius, float st
                         // Apply brush falloff and strength
                         float brushEffect = (1.0f - t) * strength * ridgedHeight;
                         newHeight += brushEffect;
+                        break;
+                    }
+                    case BrushMode::Terrace: {
+                        float stepHeight = std::max(0.5f, strength);
+                        float steppedHeight = std::floor(currentHeight / stepHeight) * stepHeight;
+                        newHeight = currentHeight + (steppedHeight - currentHeight) * falloffMult;
                         break;
                     }
                     case BrushMode::Trench:
@@ -849,11 +896,13 @@ bool Terrain::raycast(const glm::vec3& rayOrigin, const glm::vec3& rayDir, glm::
 }
 
 void Terrain::applyBrush(float worldX, float worldZ, float radius, float strength, float falloff, BrushMode mode,
-                         const BrushShapeParams& shapeParams) {
+                         const BrushShapeParams& shapeParams, float targetHeightOverride) {
     // For flatten mode, get the target height ONCE at the brush center
     // This ensures all chunks flatten to the same height (no seams)
     float targetHeight = 0.0f;
-    if (mode == BrushMode::Flatten) {
+    if (mode == BrushMode::FlattenToY) {
+        targetHeight = targetHeightOverride;
+    } else if (mode == BrushMode::Flatten) {
         targetHeight = getHeightAt(worldX, worldZ);
     } else if (mode == BrushMode::Plateau) {
         // Plateau mode: extrude the center point upward by strength amount
@@ -972,6 +1021,12 @@ void Terrain::applySelectionBrush(float worldX, float worldZ, float radius, floa
     }
     if (anyModified) {
         updateSelectionCache();
+    }
+}
+
+void Terrain::setTriangulationMode(TriangulationMode mode) {
+    for (auto& pair : m_chunks) {
+        pair.second->setTriangulationMode(mode);
     }
 }
 

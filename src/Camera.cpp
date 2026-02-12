@@ -43,8 +43,8 @@ void Camera::updateMovement(float deltaTime, bool forward, bool backward, bool l
     m_currentTime += deltaTime;
     float velocity = m_speed * deltaTime;
 
-    // Get max ground height within collision radius
-    float groundHeight = getMaxHeightInRadius(heightQuery, m_position.x, m_position.z, m_collisionRadius);
+    // Get ground height at player center (allows descending into valleys)
+    float groundHeight = heightQuery(m_position.x, m_position.z);
 
     // Calculate horizontal movement direction (ignore pitch for WASD)
     glm::vec3 frontHorizontal = glm::normalize(glm::vec3(m_front.x, 0.0f, m_front.z));
@@ -121,8 +121,26 @@ void Camera::updateMovement(float deltaTime, bool forward, bool backward, bool l
                     // Slope is walkable - allow movement
                     m_position.x = intendedPos.x;
                     m_position.z = intendedPos.z;
+                } else if (gradientMag > 0.001f) {
+                    // Wall slide: project movement along the wall face
+                    glm::vec2 wallNormal = glm::normalize(gradient);  // Points uphill
+                    glm::vec2 move2D(moveDir.x, moveDir.z);
+                    // Remove the component going into the wall
+                    float dot = glm::dot(move2D, wallNormal);
+                    if (dot > 0.0f) {
+                        move2D -= dot * wallNormal;
+                    }
+                    if (glm::length(move2D) > 0.001f) {
+                        glm::vec3 slidePos = m_position + glm::vec3(move2D.x, 0, move2D.y) * velocity;
+                        float slideHeight = heightQuery(slidePos.x, slidePos.z);
+                        float slideDiff = slideHeight - groundHeight;
+                        // Only allow the slide if the resulting position isn't also too steep
+                        if (slideDiff <= 0.0f || glm::degrees(std::atan2(slideDiff, velocity)) < m_maxSlopeAngle) {
+                            m_position.x = slidePos.x;
+                            m_position.z = slidePos.z;
+                        }
+                    }
                 }
-                // If slope too steep, player can still try but will slide back
             } else {
                 // Downhill or flat - always allow
                 m_position.x = intendedPos.x;
@@ -130,22 +148,8 @@ void Camera::updateMovement(float deltaTime, bool forward, bool backward, bool l
             }
         }
 
-        // Apply sliding on steep slopes when on ground
-        if (m_onGround && currentSlopeAngle > m_maxSlopeAngle && gradientMag > 0.001f) {
-            // Slide downhill (opposite to gradient direction)
-            glm::vec2 slideDir = -glm::normalize(gradient);
-
-            // Slide speed increases with slope steepness
-            float slideStrength = (currentSlopeAngle - m_maxSlopeAngle) / (90.0f - m_maxSlopeAngle);
-            slideStrength = std::min(slideStrength, 1.0f);
-            float slideSpeed = m_speed * slideStrength * 0.8f * deltaTime;
-
-            m_position.x += slideDir.x * slideSpeed;
-            m_position.z += slideDir.y * slideSpeed;
-        }
-
-        // Get actual ground height for collision
-        float actualGroundHeight = getMaxHeightInRadius(heightQuery, m_position.x, m_position.z, m_collisionRadius);
+        // Get actual ground height at player center
+        float actualGroundHeight = heightQuery(m_position.x, m_position.z);
         float feetHeight = m_position.y - m_eyeHeight;
 
         // Are we on or near the ground?
@@ -179,9 +183,9 @@ void Camera::updateMovement(float deltaTime, bool forward, bool backward, bool l
         }
     }
 
-    // Final safety: camera must stay above terrain (skip in noclip mode)
+    // Final safety: camera must stay above terrain at center point (skip in noclip mode)
     if (!m_noClip) {
-        float finalGroundHeight = getMaxHeightInRadius(heightQuery, m_position.x, m_position.z, m_collisionRadius);
+        float finalGroundHeight = heightQuery(m_position.x, m_position.z);
         float absoluteMin = finalGroundHeight + 0.3f;
         if (m_position.y < absoluteMin) {
             m_position.y = absoluteMin;

@@ -131,7 +131,8 @@ float PathTool::getPathLength() const {
 
 void PathTool::applyToPath(BrushMode mode, float radius, float strength, float falloff,
                            const glm::vec3& paintColor, int textureIndex,
-                           float texHue, float texSat, float texBright) {
+                           float texHue, float texSat, float texBright,
+                           float targetElevation) {
     if (m_controlPoints.size() < 2) {
         return;
     }
@@ -167,6 +168,11 @@ void PathTool::applyToPath(BrushMode mode, float radius, float strength, float f
 
             case BrushMode::Deselect:
                 m_terrain.applySelectionBrush(point.x, point.z, radius, scaledStrength, falloff, false);
+                break;
+
+            case BrushMode::FlattenToY:
+                m_terrain.applyBrush(point.x, point.z, radius, strength, falloff, mode,
+                                     BrushShapeParams{}, targetElevation);
                 break;
 
             default:
@@ -324,6 +330,110 @@ LoadedMesh PathTool::generateTubeMesh(float radius, int segments, const glm::vec
     // Calculate bounding box
     mesh.bounds.min = samples[0];
     mesh.bounds.max = samples[0];
+    for (const auto& v : mesh.vertices) {
+        mesh.bounds.min = glm::min(mesh.bounds.min, v.position);
+        mesh.bounds.max = glm::max(mesh.bounds.max, v.position);
+    }
+
+    return mesh;
+}
+
+LoadedMesh PathTool::generateRoadMesh(float width, const glm::vec3& color,
+                                       bool useFixedY, float fixedY) const {
+    LoadedMesh mesh;
+    mesh.name = "Road";
+
+    if (m_controlPoints.size() < 2) {
+        return mesh;
+    }
+
+    // Sample the spline (terrain-following)
+    auto samples = sampleSpline(16);
+    if (samples.size() < 2) {
+        return mesh;
+    }
+
+    // Override Y for fixed-Y mode
+    if (useFixedY) {
+        for (auto& s : samples) {
+            s.y = fixedY;
+        }
+    }
+
+    // Small Y offset to prevent z-fighting with terrain
+    const float yOffset = 0.05f;
+    for (auto& s : samples) {
+        s.y += yOffset;
+    }
+
+    const glm::vec3 up(0.0f, 1.0f, 0.0f);
+    glm::vec4 vertColor(color, 1.0f);
+    float halfWidth = width * 0.5f;
+
+    // Accumulate distance along the path for UV V coordinate
+    std::vector<float> distances(samples.size(), 0.0f);
+    for (size_t i = 1; i < samples.size(); i++) {
+        distances[i] = distances[i - 1] + glm::length(samples[i] - samples[i - 1]);
+    }
+    float totalDist = distances.back();
+
+    // Generate 2 vertices per sample (left edge and right edge)
+    for (size_t i = 0; i < samples.size(); i++) {
+        // Calculate tangent using central differencing
+        glm::vec3 tangent;
+        if (i == 0) {
+            tangent = glm::normalize(samples[1] - samples[0]);
+        } else if (i == samples.size() - 1) {
+            tangent = glm::normalize(samples[i] - samples[i - 1]);
+        } else {
+            tangent = glm::normalize(samples[i + 1] - samples[i - 1]);
+        }
+
+        // Perpendicular direction (horizontal, ignoring Y component of tangent for flat roads)
+        glm::vec3 flatTangent = glm::normalize(glm::vec3(tangent.x, 0.0f, tangent.z));
+        glm::vec3 right = glm::normalize(glm::cross(up, flatTangent));
+
+        // UV: v tiles based on distance / width for 1:1 aspect ratio
+        float v = distances[i] / width;
+
+        // Left vertex (u=0)
+        ModelVertex leftVert;
+        leftVert.position = samples[i] - right * halfWidth;
+        leftVert.normal = up;
+        leftVert.texCoord = glm::vec2(0.0f, v);
+        leftVert.color = vertColor;
+        mesh.vertices.push_back(leftVert);
+
+        // Right vertex (u=1)
+        ModelVertex rightVert;
+        rightVert.position = samples[i] + right * halfWidth;
+        rightVert.normal = up;
+        rightVert.texCoord = glm::vec2(1.0f, v);
+        rightVert.color = vertColor;
+        mesh.vertices.push_back(rightVert);
+    }
+
+    // Generate indices: 2 triangles per quad segment
+    for (size_t i = 0; i < samples.size() - 1; i++) {
+        uint32_t bl = static_cast<uint32_t>(i * 2);      // bottom-left
+        uint32_t br = static_cast<uint32_t>(i * 2 + 1);  // bottom-right
+        uint32_t tl = static_cast<uint32_t>((i + 1) * 2);      // top-left
+        uint32_t tr = static_cast<uint32_t>((i + 1) * 2 + 1);  // top-right
+
+        // Triangle 1: bl, tl, br
+        mesh.indices.push_back(bl);
+        mesh.indices.push_back(tl);
+        mesh.indices.push_back(br);
+
+        // Triangle 2: br, tl, tr
+        mesh.indices.push_back(br);
+        mesh.indices.push_back(tl);
+        mesh.indices.push_back(tr);
+    }
+
+    // Calculate bounding box
+    mesh.bounds.min = mesh.vertices[0].position;
+    mesh.bounds.max = mesh.vertices[0].position;
     for (const auto& v : mesh.vertices) {
         mesh.bounds.min = glm::min(mesh.bounds.min, v.position);
         mesh.bounds.max = glm::max(mesh.bounds.max, v.position);
