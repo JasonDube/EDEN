@@ -282,6 +282,11 @@ bool BinaryLevelReader::readObjects(std::ifstream& file, const BinaryLevelHeader
             obj.description = m_strings[entry.descriptionIndex];
         }
 
+        // Building type from string table
+        if (entry.buildingTypeIndex >= 0 && entry.buildingTypeIndex < static_cast<int32_t>(m_strings.size())) {
+            obj.buildingType = m_strings[entry.buildingTypeIndex];
+        }
+
         // Model path from string table
         if (entry.modelPathIndex >= 0 && entry.modelPathIndex < static_cast<int32_t>(m_strings.size())) {
             obj.modelPath = m_strings[entry.modelPathIndex];

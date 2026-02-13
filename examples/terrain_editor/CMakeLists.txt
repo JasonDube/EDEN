@@ -1,4 +1,4 @@
-add_executable(terrain_editor main.cpp grove_host.cpp)
+add_executable(terrain_editor main.cpp grove_host.cpp MCPServer.cpp)
 
 target_link_libraries(terrain_editor PRIVATE eden)
 

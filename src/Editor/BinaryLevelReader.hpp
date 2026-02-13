@@ -75,6 +75,9 @@ struct BinaryObjectData {
     // Description (visible to AI perception)
     std::string description;
 
+    // Building type (from building catalog)
+    std::string buildingType;
+
     // References
     int32_t meshId = -1;        // Index into meshes array
     std::string modelPath;      // Original GLB path (for skinned models or fallback)

@@ -186,6 +186,14 @@ void BinaryLevelWriter::addObject(const SceneObject& obj, int32_t meshId, const 
         entry.descriptionIndex = -1;
     }
 
+    // Building type (from building catalog)
+    const std::string& buildingType = obj.getBuildingType();
+    if (!buildingType.empty()) {
+        entry.buildingTypeIndex = addString(buildingType);
+    } else {
+        entry.buildingTypeIndex = -1;
+    }
+
     // Model path (for GLB models that aren't fully baked into the binary)
     if (!modelPath.empty()) {
         entry.modelPathIndex = addString(modelPath);

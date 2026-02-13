@@ -139,8 +139,8 @@ struct BinaryObjectEntry {
     // Description string table index (-1 if none)
     int32_t descriptionIndex = -1;
 
-    // Reserved (padded to nice boundary)
-    uint8_t reserved[4] = {0};
+    // Building type string table index (-1 if none)
+    int32_t buildingTypeIndex = -1;
 };
 // Note: Size may vary slightly by platform due to alignment, but packed pragma ensures consistent layout
 

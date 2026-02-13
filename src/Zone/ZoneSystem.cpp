@@ -227,14 +227,26 @@ void ZoneSystem::generateDefaultLayout() {
     // Spawn/Safe zone: 5x5 plots at center
     fillRect(cx - 2, cz - 2, cx + 2, cz + 2, ZoneType::SpawnSafe);
 
-    // Battlefield: horizontal strip through middle, 20 plots wide, avoiding spawn
+    // Residential zones: neighborhoods around spawn (north and south)
+    fillRect(cx - 8, cz - 12, cx + 8, cz - 4, ZoneType::Residential);  // North
+    fillRect(cx - 8, cz + 4,  cx + 8, cz + 12, ZoneType::Residential); // South
+
+    // Commercial zones: east and west strips near center
+    fillRect(cx + 4, cz - 3, cx + 10, cz + 3, ZoneType::Commercial);   // East
+    fillRect(cx - 10, cz - 3, cx - 4, cz + 3, ZoneType::Commercial);   // West
+
+    // Industrial zones: further out, between residential and resources
+    fillRect(cx - 18, cz - 6, cx - 12, cz + 6, ZoneType::Industrial);  // Far west
+    fillRect(cx + 12, cz - 6, cx + 18, cz + 6, ZoneType::Industrial);  // Far east
+
+    // Battlefield: horizontal strip through middle, 20 plots wide, further out
     int bfHalfWidth = 10;
     int bfTop = cz - bfHalfWidth;
     int bfBot = cz + bfHalfWidth;
-    // Left side of battlefield (left of spawn)
-    fillRect(cx - 40, bfTop, cx - 5, bfBot, ZoneType::Battlefield);
-    // Right side of battlefield (right of spawn)
-    fillRect(cx + 5, bfTop, cx + 40, bfBot, ZoneType::Battlefield);
+    // Left side of battlefield (beyond industrial)
+    fillRect(cx - 40, bfTop, cx - 20, bfBot, ZoneType::Battlefield);
+    // Right side of battlefield (beyond industrial)
+    fillRect(cx + 20, bfTop, cx + 40, bfBot, ZoneType::Battlefield);
 
     // Resource clusters (8 deposits scattered in wilderness)
     // Wood clusters

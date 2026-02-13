@@ -102,6 +102,10 @@ public:
     void setDescription(const std::string& desc) { m_description = desc; }
     const std::string& getDescription() const { return m_description; }
 
+    // Building type (from building catalog, e.g. "farm", "house"). Empty = not a building.
+    void setBuildingType(const std::string& type) { m_buildingType = type; }
+    const std::string& getBuildingType() const { return m_buildingType; }
+
     // Source file path (for save/load)
     void setModelPath(const std::string& path) { m_modelPath = path; }
     const std::string& getModelPath() const { return m_modelPath; }
@@ -653,6 +657,7 @@ public:
 private:
     std::string m_name = "Object";
     std::string m_description;  // Description visible to AI perception
+    std::string m_buildingType; // Building catalog type (e.g. "farm"). Empty = not a building.
     std::string m_modelPath;  // Source file path for save/load
 
     // Primitive object support

@@ -443,6 +443,9 @@ bool LevelSerializer::save(const std::string& filepath,
             if (!obj->getDescription().empty()) {
                 objJson["description"] = obj->getDescription();
             }
+            if (!obj->getBuildingType().empty()) {
+                objJson["buildingType"] = obj->getBuildingType();
+            }
 
             // Primitive object support
             objJson["primitiveType"] = static_cast<int>(obj->getPrimitiveType());
@@ -806,6 +809,7 @@ bool LevelSerializer::load(const std::string& filepath, LevelData& outData) {
                 obj.dailySchedule = objJson.value("dailySchedule", false);
                 obj.patrolSpeed = objJson.value("patrolSpeed", 5.0f);
                 obj.description = objJson.value("description", std::string(""));
+                obj.buildingType = objJson.value("buildingType", std::string(""));
 
                 // Primitive object support
                 obj.primitiveType = objJson.value("primitiveType", 0);

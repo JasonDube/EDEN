@@ -67,6 +67,8 @@
 #include <grove.h>
 
 #include "grove_host.hpp"
+#include "MCPServer.hpp"
+#include <httplib.h>
 
 #include <iostream>
 #include <sstream>
@@ -172,6 +174,14 @@ protected:
             std::cout << "Grove scripts directory: " << m_groveScriptsDir << std::endl;
         }
 
+        // Initialize Economy and Trading Systems
+        initializeEconomySystems();
+
+        // Initialize Zone System (BEFORE initGroveVM so context pointer is valid)
+        m_zoneSystem = std::make_unique<ZoneSystem>(-2016.0f, -2016.0f, 2016.0f, 2016.0f, 32.0f);
+        m_zoneSystem->generateDefaultLayout();
+        m_editorUI.setZoneSystem(m_zoneSystem.get());
+
         initGroveVM();
         loadEditorConfig();
 
@@ -185,6 +195,9 @@ protected:
                 std::cout << "AI Backend not available (start backend/server.py)\n";
             }
         });
+
+        // Initialize MCP Server
+        initMCPServer();
 
         // Initialize Bullet physics collision world
         m_physicsWorld = std::make_unique<PhysicsWorld>();
@@ -208,14 +221,6 @@ protected:
         std::cout << "  Double-tap Space - Toggle fly mode\n";
         std::cout << "  Ctrl - Speed boost\n";
         std::cout << "  Left-click - Paint with brush\n";
-
-        // Initialize Economy and Trading Systems
-        initializeEconomySystems();
-
-        // Initialize Zone System
-        m_zoneSystem = std::make_unique<ZoneSystem>(-2016.0f, -2016.0f, 2016.0f, 2016.0f, 32.0f);
-        m_zoneSystem->generateDefaultLayout();
-        m_editorUI.setZoneSystem(m_zoneSystem.get());
     }
 
     void initializeEconomySystems() {
@@ -235,6 +240,560 @@ protected:
         // No pre-created AI traders or player trader
 
         std::cout << "Economy systems initialized\n";
+    }
+
+    void initMCPServer() {
+        m_mcpServer = std::make_unique<MCPServer>(9998);
+
+        // ── ping ──
+        m_mcpServer->registerTool("ping", "Connectivity test — returns pong",
+            [](const MCPParams&) -> MCPResult {
+                return {{"message", MCPValue("pong")}};
+            });
+
+        // ── get_camera_position ──
+        m_mcpServer->registerTool("get_camera_position", "Get current camera world position",
+            [this](const MCPParams&) -> MCPResult {
+                auto pos = m_camera.getPosition();
+                return {
+                    {"x", MCPValue(pos.x)},
+                    {"y", MCPValue(pos.y)},
+                    {"z", MCPValue(pos.z)}
+                };
+            });
+
+        // ── set_camera_position ──
+        m_mcpServer->registerTool("set_camera_position", "Move camera to world position (x, y, z)",
+            [this](const MCPParams& p) -> MCPResult {
+                auto xi = p.find("x"), yi = p.find("y"), zi = p.find("z");
+                if (xi == p.end() || zi == p.end())
+                    return {{"error", MCPValue("Missing x or z parameter")}};
+                float x = xi->second.getFloat();
+                float z = zi->second.getFloat();
+                float y = (yi != p.end()) ? yi->second.getFloat() : m_terrain.getHeightAt(x, z) + 10.0f;
+                m_camera.setPosition({x, y, z});
+                return {
+                    {"x", MCPValue(x)},
+                    {"y", MCPValue(y)},
+                    {"z", MCPValue(z)}
+                };
+            });
+
+        // ── get_terrain_height ──
+        m_mcpServer->registerTool("get_terrain_height", "Get terrain height at world (x, z)",
+            [this](const MCPParams& p) -> MCPResult {
+                auto xi = p.find("x"), zi = p.find("z");
+                if (xi == p.end() || zi == p.end())
+                    return {{"error", MCPValue("Missing x or z parameter")}};
+                float x = xi->second.getFloat();
+                float z = zi->second.getFloat();
+                float h = m_terrain.getHeightAt(x, z);
+                return {{"x", MCPValue(x)}, {"z", MCPValue(z)}, {"height", MCPValue(h)}};
+            });
+
+        // ── list_scene_objects ──
+        m_mcpServer->registerTool("list_scene_objects", "List all scene objects with positions and types",
+            [this](const MCPParams&) -> MCPResult {
+                std::ostringstream ss;
+                ss << "[";
+                bool first = true;
+                for (const auto& obj : m_sceneObjects) {
+                    if (!obj) continue;
+                    if (!first) ss << ",";
+                    first = false;
+                    auto pos = obj->getTransform().getPosition();
+                    ss << "{\"name\":\"" << obj->getName()
+                       << "\",\"x\":" << pos.x
+                       << ",\"y\":" << pos.y
+                       << ",\"z\":" << pos.z;
+                    if (!obj->getBuildingType().empty())
+                        ss << ",\"buildingType\":\"" << obj->getBuildingType() << "\"";
+                    if (!obj->getModelPath().empty())
+                        ss << ",\"modelPath\":\"" << obj->getModelPath() << "\"";
+                    ss << "}";
+                }
+                ss << "]";
+                return {
+                    {"count", MCPValue(static_cast<int>(m_sceneObjects.size()))},
+                    {"objects", MCPValue(ss.str())}
+                };
+            });
+
+        // ── query_zone ──
+        m_mcpServer->registerTool("query_zone", "Get zone type, resource, owner, price at world (x, z)",
+            [this](const MCPParams& p) -> MCPResult {
+                auto xi = p.find("x"), zi = p.find("z");
+                if (xi == p.end() || zi == p.end())
+                    return {{"error", MCPValue("Missing x or z parameter")}};
+                float x = xi->second.getFloat();
+                float z = zi->second.getFloat();
+                if (!m_zoneSystem)
+                    return {{"error", MCPValue("Zone system not initialized")}};
+
+                auto zt = m_zoneSystem->getZoneType(x, z);
+                auto rt = m_zoneSystem->getResource(x, z);
+                uint32_t owner = m_zoneSystem->getOwner(x, z);
+                auto grid = m_zoneSystem->worldToGrid(x, z);
+                float price = m_zoneSystem->getPlotPrice(grid.x, grid.y);
+
+                return {
+                    {"zone_type", MCPValue(std::string(ZoneSystem::zoneTypeName(zt)))},
+                    {"resource", MCPValue(std::string(ZoneSystem::resourceTypeName(rt)))},
+                    {"owner_id", MCPValue(static_cast<int>(owner))},
+                    {"price", MCPValue(price)},
+                    {"grid_x", MCPValue(grid.x)},
+                    {"grid_z", MCPValue(grid.y)}
+                };
+            });
+
+        // ── get_zone_summary ──
+        m_mcpServer->registerTool("get_zone_summary", "Overview of all zone types and resource counts",
+            [this](const MCPParams&) -> MCPResult {
+                if (!m_zoneSystem)
+                    return {{"error", MCPValue("Zone system not initialized")}};
+
+                int wilderness = 0, battlefield = 0, spawn = 0;
+                int residential = 0, commercial = 0, industrial = 0, resource = 0;
+                int resWood = 0, resLimestone = 0, resIron = 0, resOil = 0;
+
+                int w = m_zoneSystem->getGridWidth();
+                int h = m_zoneSystem->getGridHeight();
+                for (int gz = 0; gz < h; gz++) {
+                    for (int gx = 0; gx < w; gx++) {
+                        auto worldPos = m_zoneSystem->gridToWorld(gx, gz);
+                        auto zt = m_zoneSystem->getZoneType(worldPos.x, worldPos.y);
+                        auto rt = m_zoneSystem->getResource(worldPos.x, worldPos.y);
+                        switch (zt) {
+                            case ZoneType::Wilderness:  wilderness++; break;
+                            case ZoneType::Battlefield: battlefield++; break;
+                            case ZoneType::SpawnSafe:   spawn++; break;
+                            case ZoneType::Residential: residential++; break;
+                            case ZoneType::Commercial:  commercial++; break;
+                            case ZoneType::Industrial:  industrial++; break;
+                            case ZoneType::Resource:    resource++; break;
+                        }
+                        switch (rt) {
+                            case ResourceType::Wood:      resWood++; break;
+                            case ResourceType::Limestone: resLimestone++; break;
+                            case ResourceType::Iron:      resIron++; break;
+                            case ResourceType::Oil:       resOil++; break;
+                            default: break;
+                        }
+                    }
+                }
+
+                return {
+                    {"total_cells", MCPValue(w * h)},
+                    {"wilderness", MCPValue(wilderness)},
+                    {"battlefield", MCPValue(battlefield)},
+                    {"spawn_safe", MCPValue(spawn)},
+                    {"residential", MCPValue(residential)},
+                    {"commercial", MCPValue(commercial)},
+                    {"industrial", MCPValue(industrial)},
+                    {"resource", MCPValue(resource)},
+                    {"wood_cells", MCPValue(resWood)},
+                    {"limestone_cells", MCPValue(resLimestone)},
+                    {"iron_cells", MCPValue(resIron)},
+                    {"oil_cells", MCPValue(resOil)}
+                };
+            });
+
+        // ── get_building_catalog ──
+        m_mcpServer->registerTool("get_building_catalog", "List all building types with properties",
+            [](const MCPParams&) -> MCPResult {
+                const auto& catalog = ::getCityBuildingCatalog();
+                std::ostringstream ss;
+                ss << "[";
+                bool first = true;
+                for (const auto& def : catalog) {
+                    if (!first) ss << ",";
+                    first = false;
+                    ss << "{\"type\":\"" << def.type
+                       << "\",\"name\":\"" << def.name
+                       << "\",\"category\":\"" << def.category
+                       << "\",\"zoneReq\":\"" << def.zoneReq
+                       << "\",\"cost\":" << def.cost
+                       << ",\"maxWorkers\":" << def.maxWorkers
+                       << ",\"footprint\":" << def.footprint
+                       << ",\"produces\":\"" << def.produces
+                       << "\",\"requires\":\"" << def.requires
+                       << "\"}";
+                }
+                ss << "]";
+                return {
+                    {"count", MCPValue(static_cast<int>(catalog.size()))},
+                    {"buildings", MCPValue(ss.str())}
+                };
+            });
+
+        // ── list_buildings ──
+        m_mcpServer->registerTool("list_buildings", "List all placed buildings with positions and types",
+            [this](const MCPParams&) -> MCPResult {
+                std::ostringstream ss;
+                ss << "[";
+                bool first = true;
+                int count = 0;
+                for (const auto& obj : m_sceneObjects) {
+                    if (!obj || obj->getBuildingType().empty()) continue;
+                    if (!first) ss << ",";
+                    first = false;
+                    auto pos = obj->getTransform().getPosition();
+                    const ::CityBuildingDef* def = ::findCityBuildingDef(obj->getBuildingType());
+                    ss << "{\"name\":\"" << obj->getName()
+                       << "\",\"type\":\"" << obj->getBuildingType()
+                       << "\",\"category\":\"" << (def ? def->category : "")
+                       << "\",\"x\":" << pos.x
+                       << ",\"y\":" << pos.y
+                       << ",\"z\":" << pos.z
+                       << "}";
+                    count++;
+                }
+                ss << "]";
+                return {
+                    {"count", MCPValue(count)},
+                    {"buildings", MCPValue(ss.str())}
+                };
+            });
+
+        // ── place_building ──
+        m_mcpServer->registerTool("place_building", "Place a building at position (type, x, z). Validates zone and deducts cost from city treasury.",
+            [this](const MCPParams& p) -> MCPResult {
+                auto ti = p.find("type"), xi = p.find("x"), zi = p.find("z");
+                if (ti == p.end() || xi == p.end() || zi == p.end())
+                    return {{"error", MCPValue("Missing type, x, or z parameter")}};
+
+                std::string type = ti->second.getString();
+                float posX = xi->second.getFloat();
+                float posZ = zi->second.getFloat();
+
+                const ::CityBuildingDef* def = ::findCityBuildingDef(type);
+                if (!def)
+                    return {{"error", MCPValue("Unknown building type: " + type)}};
+
+                // Check zone compatibility
+                if (m_zoneSystem) {
+                    ZoneType zt = m_zoneSystem->getZoneType(posX, posZ);
+                    bool matches = def->zoneReq.empty();
+                    if (!matches) {
+                        if (def->zoneReq == "residential" && zt == ZoneType::Residential) matches = true;
+                        if (def->zoneReq == "commercial"  && zt == ZoneType::Commercial)  matches = true;
+                        if (def->zoneReq == "industrial"  && zt == ZoneType::Industrial)  matches = true;
+                        if (def->zoneReq == "resource"    && zt == ZoneType::Resource)    matches = true;
+                    }
+                    if (!matches)
+                        return {{"error", MCPValue("Zone mismatch — " + type + " requires " + def->zoneReq + " zone")}};
+                }
+
+                // Check cost
+                if (m_cityCredits < def->cost)
+                    return {{"error", MCPValue("Insufficient city funds (need " + std::to_string(static_cast<int>(def->cost))
+                                               + ", have " + std::to_string(static_cast<int>(m_cityCredits)) + ")")}};
+                m_cityCredits -= def->cost;
+
+                // Generate unique name
+                int count = 0;
+                for (auto& obj : m_sceneObjects) {
+                    if (obj && obj->getBuildingType() == type) count++;
+                }
+                std::string objName = def->name + "_" + std::to_string(count + 1);
+
+                float terrainY = m_terrain.getHeightAt(posX, posZ);
+
+                // Spawn placeholder cube colored by category
+                float size = def->footprint * 0.6f;
+                glm::vec4 color(0.7f, 0.7f, 0.7f, 1.0f);
+                if (def->category == "housing")    color = glm::vec4(0.9f, 0.8f, 0.2f, 1.0f);
+                else if (def->category == "food")       color = glm::vec4(0.2f, 0.8f, 0.2f, 1.0f);
+                else if (def->category == "resource")   color = glm::vec4(0.6f, 0.4f, 0.2f, 1.0f);
+                else if (def->category == "industry")   color = glm::vec4(0.5f, 0.5f, 0.6f, 1.0f);
+                else if (def->category == "commercial") color = glm::vec4(0.2f, 0.5f, 0.9f, 1.0f);
+
+                auto meshData = PrimitiveMeshBuilder::createCube(size, color);
+                auto obj = std::make_unique<SceneObject>(objName);
+                uint32_t handle = m_modelRenderer->createModel(meshData.vertices, meshData.indices);
+                obj->setBufferHandle(handle);
+                obj->setIndexCount(static_cast<uint32_t>(meshData.indices.size()));
+                obj->setVertexCount(static_cast<uint32_t>(meshData.vertices.size()));
+                obj->setLocalBounds(meshData.bounds);
+                obj->setModelPath("");
+                obj->setMeshData(meshData.vertices, meshData.indices);
+                obj->setPrimitiveType(PrimitiveType::Cube);
+                obj->setPrimitiveSize(size);
+                obj->setPrimitiveColor(color);
+                obj->getTransform().setPosition(glm::vec3(posX, terrainY, posZ));
+                obj->setName(objName);
+                obj->setBuildingType(type);
+                obj->setDescription(def->name);
+
+                m_sceneObjects.push_back(std::move(obj));
+
+                return {
+                    {"placed", MCPValue(true)},
+                    {"name", MCPValue(objName)},
+                    {"type", MCPValue(type)},
+                    {"x", MCPValue(posX)},
+                    {"y", MCPValue(terrainY)},
+                    {"z", MCPValue(posZ)},
+                    {"cost", MCPValue(def->cost)},
+                    {"city_credits_remaining", MCPValue(m_cityCredits)}
+                };
+            });
+
+        // ── find_empty_plot ──
+        m_mcpServer->registerTool("find_empty_plot", "Find a suitable empty location for a building type (type, optional near_x/near_z)",
+            [this](const MCPParams& p) -> MCPResult {
+                auto ti = p.find("type");
+                if (ti == p.end())
+                    return {{"error", MCPValue("Missing type parameter")}};
+
+                std::string type = ti->second.getString();
+                const ::CityBuildingDef* def = ::findCityBuildingDef(type);
+                if (!def)
+                    return {{"error", MCPValue("Unknown building type: " + type)}};
+                if (!m_zoneSystem)
+                    return {{"error", MCPValue("Zone system not initialized")}};
+
+                // Collect existing building positions and footprints
+                std::vector<std::pair<glm::vec2, float>> existingBuildings;
+                for (auto& obj : m_sceneObjects) {
+                    if (!obj || obj->getBuildingType().empty()) continue;
+                    auto pos = obj->getTransform().getPosition();
+                    const ::CityBuildingDef* bd = ::findCityBuildingDef(obj->getBuildingType());
+                    float fp = bd ? bd->footprint : 10.0f;
+                    existingBuildings.push_back({{pos.x, pos.z}, fp});
+                }
+
+                // Search center
+                float centerX = 0.0f, centerZ = 0.0f;
+                auto nxi = p.find("near_x"), nzi = p.find("near_z");
+                if (nxi != p.end()) centerX = nxi->second.getFloat();
+                if (nzi != p.end()) centerZ = nzi->second.getFloat();
+
+                float cellSize = m_zoneSystem->getCellSize();
+                float bestDist = 1e9f;
+                glm::vec2 bestPos(0.0f);
+                bool found = false;
+
+                // Spiral search from center
+                int maxRadius = 50;
+                for (int r = 0; r <= maxRadius && !found; r++) {
+                    for (int dz = -r; dz <= r; dz++) {
+                        for (int dx = -r; dx <= r; dx++) {
+                            if (std::abs(dx) != r && std::abs(dz) != r) continue; // only shell
+                            float wx = centerX + dx * cellSize;
+                            float wz = centerZ + dz * cellSize;
+
+                            // Check zone match
+                            ZoneType zt = m_zoneSystem->getZoneType(wx, wz);
+                            bool matches = def->zoneReq.empty();
+                            if (!matches) {
+                                if (def->zoneReq == "residential" && zt == ZoneType::Residential) matches = true;
+                                if (def->zoneReq == "commercial"  && zt == ZoneType::Commercial)  matches = true;
+                                if (def->zoneReq == "industrial"  && zt == ZoneType::Industrial)  matches = true;
+                                if (def->zoneReq == "resource"    && zt == ZoneType::Resource)    matches = true;
+                            }
+                            if (!matches) continue;
+
+                            // Check no existing building too close
+                            bool tooClose = false;
+                            for (auto& [bp, bfp] : existingBuildings) {
+                                float minDist = (bfp + def->footprint) * 0.5f;
+                                if (glm::length(glm::vec2(wx, wz) - bp) < minDist) {
+                                    tooClose = true;
+                                    break;
+                                }
+                            }
+                            if (tooClose) continue;
+
+                            float dist = glm::length(glm::vec2(wx - centerX, wz - centerZ));
+                            if (dist < bestDist) {
+                                bestDist = dist;
+                                bestPos = {wx, wz};
+                                found = true;
+                            }
+                        }
+                    }
+                }
+
+                if (!found)
+                    return {{"error", MCPValue("No suitable plot found for " + type)}};
+
+                float h = m_terrain.getHeightAt(bestPos.x, bestPos.y);
+                return {
+                    {"x", MCPValue(bestPos.x)},
+                    {"z", MCPValue(bestPos.y)},
+                    {"terrain_height", MCPValue(h)},
+                    {"zone_type", MCPValue(std::string(ZoneSystem::zoneTypeName(m_zoneSystem->getZoneType(bestPos.x, bestPos.y))))},
+                    {"distance_from_center", MCPValue(bestDist)}
+                };
+            });
+
+        // ── get_city_stats ──
+        m_mcpServer->registerTool("get_city_stats", "Get city statistics: population, housing, workers, production, treasury",
+            [this](const MCPParams&) -> MCPResult {
+                const auto& catalog = ::getCityBuildingCatalog();
+                int totalBuildings = 0;
+                int totalWorkerSlots = 0;
+                int housingCount = 0;
+                std::unordered_map<std::string, int> buildingCounts;
+                std::unordered_map<std::string, int> production;
+
+                for (const auto& obj : m_sceneObjects) {
+                    if (!obj || obj->getBuildingType().empty()) continue;
+                    totalBuildings++;
+                    buildingCounts[obj->getBuildingType()]++;
+                    const ::CityBuildingDef* def = ::findCityBuildingDef(obj->getBuildingType());
+                    if (def) {
+                        totalWorkerSlots += def->maxWorkers;
+                        if (def->category == "housing") housingCount++;
+                        if (!def->produces.empty()) production[def->produces]++;
+                    }
+                }
+
+                // Build summary strings
+                std::ostringstream countsSS;
+                countsSS << "{";
+                bool first = true;
+                for (const auto& def : catalog) {
+                    if (!first) countsSS << ",";
+                    first = false;
+                    int c = 0;
+                    auto it = buildingCounts.find(def.type);
+                    if (it != buildingCounts.end()) c = it->second;
+                    countsSS << "\"" << def.type << "\":" << c;
+                }
+                countsSS << "}";
+
+                std::ostringstream prodSS;
+                prodSS << "{";
+                first = true;
+                for (auto& [res, cnt] : production) {
+                    if (!first) prodSS << ",";
+                    first = false;
+                    prodSS << "\"" << res << "\":" << cnt;
+                }
+                prodSS << "}";
+
+                return {
+                    {"total_buildings", MCPValue(totalBuildings)},
+                    {"housing_count", MCPValue(housingCount)},
+                    {"estimated_population", MCPValue(housingCount * 4)},
+                    {"total_worker_slots", MCPValue(totalWorkerSlots)},
+                    {"city_credits", MCPValue(m_cityCredits)},
+                    {"building_counts", MCPValue(countsSS.str())},
+                    {"production", MCPValue(prodSS.str())}
+                };
+            });
+
+        // ── Planet/Species tools (query backend on localhost:8080) ──
+
+        // ── generate_planet ──
+        m_mcpServer->registerTool("generate_planet", "Generate a random planet. Optional params: seed(int), biome(string), government(string), tech_level(int)",
+            [](const MCPParams& p) -> MCPResult {
+                httplib::Client cli("localhost", 8080);
+                cli.set_connection_timeout(3);
+
+                // Build JSON body from params
+                std::ostringstream body;
+                body << "{";
+                bool first = true;
+                auto si = p.find("seed");
+                if (si != p.end()) { body << "\"seed\":" << si->second.getInt(); first = false; }
+                auto bi = p.find("biome");
+                if (bi != p.end()) { if (!first) body << ","; body << "\"biome\":\"" << bi->second.getString() << "\""; first = false; }
+                auto gi = p.find("government");
+                if (gi != p.end()) { if (!first) body << ","; body << "\"government\":\"" << gi->second.getString() << "\""; first = false; }
+                auto ti = p.find("tech_level");
+                if (ti != p.end()) { if (!first) body << ","; body << "\"tech_level\":" << ti->second.getInt(); first = false; }
+                body << "}";
+
+                auto res = cli.Post("/planet/generate", body.str(), "application/json");
+                if (res && res->status == 200) {
+                    return {{"planet_json", MCPValue(res->body)}};
+                }
+                return {{"error", MCPValue("Backend not available — start backend/server.py")}};
+            });
+
+        // ── get_planet_info ──
+        m_mcpServer->registerTool("get_planet_info", "Get the current planet profile (biome, species, tech level, resources)",
+            [](const MCPParams&) -> MCPResult {
+                httplib::Client cli("localhost", 8080);
+                cli.set_connection_timeout(3);
+                auto res = cli.Get("/planet/current");
+                if (res && res->status == 200) {
+                    return {{"planet_json", MCPValue(res->body)}};
+                }
+                return {{"error", MCPValue("No planet generated or backend not available")}};
+            });
+
+        // ── get_species_info ──
+        m_mcpServer->registerTool("get_species_info", "Get species data by civilization ID (e.g. 'democracy_7'). Param: civ_id",
+            [](const MCPParams& p) -> MCPResult {
+                auto ci = p.find("civ_id");
+                if (ci == p.end())
+                    return {{"error", MCPValue("Missing civ_id parameter")}};
+                httplib::Client cli("localhost", 8080);
+                cli.set_connection_timeout(3);
+                auto res = cli.Get(("/species/" + ci->second.getString()).c_str());
+                if (res && res->status == 200) {
+                    return {{"species_json", MCPValue(res->body)}};
+                }
+                return {{"error", MCPValue("Species not found or backend not available")}};
+            });
+
+        // ── get_tech_capabilities ──
+        m_mcpServer->registerTool("get_tech_capabilities", "Get all tech levels with capabilities and available buildings",
+            [](const MCPParams&) -> MCPResult {
+                httplib::Client cli("localhost", 8080);
+                cli.set_connection_timeout(3);
+                auto res = cli.Get("/tech_levels");
+                if (res && res->status == 200) {
+                    return {{"tech_levels_json", MCPValue(res->body)}};
+                }
+                return {{"error", MCPValue("Backend not available")}};
+            });
+
+        // ── list_biomes ──
+        m_mcpServer->registerTool("list_biomes", "List all available planet biome types",
+            [](const MCPParams&) -> MCPResult {
+                httplib::Client cli("localhost", 8080);
+                cli.set_connection_timeout(3);
+                auto res = cli.Get("/planet/biomes");
+                if (res && res->status == 200) {
+                    return {{"biomes_json", MCPValue(res->body)}};
+                }
+                return {{"error", MCPValue("Backend not available")}};
+            });
+
+        // ── list_governments ──
+        m_mcpServer->registerTool("list_governments", "List all government types with tendencies and descriptions",
+            [](const MCPParams&) -> MCPResult {
+                httplib::Client cli("localhost", 8080);
+                cli.set_connection_timeout(3);
+                auto res = cli.Get("/governments");
+                if (res && res->status == 200) {
+                    return {{"governments_json", MCPValue(res->body)}};
+                }
+                return {{"error", MCPValue("Backend not available")}};
+            });
+
+        // ── get_diplomacy ──
+        m_mcpServer->registerTool("get_diplomacy", "Get relationship between two civilizations. Params: civ_a, civ_b (e.g. 'democracy_7', 'empire_6')",
+            [](const MCPParams& p) -> MCPResult {
+                auto ai = p.find("civ_a"), bi = p.find("civ_b");
+                if (ai == p.end() || bi == p.end())
+                    return {{"error", MCPValue("Missing civ_a or civ_b parameter")}};
+                httplib::Client cli("localhost", 8080);
+                cli.set_connection_timeout(3);
+                std::string path = "/diplomacy/" + ai->second.getString() + "/" + bi->second.getString();
+                auto res = cli.Get(path.c_str());
+                if (res && res->status == 200) {
+                    return {{"diplomacy_json", MCPValue(res->body)}};
+                }
+                return {{"error", MCPValue("Backend not available")}};
+            });
+
+        m_mcpServer->start();
     }
 
     void onBeforeMainLoop() override {
@@ -278,6 +837,11 @@ protected:
         cleanupGroveLogoTexture();
         if (m_groveVm) { grove_destroy(m_groveVm); m_groveVm = nullptr; }
 
+        if (m_mcpServer) {
+            m_mcpServer->stop();
+            m_mcpServer.reset();
+        }
+
         m_imguiManager.cleanup();
 
         m_waterRenderer.reset();
@@ -309,6 +873,11 @@ protected:
         // Poll for AI backend responses
         if (m_httpClient) {
             m_httpClient->pollResponses();
+        }
+
+        // Process MCP server commands
+        if (m_mcpServer) {
+            m_mcpServer->processCommands();
         }
 
         trackFPS(deltaTime);
@@ -1534,6 +2103,7 @@ private:
         m_groveContext.groveBotTarget = &m_groveBotTarget;
         m_groveContext.groveCurrentScriptName = &m_groveCurrentScriptName;
         m_groveContext.playerCredits = &m_playerCredits;
+        m_groveContext.cityCredits = &m_cityCredits;
         m_groveContext.isPlayMode = &m_isPlayMode;
         m_groveContext.currentLevelPath = &m_currentLevelPath;
         m_groveContext.spawnPlotPosts = [this](int gx, int gz) { spawnPlotPosts(gx, gz); };
@@ -5838,9 +6408,16 @@ private:
 
                                 // Check for and execute AI action
                                 if (json.contains("action") && !json["action"].is_null()) {
+                                    std::cout << "[AI] Action received: " << json["action"].value("type", "?") << std::endl;
                                     executeAIAction(json["action"]);
+                                } else {
+                                    std::cout << "[AI] No action in response (dialogue only)" << std::endl;
                                 }
+                            } catch (const std::exception& e) {
+                                std::cerr << "[AI] Exception in response handler: " << e.what() << std::endl;
+                                m_conversationHistory.push_back({npcName, "...", false});
                             } catch (...) {
+                                std::cerr << "[AI] Unknown exception in response handler" << std::endl;
                                 m_conversationHistory.push_back({npcName, "...", false});
                             }
                         } else {
@@ -6282,13 +6859,16 @@ private:
         }
         ImGui::End();
 
-        // Credits + Game time display (upper right corner)
+        // Credits + City Credits + Game time display (upper right corner)
         std::string timeStr = formatGameTimeDisplay(m_gameTimeMinutes);
         char creditsStr[64];
         snprintf(creditsStr, sizeof(creditsStr), "%d CR", static_cast<int>(m_playerCredits));
+        char cityCreditsStr[64];
+        snprintf(cityCreditsStr, sizeof(cityCreditsStr), "City: %d CR", static_cast<int>(m_cityCredits));
         ImVec2 timeSize = ImGui::CalcTextSize(timeStr.c_str());
         ImVec2 creditsSize = ImGui::CalcTextSize(creditsStr);
-        float hudWindowWidth = creditsSize.x + 20.0f + timeSize.x + 20.0f;
+        ImVec2 cityCreditsSize = ImGui::CalcTextSize(cityCreditsStr);
+        float hudWindowWidth = creditsSize.x + 20.0f + cityCreditsSize.x + 20.0f + timeSize.x + 20.0f;
         ImGui::SetNextWindowPos(ImVec2(getWindow().getWidth() - hudWindowWidth - 10, 10));
         ImGui::SetNextWindowBgAlpha(0.5f);
         if (ImGui::Begin("##GameHUD", nullptr,
@@ -6296,6 +6876,8 @@ private:
             ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoMove |
             ImGuiWindowFlags_NoSavedSettings)) {
             ImGui::TextColored(ImVec4(0.3f, 1.0f, 0.5f, 1.0f), "%s", creditsStr);
+            ImGui::SameLine(0, 20.0f);
+            ImGui::TextColored(ImVec4(0.4f, 0.7f, 1.0f, 1.0f), "%s", cityCreditsStr);
             ImGui::SameLine(0, 20.0f);
             ImGui::TextColored(ImVec4(1.0f, 1.0f, 0.5f, 1.0f), "%s", timeStr.c_str());
         }
@@ -6467,6 +7049,30 @@ private:
         legendColor(IM_COL32(60, 60, 60, 255), "Wilderness");
         ImGui::NewLine();
 
+        // Building icon legend
+        auto legendDiamond = [](ImU32 col, const char* label) {
+            ImVec2 p = ImGui::GetCursorScreenPos();
+            ImVec2 c(p.x + 6, p.y + 6);
+            ImGui::GetWindowDrawList()->AddQuadFilled(
+                ImVec2(c.x, c.y - 5), ImVec2(c.x + 5, c.y),
+                ImVec2(c.x, c.y + 5), ImVec2(c.x - 5, c.y), col);
+            ImGui::GetWindowDrawList()->AddQuad(
+                ImVec2(c.x, c.y - 5), ImVec2(c.x + 5, c.y),
+                ImVec2(c.x, c.y + 5), ImVec2(c.x - 5, c.y), IM_COL32(0, 0, 0, 255));
+            ImGui::Dummy(ImVec2(14, 12));
+            ImGui::SameLine();
+            ImGui::Text("%s", label);
+            ImGui::SameLine(0, 16);
+        };
+        ImGui::Text("Buildings:");
+        ImGui::SameLine(0, 8);
+        legendDiamond(IM_COL32(230, 204, 51, 255), "Housing");
+        legendDiamond(IM_COL32(77, 204, 51, 255), "Food");
+        legendDiamond(IM_COL32(153, 102, 51, 255), "Resource");
+        legendDiamond(IM_COL32(128, 128, 128, 255), "Industry");
+        legendDiamond(IM_COL32(51, 128, 204, 255), "Commercial");
+        ImGui::NewLine();
+
         // Zoom controls
         ImGui::Text("Zoom: %.1fx", m_zoneMapZoom);
         ImGui::SameLine();
@@ -6617,6 +7223,65 @@ private:
             }
         }
 
+        // Draw building icons as colored diamonds
+        {
+            auto bldgDiamondColor = [](const std::string& btype) -> ImU32 {
+                const ::CityBuildingDef* d = ::findCityBuildingDef(btype);
+                if (!d) return IM_COL32(200, 200, 200, 255);
+                const std::string& cat = d->category;
+                if (cat == "housing")    return IM_COL32(230, 204, 51, 255);
+                if (cat == "food")       return IM_COL32(77, 204, 51, 255);
+                if (cat == "resource")   return IM_COL32(153, 102, 51, 255);
+                if (cat == "industry")   return IM_COL32(128, 128, 128, 255);
+                if (cat == "commercial") return IM_COL32(51, 128, 204, 255);
+                return IM_COL32(200, 200, 200, 255);
+            };
+
+            auto bldgLabel = [](const std::string& btype) -> const char* {
+                if (btype == "shack")       return "S";
+                if (btype == "farm")        return "F";
+                if (btype == "lumber_mill") return "L";
+                if (btype == "quarry")      return "Q";
+                if (btype == "mine")        return "M";
+                if (btype == "workshop")    return "W";
+                if (btype == "market")      return "Mk";
+                if (btype == "warehouse")   return "Wh";
+                return "?";
+            };
+
+            for (auto& obj : m_sceneObjects) {
+                const std::string& bt = obj->getBuildingType();
+                if (bt.empty() || bt.substr(0, 10) == "worker_at_") continue;
+
+                glm::vec3 pos = obj->getTransform().getPosition();
+                glm::ivec2 gp = m_zoneSystem->worldToGrid(pos.x, pos.z);
+                float cx = originX + (gp.x + 0.5f) * cellPx;
+                float cy = originY + (gp.y + 0.5f) * cellPx;
+
+                // Skip if off-screen
+                if (cx < canvasPos.x - 10 || cx > canvasPos.x + canvasSize.x + 10 ||
+                    cy < canvasPos.y - 10 || cy > canvasPos.y + canvasSize.y + 10) continue;
+
+                float ds = std::max(3.0f, cellPx * 0.4f); // diamond half-size
+                ImU32 col = bldgDiamondColor(bt);
+
+                drawList->AddQuadFilled(
+                    ImVec2(cx, cy - ds), ImVec2(cx + ds, cy),
+                    ImVec2(cx, cy + ds), ImVec2(cx - ds, cy), col);
+                drawList->AddQuad(
+                    ImVec2(cx, cy - ds), ImVec2(cx + ds, cy),
+                    ImVec2(cx, cy + ds), ImVec2(cx - ds, cy), IM_COL32(0, 0, 0, 255));
+
+                // Text label at higher zoom
+                if (cellPx >= 24.0f) {
+                    const char* lbl = bldgLabel(bt);
+                    ImVec2 ts = ImGui::CalcTextSize(lbl);
+                    drawList->AddText(ImVec2(cx - ts.x * 0.5f, cy + ds + 1.0f),
+                                      IM_COL32(255, 255, 255, 220), lbl);
+                }
+            }
+        }
+
         // Draw player position marker
         glm::vec3 camPos = m_camera.getPosition();
         glm::ivec2 playerGrid = m_zoneSystem->worldToGrid(camPos.x, camPos.z);
@@ -6660,6 +7325,25 @@ private:
                     if (cell->ownerPlayerId != 0)
                         ImGui::Text("Owner: Player %u", cell->ownerPlayerId);
                     ImGui::Text("Price: $%.0f", cell->purchasePrice);
+
+                    // List buildings in this grid cell
+                    bool headerShown = false;
+                    for (auto& bobj : m_sceneObjects) {
+                        const std::string& bt = bobj->getBuildingType();
+                        if (bt.empty() || bt.substr(0, 10) == "worker_at_") continue;
+                        glm::vec3 bpos = bobj->getTransform().getPosition();
+                        glm::ivec2 bgp = m_zoneSystem->worldToGrid(bpos.x, bpos.z);
+                        if (bgp.x == hoverGX && bgp.y == hoverGZ) {
+                            if (!headerShown) {
+                                ImGui::Separator();
+                                ImGui::Text("Buildings:");
+                                headerShown = true;
+                            }
+                            const ::CityBuildingDef* bd = ::findCityBuildingDef(bt);
+                            ImGui::Text("  %s (%s)", bobj->getName().c_str(),
+                                        bd ? bd->name.c_str() : bt.c_str());
+                        }
+                    }
                     ImGui::EndTooltip();
                 }
             }
@@ -7241,6 +7925,9 @@ private:
             if (!binObj.description.empty()) {
                 obj->setDescription(binObj.description);
             }
+            if (!binObj.buildingType.empty()) {
+                obj->setBuildingType(binObj.buildingType);
+            }
 
             // Primitive properties
             if (binObj.isPrimitive) {
@@ -7507,6 +8194,9 @@ private:
                 if (!objData.description.empty()) {
                     obj->setDescription(objData.description);
                 }
+                if (!objData.buildingType.empty()) {
+                    obj->setBuildingType(objData.buildingType);
+                }
 
                 // Restore behaviors
                 for (const auto& behData : objData.behaviors) {
@@ -7694,6 +8384,7 @@ private:
         try {
             nlohmann::json save;
             save["credits"] = m_playerCredits;
+            save["cityCredits"] = m_cityCredits;
             save["gameTimeMinutes"] = m_gameTimeMinutes;
 
             // Save owned plots from zone system
@@ -7743,6 +8434,9 @@ private:
             // Restore credits
             if (save.contains("credits")) {
                 m_playerCredits = save["credits"].get<float>();
+            }
+            if (save.contains("cityCredits")) {
+                m_cityCredits = save["cityCredits"].get<float>();
             }
 
             // Restore game time
@@ -10378,8 +11072,10 @@ private:
                 std::cout << "[AI Action] run_script: no script provided" << std::endl;
             } else {
                 std::cout << "[AI Action] run_script: executing " << script.size() << " bytes" << std::endl;
+                std::cout << "[AI Action] script first 200 chars: " << script.substr(0, 200) << std::endl;
                 m_groveOutputAccum.clear();
                 int32_t ret = grove_eval(m_groveVm, script.c_str());
+                std::cout << "[AI Action] grove_eval returned: " << ret << std::endl;
                 if (ret != 0) {
                     const char* err = grove_last_error(m_groveVm);
                     int line = static_cast<int>(grove_last_error_line(m_groveVm));
@@ -10388,12 +11084,14 @@ private:
                     addChatMessage("System", errMsg);
                 } else if (!m_groveOutputAccum.empty()) {
                     // Show Grove output in chat as a system message
-                    std::cout << "[Grove] " << m_groveOutputAccum;
+                    std::cout << "[Grove output] " << m_groveOutputAccum << std::endl;
                     // Add to conversation so player can see the result
                     std::string output = m_groveOutputAccum;
                     // Trim trailing newline
                     while (!output.empty() && output.back() == '\n') output.pop_back();
                     addChatMessage(m_currentInteractObject ? m_currentInteractObject->getName() : "System", output);
+                } else {
+                    std::cout << "[AI Action] Script succeeded but produced no output" << std::endl;
                 }
             }
         }
@@ -11284,6 +11982,9 @@ private:
     std::string m_currentSessionId;
     std::unordered_map<std::string, std::string> m_quickChatSessionIds;  // npcName -> session_id
     bool m_waitingForAIResponse = false;
+
+    // MCP Server (Claude Code integration)
+    std::unique_ptr<MCPServer> m_mcpServer;
     
     // AI Motor Control Actions
     bool m_aiActionActive = false;
@@ -11477,6 +12178,7 @@ private:
 
     // Player economy
     float m_playerCredits = 1000.0f;   // Starting credits
+    float m_cityCredits = 5000.0f;     // City treasury (separate from player)
 
     // Camera speed (tracked separately since Camera doesn't expose getter)
     float m_cameraSpeed = 15.0f;

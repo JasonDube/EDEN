@@ -88,6 +88,7 @@ struct LevelData {
         bool dailySchedule = false;  // Reset behaviors at midnight for daily routines
         float patrolSpeed = 5.0f;    // Movement speed for FOLLOW_PATH
         std::string description;     // Description visible to AI perception
+        std::string buildingType;    // Building catalog type (e.g. "farm")
         std::vector<BehaviorData> behaviors;  // Behaviors for this object
 
         // Skinned/animated model support

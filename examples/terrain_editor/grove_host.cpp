@@ -14,6 +14,8 @@
 #include <filesystem>
 #include <cmath>
 #include <cstring>
+#include <map>
+#include <algorithm>
 
 using namespace eden;
 
@@ -1749,6 +1751,538 @@ static int32_t grovePlotStatus(const GroveValue* args, uint32_t argc, GroveValue
     return 0;
 }
 
+// ─── Building Catalog ───
+
+static std::vector<CityBuildingDef> s_buildingCatalog = {
+    {"shack",       "Shack",        "housing",    "residential", "", 50.0f,  0, 8.0f,  "",      ""},
+    {"farm",        "Farm",         "food",       "",            "", 200.0f, 2, 12.0f, "food",  ""},
+    {"lumber_mill", "Lumber Mill",  "resource",   "resource",    "", 300.0f, 3, 14.0f, "wood",  "wood"},
+    {"quarry",      "Quarry",       "resource",   "resource",    "", 400.0f, 4, 16.0f, "stone", "limestone"},
+    {"mine",        "Mine",         "resource",   "resource",    "", 500.0f, 5, 16.0f, "metal", "iron"},
+    {"workshop",    "Workshop",     "industry",   "industrial",  "", 350.0f, 3, 12.0f, "goods", ""},
+    {"market",      "Market",       "commercial", "commercial",  "", 250.0f, 2, 10.0f, "",      ""},
+    {"warehouse",   "Warehouse",    "commercial", "",            "", 200.0f, 1, 12.0f, "",      ""},
+};
+
+const std::vector<CityBuildingDef>& getCityBuildingCatalog() { return s_buildingCatalog; }
+
+const CityBuildingDef* findCityBuildingDef(const std::string& type) {
+    for (const auto& def : s_buildingCatalog) {
+        if (def.type == type) return &def;
+    }
+    return nullptr;
+}
+
+// Thread-local buffer for returning dynamic strings to Grove
+static thread_local std::string s_groveStringBuf;
+
+// Helper: set result to a dynamic string using the thread-local buffer
+static void setStringResult(GroveValue* result, const std::string& str) {
+    s_groveStringBuf = str;
+    result->tag = GROVE_STRING;
+    result->data.string_val.ptr = s_groveStringBuf.c_str();
+    result->data.string_val.len = static_cast<uint32_t>(s_groveStringBuf.size());
+}
+
+// Helper: category → placeholder cube color
+static glm::vec4 categoryColor(const std::string& category) {
+    if (category == "housing")    return glm::vec4(0.9f, 0.8f, 0.2f, 1.0f); // yellow
+    if (category == "food")       return glm::vec4(0.3f, 0.8f, 0.2f, 1.0f); // green
+    if (category == "resource")   return glm::vec4(0.6f, 0.4f, 0.2f, 1.0f); // brown
+    if (category == "industry")   return glm::vec4(0.5f, 0.5f, 0.5f, 1.0f); // gray
+    if (category == "commercial") return glm::vec4(0.2f, 0.4f, 0.9f, 1.0f); // blue
+    if (category == "service")    return glm::vec4(0.8f, 0.3f, 0.8f, 1.0f); // purple
+    return glm::vec4(0.7f, 0.7f, 0.7f, 1.0f);
+}
+
+// Helper: map zone requirement string to ZoneType
+static bool zoneMatches(const std::string& zoneReq, eden::ZoneType actual) {
+    if (zoneReq.empty()) return true; // any zone
+    if (zoneReq == "residential" && actual == eden::ZoneType::Residential) return true;
+    if (zoneReq == "commercial"  && actual == eden::ZoneType::Commercial)  return true;
+    if (zoneReq == "industrial"  && actual == eden::ZoneType::Industrial)  return true;
+    if (zoneReq == "resource"    && actual == eden::ZoneType::Resource)    return true;
+    // Also allow SpawnSafe for any zone type (initial builds)
+    if (actual == eden::ZoneType::SpawnSafe) return true;
+    return false;
+}
+
+// building_types() → string
+static int32_t groveBuildingTypesFn(const GroveValue*, uint32_t, GroveValue* result, void*) {
+    std::string out;
+    for (const auto& def : s_buildingCatalog) {
+        if (!out.empty()) out += "\n";
+        out += def.type + "|" + def.name + "|" + def.category + "|" + def.zoneReq + "|"
+             + std::to_string(static_cast<int>(def.cost)) + "|" + std::to_string(def.maxWorkers) + "|"
+             + def.produces + "|" + def.requires;
+    }
+    setStringResult(result, out);
+    return 0;
+}
+
+// spawn_building(type, pos) → bool
+static int32_t groveSpawnBuildingFn(const GroveValue* args, uint32_t argc, GroveValue* result, void* ud) {
+    auto* ctx = static_cast<GroveContext*>(ud);
+    result->tag = GROVE_BOOL;
+    result->data.bool_val = 0;
+
+    if (argc < 2 || args[0].tag != GROVE_STRING || args[1].tag != GROVE_VEC3) return 0;
+
+    auto& sv = args[0].data.string_val;
+    std::string type = (sv.ptr && sv.len > 0) ? std::string(sv.ptr, sv.len) : "";
+    const CityBuildingDef* def = findCityBuildingDef(type);
+    if (!def) {
+        if (ctx->groveOutputAccum)
+            ctx->groveOutputAccum->append("[City] Unknown building type '" + type + "'\n");
+        return 0;
+    }
+
+    float posX = static_cast<float>(args[1].data.vec3_val.x);
+    float posZ = static_cast<float>(args[1].data.vec3_val.z);
+
+    // Check zone compatibility
+    if (ctx->zoneSystem) {
+        eden::ZoneType zt = ctx->zoneSystem->getZoneType(posX, posZ);
+        if (!zoneMatches(def->zoneReq, zt)) {
+            if (ctx->groveOutputAccum)
+                ctx->groveOutputAccum->append("[City] Cannot place " + type + " — zone mismatch at ("
+                    + std::to_string(static_cast<int>(posX)) + ", " + std::to_string(static_cast<int>(posZ)) + ")\n");
+            return 0;
+        }
+    }
+
+    // Deduct cost from city treasury
+    if (*ctx->cityCredits < def->cost) {
+        if (ctx->groveOutputAccum)
+            ctx->groveOutputAccum->append("[City] Cannot place " + type + " — insufficient city funds (need "
+                + std::to_string(static_cast<int>(def->cost)) + ", have "
+                + std::to_string(static_cast<int>(*ctx->cityCredits)) + ")\n");
+        return 0;
+    }
+    *ctx->cityCredits -= def->cost;
+
+    // Generate unique name: "Type_N"
+    int count = 0;
+    for (auto& obj : *ctx->sceneObjects) {
+        if (obj->getBuildingType() == type) count++;
+    }
+    std::string objName = def->name + "_" + std::to_string(count + 1);
+
+    float terrainY = ctx->terrain->getHeightAt(posX, posZ);
+
+    std::unique_ptr<SceneObject> obj;
+
+    if (!def->modelPath.empty()) {
+        // Load real model (reusing spawn_model pattern)
+        std::string modelPath = def->modelPath;
+        if (modelPath[0] != '/') {
+            std::vector<std::string> searchPaths;
+            if (!ctx->currentLevelPath->empty()) {
+                size_t lastSlash = ctx->currentLevelPath->find_last_of("/\\");
+                if (lastSlash != std::string::npos)
+                    searchPaths.push_back(ctx->currentLevelPath->substr(0, lastSlash + 1) + modelPath);
+            }
+            searchPaths.push_back("levels/" + modelPath);
+            searchPaths.push_back(modelPath);
+            for (const auto& candidate : searchPaths) {
+                std::ifstream test(candidate);
+                if (test.good()) { modelPath = candidate; break; }
+            }
+        }
+        bool isLime = modelPath.size() >= 5 && modelPath.substr(modelPath.size() - 5) == ".lime";
+        if (isLime) {
+            auto lr = LimeLoader::load(modelPath);
+            if (lr.success) obj = LimeLoader::createSceneObject(lr.mesh, *ctx->modelRenderer);
+        } else {
+            auto lr = GLBLoader::load(modelPath);
+            if (lr.success && !lr.meshes.empty())
+                obj = GLBLoader::createSceneObject(lr.meshes[0], *ctx->modelRenderer);
+        }
+        if (obj) {
+            obj->setModelPath(modelPath);
+            // Position bottom on terrain
+            glm::vec3 scale = obj->getTransform().getScale();
+            float minVertexY = 0.0f;
+            if (obj->hasMeshData()) {
+                for (const auto& v : obj->getVertices())
+                    if (v.position.y < minVertexY) minVertexY = v.position.y;
+            }
+            float bottomOffset = -minVertexY * scale.y;
+            obj->getTransform().setPosition(glm::vec3(posX, terrainY + bottomOffset, posZ));
+        }
+    }
+
+    if (!obj) {
+        // Spawn placeholder cube colored by category
+        float size = def->footprint * 0.6f; // Cube covers ~60% of footprint
+        glm::vec4 color = categoryColor(def->category);
+        auto meshData = PrimitiveMeshBuilder::createCube(size, color);
+        obj = std::make_unique<SceneObject>(objName);
+        uint32_t handle = ctx->modelRenderer->createModel(meshData.vertices, meshData.indices);
+        obj->setBufferHandle(handle);
+        obj->setIndexCount(static_cast<uint32_t>(meshData.indices.size()));
+        obj->setVertexCount(static_cast<uint32_t>(meshData.vertices.size()));
+        obj->setLocalBounds(meshData.bounds);
+        obj->setModelPath("");
+        obj->setMeshData(meshData.vertices, meshData.indices);
+        obj->setPrimitiveType(PrimitiveType::Cube);
+        obj->setPrimitiveSize(size);
+        obj->setPrimitiveColor(color);
+        // Cube origin is at bottom center (Y goes 0 to size), so place at terrainY
+        obj->getTransform().setPosition(glm::vec3(posX, terrainY, posZ));
+    }
+
+    obj->setName(objName);
+    obj->setBuildingType(type);
+    obj->setDescription(def->name);
+
+    ctx->sceneObjects->push_back(std::move(obj));
+    if (ctx->groveOutputAccum)
+        ctx->groveOutputAccum->append("[City] " + def->name + " placed at ("
+            + std::to_string(static_cast<int>(posX)) + ", " + std::to_string(static_cast<int>(posZ))
+            + ") — cost " + std::to_string(static_cast<int>(def->cost))
+            + " CR, treasury: " + std::to_string(static_cast<int>(*ctx->cityCredits)) + " CR\n");
+    result->data.bool_val = 1;
+    return 0;
+}
+
+// count_buildings(type?) → number
+static int32_t groveCountBuildingsFn(const GroveValue* args, uint32_t argc, GroveValue* result, void* ud) {
+    auto* ctx = static_cast<GroveContext*>(ud);
+    result->tag = GROVE_NUMBER;
+
+    std::string filterType;
+    if (argc >= 1 && args[0].tag == GROVE_STRING) {
+        auto& sv = args[0].data.string_val;
+        if (sv.ptr && sv.len > 0) filterType = std::string(sv.ptr, sv.len);
+    }
+
+    int count = 0;
+    for (auto& obj : *ctx->sceneObjects) {
+        const auto& bt = obj->getBuildingType();
+        if (bt.empty()) continue;
+        if (filterType.empty() || bt == filterType) count++;
+    }
+    result->data.number_val = static_cast<double>(count);
+    return 0;
+}
+
+// list_buildings(type?) → string
+static int32_t groveListBuildingsFn(const GroveValue* args, uint32_t argc, GroveValue* result, void* ud) {
+    auto* ctx = static_cast<GroveContext*>(ud);
+
+    std::string filterType;
+    if (argc >= 1 && args[0].tag == GROVE_STRING) {
+        auto& sv = args[0].data.string_val;
+        if (sv.ptr && sv.len > 0) filterType = std::string(sv.ptr, sv.len);
+    }
+
+    std::string out;
+    for (auto& obj : *ctx->sceneObjects) {
+        const auto& bt = obj->getBuildingType();
+        if (bt.empty()) continue;
+        if (!filterType.empty() && bt != filterType) continue;
+        glm::vec3 pos = obj->getTransform().getPosition();
+        if (!out.empty()) out += "\n";
+        out += obj->getName() + "|" + bt + "|"
+             + std::to_string(static_cast<int>(pos.x)) + "|" + std::to_string(static_cast<int>(pos.z));
+    }
+    setStringResult(result, out);
+    return 0;
+}
+
+// find_empty_plot(zone_type, near_x?, near_z?) → vec3 or nil
+static int32_t groveFindEmptyPlotFn(const GroveValue* args, uint32_t argc, GroveValue* result, void* ud) {
+    auto* ctx = static_cast<GroveContext*>(ud);
+    result->tag = GROVE_NIL;
+
+    if (!ctx->zoneSystem || argc < 1 || args[0].tag != GROVE_STRING) return 0;
+
+    auto& sv = args[0].data.string_val;
+    std::string zoneReqStr = (sv.ptr && sv.len > 0) ? std::string(sv.ptr, sv.len) : "";
+
+    // Default to sorting near player position (spawn center / camera)
+    glm::vec3 camPos = ctx->camera->getPosition();
+    float nearX = camPos.x, nearZ = camPos.z;
+    if (argc >= 3 && args[1].tag == GROVE_NUMBER && args[2].tag == GROVE_NUMBER) {
+        nearX = static_cast<float>(args[1].data.number_val);
+        nearZ = static_cast<float>(args[2].data.number_val);
+    }
+
+    // Collect existing building positions for spacing check
+    std::vector<std::pair<glm::vec2, float>> existingBuildings; // pos, footprint
+    for (auto& obj : *ctx->sceneObjects) {
+        const auto& bt = obj->getBuildingType();
+        if (bt.empty()) continue;
+        glm::vec3 p = obj->getTransform().getPosition();
+        const CityBuildingDef* d = findCityBuildingDef(bt);
+        float fp = d ? d->footprint : 10.0f;
+        existingBuildings.push_back({glm::vec2(p.x, p.z), fp});
+    }
+
+    // Find the footprint for the building we want to place
+    float myFootprint = 10.0f;
+    // We don't know which building type will go here, use a default spacing
+
+    struct Candidate { float x, z, dist; };
+    std::vector<Candidate> candidates;
+
+    int gw = ctx->zoneSystem->getGridWidth();
+    int gh = ctx->zoneSystem->getGridHeight();
+    float cellSize = ctx->zoneSystem->getCellSize();
+
+    for (int gz = 0; gz < gh; gz++) {
+        for (int gx = 0; gx < gw; gx++) {
+            glm::vec2 worldPos = ctx->zoneSystem->gridToWorld(gx, gz);
+            float wx = worldPos.x + cellSize * 0.5f;
+            float wz = worldPos.y + cellSize * 0.5f;
+
+            // Check zone match
+            eden::ZoneType zt = ctx->zoneSystem->getZoneType(wx, wz);
+            if (!zoneMatches(zoneReqStr, zt)) continue;
+
+            // Check no existing building too close
+            bool tooClose = false;
+            for (auto& [bp, bfp] : existingBuildings) {
+                float minDist = (bfp + myFootprint) * 0.5f;
+                float dx = wx - bp.x;
+                float dz = wz - bp.y;
+                if (dx * dx + dz * dz < minDist * minDist) {
+                    tooClose = true;
+                    break;
+                }
+            }
+            if (tooClose) continue;
+
+            float dist = (wx - nearX) * (wx - nearX) + (wz - nearZ) * (wz - nearZ);
+            candidates.push_back({wx, wz, dist});
+        }
+    }
+
+    if (candidates.empty()) return 0;
+
+    // Sort by distance to preferred location (closest first)
+    std::sort(candidates.begin(), candidates.end(),
+        [](const Candidate& a, const Candidate& b) { return a.dist < b.dist; });
+
+    result->tag = GROVE_VEC3;
+    result->data.vec3_val.x = static_cast<double>(candidates[0].x);
+    result->data.vec3_val.y = 0.0;
+    result->data.vec3_val.z = static_cast<double>(candidates[0].z);
+    return 0;
+}
+
+// get_zone_summary() → string
+static int32_t groveGetZoneSummaryFn(const GroveValue*, uint32_t, GroveValue* result, void* ud) {
+    auto* ctx = static_cast<GroveContext*>(ud);
+
+    // Count zones by type
+    int zoneCount[7] = {0}; // Wilderness..Resource
+    int resCount[5] = {0};  // None..Oil
+
+    if (ctx->zoneSystem) {
+        int gw = ctx->zoneSystem->getGridWidth();
+        int gh = ctx->zoneSystem->getGridHeight();
+        float cellSize = ctx->zoneSystem->getCellSize();
+        for (int gz = 0; gz < gh; gz++) {
+            for (int gx = 0; gx < gw; gx++) {
+                glm::vec2 wp = ctx->zoneSystem->gridToWorld(gx, gz);
+                float wx = wp.x + cellSize * 0.5f;
+                float wz = wp.y + cellSize * 0.5f;
+                int zt = static_cast<int>(ctx->zoneSystem->getZoneType(wx, wz));
+                if (zt >= 0 && zt < 7) zoneCount[zt]++;
+                int rt = static_cast<int>(ctx->zoneSystem->getResource(wx, wz));
+                if (rt > 0 && rt < 5) resCount[rt]++;
+            }
+        }
+    }
+
+    // Count buildings by type
+    std::map<std::string, int> buildingCounts;
+    for (auto& obj : *ctx->sceneObjects) {
+        const auto& bt = obj->getBuildingType();
+        if (!bt.empty()) buildingCounts[bt]++;
+    }
+
+    // Count population (workers)
+    int workerCount = 0;
+    for (auto& obj : *ctx->sceneObjects) {
+        if (obj->getBeingType() == eden::BeingType::ALGOBOT &&
+            obj->getBuildingType().substr(0, 10) == "worker_at_") {
+            workerCount++;
+        }
+    }
+
+    // Housing capacity
+    int housingCap = 0;
+    int totalWorkerSlots = 0;
+    for (auto& obj : *ctx->sceneObjects) {
+        const auto& bt = obj->getBuildingType();
+        if (bt.empty()) continue;
+        const CityBuildingDef* d = findCityBuildingDef(bt);
+        if (!d) continue;
+        if (d->category == "housing") housingCap += 4; // Each shack houses 4
+        totalWorkerSlots += d->maxWorkers;
+    }
+
+    std::string out;
+    out += "zones: wilderness=" + std::to_string(zoneCount[0])
+        + " battlefield=" + std::to_string(zoneCount[1])
+        + " spawn_safe=" + std::to_string(zoneCount[2])
+        + " residential=" + std::to_string(zoneCount[3])
+        + " commercial=" + std::to_string(zoneCount[4])
+        + " industrial=" + std::to_string(zoneCount[5])
+        + " resource=" + std::to_string(zoneCount[6]) + "\n";
+    out += "resources: wood=" + std::to_string(resCount[1])
+        + " limestone=" + std::to_string(resCount[2])
+        + " iron=" + std::to_string(resCount[3])
+        + " oil=" + std::to_string(resCount[4]) + "\n";
+    out += "buildings:";
+    for (const auto& def : s_buildingCatalog) {
+        int c = 0;
+        auto it = buildingCounts.find(def.type);
+        if (it != buildingCounts.end()) c = it->second;
+        out += " " + def.type + "=" + std::to_string(c);
+    }
+    out += "\n";
+    out += "population: " + std::to_string(workerCount)
+        + "  housing_capacity: " + std::to_string(housingCap)
+        + "  workers_assigned: " + std::to_string(workerCount)
+        + "  workers_available: " + std::to_string(totalWorkerSlots - workerCount) + "\n";
+    out += "city_credits: " + std::to_string(static_cast<int>(*ctx->cityCredits))
+        + "  player_credits: " + std::to_string(static_cast<int>(*ctx->playerCredits));
+
+    setStringResult(result, out);
+    return 0;
+}
+
+// spawn_worker(name, building_name) → bool
+static int32_t groveSpawnWorkerFn(const GroveValue* args, uint32_t argc, GroveValue* result, void* ud) {
+    auto* ctx = static_cast<GroveContext*>(ud);
+    result->tag = GROVE_BOOL;
+    result->data.bool_val = 0;
+
+    if (argc < 2 || args[0].tag != GROVE_STRING || args[1].tag != GROVE_STRING) return 0;
+
+    auto& nameSv = args[0].data.string_val;
+    std::string workerName = (nameSv.ptr && nameSv.len > 0) ? std::string(nameSv.ptr, nameSv.len) : "worker";
+    auto& bldgSv = args[1].data.string_val;
+    std::string buildingName = (bldgSv.ptr && bldgSv.len > 0) ? std::string(bldgSv.ptr, bldgSv.len) : "";
+
+    // Find the building
+    SceneObject* building = nullptr;
+    for (auto& obj : *ctx->sceneObjects) {
+        if (obj->getName() == buildingName) { building = obj.get(); break; }
+    }
+    if (!building) {
+        if (ctx->groveOutputAccum)
+            ctx->groveOutputAccum->append("[City] Cannot spawn worker — building '" + buildingName + "' not found\n");
+        return 0;
+    }
+
+    glm::vec3 bldgPos = building->getTransform().getPosition();
+    // Offset worker slightly from building center
+    float offsetX = 3.0f;
+    float offsetZ = 3.0f;
+    float wx = bldgPos.x + offsetX;
+    float wz = bldgPos.z + offsetZ;
+    float terrainY = ctx->terrain->getHeightAt(wx, wz);
+
+    // Create a simple cube AlgoBot (placeholder)
+    float size = 1.0f;
+    glm::vec4 color(0.2f, 0.8f, 0.9f, 1.0f); // Cyan worker color
+    auto meshData = PrimitiveMeshBuilder::createCube(size, color);
+    auto obj = std::make_unique<SceneObject>(workerName);
+    uint32_t handle = ctx->modelRenderer->createModel(meshData.vertices, meshData.indices);
+    obj->setBufferHandle(handle);
+    obj->setIndexCount(static_cast<uint32_t>(meshData.indices.size()));
+    obj->setVertexCount(static_cast<uint32_t>(meshData.vertices.size()));
+    obj->setLocalBounds(meshData.bounds);
+    obj->setMeshData(meshData.vertices, meshData.indices);
+    obj->setPrimitiveType(PrimitiveType::Cube);
+    obj->setPrimitiveSize(size);
+    obj->setPrimitiveColor(color);
+    obj->getTransform().setPosition(glm::vec3(wx, terrainY + size * 0.5f, wz));
+
+    obj->setBeingType(BeingType::ALGOBOT);
+    obj->setDescription("Worker at " + buildingName);
+    obj->setBuildingType("worker_at_" + buildingName);
+
+    ctx->sceneObjects->push_back(std::move(obj));
+    if (ctx->groveOutputAccum) {
+        glm::vec3 bPos = building->getTransform().getPosition();
+        ctx->groveOutputAccum->append("[City] Worker " + workerName + " assigned to " + buildingName
+            + " at (" + std::to_string(static_cast<int>(bPos.x)) + ", "
+            + std::to_string(static_cast<int>(bPos.z)) + ")\n");
+    }
+    result->data.bool_val = 1;
+    return 0;
+}
+
+// get_city_stats() → string
+static int32_t groveGetCityStatsFn(const GroveValue*, uint32_t, GroveValue* result, void* ud) {
+    auto* ctx = static_cast<GroveContext*>(ud);
+
+    int pop = 0, housing = 0, foodBuildings = 0, totalWorkers = 0, idle = 0;
+    for (auto& obj : *ctx->sceneObjects) {
+        const auto& bt = obj->getBuildingType();
+        if (bt.empty()) continue;
+        if (bt.substr(0, 10) == "worker_at_") { pop++; continue; }
+        const CityBuildingDef* d = findCityBuildingDef(bt);
+        if (!d) continue;
+        if (d->category == "housing") housing += 4;
+        if (d->category == "food") foodBuildings++;
+        totalWorkers += d->maxWorkers;
+    }
+    idle = totalWorkers - pop;
+    if (idle < 0) idle = 0;
+
+    std::string out = "pop:" + std::to_string(pop)
+        + " housing:" + std::to_string(housing)
+        + " food:" + std::to_string(foodBuildings)
+        + " workers:" + std::to_string(totalWorkers)
+        + " idle:" + std::to_string(idle)
+        + " city_credits:" + std::to_string(static_cast<int>(*ctx->cityCredits))
+        + " player_credits:" + std::to_string(static_cast<int>(*ctx->playerCredits));
+
+    setStringResult(result, out);
+    return 0;
+}
+
+// get_city_credits() → number
+static int32_t groveGetCityCreditsFn(const GroveValue*, uint32_t, GroveValue* result, void* ud) {
+    auto* ctx = static_cast<GroveContext*>(ud);
+    result->tag = GROVE_NUMBER;
+    result->data.number_val = static_cast<double>(*ctx->cityCredits);
+    return 0;
+}
+
+// add_city_credits(amount) → number (new balance)
+static int32_t groveAddCityCreditsFn(const GroveValue* args, uint32_t argc, GroveValue* result, void* ud) {
+    auto* ctx = static_cast<GroveContext*>(ud);
+    result->tag = GROVE_NUMBER;
+    if (argc >= 1 && args[0].tag == GROVE_NUMBER) {
+        *ctx->cityCredits += static_cast<float>(args[0].data.number_val);
+    }
+    result->data.number_val = static_cast<double>(*ctx->cityCredits);
+    return 0;
+}
+
+// deduct_city_credits(amount) → bool
+static int32_t groveDeductCityCreditsFn(const GroveValue* args, uint32_t argc, GroveValue* result, void* ud) {
+    auto* ctx = static_cast<GroveContext*>(ud);
+    result->tag = GROVE_BOOL;
+    result->data.bool_val = 0;
+    if (argc >= 1 && args[0].tag == GROVE_NUMBER) {
+        float amount = static_cast<float>(args[0].data.number_val);
+        if (*ctx->cityCredits >= amount) {
+            *ctx->cityCredits -= amount;
+            result->data.bool_val = 1;
+        }
+    }
+    return 0;
+}
+
 // ─── Registration ───
 
 void registerGroveHostFunctions(GroveVm* vm, GroveContext* ctx) {
@@ -1817,4 +2351,19 @@ void registerGroveHostFunctions(GroveVm* vm, GroveContext* ctx) {
     grove_register_fn(vm, "buy_plot", groveBuyPlot, ctx);
     grove_register_fn(vm, "sell_plot", groveSellPlot, ctx);
     grove_register_fn(vm, "plot_status", grovePlotStatus, ctx);
+
+    // Building catalog & city management
+    grove_register_fn(vm, "building_types", groveBuildingTypesFn, ctx);
+    grove_register_fn(vm, "spawn_building", groveSpawnBuildingFn, ctx);
+    grove_register_fn(vm, "count_buildings", groveCountBuildingsFn, ctx);
+    grove_register_fn(vm, "list_buildings", groveListBuildingsFn, ctx);
+    grove_register_fn(vm, "find_empty_plot", groveFindEmptyPlotFn, ctx);
+    grove_register_fn(vm, "get_zone_summary", groveGetZoneSummaryFn, ctx);
+    grove_register_fn(vm, "spawn_worker", groveSpawnWorkerFn, ctx);
+    grove_register_fn(vm, "get_city_stats", groveGetCityStatsFn, ctx);
+
+    // City treasury functions
+    grove_register_fn(vm, "get_city_credits", groveGetCityCreditsFn, ctx);
+    grove_register_fn(vm, "add_city_credits", groveAddCityCreditsFn, ctx);
+    grove_register_fn(vm, "deduct_city_credits", groveDeductCityCreditsFn, ctx);
 }
