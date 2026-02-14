@@ -8,6 +8,8 @@ using json = nlohmann::json;
 
 namespace eden {
 
+const std::string ZoneSystem::s_emptyString;
+
 ZoneSystem::ZoneSystem(float worldMinX, float worldMinZ, float worldMaxX, float worldMaxZ, float cellSize)
     : m_worldMinX(worldMinX), m_worldMinZ(worldMinZ)
     , m_worldMaxX(worldMaxX), m_worldMaxZ(worldMaxZ)
@@ -54,6 +56,12 @@ ResourceType ZoneSystem::getResource(float worldX, float worldZ) const {
     auto g = worldToGrid(worldX, worldZ);
     if (!inBounds(g.x, g.y)) return ResourceType::None;
     return m_grid[cellIndex(g.x, g.y)].resource;
+}
+
+const std::string& ZoneSystem::getResourceName(float worldX, float worldZ) const {
+    auto g = worldToGrid(worldX, worldZ);
+    if (!inBounds(g.x, g.y)) return s_emptyString;
+    return m_grid[cellIndex(g.x, g.y)].resourceName;
 }
 
 uint32_t ZoneSystem::getOwner(float worldX, float worldZ) const {
@@ -148,6 +156,10 @@ void ZoneSystem::fillCircle(int centerX, int centerZ, int radius, ZoneType type)
 }
 
 void ZoneSystem::fillCircleResource(int centerX, int centerZ, int radius, ResourceType resource, float density) {
+    fillCircleResource(centerX, centerZ, radius, resource, density, "");
+}
+
+void ZoneSystem::fillCircleResource(int centerX, int centerZ, int radius, ResourceType resource, float density, const std::string& name) {
     int r2 = radius * radius;
     for (int dz = -radius; dz <= radius; dz++) {
         for (int dx = -radius; dx <= radius; dx++) {
@@ -158,6 +170,7 @@ void ZoneSystem::fillCircleResource(int centerX, int centerZ, int radius, Resour
                     auto& cell = m_grid[cellIndex(gx, gz)];
                     cell.type = ZoneType::Resource;
                     cell.resource = resource;
+                    cell.resourceName = name;
                     // Density falls off from center
                     float dist = std::sqrt(static_cast<float>(dx * dx + dz * dz));
                     float falloff = 1.0f - (dist / (radius + 1.0f));
@@ -249,21 +262,14 @@ void ZoneSystem::generateDefaultLayout() {
     fillRect(cx + 20, bfTop, cx + 40, bfBot, ZoneType::Battlefield);
 
     // Resource clusters (8 deposits scattered in wilderness)
-    // Wood clusters
-    fillCircleResource(cx - 30, cz - 25, 4, ResourceType::Wood, 0.8f);
-    fillCircleResource(cx + 25, cz + 30, 3, ResourceType::Wood, 0.7f);
-
-    // Iron clusters
-    fillCircleResource(cx - 25, cz + 20, 3, ResourceType::Iron, 0.9f);
-    fillCircleResource(cx + 30, cz - 20, 4, ResourceType::Iron, 0.6f);
-
-    // Limestone clusters
-    fillCircleResource(cx + 35, cz + 5, 3, ResourceType::Limestone, 0.8f);
-    fillCircleResource(cx - 20, cz - 35, 3, ResourceType::Limestone, 0.7f);
-
-    // Oil deposits (rarer, smaller)
-    fillCircleResource(cx - 35, cz + 5, 2, ResourceType::Oil, 1.0f);
-    fillCircleResource(cx + 20, cz - 35, 2, ResourceType::Oil, 0.9f);
+    fillCircleResource(cx - 30, cz - 25, 4, ResourceType::Wood, 0.8f, "Wood");
+    fillCircleResource(cx + 25, cz + 30, 3, ResourceType::Wood, 0.7f, "Wood");
+    fillCircleResource(cx - 25, cz + 20, 3, ResourceType::Iron, 0.9f, "Iron");
+    fillCircleResource(cx + 30, cz - 20, 4, ResourceType::Iron, 0.6f, "Iron");
+    fillCircleResource(cx + 35, cz + 5, 3, ResourceType::Limestone, 0.8f, "Limestone");
+    fillCircleResource(cx - 20, cz - 35, 3, ResourceType::Limestone, 0.7f, "Limestone");
+    fillCircleResource(cx - 35, cz + 5, 2, ResourceType::Oil, 1.0f, "Oil");
+    fillCircleResource(cx + 20, cz - 35, 2, ResourceType::Oil, 0.9f, "Oil");
 
     // Update prices for all cells
     for (int z = 0; z < m_gridHeight; z++) {
@@ -273,6 +279,129 @@ void ZoneSystem::generateDefaultLayout() {
     }
 
     std::cout << "[ZoneSystem] Default layout generated (" << m_gridWidth << "x" << m_gridHeight << " grid)\n";
+}
+
+// --- Planet-aware layout ---
+
+static ResourceType mapResourceName(const std::string& name, const std::string& category) {
+    // --- Organic / Wood ---
+    if (name == "Wood" || name == "Organic Matter" || name == "Rare Flora")
+        return ResourceType::Wood;
+    if (category == "organic") return ResourceType::Wood;
+
+    // --- Stone / Limestone ---
+    if (name == "Limestone" || name == "Mineral Deposits" || name == "Carbon")
+        return ResourceType::Limestone;
+
+    // --- Metal / Iron ---
+    if (name == "Iron" || name == "Nickel" || name == "Aluminum" ||
+        name == "Titanium" || name == "Silver" || name == "Platinum" ||
+        name == "Gold" || name == "Copper" || name == "Tin" ||
+        name == "Zinc" || name == "Cobalt" || name == "Tungsten" ||
+        name == "Chromium" || name == "Lead" || name == "Manganese")
+        return ResourceType::Iron;
+    if (category == "metal" || category == "metals" || category == "mineral")
+        return ResourceType::Iron;
+
+    // --- Fossil / Oil ---
+    if (name == "Oil") return ResourceType::Oil;
+
+    // --- Water ---
+    if (name == "Water" || name == "Water Ice" || name == "Salt Compounds" || name == "Marine Biomass")
+        return ResourceType::Water;
+    if (category == "water") return ResourceType::Water;
+
+    // --- Atmospheric / Gas ---
+    if (name == "Oxygen" || name == "Nitrogen" || name == "Hydrogen" ||
+        name == "Helium" || name == "Methane" || name == "Ammonia" ||
+        name == "Carbon Dioxide" || name == "Helium-3")
+        return ResourceType::Gas;
+    if (category == "atmospheric") return ResourceType::Gas;
+
+    // --- Crystal ---
+    if (name == "Diamond" || name == "Rare Crystals" || name == "Silicon" || name == "Sulfur")
+        return ResourceType::Crystal;
+
+    // --- Energy ---
+    if (name == "Geothermal Energy" || name == "Uranium")
+        return ResourceType::Energy;
+
+    // --- Exotic ---
+    if (name == "Dark Matter" || name == "Exotic Matter" || name == "Ancient Artifacts")
+        return ResourceType::Exotic;
+    if (category == "rare" || category == "exotic") return ResourceType::Exotic;
+
+    return ResourceType::None;
+}
+
+void ZoneSystem::generatePlanetLayout(const nlohmann::json& planetData) {
+    // Reset all to wilderness
+    for (auto& cell : m_grid) {
+        cell = ZoneCell{};
+    }
+
+    int cx = m_gridWidth / 2;
+    int cz = m_gridHeight / 2;
+    m_spawnCenter = {cx, cz};
+
+    int population = planetData.value("population", 50);
+    int techLevel = planetData.value("tech_level", 1);
+
+    // --- Spawn safe zone at center ---
+    fillRect(cx - 2, cz - 2, cx + 2, cz + 2, ZoneType::SpawnSafe);
+
+    // --- Place resource zones from planet deposits ---
+    int resourceZonesPlaced = 0;
+
+    if (planetData.contains("resource_deposits") && planetData["resource_deposits"].is_array()) {
+        for (const auto& dep : planetData["resource_deposits"]) {
+            std::string resName = dep.value("resource", "");
+            std::string category = dep.value("category", "");
+            float density = dep.value("density", 0.5f);
+            int radius = dep.value("radius", 3);
+            int offsetX = dep.value("offset_x", 0);
+            int offsetZ = dep.value("offset_z", 0);
+
+            ResourceType rt = mapResourceName(resName, category);
+            if (rt == ResourceType::None) continue;
+
+            // Offsets are in grid units (backend uses grid_size=126, offsets ±50)
+            int gridRadius = std::max(2, radius);
+
+            fillCircleResource(cx + offsetX, cz + offsetZ, gridRadius, rt, density, resName);
+            resourceZonesPlaced++;
+
+            std::cout << "[ZoneSystem]   Deposit: " << resName << " at grid ("
+                      << (cx + offsetX) << ", " << (cz + offsetZ)
+                      << ") radius=" << gridRadius << " density=" << density << "\n";
+        }
+    }
+
+    // --- Scale residential/commercial/industrial by population ---
+    int resRadius = std::max(4, std::min(12, population / 10));
+    fillRect(cx - resRadius, cz - 3 - resRadius, cx + resRadius, cz - 4, ZoneType::Residential);
+    fillRect(cx - resRadius, cz + 4, cx + resRadius, cz + 3 + resRadius, ZoneType::Residential);
+
+    int comWidth = std::max(3, std::min(8, 2 + techLevel));
+    fillRect(cx + 4, cz - 3, cx + 3 + comWidth, cz + 3, ZoneType::Commercial);
+    fillRect(cx - 3 - comWidth, cz - 3, cx - 4, cz + 3, ZoneType::Commercial);
+
+    if (techLevel >= 2) {
+        int indWidth = std::max(3, std::min(8, techLevel));
+        fillRect(cx - 4 - comWidth - indWidth, cz - 4, cx - 4 - comWidth, cz + 4, ZoneType::Industrial);
+        fillRect(cx + 4 + comWidth, cz - 4, cx + 4 + comWidth + indWidth, cz + 4, ZoneType::Industrial);
+    }
+
+    // --- Update prices for all cells ---
+    for (int z = 0; z < m_gridHeight; z++) {
+        for (int x = 0; x < m_gridWidth; x++) {
+            m_grid[cellIndex(x, z)].purchasePrice = getPlotPrice(x, z);
+        }
+    }
+
+    std::cout << "[ZoneSystem] Planet layout generated (" << m_gridWidth << "x" << m_gridHeight
+              << " grid, pop=" << population << ", tech=" << techLevel
+              << ", " << resourceZonesPlaced << " resource deposits placed)\n";
 }
 
 // --- Persistence ---
@@ -302,6 +431,7 @@ void ZoneSystem::save(nlohmann::json& root) const {
             c["type"] = static_cast<int>(cell.type);
             if (cell.resource != ResourceType::None) {
                 c["resource"] = static_cast<int>(cell.resource);
+                c["resourceName"] = cell.resourceName;
                 c["density"] = cell.resourceDensity;
             }
             if (cell.ownerPlayerId != 0) {
@@ -334,6 +464,7 @@ void ZoneSystem::load(const nlohmann::json& root) {
             auto& cell = m_grid[cellIndex(x, z)];
             cell.type = static_cast<ZoneType>(c.value("type", 0));
             cell.resource = static_cast<ResourceType>(c.value("resource", 0));
+            cell.resourceName = c.value("resourceName", std::string(""));
             cell.resourceDensity = c.value("density", 0.0f);
             cell.ownerPlayerId = c.value("owner", 0u);
             cell.purchasePrice = c.value("price", 100.0f);
@@ -362,9 +493,14 @@ const char* ZoneSystem::resourceTypeName(ResourceType type) {
     switch (type) {
         case ResourceType::None:      return "none";
         case ResourceType::Wood:      return "wood";
-        case ResourceType::Limestone: return "limestone";
-        case ResourceType::Iron:      return "iron";
+        case ResourceType::Limestone: return "stone";
+        case ResourceType::Iron:      return "metal";
         case ResourceType::Oil:       return "oil";
+        case ResourceType::Water:     return "water";
+        case ResourceType::Gas:       return "gas";
+        case ResourceType::Crystal:   return "crystal";
+        case ResourceType::Energy:    return "energy";
+        case ResourceType::Exotic:    return "exotic";
     }
     return "none";
 }

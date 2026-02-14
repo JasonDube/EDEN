@@ -20,15 +20,21 @@ enum class ZoneType : uint8_t {
 
 enum class ResourceType : uint8_t {
     None = 0,
-    Wood,
-    Limestone,
-    Iron,
-    Oil
+    Wood,       // Organic: Wood, Organic Matter, Rare Flora
+    Limestone,  // Stone: Limestone, Mineral Deposits, Carbon
+    Iron,       // Metal: Iron, Nickel, Aluminum, Titanium, Silver, Platinum, Gold, etc.
+    Oil,        // Fossil: Oil
+    Water,      // Water: Water, Water Ice, Salt Compounds, Marine Biomass
+    Gas,        // Atmospheric: Oxygen, Nitrogen, Hydrogen, Helium, Methane, Ammonia, CO2, Helium-3
+    Crystal,    // Crystal: Diamond, Rare Crystals, Silicon, Sulfur
+    Energy,     // Energy: Geothermal Energy, Uranium
+    Exotic      // Exotic: Dark Matter, Exotic Matter, Ancient Artifacts
 };
 
 struct ZoneCell {
     ZoneType type = ZoneType::Wilderness;
     ResourceType resource = ResourceType::None;
+    std::string resourceName;    // Individual resource identity: "Water", "Iron", "Nitrogen", etc.
     uint32_t ownerPlayerId = 0;
     float purchasePrice = 100.0f;
     float resourceDensity = 0.0f;
@@ -41,6 +47,7 @@ public:
     // Core queries
     ZoneType getZoneType(float worldX, float worldZ) const;
     ResourceType getResource(float worldX, float worldZ) const;
+    const std::string& getResourceName(float worldX, float worldZ) const;
     uint32_t getOwner(float worldX, float worldZ) const;
     bool canBuild(float worldX, float worldZ, uint32_t playerId) const;
     bool canEnter(float worldX, float worldZ, uint32_t playerId) const;
@@ -62,6 +69,7 @@ public:
     void fillRect(int x1, int z1, int x2, int z2, ZoneType type);
     void fillCircle(int centerX, int centerZ, int radius, ZoneType type);
     void fillCircleResource(int centerX, int centerZ, int radius, ResourceType resource, float density);
+    void fillCircleResource(int centerX, int centerZ, int radius, ResourceType resource, float density, const std::string& name);
 
     // Price calculation
     float getPlotPrice(int gridX, int gridZ) const;
@@ -72,6 +80,9 @@ public:
 
     // Default layout generation
     void generateDefaultLayout();
+
+    // Planet-aware layout generation from backend planet data
+    void generatePlanetLayout(const nlohmann::json& planetData);
 
     // String helpers
     static const char* zoneTypeName(ZoneType type);
@@ -94,6 +105,9 @@ private:
 
     // Spawn center location (grid coords)
     glm::ivec2 m_spawnCenter{0, 0};
+
+    // Empty string for out-of-bounds queries
+    static const std::string s_emptyString;
 };
 
 } // namespace eden

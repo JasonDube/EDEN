@@ -81,6 +81,7 @@
 #include <cmath>
 #include <set>
 #include <unordered_map>
+#include <map>
 #include <glm/gtc/matrix_transform.hpp>
 
 using namespace eden;
@@ -354,16 +355,16 @@ protected:
 
                 int wilderness = 0, battlefield = 0, spawn = 0;
                 int residential = 0, commercial = 0, industrial = 0, resource = 0;
-                int resWood = 0, resLimestone = 0, resIron = 0, resOil = 0;
+                std::map<std::string, int> resourceCounts;
 
                 int w = m_zoneSystem->getGridWidth();
                 int h = m_zoneSystem->getGridHeight();
                 for (int gz = 0; gz < h; gz++) {
                     for (int gx = 0; gx < w; gx++) {
                         auto worldPos = m_zoneSystem->gridToWorld(gx, gz);
-                        auto zt = m_zoneSystem->getZoneType(worldPos.x, worldPos.y);
-                        auto rt = m_zoneSystem->getResource(worldPos.x, worldPos.y);
-                        switch (zt) {
+                        const ZoneCell* cell = m_zoneSystem->getCell(worldPos.x, worldPos.y);
+                        if (!cell) continue;
+                        switch (cell->type) {
                             case ZoneType::Wilderness:  wilderness++; break;
                             case ZoneType::Battlefield: battlefield++; break;
                             case ZoneType::SpawnSafe:   spawn++; break;
@@ -372,15 +373,21 @@ protected:
                             case ZoneType::Industrial:  industrial++; break;
                             case ZoneType::Resource:    resource++; break;
                         }
-                        switch (rt) {
-                            case ResourceType::Wood:      resWood++; break;
-                            case ResourceType::Limestone: resLimestone++; break;
-                            case ResourceType::Iron:      resIron++; break;
-                            case ResourceType::Oil:       resOil++; break;
-                            default: break;
-                        }
+                        if (!cell->resourceName.empty())
+                            resourceCounts[cell->resourceName]++;
                     }
                 }
+
+                // Build resource counts JSON string
+                std::ostringstream resSS;
+                resSS << "{";
+                bool first = true;
+                for (auto& [name, cnt] : resourceCounts) {
+                    if (!first) resSS << ",";
+                    first = false;
+                    resSS << "\"" << name << "\":" << cnt;
+                }
+                resSS << "}";
 
                 return {
                     {"total_cells", MCPValue(w * h)},
@@ -390,11 +397,8 @@ protected:
                     {"residential", MCPValue(residential)},
                     {"commercial", MCPValue(commercial)},
                     {"industrial", MCPValue(industrial)},
-                    {"resource", MCPValue(resource)},
-                    {"wood_cells", MCPValue(resWood)},
-                    {"limestone_cells", MCPValue(resLimestone)},
-                    {"iron_cells", MCPValue(resIron)},
-                    {"oil_cells", MCPValue(resOil)}
+                    {"resource_cells", MCPValue(resource)},
+                    {"resource_counts", MCPValue(resSS.str())}
                 };
             });
 
@@ -791,6 +795,57 @@ protected:
                     return {{"diplomacy_json", MCPValue(res->body)}};
                 }
                 return {{"error", MCPValue("Backend not available")}};
+            });
+
+        // ── generate_world (procedural settlement) ──
+        m_mcpServer->registerTool("generate_world", "Generate a random planet and build a settlement on the current terrain. Optional: seed(int), biome(string)",
+            [this](const MCPParams& p) -> MCPResult {
+                // Optionally pass seed/biome to backend
+                std::ostringstream body;
+                body << "{";
+                bool first = true;
+                auto si = p.find("seed");
+                if (si != p.end()) { body << "\"seed\":" << si->second.getInt(); first = false; }
+                auto bi = p.find("biome");
+                if (bi != p.end()) { if (!first) body << ","; body << "\"biome\":\"" << bi->second.getString() << "\""; first = false; }
+                body << "}";
+
+                // Fetch planet from backend
+                httplib::Client cli("localhost", 8080);
+                cli.set_connection_timeout(5);
+                auto res = cli.Post("/planet/generate", body.str(), "application/json");
+                if (!res || res->status != 200)
+                    return {{"error", MCPValue("Backend not available — start backend/server.py")}};
+
+                try {
+                    m_planetData = nlohmann::json::parse(res->body);
+                } catch (...) {
+                    return {{"error", MCPValue("Failed to parse planet JSON")}};
+                }
+
+                // Generate zone layout
+                if (m_zoneSystem) {
+                    m_zoneSystem->generatePlanetLayout(m_planetData);
+                }
+
+                // Build settlement
+                int placed = buildSettlement(m_planetData);
+                m_worldGenerated = true;
+
+                std::string planetName = m_planetData.value("name", "Unknown");
+                std::string biome = m_planetData.value("biome_name", "unknown");
+                int pop = m_planetData.value("population", 0);
+                int tech = m_planetData.value("tech_level", 0);
+
+                return {
+                    {"success", MCPValue(true)},
+                    {"planet_name", MCPValue(planetName)},
+                    {"biome", MCPValue(biome)},
+                    {"population", MCPValue(pop)},
+                    {"tech_level", MCPValue(tech)},
+                    {"buildings_placed", MCPValue(placed)},
+                    {"city_credits", MCPValue(m_cityCredits)}
+                };
             });
 
         m_mcpServer->start();
@@ -3311,6 +3366,14 @@ private:
             m_showZoneMap = !m_showZoneMap;
         }
         wasMKeyDown = mKeyDown;
+
+        // P key - toggle planet info panel (play mode only)
+        static bool wasPKeyDown = false;
+        bool pKeyDown = Input::isKeyDown(Input::KEY_P);
+        if (pKeyDown && !wasPKeyDown && m_isPlayMode && !ImGui::GetIO().WantTextInput) {
+            m_showPlanetInfo = !m_showPlanetInfo;
+        }
+        wasPKeyDown = pKeyDown;
 
         // Y key - snap selected object vertically (stack on top/bottom of another object)
         static bool wasYKeyDown = false;
@@ -6843,6 +6906,73 @@ private:
         m_quickChatBuffer[0] = '\0';
     }
 
+    void renderPlanetInfoPanel() {
+        if (!m_showPlanetInfo || !m_worldGenerated || m_planetData.empty()) return;
+
+        ImGui::SetNextWindowPos(ImVec2(10, 60), ImGuiCond_FirstUseEver);
+        ImGui::SetNextWindowSize(ImVec2(340, 0), ImGuiCond_FirstUseEver);
+        ImGui::SetNextWindowBgAlpha(0.85f);
+        if (ImGui::Begin("Planet Info [P]", &m_showPlanetInfo,
+            ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_AlwaysAutoResize)) {
+
+            std::string name = m_planetData.value("name", "Unknown");
+            std::string biome = m_planetData.value("biome_name", m_planetData.value("biome", "?"));
+            std::string species = m_planetData.value("species_name", "Unknown");
+            std::string govt = m_planetData.value("government_name", "Unknown");
+            int techLevel = m_planetData.value("tech_level", 0);
+            std::string techName = m_planetData.value("tech_name", "");
+            int population = m_planetData.value("population", 0);
+            std::string temp = m_planetData.value("temperature", "?");
+            std::string veg = m_planetData.value("vegetation", "?");
+
+            ImGui::TextColored(ImVec4(1.0f, 0.9f, 0.3f, 1.0f), "%s", name.c_str());
+            ImGui::Separator();
+
+            ImGui::Text("Biome:       %s", biome.c_str());
+            ImGui::Text("Temperature: %s", temp.c_str());
+            ImGui::Text("Vegetation:  %s", veg.c_str());
+            ImGui::Spacing();
+
+            ImGui::Text("Species:     %s", species.c_str());
+            ImGui::Text("Government:  %s", govt.c_str());
+            ImGui::Text("Tech Level:  %d (%s)", techLevel, techName.c_str());
+            ImGui::Text("Population:  %d", population);
+            ImGui::Spacing();
+
+            // Resources
+            if (m_planetData.contains("resources_harvestable") && m_planetData["resources_harvestable"].is_array()) {
+                ImGui::Separator();
+                ImGui::TextColored(ImVec4(0.5f, 1.0f, 0.5f, 1.0f), "Harvestable Resources:");
+                for (const auto& r : m_planetData["resources_harvestable"]) {
+                    ImGui::BulletText("%s", r.get<std::string>().c_str());
+                }
+            }
+
+            if (m_planetData.contains("resources_locked") && m_planetData["resources_locked"].is_array()
+                && !m_planetData["resources_locked"].empty()) {
+                ImGui::Spacing();
+                ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.5f, 1.0f), "Locked Resources:");
+                for (const auto& r : m_planetData["resources_locked"]) {
+                    ImGui::BulletText("%s", r.get<std::string>().c_str());
+                }
+            }
+
+            // Buildings available
+            if (m_planetData.contains("buildings_available") && m_planetData["buildings_available"].is_array()) {
+                ImGui::Spacing();
+                ImGui::Separator();
+                ImGui::TextColored(ImVec4(0.4f, 0.7f, 1.0f, 1.0f), "Available Buildings:");
+                std::string bldgList;
+                for (size_t i = 0; i < m_planetData["buildings_available"].size(); i++) {
+                    if (i > 0) bldgList += ", ";
+                    bldgList += m_planetData["buildings_available"][i].get<std::string>();
+                }
+                ImGui::TextWrapped("%s", bldgList.c_str());
+            }
+        }
+        ImGui::End();
+    }
+
     void renderPlayModeUI() {
         ImGui::SetNextWindowPos(ImVec2(10, 10));
         ImGui::SetNextWindowBgAlpha(0.3f);
@@ -6897,6 +7027,9 @@ private:
 
         // Player health bar - HIDDEN for now (was overlapping chat text)
         // TODO: re-enable when UI layout is finalized
+
+        // Render planet info panel (P key toggle)
+        renderPlanetInfoPanel();
 
         // Render trading UI panels
         renderTradingUI();
@@ -7002,6 +7135,91 @@ private:
                 }
             }
         }
+    }
+
+    // Per-resource unique color based on resource name
+    static ImU32 resourceNameColor(const std::string& name) {
+        // Hand-picked colors for known resources
+        if (name == "Water")             return IM_COL32(30, 100, 200, 255);
+        if (name == "Water Ice")         return IM_COL32(140, 200, 240, 255);
+        if (name == "Salt Compounds")    return IM_COL32(200, 200, 180, 255);
+        if (name == "Marine Biomass")    return IM_COL32(20, 140, 130, 255);
+        if (name == "Oxygen")            return IM_COL32(160, 220, 240, 255);
+        if (name == "Nitrogen")          return IM_COL32(100, 160, 220, 255);
+        if (name == "Hydrogen")          return IM_COL32(220, 220, 140, 255);
+        if (name == "Helium")            return IM_COL32(240, 180, 200, 255);
+        if (name == "Methane")           return IM_COL32(120, 140, 80, 255);
+        if (name == "Ammonia")           return IM_COL32(140, 200, 140, 255);
+        if (name == "Carbon Dioxide")    return IM_COL32(160, 160, 160, 255);
+        if (name == "Helium-3")          return IM_COL32(220, 100, 220, 255);
+        if (name == "Iron")              return IM_COL32(160, 90, 60, 255);
+        if (name == "Carbon")            return IM_COL32(80, 80, 80, 255);
+        if (name == "Limestone")         return IM_COL32(190, 180, 150, 255);
+        if (name == "Silicon")           return IM_COL32(170, 180, 200, 255);
+        if (name == "Nickel")            return IM_COL32(140, 160, 130, 255);
+        if (name == "Aluminum")          return IM_COL32(180, 190, 210, 255);
+        if (name == "Sulfur")            return IM_COL32(220, 210, 50, 255);
+        if (name == "Titanium")          return IM_COL32(120, 140, 170, 255);
+        if (name == "Silver")            return IM_COL32(210, 210, 220, 255);
+        if (name == "Diamond")           return IM_COL32(230, 240, 255, 255);
+        if (name == "Platinum")          return IM_COL32(200, 200, 210, 255);
+        if (name == "Gold")              return IM_COL32(240, 200, 50, 255);
+        if (name == "Uranium")           return IM_COL32(80, 200, 80, 255);
+        if (name == "Organic Matter")    return IM_COL32(100, 130, 50, 255);
+        if (name == "Wood")              return IM_COL32(60, 140, 40, 255);
+        if (name == "Rare Flora")        return IM_COL32(200, 80, 160, 255);
+        if (name == "Mineral Deposits")  return IM_COL32(150, 120, 80, 255);
+        if (name == "Geothermal Energy") return IM_COL32(240, 120, 30, 255);
+        if (name == "Oil")               return IM_COL32(40, 40, 40, 255);
+        if (name == "Rare Crystals")     return IM_COL32(180, 80, 240, 255);
+        if (name == "Dark Matter")       return IM_COL32(60, 20, 80, 255);
+        if (name == "Exotic Matter")     return IM_COL32(240, 40, 180, 255);
+        if (name == "Ancient Artifacts") return IM_COL32(200, 160, 60, 255);
+        // Fallback: hash-based color
+        uint32_t h = 0;
+        for (char c : name) h = h * 31 + static_cast<uint8_t>(c);
+        return IM_COL32(80 + (h % 160), 80 + ((h >> 8) % 160), 80 + ((h >> 16) % 160), 255);
+    }
+
+    // Short label for zone map cells
+    static const char* resourceNameLabel(const std::string& name) {
+        if (name == "Water")             return "H2O";
+        if (name == "Water Ice")         return "Ice";
+        if (name == "Salt Compounds")    return "Sal";
+        if (name == "Marine Biomass")    return "Mar";
+        if (name == "Oxygen")            return "O2";
+        if (name == "Nitrogen")          return "N2";
+        if (name == "Hydrogen")          return "H2";
+        if (name == "Helium")            return "He";
+        if (name == "Methane")           return "CH4";
+        if (name == "Ammonia")           return "NH3";
+        if (name == "Carbon Dioxide")    return "CO2";
+        if (name == "Helium-3")          return "He3";
+        if (name == "Iron")              return "Fe";
+        if (name == "Carbon")            return "C";
+        if (name == "Limestone")         return "ite";
+        if (name == "Silicon")           return "Si";
+        if (name == "Nickel")            return "Ni";
+        if (name == "Aluminum")          return "Al";
+        if (name == "Sulfur")            return "S";
+        if (name == "Titanium")          return "Ti";
+        if (name == "Silver")            return "Ag";
+        if (name == "Diamond")           return "Dia";
+        if (name == "Platinum")          return "Pt";
+        if (name == "Gold")              return "Au";
+        if (name == "Uranium")           return "U";
+        if (name == "Organic Matter")    return "Org";
+        if (name == "Wood")              return "Wd";
+        if (name == "Rare Flora")        return "Flo";
+        if (name == "Mineral Deposits")  return "Min";
+        if (name == "Geothermal Energy") return "Geo";
+        if (name == "Oil")               return "Oil";
+        if (name == "Rare Crystals")     return "Cry";
+        if (name == "Dark Matter")       return "DM";
+        if (name == "Exotic Matter")     return "EM";
+        if (name == "Ancient Artifacts") return "Art";
+        if (name.size() >= 2) return name.c_str(); // fallback: full name (truncated by cell)
+        return "?";
     }
 
     void renderZoneMap() {
@@ -7172,14 +7390,8 @@ private:
                     case ZoneType::Commercial:  color = IM_COL32(180, 180, 40, 255); break;
                     case ZoneType::Industrial:  color = IM_COL32(180, 110, 40, 255); break;
                     case ZoneType::Resource: {
-                        // Tint by resource type
-                        switch (cell->resource) {
-                            case ResourceType::Wood:      color = IM_COL32(60, 140, 40, 255); break;
-                            case ResourceType::Limestone: color = IM_COL32(180, 170, 140, 255); break;
-                            case ResourceType::Iron:      color = IM_COL32(140, 100, 80, 255); break;
-                            case ResourceType::Oil:       color = IM_COL32(40, 40, 40, 255); break;
-                            default:                      color = IM_COL32(150, 40, 180, 255); break;
-                        }
+                        // Tint by individual resource name (unique color per resource)
+                        color = resourceNameColor(cell->resourceName);
                         break;
                     }
                     default: color = IM_COL32(45, 55, 45, 255); break;
@@ -7207,14 +7419,7 @@ private:
 
                     float x0 = originX + gx * cellPx;
                     float y0 = originY + gz * cellPx;
-                    const char* label = "";
-                    switch (cell->resource) {
-                        case ResourceType::Wood:      label = "W"; break;
-                        case ResourceType::Limestone: label = "L"; break;
-                        case ResourceType::Iron:      label = "Fe"; break;
-                        case ResourceType::Oil:       label = "O"; break;
-                        default: break;
-                    }
+                    const char* label = resourceNameLabel(cell->resourceName);
                     ImVec2 textSize = ImGui::CalcTextSize(label);
                     drawList->AddText(ImVec2(x0 + (cellPx - textSize.x) * 0.5f,
                                              y0 + (cellPx - textSize.y) * 0.5f),
@@ -7318,10 +7523,16 @@ private:
                     ImGui::Text("Grid: %d, %d", hoverGX, hoverGZ);
                     ImGui::Text("World: %.0f, %.0f", wc.x, wc.y);
                     ImGui::Text("Zone: %s", ZoneSystem::zoneTypeName(cell->type));
-                    if (cell->resource != ResourceType::None)
-                        ImGui::Text("Resource: %s (%.0f%%)",
-                                    ZoneSystem::resourceTypeName(cell->resource),
-                                    cell->resourceDensity * 100.0f);
+                    if (cell->resource != ResourceType::None) {
+                        if (!cell->resourceName.empty())
+                            ImGui::Text("Resource: %s (%.0f%%)",
+                                        cell->resourceName.c_str(),
+                                        cell->resourceDensity * 100.0f);
+                        else
+                            ImGui::Text("Resource: %s (%.0f%%)",
+                                        ZoneSystem::resourceTypeName(cell->resource),
+                                        cell->resourceDensity * 100.0f);
+                    }
                     if (cell->ownerPlayerId != 0)
                         ImGui::Text("Owner: Player %u", cell->ownerPlayerId);
                     ImGui::Text("Price: $%.0f", cell->purchasePrice);
@@ -8666,6 +8877,266 @@ private:
         }
     }
 
+    // ── World Generation ─────────────────────────────────────────────
+
+    // Find an empty plot for a building type (native C++ version of MCP find_empty_plot)
+    // Returns {x, z} or {NaN, NaN} if not found
+    glm::vec2 findEmptyPlotNative(const std::string& buildingType, float nearX = 0.0f, float nearZ = 0.0f) {
+        const ::CityBuildingDef* def = ::findCityBuildingDef(buildingType);
+        if (!def || !m_zoneSystem) return glm::vec2(NAN);
+
+        // Collect existing building positions and footprints
+        std::vector<std::pair<glm::vec2, float>> existingBuildings;
+        for (auto& obj : m_sceneObjects) {
+            if (!obj || obj->getBuildingType().empty()) continue;
+            auto pos = obj->getTransform().getPosition();
+            const ::CityBuildingDef* bd = ::findCityBuildingDef(obj->getBuildingType());
+            float fp = bd ? bd->footprint : 10.0f;
+            existingBuildings.push_back({{pos.x, pos.z}, fp});
+        }
+
+        float cellSize = m_zoneSystem->getCellSize();
+        int maxRadius = 50;
+        for (int r = 0; r <= maxRadius; r++) {
+            for (int dz = -r; dz <= r; dz++) {
+                for (int dx = -r; dx <= r; dx++) {
+                    if (std::abs(dx) != r && std::abs(dz) != r) continue;
+                    float wx = nearX + dx * cellSize;
+                    float wz = nearZ + dz * cellSize;
+
+                    // Check zone match
+                    ZoneType zt = m_zoneSystem->getZoneType(wx, wz);
+                    bool matches = def->zoneReq.empty();
+                    if (!matches) {
+                        if (def->zoneReq == "residential" && zt == ZoneType::Residential) matches = true;
+                        if (def->zoneReq == "commercial"  && zt == ZoneType::Commercial)  matches = true;
+                        if (def->zoneReq == "industrial"  && zt == ZoneType::Industrial)  matches = true;
+                        if (def->zoneReq == "resource"    && zt == ZoneType::Resource)    matches = true;
+                    }
+                    if (!matches) continue;
+
+                    // Check resource requirement for extraction buildings
+                    if (!def->requires.empty()) {
+                        ResourceType rt = m_zoneSystem->getResource(wx, wz);
+                        bool resMatch = false;
+                        if (def->requires == "wood"      && rt == ResourceType::Wood)      resMatch = true;
+                        if (def->requires == "iron"      && rt == ResourceType::Iron)      resMatch = true;
+                        if (def->requires == "limestone" && rt == ResourceType::Limestone) resMatch = true;
+                        if (def->requires == "oil"       && rt == ResourceType::Oil)       resMatch = true;
+                        if (def->requires == "water"     && rt == ResourceType::Water)     resMatch = true;
+                        if (def->requires == "gas"       && rt == ResourceType::Gas)       resMatch = true;
+                        if (def->requires == "crystal"   && rt == ResourceType::Crystal)   resMatch = true;
+                        if (def->requires == "energy"    && rt == ResourceType::Energy)    resMatch = true;
+                        if (def->requires == "exotic"    && rt == ResourceType::Exotic)    resMatch = true;
+                        if (!resMatch) continue;
+                    }
+
+                    // Check no existing building too close
+                    bool tooClose = false;
+                    for (auto& [bp, bfp] : existingBuildings) {
+                        float minDist = (bfp + def->footprint) * 0.5f;
+                        if (glm::length(glm::vec2(wx, wz) - bp) < minDist) {
+                            tooClose = true;
+                            break;
+                        }
+                    }
+                    if (tooClose) continue;
+
+                    return {wx, wz};
+                }
+            }
+        }
+        return glm::vec2(NAN);
+    }
+
+    // Place a building at a position (returns true if placed)
+    bool placeBuildingNative(const std::string& type, float posX, float posZ) {
+        const ::CityBuildingDef* def = ::findCityBuildingDef(type);
+        if (!def) return false;
+
+        if (m_cityCredits < def->cost) return false;
+        m_cityCredits -= def->cost;
+
+        int count = 0;
+        for (auto& obj : m_sceneObjects) {
+            if (obj && obj->getBuildingType() == type) count++;
+        }
+        std::string objName = def->name + "_" + std::to_string(count + 1);
+        float terrainY = m_terrain.getHeightAt(posX, posZ);
+
+        float size = def->footprint * 0.6f;
+        glm::vec4 color(0.7f, 0.7f, 0.7f, 1.0f);
+        if (def->category == "housing")         color = glm::vec4(0.9f, 0.8f, 0.2f, 1.0f);
+        else if (def->category == "food")       color = glm::vec4(0.2f, 0.8f, 0.2f, 1.0f);
+        else if (def->category == "resource")   color = glm::vec4(0.6f, 0.4f, 0.2f, 1.0f);
+        else if (def->category == "industry")   color = glm::vec4(0.5f, 0.5f, 0.6f, 1.0f);
+        else if (def->category == "commercial") color = glm::vec4(0.2f, 0.5f, 0.9f, 1.0f);
+
+        auto meshData = PrimitiveMeshBuilder::createCube(size, color);
+        auto obj = std::make_unique<SceneObject>(objName);
+        uint32_t handle = m_modelRenderer->createModel(meshData.vertices, meshData.indices);
+        obj->setBufferHandle(handle);
+        obj->setIndexCount(static_cast<uint32_t>(meshData.indices.size()));
+        obj->setVertexCount(static_cast<uint32_t>(meshData.vertices.size()));
+        obj->setLocalBounds(meshData.bounds);
+        obj->setModelPath("");
+        obj->setMeshData(meshData.vertices, meshData.indices);
+        obj->setPrimitiveType(PrimitiveType::Cube);
+        obj->setPrimitiveSize(size);
+        obj->setPrimitiveColor(color);
+        obj->getTransform().setPosition(glm::vec3(posX, terrainY, posZ));
+        obj->setName(objName);
+        obj->setBuildingType(type);
+        obj->setDescription(def->name);
+
+        m_sceneObjects.push_back(std::move(obj));
+        return true;
+    }
+
+    // Build a settlement algorithmically from planet data
+    int buildSettlement(const nlohmann::json& planetData) {
+        int population = planetData.value("population", 50);
+        float startingCredits = planetData.value("starting_credits", 5000.0f);
+        m_cityCredits = startingCredits;
+
+        // Collect available buildings from planet data
+        std::set<std::string> available;
+        if (planetData.contains("buildings_available") && planetData["buildings_available"].is_array()) {
+            for (const auto& b : planetData["buildings_available"]) {
+                available.insert(b.get<std::string>());
+            }
+        }
+        // Shack is always available
+        available.insert("shack");
+
+        int totalPlaced = 0;
+
+        // Phase 1: Housing — 1 shack per 4 people
+        if (available.count("shack")) {
+            int targetShacks = std::min(population / 4, 50);  // Cap at 50
+            for (int i = 0; i < targetShacks; i++) {
+                if (m_cityCredits < 50.0f) break;
+                glm::vec2 plot = findEmptyPlotNative("shack", m_spawnPosition.x, m_spawnPosition.z);
+                if (std::isnan(plot.x)) break;
+                if (placeBuildingNative("shack", plot.x, plot.y)) totalPlaced++;
+            }
+        }
+
+        // Phase 2: Food — 1 farm per 8 people
+        if (available.count("farm")) {
+            int targetFarms = std::min(population / 8, 20);
+            for (int i = 0; i < targetFarms; i++) {
+                if (m_cityCredits < 200.0f) break;
+                glm::vec2 plot = findEmptyPlotNative("farm", m_spawnPosition.x, m_spawnPosition.z);
+                if (std::isnan(plot.x)) break;
+                if (placeBuildingNative("farm", plot.x, plot.y)) totalPlaced++;
+            }
+        }
+
+        // Phase 3: Resource extraction (only if resource zone exists)
+        auto placeExtractors = [&](const std::string& type, int count) {
+            if (!available.count(type)) return;
+            for (int i = 0; i < count; i++) {
+                const ::CityBuildingDef* def = ::findCityBuildingDef(type);
+                if (!def || m_cityCredits < def->cost) break;
+                glm::vec2 plot = findEmptyPlotNative(type, m_spawnPosition.x, m_spawnPosition.z);
+                if (std::isnan(plot.x)) break;
+                if (placeBuildingNative(type, plot.x, plot.y)) totalPlaced++;
+            }
+        };
+        placeExtractors("lumber_mill", 2);
+        placeExtractors("mine", 2);
+        placeExtractors("quarry", 2);
+
+        // Phase 4: Industry — workshops if raw materials exist
+        if (available.count("workshop")) {
+            int targetWorkshops = std::min(2, population / 20);
+            for (int i = 0; i < targetWorkshops; i++) {
+                if (m_cityCredits < 350.0f) break;
+                glm::vec2 plot = findEmptyPlotNative("workshop", m_spawnPosition.x, m_spawnPosition.z);
+                if (std::isnan(plot.x)) break;
+                if (placeBuildingNative("workshop", plot.x, plot.y)) totalPlaced++;
+            }
+        }
+
+        // Phase 5: Commerce
+        if (available.count("market")) {
+            glm::vec2 plot = findEmptyPlotNative("market", m_spawnPosition.x, m_spawnPosition.z);
+            if (!std::isnan(plot.x) && m_cityCredits >= 250.0f) {
+                if (placeBuildingNative("market", plot.x, plot.y)) totalPlaced++;
+            }
+        }
+        if (available.count("warehouse")) {
+            glm::vec2 plot = findEmptyPlotNative("warehouse", m_spawnPosition.x, m_spawnPosition.z);
+            if (!std::isnan(plot.x) && m_cityCredits >= 200.0f) {
+                if (placeBuildingNative("warehouse", plot.x, plot.y)) totalPlaced++;
+            }
+        }
+
+        std::cout << "[Settlement] Built " << totalPlaced << " buildings (pop=" << population
+                  << ", treasury=" << static_cast<int>(m_cityCredits) << " CR remaining)\n";
+        return totalPlaced;
+    }
+
+    // Generate a random world: fetch planet data, lay out zones, build settlement
+    bool generateRandomWorld() {
+        std::cout << "[WorldGen] Generating random world...\n";
+
+        // 1. HTTP POST to backend
+        httplib::Client cli("localhost", 8080);
+        cli.set_connection_timeout(5);
+        auto res = cli.Post("/planet/generate", "{}", "application/json");
+        if (!res || res->status != 200) {
+            std::cout << "[WorldGen] ERROR: Backend not available (start backend/server.py on port 8080)\n";
+            return false;
+        }
+
+        try {
+            m_planetData = nlohmann::json::parse(res->body);
+        } catch (const std::exception& e) {
+            std::cout << "[WorldGen] ERROR: Failed to parse planet JSON: " << e.what() << "\n";
+            return false;
+        }
+
+        std::string planetName = m_planetData.value("name", "Unknown");
+        std::string biome = m_planetData.value("biome_name", m_planetData.value("biome", "unknown"));
+        int techLevel = m_planetData.value("tech_level", 1);
+        int population = m_planetData.value("population", 50);
+        float credits = m_planetData.value("starting_credits", 5000.0f);
+
+        std::cout << "[WorldGen] Planet: " << planetName << "\n"
+                  << "[WorldGen]   Biome: " << biome << "\n"
+                  << "[WorldGen]   Tech Level: " << techLevel << " (" << m_planetData.value("tech_name", "") << ")\n"
+                  << "[WorldGen]   Population: " << population << "\n"
+                  << "[WorldGen]   Starting Credits: " << static_cast<int>(credits) << " CR\n"
+                  << "[WorldGen]   Species: " << m_planetData.value("species_name", "Unknown") << "\n"
+                  << "[WorldGen]   Government: " << m_planetData.value("government_name", "Unknown") << "\n";
+
+        // List resources
+        if (m_planetData.contains("resources_harvestable") && m_planetData["resources_harvestable"].is_array()) {
+            std::cout << "[WorldGen]   Harvestable: ";
+            for (size_t i = 0; i < m_planetData["resources_harvestable"].size(); i++) {
+                if (i > 0) std::cout << ", ";
+                std::cout << m_planetData["resources_harvestable"][i].get<std::string>();
+            }
+            std::cout << "\n";
+        }
+
+        // 2. Generate zone layout
+        if (m_zoneSystem) {
+            m_zoneSystem->generatePlanetLayout(m_planetData);
+        }
+
+        // 3. Build settlement
+        int buildingsPlaced = buildSettlement(m_planetData);
+
+        // 4. Mark as generated
+        m_worldGenerated = true;
+
+        std::cout << "[WorldGen] World generation complete — " << buildingsPlaced << " buildings placed\n";
+        return true;
+    }
+
     void enterPlayMode() {
         m_isPlayMode = true;
         m_playModeCursorVisible = false;  // Start with cursor hidden (mouse look active)
@@ -8716,6 +9187,12 @@ private:
             m_camera.setPosition(m_spawnPosition + glm::vec3(0, eyeHeight, 0));
         }
         // Otherwise camera stays at current editor position for quick iteration
+
+        // Trigger procedural world generation if spawn marker exists and world not yet generated
+        if (hasRealSpawnMarker && !m_worldGenerated) {
+            std::cout << "[PlayMode] Spawn marker detected — triggering world generation\n";
+            generateRandomWorld();
+        }
 
         // Initialize game time (start at 6:00 AM)
         m_gameTimeMinutes = 360.0f;  // 0600
@@ -12206,6 +12683,11 @@ private:
     // Zone system
     std::unique_ptr<ZoneSystem> m_zoneSystem;
     bool m_showZoneMap = false;
+
+    // World generation
+    bool m_worldGenerated = false;
+    bool m_showPlanetInfo = false;
+    nlohmann::json m_planetData;
     float m_zoneMapZoom = 1.0f;
     glm::vec2 m_zoneMapPan{0.0f, 0.0f};
     bool m_zoneMapDragging = false;
