@@ -1,0 +1,1885 @@
+{
+  "temperate_forest": {
+    "name": "Temperate Forest",
+    "description": "Dense forests with moderate climate, abundant wood and wildlife.",
+    "terrain": {
+      "heightScale": 120.0,
+      "noiseScale": 0.004,
+      "noiseOctaves": 5,
+      "noisePersistence": 0.45
+    },
+    "water_coverage": 0.15,
+    "temperature": "moderate",
+    "vegetation": "heavy",
+    "liquid_type": "water",
+    "dominant_resources": [
+      "wood"
+    ],
+    "possible_resources": [
+      "wood",
+      "limestone",
+      "iron"
+    ],
+    "images": [],
+    "texture_palette": {
+      "base": {
+        "texture": "grass",
+        "h": 0.33,
+        "s": 0.5,
+        "b": 0.5
+      },
+      "slope": {
+        "texture": "rock",
+        "h": 0.0,
+        "s": 0.2,
+        "b": 0.4
+      },
+      "high": {
+        "texture": "rock",
+        "h": 0.0,
+        "s": 0.1,
+        "b": 0.6
+      },
+      "detail": {
+        "texture": "dirt",
+        "h": 0.08,
+        "s": 0.4,
+        "b": 0.45
+      }
+    }
+  },
+  "arid_desert": {
+    "name": "Arid Desert",
+    "description": "Vast sandy expanses with extreme heat, mineral-rich underground deposits.",
+    "terrain": {
+      "heightScale": 80.0,
+      "noiseScale": 0.002,
+      "noiseOctaves": 3,
+      "noisePersistence": 0.35
+    },
+    "water_coverage": 0.02,
+    "temperature": "hot",
+    "vegetation": "sparse",
+    "liquid_type": "water",
+    "dominant_resources": [
+      "iron",
+      "oil"
+    ],
+    "possible_resources": [
+      "iron",
+      "oil",
+      "limestone"
+    ],
+    "images": [],
+    "texture_palette": {
+      "base": {
+        "texture": "grass",
+        "h": 0.33,
+        "s": 0.5,
+        "b": 0.5
+      },
+      "slope": {
+        "texture": "rock",
+        "h": 0.0,
+        "s": 0.2,
+        "b": 0.4
+      },
+      "high": {
+        "texture": "rock",
+        "h": 0.0,
+        "s": 0.1,
+        "b": 0.6
+      },
+      "detail": {
+        "texture": "dirt",
+        "h": 0.08,
+        "s": 0.4,
+        "b": 0.45
+      }
+    },
+    "image_layouts": {}
+  },
+  "ocean_world": {
+    "name": "Ocean World",
+    "description": "Mostly water with scattered island chains and archipelagos.",
+    "terrain": {
+      "heightScale": 60.0,
+      "noiseScale": 0.003,
+      "noiseOctaves": 4,
+      "noisePersistence": 0.5
+    },
+    "water_coverage": 0.7,
+    "temperature": "moderate",
+    "vegetation": "moderate",
+    "liquid_type": "water",
+    "dominant_resources": [
+      "limestone"
+    ],
+    "possible_resources": [
+      "wood",
+      "limestone"
+    ],
+    "images": [],
+    "texture_palette": {
+      "base": {
+        "texture": "grass",
+        "h": 0.33,
+        "s": 0.5,
+        "b": 0.5
+      },
+      "slope": {
+        "texture": "rock",
+        "h": 0.0,
+        "s": 0.2,
+        "b": 0.4
+      },
+      "high": {
+        "texture": "rock",
+        "h": 0.0,
+        "s": 0.1,
+        "b": 0.6
+      },
+      "detail": {
+        "texture": "dirt",
+        "h": 0.08,
+        "s": 0.4,
+        "b": 0.45
+      }
+    }
+  },
+  "volcanic": {
+    "name": "Volcanic",
+    "description": "Geologically active world with lava fields, hot springs, and rich mineral deposits.",
+    "terrain": {
+      "heightScale": 250.0,
+      "noiseScale": 0.005,
+      "noiseOctaves": 6,
+      "noisePersistence": 0.55
+    },
+    "water_coverage": 0.05,
+    "temperature": "extreme",
+    "vegetation": "minimal",
+    "liquid_type": "water",
+    "dominant_resources": [
+      "iron"
+    ],
+    "possible_resources": [
+      "iron",
+      "limestone",
+      "oil"
+    ],
+    "images": [],
+    "texture_palette": {
+      "base": {
+        "texture": "grass",
+        "h": 0.33,
+        "s": 0.5,
+        "b": 0.5
+      },
+      "slope": {
+        "texture": "rock",
+        "h": 0.0,
+        "s": 0.2,
+        "b": 0.4
+      },
+      "high": {
+        "texture": "rock",
+        "h": 0.0,
+        "s": 0.1,
+        "b": 0.6
+      },
+      "detail": {
+        "texture": "dirt",
+        "h": 0.08,
+        "s": 0.4,
+        "b": 0.45
+      }
+    }
+  },
+  "tundra": {
+    "name": "Frozen Tundra",
+    "description": "Ice-covered world with harsh winds, limited growing seasons, and buried resources.",
+    "terrain": {
+      "heightScale": 100.0,
+      "noiseScale": 0.003,
+      "noiseOctaves": 4,
+      "noisePersistence": 0.4
+    },
+    "water_coverage": 0.1,
+    "temperature": "frozen",
+    "vegetation": "minimal",
+    "liquid_type": "water",
+    "dominant_resources": [
+      "oil"
+    ],
+    "possible_resources": [
+      "iron",
+      "oil"
+    ],
+    "images": [],
+    "texture_palette": {
+      "base": {
+        "texture": "grass",
+        "h": 0.33,
+        "s": 0.5,
+        "b": 0.5
+      },
+      "slope": {
+        "texture": "rock",
+        "h": 0.0,
+        "s": 0.2,
+        "b": 0.4
+      },
+      "high": {
+        "texture": "rock",
+        "h": 0.0,
+        "s": 0.1,
+        "b": 0.6
+      },
+      "detail": {
+        "texture": "dirt",
+        "h": 0.08,
+        "s": 0.4,
+        "b": 0.45
+      }
+    }
+  },
+  "savanna": {
+    "name": "Savanna",
+    "description": "Open grasslands with scattered trees, seasonal rains, and diverse fauna.",
+    "terrain": {
+      "heightScale": 50.0,
+      "noiseScale": 0.002,
+      "noiseOctaves": 3,
+      "noisePersistence": 0.3
+    },
+    "water_coverage": 0.08,
+    "temperature": "warm",
+    "vegetation": "moderate",
+    "liquid_type": "water",
+    "dominant_resources": [
+      "wood"
+    ],
+    "possible_resources": [
+      "wood",
+      "limestone"
+    ],
+    "images": [],
+    "texture_palette": {
+      "base": {
+        "texture": "grass",
+        "h": 0.33,
+        "s": 0.5,
+        "b": 0.5
+      },
+      "slope": {
+        "texture": "rock",
+        "h": 0.0,
+        "s": 0.2,
+        "b": 0.4
+      },
+      "high": {
+        "texture": "rock",
+        "h": 0.0,
+        "s": 0.1,
+        "b": 0.6
+      },
+      "detail": {
+        "texture": "dirt",
+        "h": 0.08,
+        "s": 0.4,
+        "b": 0.45
+      }
+    }
+  },
+  "mountainous": {
+    "name": "Mountainous",
+    "description": "Towering peaks and deep valleys with rich mineral veins and sparse vegetation.",
+    "terrain": {
+      "heightScale": 300.0,
+      "noiseScale": 0.006,
+      "noiseOctaves": 6,
+      "noisePersistence": 0.5
+    },
+    "water_coverage": 0.05,
+    "temperature": "cold",
+    "vegetation": "sparse",
+    "liquid_type": "water",
+    "dominant_resources": [
+      "iron",
+      "limestone"
+    ],
+    "possible_resources": [
+      "iron",
+      "limestone",
+      "wood"
+    ],
+    "images": [],
+    "texture_palette": {
+      "base": {
+        "texture": "grass",
+        "h": 0.33,
+        "s": 0.5,
+        "b": 0.5
+      },
+      "slope": {
+        "texture": "rock",
+        "h": 0.0,
+        "s": 0.2,
+        "b": 0.4
+      },
+      "high": {
+        "texture": "rock",
+        "h": 0.0,
+        "s": 0.1,
+        "b": 0.6
+      },
+      "detail": {
+        "texture": "dirt",
+        "h": 0.08,
+        "s": 0.4,
+        "b": 0.45
+      }
+    }
+  },
+  "swamp": {
+    "name": "Swamplands",
+    "description": "Waterlogged terrain with dense vegetation, rich soil, and oil deposits.",
+    "terrain": {
+      "heightScale": 30.0,
+      "noiseScale": 0.004,
+      "noiseOctaves": 5,
+      "noisePersistence": 0.6
+    },
+    "water_coverage": 0.4,
+    "temperature": "warm",
+    "vegetation": "heavy",
+    "liquid_type": "water",
+    "dominant_resources": [
+      "wood",
+      "oil"
+    ],
+    "possible_resources": [
+      "wood",
+      "oil"
+    ],
+    "images": [],
+    "texture_palette": {
+      "base": {
+        "texture": "grass",
+        "h": 0.33,
+        "s": 0.5,
+        "b": 0.5
+      },
+      "slope": {
+        "texture": "rock",
+        "h": 0.0,
+        "s": 0.2,
+        "b": 0.4
+      },
+      "high": {
+        "texture": "rock",
+        "h": 0.0,
+        "s": 0.1,
+        "b": 0.6
+      },
+      "detail": {
+        "texture": "dirt",
+        "h": 0.08,
+        "s": 0.4,
+        "b": 0.45
+      }
+    }
+  },
+  "crystalline": {
+    "name": "Crystalline",
+    "description": "Alien landscape of crystal formations and mineral-rich terrain. Low gravity feel.",
+    "terrain": {
+      "heightScale": 180.0,
+      "noiseScale": 0.007,
+      "noiseOctaves": 4,
+      "noisePersistence": 0.35
+    },
+    "water_coverage": 0.03,
+    "temperature": "moderate",
+    "vegetation": "alien",
+    "liquid_type": "water",
+    "dominant_resources": [
+      "limestone",
+      "iron"
+    ],
+    "possible_resources": [
+      "limestone",
+      "iron"
+    ],
+    "images": [],
+    "texture_palette": {
+      "base": {
+        "texture": "grass",
+        "h": 0.33,
+        "s": 0.5,
+        "b": 0.5
+      },
+      "slope": {
+        "texture": "rock",
+        "h": 0.0,
+        "s": 0.2,
+        "b": 0.4
+      },
+      "high": {
+        "texture": "rock",
+        "h": 0.0,
+        "s": 0.1,
+        "b": 0.6
+      },
+      "detail": {
+        "texture": "dirt",
+        "h": 0.08,
+        "s": 0.4,
+        "b": 0.45
+      }
+    }
+  },
+  "fertile_floodplains": {
+    "name": "Fertile Floodplains",
+    "description": "Rich alluvial plains along river deltas with deep soil and seasonal flooding.",
+    "terrain": {
+      "heightScale": 30.0,
+      "noiseScale": 0.002,
+      "noiseOctaves": 3,
+      "noisePersistence": 0.35
+    },
+    "water_coverage": 0.25,
+    "temperature": "warm",
+    "vegetation": "heavy",
+    "liquid_type": "water",
+    "dominant_resources": [
+      "wood"
+    ],
+    "possible_resources": [
+      "wood",
+      "limestone"
+    ],
+    "images": [],
+    "texture_palette": {
+      "base": {
+        "texture": "grass",
+        "h": 0.33,
+        "s": 0.5,
+        "b": 0.5
+      },
+      "slope": {
+        "texture": "rock",
+        "h": 0.0,
+        "s": 0.2,
+        "b": 0.4
+      },
+      "high": {
+        "texture": "rock",
+        "h": 0.0,
+        "s": 0.1,
+        "b": 0.6
+      },
+      "detail": {
+        "texture": "dirt",
+        "h": 0.08,
+        "s": 0.4,
+        "b": 0.45
+      }
+    }
+  },
+  "ocean_world_rocky_coast": {
+    "name": "Ocean World (Rocky Coast)",
+    "description": "Ocean world dominated by dramatic rocky coastlines, sea cliffs, and tidal pools.",
+    "terrain": {
+      "heightScale": 90.0,
+      "noiseScale": 0.004,
+      "noiseOctaves": 5,
+      "noisePersistence": 0.5
+    },
+    "water_coverage": 0.6,
+    "temperature": "moderate",
+    "vegetation": "sparse",
+    "liquid_type": "water",
+    "dominant_resources": [
+      "limestone"
+    ],
+    "possible_resources": [
+      "limestone",
+      "iron"
+    ],
+    "images": [],
+    "texture_palette": {
+      "base": {
+        "texture": "grass",
+        "h": 0.33,
+        "s": 0.5,
+        "b": 0.5
+      },
+      "slope": {
+        "texture": "rock",
+        "h": 0.0,
+        "s": 0.2,
+        "b": 0.4
+      },
+      "high": {
+        "texture": "rock",
+        "h": 0.0,
+        "s": 0.1,
+        "b": 0.6
+      },
+      "detail": {
+        "texture": "dirt",
+        "h": 0.08,
+        "s": 0.4,
+        "b": 0.45
+      }
+    }
+  },
+  "temperate_river": {
+    "name": "Temperate River Valley",
+    "description": "Gentle river valleys with fertile banks, deciduous forests, and mild seasons.",
+    "terrain": {
+      "heightScale": 60.0,
+      "noiseScale": 0.003,
+      "noiseOctaves": 4,
+      "noisePersistence": 0.4
+    },
+    "water_coverage": 0.2,
+    "temperature": "moderate",
+    "vegetation": "heavy",
+    "liquid_type": "water",
+    "dominant_resources": [
+      "wood"
+    ],
+    "possible_resources": [
+      "wood",
+      "limestone",
+      "iron"
+    ],
+    "images": [],
+    "texture_palette": {
+      "base": {
+        "texture": "grass",
+        "h": 0.33,
+        "s": 0.5,
+        "b": 0.5
+      },
+      "slope": {
+        "texture": "rock",
+        "h": 0.0,
+        "s": 0.2,
+        "b": 0.4
+      },
+      "high": {
+        "texture": "rock",
+        "h": 0.0,
+        "s": 0.1,
+        "b": 0.6
+      },
+      "detail": {
+        "texture": "dirt",
+        "h": 0.08,
+        "s": 0.4,
+        "b": 0.45
+      }
+    }
+  },
+  "coastal_urban": {
+    "name": "Coastal Urban",
+    "description": "Densely developed coastal zones with harbors, infrastructure, and mixed terrain.",
+    "terrain": {
+      "heightScale": 40.0,
+      "noiseScale": 0.003,
+      "noiseOctaves": 3,
+      "noisePersistence": 0.3
+    },
+    "water_coverage": 0.35,
+    "temperature": "moderate",
+    "vegetation": "sparse",
+    "liquid_type": "water",
+    "dominant_resources": [
+      "iron",
+      "limestone"
+    ],
+    "possible_resources": [
+      "iron",
+      "limestone",
+      "oil"
+    ],
+    "images": [],
+    "texture_palette": {
+      "base": {
+        "texture": "grass",
+        "h": 0.29,
+        "s": 0.5,
+        "b": 0.5
+      },
+      "slope": {
+        "texture": "rock",
+        "h": 0.0,
+        "s": 0.2,
+        "b": 0.4
+      },
+      "high": {
+        "texture": "rock",
+        "h": 0.0,
+        "s": 0.1,
+        "b": 0.6
+      },
+      "detail": {
+        "texture": "dirt",
+        "h": 0.08,
+        "s": 0.4,
+        "b": 0.45
+      }
+    }
+  },
+  "mountainous_extreme": {
+    "name": "Extreme Mountains",
+    "description": "Jagged ultra-high peaks with thin atmosphere, perpetual snow, and extreme elevation changes.",
+    "terrain": {
+      "heightScale": 400.0,
+      "noiseScale": 0.008,
+      "noiseOctaves": 7,
+      "noisePersistence": 0.55
+    },
+    "water_coverage": 0.02,
+    "temperature": "frozen",
+    "vegetation": "minimal",
+    "liquid_type": "water",
+    "dominant_resources": [
+      "iron"
+    ],
+    "possible_resources": [
+      "iron",
+      "limestone"
+    ],
+    "images": [],
+    "texture_palette": {
+      "base": {
+        "texture": "grass",
+        "h": 0.33,
+        "s": 0.5,
+        "b": 0.5
+      },
+      "slope": {
+        "texture": "rock",
+        "h": 0.0,
+        "s": 0.2,
+        "b": 0.4
+      },
+      "high": {
+        "texture": "rock",
+        "h": 0.0,
+        "s": 0.1,
+        "b": 0.6
+      },
+      "detail": {
+        "texture": "dirt",
+        "h": 0.08,
+        "s": 0.4,
+        "b": 0.45
+      }
+    }
+  },
+  "gas_giant": {
+    "name": "Gas Giant",
+    "description": "Massive gaseous world with floating platforms amid swirling cloud layers. No solid surface.",
+    "terrain": {
+      "heightScale": 200.0,
+      "noiseScale": 0.01,
+      "noiseOctaves": 4,
+      "noisePersistence": 0.6
+    },
+    "water_coverage": 0.0,
+    "temperature": "extreme",
+    "vegetation": "none",
+    "liquid_type": "gas",
+    "dominant_resources": [
+      "oil"
+    ],
+    "possible_resources": [
+      "oil"
+    ],
+    "images": [],
+    "texture_palette": {
+      "base": {
+        "texture": "grass",
+        "h": 0.33,
+        "s": 0.5,
+        "b": 0.5
+      },
+      "slope": {
+        "texture": "rock",
+        "h": 0.0,
+        "s": 0.2,
+        "b": 0.4
+      },
+      "high": {
+        "texture": "rock",
+        "h": 0.0,
+        "s": 0.1,
+        "b": 0.6
+      },
+      "detail": {
+        "texture": "dirt",
+        "h": 0.08,
+        "s": 0.4,
+        "b": 0.45
+      }
+    }
+  },
+  "void": {
+    "name": "Void",
+    "description": "Deep space habitat or interdimensional pocket \u2014 no natural terrain, fully artificial.",
+    "terrain": {
+      "heightScale": 10.0,
+      "noiseScale": 0.001,
+      "noiseOctaves": 2,
+      "noisePersistence": 0.2
+    },
+    "water_coverage": 0.0,
+    "temperature": "frozen",
+    "vegetation": "none",
+    "liquid_type": "water",
+    "dominant_resources": [],
+    "possible_resources": [
+      "iron"
+    ],
+    "images": [],
+    "texture_palette": {
+      "base": {
+        "texture": "grass",
+        "h": 0.33,
+        "s": 0.5,
+        "b": 0.5
+      },
+      "slope": {
+        "texture": "rock",
+        "h": 0.0,
+        "s": 0.2,
+        "b": 0.4
+      },
+      "high": {
+        "texture": "rock",
+        "h": 0.0,
+        "s": 0.1,
+        "b": 0.6
+      },
+      "detail": {
+        "texture": "dirt",
+        "h": 0.08,
+        "s": 0.4,
+        "b": 0.45
+      }
+    }
+  },
+  "ocean_world_archipelago": {
+    "name": "Ocean Archipelago",
+    "description": "Vast oceans dotted with chains of volcanic islands and coral atolls.",
+    "terrain": {
+      "heightScale": 70.0,
+      "noiseScale": 0.005,
+      "noiseOctaves": 5,
+      "noisePersistence": 0.5
+    },
+    "water_coverage": 0.65,
+    "temperature": "warm",
+    "vegetation": "moderate",
+    "liquid_type": "water",
+    "dominant_resources": [
+      "limestone",
+      "wood"
+    ],
+    "possible_resources": [
+      "limestone",
+      "wood"
+    ],
+    "images": [],
+    "texture_palette": {
+      "base": {
+        "texture": "grass",
+        "h": 0.33,
+        "s": 0.5,
+        "b": 0.5
+      },
+      "slope": {
+        "texture": "rock",
+        "h": 0.0,
+        "s": 0.2,
+        "b": 0.4
+      },
+      "high": {
+        "texture": "rock",
+        "h": 0.0,
+        "s": 0.1,
+        "b": 0.6
+      },
+      "detail": {
+        "texture": "dirt",
+        "h": 0.08,
+        "s": 0.4,
+        "b": 0.45
+      }
+    }
+  },
+  "rocky": {
+    "name": "Rocky Badlands",
+    "description": "Barren rocky terrain with mesas, canyons, and exposed mineral strata.",
+    "terrain": {
+      "heightScale": 150.0,
+      "noiseScale": 0.005,
+      "noiseOctaves": 5,
+      "noisePersistence": 0.4
+    },
+    "water_coverage": 0.03,
+    "temperature": "hot",
+    "vegetation": "minimal",
+    "liquid_type": "water",
+    "dominant_resources": [
+      "iron",
+      "limestone"
+    ],
+    "possible_resources": [
+      "iron",
+      "limestone"
+    ],
+    "images": [],
+    "texture_palette": {
+      "base": {
+        "texture": "grass",
+        "h": 0.33,
+        "s": 0.5,
+        "b": 0.5
+      },
+      "slope": {
+        "texture": "rock",
+        "h": 0.0,
+        "s": 0.2,
+        "b": 0.4
+      },
+      "high": {
+        "texture": "rock",
+        "h": 0.0,
+        "s": 0.1,
+        "b": 0.6
+      },
+      "detail": {
+        "texture": "dirt",
+        "h": 0.08,
+        "s": 0.4,
+        "b": 0.45
+      }
+    }
+  },
+  "arid_river_valley": {
+    "name": "Arid River Valley",
+    "description": "Desert canyon carved by an ancient river, with oasis settlements along the banks.",
+    "terrain": {
+      "heightScale": 100.0,
+      "noiseScale": 0.004,
+      "noiseOctaves": 4,
+      "noisePersistence": 0.38
+    },
+    "water_coverage": 0.08,
+    "temperature": "hot",
+    "vegetation": "sparse",
+    "liquid_type": "water",
+    "dominant_resources": [
+      "iron"
+    ],
+    "possible_resources": [
+      "iron",
+      "oil",
+      "limestone"
+    ],
+    "images": [],
+    "texture_palette": {
+      "base": {
+        "texture": "grass",
+        "h": 0.33,
+        "s": 0.5,
+        "b": 0.5
+      },
+      "slope": {
+        "texture": "rock",
+        "h": 0.0,
+        "s": 0.2,
+        "b": 0.4
+      },
+      "high": {
+        "texture": "rock",
+        "h": 0.0,
+        "s": 0.1,
+        "b": 0.6
+      },
+      "detail": {
+        "texture": "dirt",
+        "h": 0.08,
+        "s": 0.4,
+        "b": 0.45
+      }
+    }
+  },
+  "arid_desert_underground_cities": {
+    "name": "Underground Desert Cities",
+    "description": "Scorched surface with vast underground city networks carved into bedrock.",
+    "terrain": {
+      "heightScale": 70.0,
+      "noiseScale": 0.002,
+      "noiseOctaves": 3,
+      "noisePersistence": 0.3
+    },
+    "water_coverage": 0.01,
+    "temperature": "extreme",
+    "vegetation": "none",
+    "liquid_type": "water",
+    "dominant_resources": [
+      "iron",
+      "oil"
+    ],
+    "possible_resources": [
+      "iron",
+      "oil",
+      "limestone"
+    ],
+    "images": [],
+    "texture_palette": {
+      "base": {
+        "texture": "grass",
+        "h": 0.33,
+        "s": 0.5,
+        "b": 0.5
+      },
+      "slope": {
+        "texture": "rock",
+        "h": 0.0,
+        "s": 0.2,
+        "b": 0.4
+      },
+      "high": {
+        "texture": "rock",
+        "h": 0.0,
+        "s": 0.1,
+        "b": 0.6
+      },
+      "detail": {
+        "texture": "dirt",
+        "h": 0.08,
+        "s": 0.4,
+        "b": 0.45
+      }
+    }
+  },
+  "temperate_forest_large_trees": {
+    "name": "Ancient Forest",
+    "description": "Primeval forest of colossal trees with canopy ecosystems and moss-covered floors.",
+    "terrain": {
+      "heightScale": 130.0,
+      "noiseScale": 0.004,
+      "noiseOctaves": 5,
+      "noisePersistence": 0.48
+    },
+    "water_coverage": 0.12,
+    "temperature": "moderate",
+    "vegetation": "heavy",
+    "liquid_type": "water",
+    "dominant_resources": [
+      "wood"
+    ],
+    "possible_resources": [
+      "wood",
+      "limestone"
+    ],
+    "images": [],
+    "texture_palette": {
+      "base": {
+        "texture": "grass",
+        "h": 0.33,
+        "s": 0.5,
+        "b": 0.5
+      },
+      "slope": {
+        "texture": "rock",
+        "h": 0.0,
+        "s": 0.2,
+        "b": 0.4
+      },
+      "high": {
+        "texture": "rock",
+        "h": 0.0,
+        "s": 0.1,
+        "b": 0.6
+      },
+      "detail": {
+        "texture": "dirt",
+        "h": 0.08,
+        "s": 0.4,
+        "b": 0.45
+      }
+    }
+  },
+  "mech_planet": {
+    "name": "Mech Planet",
+    "description": "Entirely mechanized world \u2014 metal plating, gears, and automated factories cover the surface.",
+    "terrain": {
+      "heightScale": 50.0,
+      "noiseScale": 0.006,
+      "noiseOctaves": 3,
+      "noisePersistence": 0.25
+    },
+    "water_coverage": 0.0,
+    "temperature": "moderate",
+    "vegetation": "none",
+    "liquid_type": "water",
+    "dominant_resources": [
+      "iron"
+    ],
+    "possible_resources": [
+      "iron",
+      "oil"
+    ],
+    "images": [],
+    "texture_palette": {
+      "base": {
+        "texture": "grass",
+        "h": 0.33,
+        "s": 0.5,
+        "b": 0.5
+      },
+      "slope": {
+        "texture": "rock",
+        "h": 0.0,
+        "s": 0.2,
+        "b": 0.4
+      },
+      "high": {
+        "texture": "rock",
+        "h": 0.0,
+        "s": 0.1,
+        "b": 0.6
+      },
+      "detail": {
+        "texture": "dirt",
+        "h": 0.08,
+        "s": 0.4,
+        "b": 0.45
+      }
+    }
+  },
+  "harsh": {
+    "name": "Harsh Wasteland",
+    "description": "Unforgiving toxic environment with acid rain, radiation storms, and scarce resources.",
+    "terrain": {
+      "heightScale": 120.0,
+      "noiseScale": 0.005,
+      "noiseOctaves": 5,
+      "noisePersistence": 0.45
+    },
+    "water_coverage": 0.05,
+    "temperature": "extreme",
+    "vegetation": "minimal",
+    "liquid_type": "toxic",
+    "dominant_resources": [
+      "oil"
+    ],
+    "possible_resources": [
+      "iron",
+      "oil"
+    ],
+    "images": [],
+    "texture_palette": {
+      "base": {
+        "texture": "grass",
+        "h": 0.33,
+        "s": 0.5,
+        "b": 0.5
+      },
+      "slope": {
+        "texture": "rock",
+        "h": 0.0,
+        "s": 0.2,
+        "b": 0.4
+      },
+      "high": {
+        "texture": "rock",
+        "h": 0.0,
+        "s": 0.1,
+        "b": 0.6
+      },
+      "detail": {
+        "texture": "dirt",
+        "h": 0.08,
+        "s": 0.4,
+        "b": 0.45
+      }
+    }
+  },
+  "asteroid": {
+    "name": "Asteroid",
+    "description": "Small rocky body in space with micro-gravity, surface mining operations, and cramped habitats.",
+    "terrain": {
+      "heightScale": 40.0,
+      "noiseScale": 0.008,
+      "noiseOctaves": 3,
+      "noisePersistence": 0.3
+    },
+    "water_coverage": 0.0,
+    "temperature": "frozen",
+    "vegetation": "none",
+    "liquid_type": "water",
+    "dominant_resources": [
+      "iron"
+    ],
+    "possible_resources": [
+      "iron",
+      "limestone"
+    ],
+    "images": [],
+    "texture_palette": {
+      "base": {
+        "texture": "grass",
+        "h": 0.33,
+        "s": 0.5,
+        "b": 0.5
+      },
+      "slope": {
+        "texture": "rock",
+        "h": 0.0,
+        "s": 0.2,
+        "b": 0.4
+      },
+      "high": {
+        "texture": "rock",
+        "h": 0.0,
+        "s": 0.1,
+        "b": 0.6
+      },
+      "detail": {
+        "texture": "dirt",
+        "h": 0.08,
+        "s": 0.4,
+        "b": 0.45
+      }
+    }
+  },
+  "space_station": {
+    "name": "Space Station",
+    "description": "Orbital habitat with artificial gravity, recycled atmosphere, and modular construction.",
+    "terrain": {
+      "heightScale": 20.0,
+      "noiseScale": 0.003,
+      "noiseOctaves": 2,
+      "noisePersistence": 0.2
+    },
+    "water_coverage": 0.0,
+    "temperature": "moderate",
+    "vegetation": "none",
+    "liquid_type": "water",
+    "dominant_resources": [
+      "iron"
+    ],
+    "possible_resources": [
+      "iron"
+    ],
+    "images": [],
+    "texture_palette": {
+      "base": {
+        "texture": "grass",
+        "h": 0.33,
+        "s": 0.5,
+        "b": 0.5
+      },
+      "slope": {
+        "texture": "rock",
+        "h": 0.0,
+        "s": 0.2,
+        "b": 0.4
+      },
+      "high": {
+        "texture": "rock",
+        "h": 0.0,
+        "s": 0.1,
+        "b": 0.6
+      },
+      "detail": {
+        "texture": "dirt",
+        "h": 0.08,
+        "s": 0.4,
+        "b": 0.45
+      }
+    }
+  },
+  "_species_images": {
+    "anarchist_1": {
+      "images": [
+        "anarchist_1_000.png",
+        "anarchist_1_001.png",
+        "anarchist_1_002.png",
+        "anarchist_1_003.png",
+        "anarchist_1_004.png",
+        "anarchist_1_005.png",
+        "anarchist_1_006.png",
+        "anarchist_1_007.png",
+        "anarchist_1_008.png",
+        "anarchist_1_009.png",
+        "anarchist_1_010.png",
+        "anarchist_1_011.png"
+      ],
+      "image_layouts": {
+        "anarchist_1_000.png": {
+          "x": 804,
+          "y": 80,
+          "w": 420,
+          "h": 501
+        },
+        "anarchist_1_001.png": {
+          "x": 810,
+          "y": 606,
+          "w": 364,
+          "h": 441
+        },
+        "anarchist_1_002.png": {
+          "x": 809,
+          "y": 1064,
+          "w": 376,
+          "h": 452
+        },
+        "anarchist_1_003.png": {
+          "x": 816,
+          "y": 1538,
+          "w": 358,
+          "h": 459
+        },
+        "anarchist_1_004.png": {
+          "x": 820,
+          "y": 2010,
+          "w": 406,
+          "h": 478
+        },
+        "anarchist_1_005.png": {
+          "x": 827,
+          "y": 2544,
+          "w": 410,
+          "h": 505
+        },
+        "anarchist_1_006.png": {
+          "x": 788,
+          "y": 3076,
+          "w": 421,
+          "h": 517
+        },
+        "anarchist_1_007.png": {
+          "x": 791,
+          "y": 3604,
+          "w": 447,
+          "h": 604
+        },
+        "anarchist_1_008.png": {
+          "x": 789,
+          "y": 4218,
+          "w": 458,
+          "h": 571
+        },
+        "anarchist_1_009.png": {
+          "x": 792,
+          "y": 4797,
+          "w": 461,
+          "h": 620
+        },
+        "anarchist_1_010.png": {
+          "x": 797,
+          "y": 5426,
+          "w": 465,
+          "h": 648
+        },
+        "anarchist_1_011.png": {
+          "x": 796,
+          "y": 6083,
+          "w": 454,
+          "h": 622
+        }
+      }
+    },
+    "anarchist_7": {
+      "images": []
+    },
+    "corporatocracy_8": {
+      "images": []
+    },
+    "corporatocracy_9": {
+      "images": []
+    },
+    "corporatocracy_10": {
+      "images": []
+    },
+    "democracy_2": {
+      "images": []
+    },
+    "democracy_3": {
+      "images": []
+    },
+    "democracy_4": {
+      "images": []
+    },
+    "democracy_1": {
+      "images": []
+    },
+    "corporatocracy_7": {
+      "images": []
+    },
+    "anarchist_2": {
+      "images": [
+        "anarchist_2_000.png",
+        "anarchist_2_001.png",
+        "anarchist_2_002.png",
+        "anarchist_2_003.png",
+        "anarchist_2_004.png",
+        "anarchist_2_005.png",
+        "anarchist_2_006.png"
+      ],
+      "image_layouts": {
+        "anarchist_2_000.png": {
+          "x": 780,
+          "y": 75,
+          "w": 283,
+          "h": 381
+        },
+        "anarchist_2_001.png": {
+          "x": 777,
+          "y": 475,
+          "w": 342,
+          "h": 441
+        },
+        "anarchist_2_002.png": {
+          "x": 778,
+          "y": 926,
+          "w": 364,
+          "h": 484
+        },
+        "anarchist_2_003.png": {
+          "x": 780,
+          "y": 1420,
+          "w": 399,
+          "h": 516
+        },
+        "anarchist_2_004.png": {
+          "x": 785,
+          "y": 1949,
+          "w": 417,
+          "h": 529
+        },
+        "anarchist_2_005.png": {
+          "x": 785,
+          "y": 2491,
+          "w": 413,
+          "h": 501
+        },
+        "anarchist_2_006.png": {
+          "x": 786,
+          "y": 3004,
+          "w": 416,
+          "h": 534
+        }
+      }
+    },
+    "corporatocracy_2": {
+      "images": []
+    },
+    "corporatocracy_3": {
+      "images": []
+    },
+    "corporatocracy_4": {
+      "images": []
+    },
+    "corporatocracy_5": {
+      "images": []
+    },
+    "corporatocracy_6": {
+      "images": []
+    },
+    "anarchist_3": {
+      "images": [
+        "anarchist_3_000.png",
+        "anarchist_3_001.png",
+        "anarchist_3_002.png",
+        "anarchist_3_003.png",
+        "anarchist_3_004.png",
+        "anarchist_3_005.png"
+      ],
+      "image_layouts": {
+        "anarchist_3_000.png": {
+          "x": 782,
+          "y": 85,
+          "w": 360,
+          "h": 465
+        },
+        "anarchist_3_001.png": {
+          "x": 781,
+          "y": 570,
+          "w": 376,
+          "h": 476
+        },
+        "anarchist_3_002.png": {
+          "x": 786,
+          "y": 1059,
+          "w": 385,
+          "h": 535
+        },
+        "anarchist_3_003.png": {
+          "x": 792,
+          "y": 1610,
+          "w": 400,
+          "h": 540
+        },
+        "anarchist_3_004.png": {
+          "x": 790,
+          "y": 2164,
+          "w": 427,
+          "h": 592
+        },
+        "anarchist_3_005.png": {
+          "x": 792,
+          "y": 2771,
+          "w": 395,
+          "h": 540
+        }
+      }
+    },
+    "anarchist_4": {
+      "images": [],
+      "image_layouts": {}
+    },
+    "anarchist_5": {
+      "images": [
+        "anarchist_5_000.png",
+        "anarchist_5_001.png",
+        "anarchist_5_002.png",
+        "anarchist_5_003.png",
+        "anarchist_5_004.png",
+        "anarchist_5_005.png",
+        "anarchist_5_006.png",
+        "anarchist_5_007.png",
+        "anarchist_5_008.png",
+        "anarchist_5_009.png",
+        "anarchist_5_010.png",
+        "anarchist_5_011.png",
+        "anarchist_5_012.png",
+        "anarchist_5_013.png",
+        "anarchist_5_014.png",
+        "anarchist_5_015.png"
+      ],
+      "image_layouts": {
+        "anarchist_5_000.png": {
+          "x": 788,
+          "y": 80,
+          "w": 402,
+          "h": 480
+        },
+        "anarchist_5_001.png": {
+          "x": 789,
+          "y": 566,
+          "w": 410,
+          "h": 552
+        },
+        "anarchist_5_002.png": {
+          "x": 790,
+          "y": 1131,
+          "w": 434,
+          "h": 620
+        },
+        "anarchist_5_003.png": {
+          "x": 792,
+          "y": 1765,
+          "w": 440,
+          "h": 532
+        },
+        "anarchist_5_004.png": {
+          "x": 794,
+          "y": 2309,
+          "w": 443,
+          "h": 592
+        },
+        "anarchist_5_005.png": {
+          "x": 794,
+          "y": 2915,
+          "w": 459,
+          "h": 610
+        },
+        "anarchist_5_006.png": {
+          "x": 795,
+          "y": 3537,
+          "w": 435,
+          "h": 584
+        },
+        "anarchist_5_007.png": {
+          "x": 797,
+          "y": 4136,
+          "w": 458,
+          "h": 635
+        },
+        "anarchist_5_008.png": {
+          "x": 803,
+          "y": 4784,
+          "w": 446,
+          "h": 568
+        },
+        "anarchist_5_009.png": {
+          "x": 805,
+          "y": 5367,
+          "w": 452,
+          "h": 623
+        },
+        "anarchist_5_010.png": {
+          "x": 805,
+          "y": 6005,
+          "w": 425,
+          "h": 627
+        },
+        "anarchist_5_011.png": {
+          "x": 808,
+          "y": 6653,
+          "w": 415,
+          "h": 539
+        },
+        "anarchist_5_012.png": {
+          "x": 810,
+          "y": 7207,
+          "w": 427,
+          "h": 608
+        },
+        "anarchist_5_013.png": {
+          "x": 813,
+          "y": 7831,
+          "w": 437,
+          "h": 561
+        },
+        "anarchist_5_014.png": {
+          "x": 814,
+          "y": 8409,
+          "w": 449,
+          "h": 656
+        },
+        "anarchist_5_015.png": {
+          "x": 816,
+          "y": 9077,
+          "w": 451,
+          "h": 609
+        }
+      }
+    },
+    "anarchist_8": {
+      "images": [
+        "anarchist_8_000.png",
+        "anarchist_8_001.png",
+        "anarchist_8_002.png",
+        "anarchist_8_003.png",
+        "anarchist_8_004.png",
+        "anarchist_8_005.png",
+        "anarchist_8_006.png",
+        "anarchist_8_007.png",
+        "anarchist_8_008.png",
+        "anarchist_8_009.png",
+        "anarchist_8_010.png",
+        "anarchist_8_011.png",
+        "anarchist_8_012.png",
+        "anarchist_8_013.png",
+        "anarchist_8_014.png",
+        "anarchist_8_015.png"
+      ],
+      "image_layouts": {
+        "anarchist_8_000.png": {
+          "x": 808,
+          "y": 59,
+          "w": 400,
+          "h": 574
+        },
+        "anarchist_8_001.png": {
+          "x": 810,
+          "y": 650,
+          "w": 404,
+          "h": 546
+        },
+        "anarchist_8_002.png": {
+          "x": 810,
+          "y": 1206,
+          "w": 415,
+          "h": 596
+        },
+        "anarchist_8_003.png": {
+          "x": 813,
+          "y": 1815,
+          "w": 415,
+          "h": 535
+        },
+        "anarchist_8_004.png": {
+          "x": 816,
+          "y": 2359,
+          "w": 437,
+          "h": 620
+        },
+        "anarchist_8_005.png": {
+          "x": 817,
+          "y": 2991,
+          "w": 452,
+          "h": 624
+        },
+        "anarchist_8_006.png": {
+          "x": 821,
+          "y": 3628,
+          "w": 456,
+          "h": 673
+        },
+        "anarchist_8_007.png": {
+          "x": 806,
+          "y": 4320,
+          "w": 459,
+          "h": 630
+        },
+        "anarchist_8_008.png": {
+          "x": 804,
+          "y": 4961,
+          "w": 468,
+          "h": 629
+        },
+        "anarchist_8_009.png": {
+          "x": 805,
+          "y": 5602,
+          "w": 477,
+          "h": 681
+        },
+        "anarchist_8_010.png": {
+          "x": 806,
+          "y": 6293,
+          "w": 462,
+          "h": 694
+        },
+        "anarchist_8_011.png": {
+          "x": 807,
+          "y": 6999,
+          "w": 472,
+          "h": 645
+        },
+        "anarchist_8_012.png": {
+          "x": 806,
+          "y": 7660,
+          "w": 459,
+          "h": 580
+        },
+        "anarchist_8_013.png": {
+          "x": 806,
+          "y": 8258,
+          "w": 460,
+          "h": 569
+        },
+        "anarchist_8_014.png": {
+          "x": 809,
+          "y": 8839,
+          "w": 461,
+          "h": 667
+        },
+        "anarchist_8_015.png": {
+          "x": 807,
+          "y": 9517,
+          "w": 483,
+          "h": 690
+        }
+      }
+    },
+    "anarchist_6": {
+      "images": []
+    }
+  },
+  "new_biome": {
+    "name": "Dense Primeval Forest",
+    "description": "",
+    "heightScale": 60.0,
+    "noiseScale": 0.005,
+    "octaves": 6,
+    "persistence": 0.5,
+    "water_coverage": 0.3,
+    "temperature": "temperate",
+    "vegetation": "moderate",
+    "liquid_type": "water",
+    "images": [
+      "new_biome_000.png",
+      "new_biome_001.png",
+      "new_biome_002.png",
+      "new_biome_003.png",
+      "new_biome_004.png",
+      "new_biome_005.png",
+      "new_biome_006.png",
+      "new_biome_007.png",
+      "new_biome_008.png",
+      "new_biome_009.png"
+    ],
+    "notes": [],
+    "texture_palette": {},
+    "image_layouts": {
+      "new_biome_000.png": {
+        "x": 821,
+        "y": 48,
+        "w": 385,
+        "h": 507
+      },
+      "new_biome_001.png": {
+        "x": 826,
+        "y": 570,
+        "w": 411,
+        "h": 542
+      },
+      "new_biome_002.png": {
+        "x": 812,
+        "y": 1129,
+        "w": 444,
+        "h": 507
+      },
+      "new_biome_003.png": {
+        "x": 802,
+        "y": 1668,
+        "w": 439,
+        "h": 554
+      },
+      "new_biome_004.png": {
+        "x": 794,
+        "y": 2245,
+        "w": 459,
+        "h": 611
+      },
+      "new_biome_005.png": {
+        "x": 800,
+        "y": 2873,
+        "w": 436,
+        "h": 556
+      },
+      "new_biome_006.png": {
+        "x": 803,
+        "y": 3439,
+        "w": 433,
+        "h": 591
+      },
+      "new_biome_007.png": {
+        "x": 802,
+        "y": 4042,
+        "w": 458,
+        "h": 662
+      },
+      "new_biome_008.png": {
+        "x": 806,
+        "y": 4717,
+        "w": 354,
+        "h": 494
+      },
+      "new_biome_009.png": {
+        "x": 809,
+        "y": 5228,
+        "w": 388,
+        "h": 610
+      }
+    }
+  },
+  "new_biome_1": {
+    "name": "Hidden Valleys",
+    "description": "",
+    "heightScale": 60.0,
+    "noiseScale": 0.005,
+    "octaves": 6,
+    "persistence": 0.5,
+    "water_coverage": 0.3,
+    "temperature": "temperate",
+    "vegetation": "moderate",
+    "liquid_type": "water",
+    "images": [
+      "new_biome_1_000.png",
+      "new_biome_1_001.png",
+      "new_biome_1_002.png",
+      "new_biome_1_003.png",
+      "new_biome_1_004.png",
+      "new_biome_1_005.png",
+      "new_biome_1_006.png",
+      "new_biome_1_007.png",
+      "new_biome_1_008.png",
+      "new_biome_1_009.png"
+    ],
+    "notes": [],
+    "texture_palette": {},
+    "image_layouts": {
+      "new_biome_1_000.png": {
+        "x": 793,
+        "y": 62,
+        "w": 298,
+        "h": 391
+      },
+      "new_biome_1_001.png": {
+        "x": 796,
+        "y": 466,
+        "w": 306,
+        "h": 391
+      },
+      "new_biome_1_002.png": {
+        "x": 799,
+        "y": 867,
+        "w": 349,
+        "h": 440
+      },
+      "new_biome_1_003.png": {
+        "x": 802,
+        "y": 1317,
+        "w": 350,
+        "h": 451
+      },
+      "new_biome_1_004.png": {
+        "x": 805,
+        "y": 1776,
+        "w": 357,
+        "h": 475
+      },
+      "new_biome_1_005.png": {
+        "x": 806,
+        "y": 2264,
+        "w": 360,
+        "h": 480
+      },
+      "new_biome_1_006.png": {
+        "x": 810,
+        "y": 2757,
+        "w": 365,
+        "h": 460
+      },
+      "new_biome_1_007.png": {
+        "x": 813,
+        "y": 3228,
+        "w": 365,
+        "h": 438
+      },
+      "new_biome_1_008.png": {
+        "x": 818,
+        "y": 3676,
+        "w": 361,
+        "h": 477
+      },
+      "new_biome_1_009.png": {
+        "x": 822,
+        "y": 4168,
+        "w": 368,
+        "h": 495
+      }
+    }
+  },
+  "new_biome_2": {
+    "name": "Cyber Cities",
+    "description": "",
+    "heightScale": 60.0,
+    "noiseScale": 0.005,
+    "octaves": 6,
+    "persistence": 0.5,
+    "water_coverage": 0.3,
+    "temperature": "temperate",
+    "vegetation": "moderate",
+    "liquid_type": "water",
+    "images": [],
+    "notes": [],
+    "texture_palette": {}
+  }
+}

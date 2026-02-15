@@ -12,6 +12,7 @@
 #include <filesystem>
 #include <limits>
 #include <random>
+#include <unordered_set>
 
 using namespace eden;
 
@@ -67,6 +68,7 @@ void ModelingMode::update(float deltaTime) {
 
     // Process deferred mesh updates (must happen before rendering, not during)
     if (m_ctx.meshDirty) {
+        invalidateWireframeCache();
         updateMeshFromEditable();
     }
 
@@ -4641,94 +4643,26 @@ void ModelingMode::renderWireframeOverlay3D(VkCommandBuffer cmd, const glm::mat4
 
     glm::mat4 modelMatrix = m_ctx.selectedObject->getTransform().getMatrix();
 
-    // Collect all edges from quad/polygon faces
-    // Use position-based keys for uniqueness (not vertex indices)
-    // because cube has duplicate vertices per face for normals
-    auto posKey = [](const glm::vec3& p) -> uint64_t {
-        int32_t x = static_cast<int32_t>(p.x * 10000.0f);
-        int32_t y = static_cast<int32_t>(p.y * 10000.0f);
-        int32_t z = static_cast<int32_t>(p.z * 10000.0f);
-        return (static_cast<uint64_t>(x & 0xFFFFF) << 40) |
-               (static_cast<uint64_t>(y & 0xFFFFF) << 20) |
-               static_cast<uint64_t>(z & 0xFFFFF);
-    };
-    auto edgePosKey = [&](const glm::vec3& p0, const glm::vec3& p1) -> std::pair<uint64_t, uint64_t> {
-        uint64_t k0 = posKey(p0);
-        uint64_t k1 = posKey(p1);
-        return k0 < k1 ? std::make_pair(k0, k1) : std::make_pair(k1, k0);
-    };
-
-    std::set<std::pair<uint64_t, uint64_t>> drawnEdges;
-    std::vector<glm::vec3> wireLines;
-    std::vector<glm::vec3> selectedLines;
-
-
-
-    // Get selected edges (using position-based keys)
-    std::set<std::pair<uint64_t, uint64_t>> selectedEdgeKeys;
+    // Check if cache needs invalidation
     auto selectedEdges = m_ctx.editableMesh.getSelectedEdges();
-    for (uint32_t he : selectedEdges) {
-        auto [vi0, vi1] = m_ctx.editableMesh.getEdgeVertices(he);
-        const auto& v0 = m_ctx.editableMesh.getVertex(vi0);
-        const auto& v1 = m_ctx.editableMesh.getVertex(vi1);
-        selectedEdgeKeys.insert(edgePosKey(v0.position, v1.position));
+    auto selectedVertSet = m_ctx.editableMesh.getSelectedVertices();
+    if (modelMatrix != m_cachedModelMatrix ||
+        selectedEdges.size() != m_cachedSelectedEdgeCount ||
+        selectedVertSet.size() != m_cachedSelectedVertCount ||
+        m_ctx.hoveredVertex != m_cachedHoveredVertex ||
+        m_ctx.modelingSelectionMode != m_cachedSelectionMode) {
+        m_wireframeDirty = true;
     }
 
-    uint32_t vertexCount = m_ctx.editableMesh.getVertexCount();
+    if (m_wireframeDirty) {
+        m_wireframeDirty = false;
+        m_cachedModelMatrix = modelMatrix;
+        m_cachedSelectedEdgeCount = selectedEdges.size();
+        m_cachedSelectedVertCount = selectedVertSet.size();
+        m_cachedHoveredVertex = m_ctx.hoveredVertex;
+        m_cachedSelectionMode = m_ctx.modelingSelectionMode;
 
-    for (uint32_t faceIdx = 0; faceIdx < m_ctx.editableMesh.getFaceCount(); ++faceIdx) {
-        auto verts = m_ctx.editableMesh.getFaceVertices(faceIdx);
-        if (verts.size() < 3) continue;  // Skip degenerate faces
-
-        for (size_t i = 0; i < verts.size(); ++i) {
-            uint32_t vi0 = verts[i];
-            uint32_t vi1 = verts[(i + 1) % verts.size()];
-
-            // Skip invalid vertex indices
-            if (vi0 >= vertexCount || vi1 >= vertexCount) continue;
-
-            const auto& v0 = m_ctx.editableMesh.getVertex(vi0);
-            const auto& v1 = m_ctx.editableMesh.getVertex(vi1);
-
-            // Use position-based key for uniqueness (handles duplicate vertices)
-            auto edgeKey = edgePosKey(v0.position, v1.position);
-            if (drawnEdges.count(edgeKey) > 0) continue;
-            drawnEdges.insert(edgeKey);
-
-            // Transform to world space (depth bias in pipeline handles Z-fighting)
-            glm::vec3 worldV0 = glm::vec3(modelMatrix * glm::vec4(v0.position, 1.0f));
-            glm::vec3 worldV1 = glm::vec3(modelMatrix * glm::vec4(v1.position, 1.0f));
-
-            bool isSelected = selectedEdgeKeys.count(edgeKey) > 0;
-            if (isSelected) {
-                selectedLines.push_back(worldV0);
-                selectedLines.push_back(worldV1);
-            } else {
-                wireLines.push_back(worldV0);
-                wireLines.push_back(worldV1);
-            }
-        }
-    }
-
-    // Render normal edges in black
-    if (!wireLines.empty()) {
-        m_ctx.modelRenderer.renderLines(cmd, viewProj, wireLines, glm::vec3(0.0f, 0.0f, 0.0f));
-    }
-
-    // Render selected edges in blue
-    if (!selectedLines.empty()) {
-        m_ctx.modelRenderer.renderLines(cmd, viewProj, selectedLines, glm::vec3(0.2f, 0.4f, 1.0f));
-    }
-
-    // Render vertices when in vertex mode
-    // NOTE: We must render all vertices in a single call to avoid buffer overwrite issues
-    // So we render: normal first (cyan), then selected on top (orange), then hovered on top (yellow)
-    if (m_ctx.modelingSelectionMode == ModelingSelectionMode::Vertex) {
-        auto selectedVertSet = m_ctx.editableMesh.getSelectedVertices();
-        std::set<uint32_t> selectedSet(selectedVertSet.begin(), selectedVertSet.end());
-
-        // Track positions we've already added to avoid duplicates
-        std::set<uint64_t> addedPositions;
+        // --- Rebuild wireframe edge cache ---
         auto posKey = [](const glm::vec3& p) -> uint64_t {
             int32_t x = static_cast<int32_t>(p.x * 10000.0f);
             int32_t y = static_cast<int32_t>(p.y * 10000.0f);
@@ -4737,57 +4671,112 @@ void ModelingMode::renderWireframeOverlay3D(VkCommandBuffer cmd, const glm::mat4
                    (static_cast<uint64_t>(y & 0xFFFFF) << 20) |
                    static_cast<uint64_t>(z & 0xFFFFF);
         };
+        auto edgePosKey = [&](const glm::vec3& p0, const glm::vec3& p1) -> std::pair<uint64_t, uint64_t> {
+            uint64_t k0 = posKey(p0);
+            uint64_t k1 = posKey(p1);
+            return k0 < k1 ? std::make_pair(k0, k1) : std::make_pair(k1, k0);
+        };
 
-        // Collect ALL vertices first, then render each category separately
-        // Store vertex info: position and category (0=normal, 1=selected, 2=hovered)
-        std::vector<std::pair<glm::vec3, int>> allVerts;
-
-        for (uint32_t vi = 0; vi < m_ctx.editableMesh.getVertexCount(); ++vi) {
-            const auto& v = m_ctx.editableMesh.getVertex(vi);
-
-            uint64_t key = posKey(v.position);
-            if (addedPositions.count(key) > 0) continue;
-            addedPositions.insert(key);
-
-            glm::vec3 worldPos = glm::vec3(modelMatrix * glm::vec4(v.position, 1.0f));
-
-            int category = 0; // normal
-            if (static_cast<int>(vi) == m_ctx.hoveredVertex) {
-                category = 2; // hovered
-            } else if (selectedSet.count(vi) > 0) {
-                category = 1; // selected
+        // Use unordered_set for O(1) edge dedup instead of std::set O(log n)
+        struct PairHash {
+            size_t operator()(const std::pair<uint64_t, uint64_t>& p) const {
+                return std::hash<uint64_t>()(p.first) ^ (std::hash<uint64_t>()(p.second) << 32);
             }
-            allVerts.push_back({worldPos, category});
+        };
+        std::unordered_set<std::pair<uint64_t, uint64_t>, PairHash> drawnEdges;
+
+        m_cachedWireLines.clear();
+        m_cachedSelectedLines.clear();
+
+        // Get selected edges (using position-based keys)
+        std::unordered_set<std::pair<uint64_t, uint64_t>, PairHash> selectedEdgeKeys;
+        for (uint32_t he : selectedEdges) {
+            auto [vi0, vi1] = m_ctx.editableMesh.getEdgeVertices(he);
+            const auto& v0 = m_ctx.editableMesh.getVertex(vi0);
+            const auto& v1 = m_ctx.editableMesh.getVertex(vi1);
+            selectedEdgeKeys.insert(edgePosKey(v0.position, v1.position));
         }
 
-        // Render each category - order matters for visibility (normal first, then selected, then hovered)
-        std::vector<glm::vec3> categoryVerts;
+        uint32_t vertexCount = m_ctx.editableMesh.getVertexCount();
+        uint32_t faceCount = m_ctx.editableMesh.getFaceCount();
 
-        // Normal vertices (cyan)
-        categoryVerts.clear();
-        for (const auto& [pos, cat] : allVerts) {
-            if (cat == 0) categoryVerts.push_back(pos);
-        }
-        if (!categoryVerts.empty()) {
-            m_ctx.modelRenderer.renderPoints(cmd, viewProj, categoryVerts, glm::vec3(0.0f, 0.8f, 1.0f), 8.0f);
+        // Reserve approximate space (3 edges per face, 2 vertices per edge)
+        drawnEdges.reserve(faceCount * 3);
+        m_cachedWireLines.reserve(faceCount * 6);
+
+        for (uint32_t faceIdx = 0; faceIdx < faceCount; ++faceIdx) {
+            auto verts = m_ctx.editableMesh.getFaceVertices(faceIdx);
+            if (verts.size() < 3) continue;
+
+            for (size_t i = 0; i < verts.size(); ++i) {
+                uint32_t vi0 = verts[i];
+                uint32_t vi1 = verts[(i + 1) % verts.size()];
+                if (vi0 >= vertexCount || vi1 >= vertexCount) continue;
+
+                const auto& v0 = m_ctx.editableMesh.getVertex(vi0);
+                const auto& v1 = m_ctx.editableMesh.getVertex(vi1);
+
+                auto edgeKey = edgePosKey(v0.position, v1.position);
+                if (!drawnEdges.insert(edgeKey).second) continue;
+
+                glm::vec3 worldV0 = glm::vec3(modelMatrix * glm::vec4(v0.position, 1.0f));
+                glm::vec3 worldV1 = glm::vec3(modelMatrix * glm::vec4(v1.position, 1.0f));
+
+                if (selectedEdgeKeys.count(edgeKey) > 0) {
+                    m_cachedSelectedLines.push_back(worldV0);
+                    m_cachedSelectedLines.push_back(worldV1);
+                } else {
+                    m_cachedWireLines.push_back(worldV0);
+                    m_cachedWireLines.push_back(worldV1);
+                }
+            }
         }
 
-        // Selected vertices (orange) - rendered after normal so they appear on top
-        categoryVerts.clear();
-        for (const auto& [pos, cat] : allVerts) {
-            if (cat == 1) categoryVerts.push_back(pos);
-        }
-        if (!categoryVerts.empty()) {
-            m_ctx.modelRenderer.renderPoints(cmd, viewProj, categoryVerts, glm::vec3(1.0f, 0.6f, 0.0f), 10.0f);
-        }
+        // --- Rebuild vertex cache ---
+        m_cachedNormalVerts.clear();
+        m_cachedSelectedVerts.clear();
+        m_cachedHoveredVerts.clear();
 
-        // Hovered vertex (yellow) - rendered last so it appears on top
-        categoryVerts.clear();
-        for (const auto& [pos, cat] : allVerts) {
-            if (cat == 2) categoryVerts.push_back(pos);
+        if (m_ctx.modelingSelectionMode == ModelingSelectionMode::Vertex) {
+            std::set<uint32_t> selectedSet(selectedVertSet.begin(), selectedVertSet.end());
+            std::unordered_set<uint64_t> addedPositions;
+            addedPositions.reserve(vertexCount);
+
+            for (uint32_t vi = 0; vi < vertexCount; ++vi) {
+                const auto& v = m_ctx.editableMesh.getVertex(vi);
+                uint64_t key = posKey(v.position);
+                if (!addedPositions.insert(key).second) continue;
+
+                glm::vec3 worldPos = glm::vec3(modelMatrix * glm::vec4(v.position, 1.0f));
+
+                if (static_cast<int>(vi) == m_ctx.hoveredVertex) {
+                    m_cachedHoveredVerts.push_back(worldPos);
+                } else if (selectedSet.count(vi) > 0) {
+                    m_cachedSelectedVerts.push_back(worldPos);
+                } else {
+                    m_cachedNormalVerts.push_back(worldPos);
+                }
+            }
         }
-        if (!categoryVerts.empty()) {
-            m_ctx.modelRenderer.renderPoints(cmd, viewProj, categoryVerts, glm::vec3(1.0f, 1.0f, 0.0f), 12.0f);
+    }
+
+    // Render cached data
+    if (!m_cachedWireLines.empty()) {
+        m_ctx.modelRenderer.renderLines(cmd, viewProj, m_cachedWireLines, glm::vec3(0.0f, 0.0f, 0.0f));
+    }
+    if (!m_cachedSelectedLines.empty()) {
+        m_ctx.modelRenderer.renderLines(cmd, viewProj, m_cachedSelectedLines, glm::vec3(0.2f, 0.4f, 1.0f));
+    }
+
+    if (m_ctx.modelingSelectionMode == ModelingSelectionMode::Vertex) {
+        if (!m_cachedNormalVerts.empty()) {
+            m_ctx.modelRenderer.renderPoints(cmd, viewProj, m_cachedNormalVerts, glm::vec3(0.0f, 0.8f, 1.0f), 8.0f);
+        }
+        if (!m_cachedSelectedVerts.empty()) {
+            m_ctx.modelRenderer.renderPoints(cmd, viewProj, m_cachedSelectedVerts, glm::vec3(1.0f, 0.6f, 0.0f), 10.0f);
+        }
+        if (!m_cachedHoveredVerts.empty()) {
+            m_ctx.modelRenderer.renderPoints(cmd, viewProj, m_cachedHoveredVerts, glm::vec3(1.0f, 1.0f, 0.0f), 12.0f);
         }
     }
 
@@ -4898,6 +4887,7 @@ void ModelingMode::renderGrid3D(VkCommandBuffer cmd, const glm::mat4& viewProj) 
 void ModelingMode::buildEditableMeshFromObject() {
     std::cout << "buildEditableMeshFromObject called" << std::endl;
     g_wireframeDebugPrinted = false;  // Reset debug flag so we print again
+    invalidateWireframeCache();
     if (!m_ctx.selectedObject || !m_ctx.selectedObject->hasMeshData()) return;
 
     // Check if we have stored EditableMesh data (preserves quad topology)

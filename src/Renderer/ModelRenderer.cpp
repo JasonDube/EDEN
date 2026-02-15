@@ -76,6 +76,17 @@ ModelRenderer::ModelRenderer(VulkanContext& context, VkRenderPass renderPass, Vk
         vkMapMemory(m_context.getDevice(), m_pointMemories[i], 0, pointBufferSize, 0, &m_pointMappedMemories[i]);
     }
     m_currentPointBuffer = 0;
+
+    // Create selection index buffers for batched face rendering
+    VkDeviceSize selectionBufferSize = MAX_SELECTION_INDICES * sizeof(uint32_t);
+    for (size_t i = 0; i < NUM_SELECTION_BUFFERS; i++) {
+        m_context.createBuffer(selectionBufferSize,
+                              VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
+                              VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                              m_selectionIndexBuffers[i], m_selectionIndexMemories[i]);
+        vkMapMemory(m_context.getDevice(), m_selectionIndexMemories[i], 0, selectionBufferSize, 0, &m_selectionIndexMapped[i]);
+    }
+    m_currentSelectionBuffer = 0;
 }
 
 ModelRenderer::~ModelRenderer() {
@@ -123,6 +134,13 @@ ModelRenderer::~ModelRenderer() {
         if (m_pointMappedMemories[i]) vkUnmapMemory(device, m_pointMemories[i]);
         if (m_pointBuffers[i]) vkDestroyBuffer(device, m_pointBuffers[i], nullptr);
         if (m_pointMemories[i]) vkFreeMemory(device, m_pointMemories[i], nullptr);
+    }
+
+    // Destroy selection index buffers
+    for (size_t i = 0; i < NUM_SELECTION_BUFFERS; i++) {
+        if (m_selectionIndexMapped[i]) vkUnmapMemory(device, m_selectionIndexMemories[i]);
+        if (m_selectionIndexBuffers[i]) vkDestroyBuffer(device, m_selectionIndexBuffers[i], nullptr);
+        if (m_selectionIndexMemories[i]) vkFreeMemory(device, m_selectionIndexMemories[i], nullptr);
     }
 }
 
@@ -916,84 +934,88 @@ void ModelRenderer::renderWireframe(VkCommandBuffer commandBuffer, const glm::ma
 
 void ModelRenderer::renderLines(VkCommandBuffer commandBuffer, const glm::mat4& viewProj,
                                  const std::vector<glm::vec3>& lines, const glm::vec3& color) {
-    if (lines.empty() || lines.size() > MAX_LINE_VERTICES) return;
+    if (lines.empty()) return;
 
-    // Get current buffer index and cycle to next for next call
-    size_t bufferIdx = m_currentLineBuffer;
-    m_currentLineBuffer = (m_currentLineBuffer + 1) % NUM_LINE_BUFFERS;
-
-    // Convert line vertices to ModelVertex format (shader expects full vertex)
-    std::vector<ModelVertex> vertices;
-    vertices.reserve(lines.size());
-    for (const auto& pos : lines) {
-        ModelVertex v{};
-        v.position = pos;
-        v.normal = glm::vec3(0, 1, 0);
-        v.texCoord = glm::vec2(0);
-        v.color = glm::vec4(1);
-        vertices.push_back(v);
-    }
-
-    // Copy to THIS call's dedicated line buffer (each call uses different buffer)
-    memcpy(m_lineMappedMemories[bufferIdx], vertices.data(), vertices.size() * sizeof(ModelVertex));
-
-    // Bind line pipeline
+    // Bind line pipeline and push constants once
     vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_linePipeline);
 
-    // Push constants with line color
     WireframePushConstants pc{};
-    pc.mvp = viewProj;  // No model transform, lines are in world space
+    pc.mvp = viewProj;
     pc.wireColor = glm::vec4(color, 1.0f);
     vkCmdPushConstants(commandBuffer, m_wireframePipelineLayout,
                        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                        0, sizeof(WireframePushConstants), &pc);
 
-    // Bind THIS call's line buffer (each renderLines call uses its own buffer)
-    VkBuffer vertexBuffers[] = {m_lineBuffers[bufferIdx]};
-    VkDeviceSize offsets[] = {0};
-    vkCmdBindVertexBuffers(commandBuffer, 0, 1, vertexBuffers, offsets);
-    vkCmdDraw(commandBuffer, static_cast<uint32_t>(lines.size()), 1, 0, 0);
+    // Render in chunks of MAX_LINE_VERTICES (must be even for LINE_LIST pairs)
+    size_t chunkSize = MAX_LINE_VERTICES & ~1u;  // Round down to even
+    size_t offset = 0;
+
+    while (offset < lines.size()) {
+        size_t count = std::min(chunkSize, lines.size() - offset);
+        count &= ~1u;  // Ensure even (complete line pairs)
+        if (count == 0) break;
+
+        // Get current buffer index and cycle
+        size_t bufferIdx = m_currentLineBuffer;
+        m_currentLineBuffer = (m_currentLineBuffer + 1) % NUM_LINE_BUFFERS;
+
+        // Convert to ModelVertex format
+        ModelVertex* dst = static_cast<ModelVertex*>(m_lineMappedMemories[bufferIdx]);
+        for (size_t i = 0; i < count; ++i) {
+            dst[i].position = lines[offset + i];
+            dst[i].normal = glm::vec3(0, 1, 0);
+            dst[i].texCoord = glm::vec2(0);
+            dst[i].color = glm::vec4(1);
+        }
+
+        VkBuffer vertexBuffers[] = {m_lineBuffers[bufferIdx]};
+        VkDeviceSize vbOffsets[] = {0};
+        vkCmdBindVertexBuffers(commandBuffer, 0, 1, vertexBuffers, vbOffsets);
+        vkCmdDraw(commandBuffer, static_cast<uint32_t>(count), 1, 0, 0);
+
+        offset += count;
+    }
 }
 
 void ModelRenderer::renderPoints(VkCommandBuffer commandBuffer, const glm::mat4& viewProj,
                                   const std::vector<glm::vec3>& points, const glm::vec3& color, float pointSize) {
-    if (points.empty() || points.size() > MAX_LINE_VERTICES) return;
+    if (points.empty()) return;
 
-    // Get current buffer index and cycle to next for next call
-    size_t bufferIdx = m_currentPointBuffer;
-    m_currentPointBuffer = (m_currentPointBuffer + 1) % NUM_POINT_BUFFERS;
-
-    // Convert points to ModelVertex format (shader expects full vertex)
-    std::vector<ModelVertex> vertices;
-    vertices.reserve(points.size());
-    for (const auto& pos : points) {
-        ModelVertex v{};
-        v.position = pos;
-        v.normal = glm::vec3(0, 1, 0);
-        v.texCoord = glm::vec2(0);
-        v.color = glm::vec4(1);
-        vertices.push_back(v);
-    }
-
-    // Copy to THIS call's dedicated point buffer (each call uses different buffer)
-    memcpy(m_pointMappedMemories[bufferIdx], vertices.data(), vertices.size() * sizeof(ModelVertex));
-
-    // Bind point pipeline
+    // Bind point pipeline and push constants once
     vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_pointPipeline);
 
-    // Push constants with point color
     WireframePushConstants pc{};
-    pc.mvp = viewProj;  // No model transform, points are in world space
+    pc.mvp = viewProj;
     pc.wireColor = glm::vec4(color, 1.0f);
     vkCmdPushConstants(commandBuffer, m_wireframePipelineLayout,
                        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                        0, sizeof(WireframePushConstants), &pc);
 
-    // Bind THIS call's point buffer (each renderPoints call uses its own buffer)
-    VkBuffer vertexBuffers[] = {m_pointBuffers[bufferIdx]};
-    VkDeviceSize offsets[] = {0};
-    vkCmdBindVertexBuffers(commandBuffer, 0, 1, vertexBuffers, offsets);
-    vkCmdDraw(commandBuffer, static_cast<uint32_t>(points.size()), 1, 0, 0);
+    // Render in chunks of MAX_LINE_VERTICES
+    size_t offset = 0;
+
+    while (offset < points.size()) {
+        size_t count = std::min(static_cast<size_t>(MAX_LINE_VERTICES), points.size() - offset);
+
+        size_t bufferIdx = m_currentPointBuffer;
+        m_currentPointBuffer = (m_currentPointBuffer + 1) % NUM_POINT_BUFFERS;
+
+        // Convert to ModelVertex format directly into mapped memory
+        ModelVertex* dst = static_cast<ModelVertex*>(m_pointMappedMemories[bufferIdx]);
+        for (size_t i = 0; i < count; ++i) {
+            dst[i].position = points[offset + i];
+            dst[i].normal = glm::vec3(0, 1, 0);
+            dst[i].texCoord = glm::vec2(0);
+            dst[i].color = glm::vec4(1);
+        }
+
+        VkBuffer vertexBuffers[] = {m_pointBuffers[bufferIdx]};
+        VkDeviceSize vbOffsets[] = {0};
+        vkCmdBindVertexBuffers(commandBuffer, 0, 1, vertexBuffers, vbOffsets);
+        vkCmdDraw(commandBuffer, static_cast<uint32_t>(count), 1, 0, 0);
+
+        offset += count;
+    }
 }
 
 void ModelRenderer::renderSelection(VkCommandBuffer commandBuffer, const glm::mat4& viewProj,
@@ -1017,19 +1039,83 @@ void ModelRenderer::renderSelection(VkCommandBuffer commandBuffer, const glm::ma
                        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                        0, sizeof(SelectionPushConstants), &pc);
 
-    // Bind vertex/index buffers
+    // Bind vertex buffer (shared across all selected faces)
     VkBuffer vertexBuffers[] = {data.vertexBuffer};
     VkDeviceSize offsets[] = {0};
     vkCmdBindVertexBuffers(commandBuffer, 0, 1, vertexBuffers, offsets);
-    vkCmdBindIndexBuffer(commandBuffer, data.indexBuffer, 0, VK_INDEX_TYPE_UINT32);
 
-    // Draw each selected triangle
+    // Batch all selected face indices into a single draw call
+    size_t bufferIdx = m_currentSelectionBuffer;
+    m_currentSelectionBuffer = (m_currentSelectionBuffer + 1) % NUM_SELECTION_BUFFERS;
+
+    // Build flat index list: for each selected face, add its 3 index offsets
+    // We write raw index values (faceIdx*3 + 0/1/2) which reference into the original index buffer
+    // But we need to use the selection index buffer as a separate index buffer,
+    // so we copy the actual index values from the model's index buffer concept.
+    // Actually, the original code used firstIndex offset into the existing index buffer.
+    // For batching, we collect firstIndex values and draw with the model's own index buffer.
+    // The simplest approach: use vkCmdDrawIndexed with the model's index buffer, batching via
+    // a temporary index buffer that references vertex positions directly.
+
+    // We need to read the original indices. Since the model index buffer is HOST_VISIBLE,
+    // we can build our batch referencing firstIndex offsets.
+    // Actually simplest: just collect all firstIndex values and emit one draw per chunk
+    // OR: build a new index buffer with the subset of indices we want to draw.
+
+    // Build selection indices: for each face, the 3 sequential indices starting at faceIdx*3
+    uint32_t* dst = static_cast<uint32_t*>(m_selectionIndexMapped[bufferIdx]);
+    uint32_t totalIndices = 0;
     for (uint32_t faceIdx : selectedFaces) {
         uint32_t firstIndex = faceIdx * 3;
-        if (firstIndex + 3 <= data.indexCount) {
-            vkCmdDrawIndexed(commandBuffer, 3, 1, firstIndex, 0, 0);
+        if (firstIndex + 3 <= data.indexCount && totalIndices + 3 <= MAX_SELECTION_INDICES) {
+            dst[totalIndices]     = firstIndex;
+            dst[totalIndices + 1] = firstIndex + 1;
+            dst[totalIndices + 2] = firstIndex + 2;
+            totalIndices += 3;
         }
     }
+
+    if (totalIndices == 0) return;
+
+    // Bind selection index buffer and draw all selected faces in one call
+    // Note: these are indices-of-indices, so we use drawIndirect or simply
+    // reference the original index buffer with offsets. Since Vulkan doesn't
+    // support index-of-index, we use the model's index buffer with multiple
+    // firstIndex offsets via a single indexed draw won't work directly.
+    //
+    // Better approach: bind the model's index buffer and use the selection buffer
+    // as a way to batch. But since we can't do index-of-index in Vulkan,
+    // we'll use the original index buffer and emit one draw call per face.
+    //
+    // ACTUALLY: The right approach is to bind the model's index buffer and draw
+    // with contiguous ranges. Let's instead sort and merge contiguous ranges,
+    // or just use the model's index buffer with the original per-face approach
+    // but with a much more efficient method: copy the actual index VALUES into
+    // our selection buffer.
+
+    // Re-read the model's index data (it's HOST_VISIBLE) and copy selected indices
+    void* indexData;
+    vkMapMemory(m_context.getDevice(), data.indexMemory, 0, data.indexCount * sizeof(uint32_t), 0, &indexData);
+    const uint32_t* srcIndices = static_cast<const uint32_t*>(indexData);
+
+    totalIndices = 0;
+    for (uint32_t faceIdx : selectedFaces) {
+        uint32_t firstIndex = faceIdx * 3;
+        if (firstIndex + 3 <= data.indexCount && totalIndices + 3 <= MAX_SELECTION_INDICES) {
+            dst[totalIndices]     = srcIndices[firstIndex];
+            dst[totalIndices + 1] = srcIndices[firstIndex + 1];
+            dst[totalIndices + 2] = srcIndices[firstIndex + 2];
+            totalIndices += 3;
+        }
+    }
+
+    vkUnmapMemory(m_context.getDevice(), data.indexMemory);
+
+    if (totalIndices == 0) return;
+
+    // Single draw call with our batched selection index buffer
+    vkCmdBindIndexBuffer(commandBuffer, m_selectionIndexBuffers[bufferIdx], 0, VK_INDEX_TYPE_UINT32);
+    vkCmdDrawIndexed(commandBuffer, totalIndices, 1, 0, 0, 0);
 }
 
 ModelGPUData* ModelRenderer::getModelData(uint32_t handle) {

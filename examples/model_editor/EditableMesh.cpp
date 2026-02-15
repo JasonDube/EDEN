@@ -8,6 +8,7 @@
 #include <sstream>
 #include <queue>
 #include <map>
+#include <unordered_map>
 #include <functional>
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/constants.hpp>
@@ -86,42 +87,8 @@ void EditableMesh::buildFromTriangles(const std::vector<ModelVertex>& vertices,
         addFace(faceVerts);
     }
 
-    // Link twin half-edges by POSITION (not index) to handle duplicate vertices
-    // Meshes often have duplicate vertices at same position for different normals/UVs
-    auto posKey = [](const glm::vec3& p) -> uint64_t {
-        int32_t x = static_cast<int32_t>(p.x * 10000.0f);
-        int32_t y = static_cast<int32_t>(p.y * 10000.0f);
-        int32_t z = static_cast<int32_t>(p.z * 10000.0f);
-        return (static_cast<uint64_t>(x & 0xFFFFF) << 40) |
-               (static_cast<uint64_t>(y & 0xFFFFF) << 20) |
-               static_cast<uint64_t>(z & 0xFFFFF);
-    };
-
-    for (size_t i = 0; i < m_halfEdges.size(); ++i) {
-        if (m_halfEdges[i].twinIndex == UINT32_MAX) {
-            uint32_t fromVert = m_halfEdges[m_halfEdges[i].prevIndex].vertexIndex;
-            uint32_t toVert = m_halfEdges[i].vertexIndex;
-            uint64_t fromPos = posKey(m_vertices[fromVert].position);
-            uint64_t toPos = posKey(m_vertices[toVert].position);
-
-            // Look for opposite half-edge (toPos -> fromPos)
-            for (size_t j = i + 1; j < m_halfEdges.size(); ++j) {
-                if (m_halfEdges[j].twinIndex == UINT32_MAX) {
-                    uint32_t jFromVert = m_halfEdges[m_halfEdges[j].prevIndex].vertexIndex;
-                    uint32_t jToVert = m_halfEdges[j].vertexIndex;
-                    uint64_t jFromPos = posKey(m_vertices[jFromVert].position);
-                    uint64_t jToPos = posKey(m_vertices[jToVert].position);
-
-                    if (jFromPos == toPos && jToPos == fromPos) {
-                        m_halfEdges[i].twinIndex = static_cast<uint32_t>(j);
-                        m_halfEdges[j].twinIndex = static_cast<uint32_t>(i);
-                        break;
-                    }
-                }
-            }
-        }
-    }
-
+    // Link twin half-edges by position (O(n) hash map approach)
+    linkTwinsByPosition();
     rebuildEdgeMap();
 }
 
@@ -1517,19 +1484,18 @@ uint32_t EditableMesh::addFace(const std::vector<uint32_t>& vertIndices) {
 
 void EditableMesh::rebuildEdgeMap() {
     m_edgeMap.clear();
+    m_edgeMap.reserve(m_halfEdges.size());
     for (uint32_t i = 0; i < m_halfEdges.size(); ++i) {
         uint32_t fromVert = m_halfEdges[m_halfEdges[i].prevIndex].vertexIndex;
         uint32_t toVert = m_halfEdges[i].vertexIndex;
         uint64_t key = makeEdgeKey(fromVert, toVert);
-        if (m_edgeMap.find(key) == m_edgeMap.end()) {
-            m_edgeMap[key] = i;
-        }
+        m_edgeMap.emplace(key, i);  // emplace won't overwrite existing
     }
 }
 
 void EditableMesh::linkTwinsByPosition() {
     // Link twin half-edges by POSITION (not index) to handle duplicate vertices
-    // Meshes often have duplicate vertices at same position for different normals/UVs
+    // Uses hash map for O(n) instead of O(n²) nested loop
     auto posKey = [](const glm::vec3& p) -> uint64_t {
         int32_t x = static_cast<int32_t>(p.x * 10000.0f);
         int32_t y = static_cast<int32_t>(p.y * 10000.0f);
@@ -1539,28 +1505,35 @@ void EditableMesh::linkTwinsByPosition() {
                static_cast<uint64_t>(z & 0xFFFFF);
     };
 
+    // Build hash map: edge (fromPos, toPos) -> half-edge index
+    // For each unlinked half-edge, insert it keyed by (from, to) position pair.
+    // If the reverse edge (to, from) is already in the map, link them as twins.
+    struct PairHash {
+        size_t operator()(const std::pair<uint64_t, uint64_t>& p) const {
+            return std::hash<uint64_t>()(p.first) ^ (std::hash<uint64_t>()(p.second) << 32);
+        }
+    };
+    std::unordered_map<std::pair<uint64_t, uint64_t>, uint32_t, PairHash> edgeLookup;
+    edgeLookup.reserve(m_halfEdges.size());
+
     for (size_t i = 0; i < m_halfEdges.size(); ++i) {
-        if (m_halfEdges[i].twinIndex == UINT32_MAX) {
-            uint32_t fromVert = m_halfEdges[m_halfEdges[i].prevIndex].vertexIndex;
-            uint32_t toVert = m_halfEdges[i].vertexIndex;
-            uint64_t fromPos = posKey(m_vertices[fromVert].position);
-            uint64_t toPos = posKey(m_vertices[toVert].position);
+        if (m_halfEdges[i].twinIndex != UINT32_MAX) continue;
 
-            // Look for opposite half-edge (toPos -> fromPos)
-            for (size_t j = i + 1; j < m_halfEdges.size(); ++j) {
-                if (m_halfEdges[j].twinIndex == UINT32_MAX) {
-                    uint32_t jFromVert = m_halfEdges[m_halfEdges[j].prevIndex].vertexIndex;
-                    uint32_t jToVert = m_halfEdges[j].vertexIndex;
-                    uint64_t jFromPos = posKey(m_vertices[jFromVert].position);
-                    uint64_t jToPos = posKey(m_vertices[jToVert].position);
+        uint32_t fromVert = m_halfEdges[m_halfEdges[i].prevIndex].vertexIndex;
+        uint32_t toVert = m_halfEdges[i].vertexIndex;
+        uint64_t fromPos = posKey(m_vertices[fromVert].position);
+        uint64_t toPos = posKey(m_vertices[toVert].position);
 
-                    if (jFromPos == toPos && jToPos == fromPos) {
-                        m_halfEdges[i].twinIndex = static_cast<uint32_t>(j);
-                        m_halfEdges[j].twinIndex = static_cast<uint32_t>(i);
-                        break;
-                    }
-                }
-            }
+        // Check if the reverse edge already exists
+        auto reverseKey = std::make_pair(toPos, fromPos);
+        auto it = edgeLookup.find(reverseKey);
+        if (it != edgeLookup.end()) {
+            uint32_t j = it->second;
+            m_halfEdges[i].twinIndex = j;
+            m_halfEdges[j].twinIndex = static_cast<uint32_t>(i);
+            edgeLookup.erase(it);
+        } else {
+            edgeLookup[std::make_pair(fromPos, toPos)] = static_cast<uint32_t>(i);
         }
     }
 }
@@ -1627,27 +1600,17 @@ void EditableMesh::rebuildFromFaces() {
 }
 
 void EditableMesh::mergeTrianglesToQuads(float normalThreshold) {
-    std::cout << "mergeTrianglesToQuads: Starting with " << m_faces.size() << " faces" << std::endl;
-
-    // Debug: count twins
-    int twinsLinked = 0;
-    for (const auto& he : m_halfEdges) {
-        if (he.twinIndex != UINT32_MAX) twinsLinked++;
-    }
-    std::cout << "  Twins linked: " << twinsLinked << " / " << m_halfEdges.size() << std::endl;
-
     // Find pairs of triangles that share an edge and have similar normals
     std::vector<bool> merged(m_faces.size(), false);
     std::vector<std::tuple<uint32_t, uint32_t, uint32_t>> mergeList; // (face1, face2, sharedEdgeHE)
+    mergeList.reserve(m_faces.size() / 2);
 
     for (uint32_t faceIdx = 0; faceIdx < m_faces.size(); ++faceIdx) {
         if (merged[faceIdx]) continue;
-        if (m_faces[faceIdx].vertexCount != 3) continue;  // Only merge triangles
+        if (m_faces[faceIdx].vertexCount != 3) continue;
 
         glm::vec3 normal1 = getFaceNormal(faceIdx);
-        bool foundMerge = false;
 
-        // Check each edge of this triangle
         uint32_t he = m_faces[faceIdx].halfEdgeIndex;
         for (uint32_t i = 0; i < 3; ++i) {
             uint32_t twin = m_halfEdges[he].twinIndex;
@@ -1663,43 +1626,18 @@ void EditableMesh::mergeTrianglesToQuads(float normalThreshold) {
                         mergeList.push_back({faceIdx, neighborFace, he});
                         merged[faceIdx] = true;
                         merged[neighborFace] = true;
-                        foundMerge = true;
                         break;
-                    } else {
-                        std::cout << "  Face " << faceIdx << " + " << neighborFace
-                                  << ": normal dot=" << dotProduct << " (threshold=" << normalThreshold << ")" << std::endl;
                     }
                 }
             }
             he = m_halfEdges[he].nextIndex;
         }
-
-        // Debug: if no merge found for this triangle
-        if (!foundMerge && !merged[faceIdx]) {
-            he = m_faces[faceIdx].halfEdgeIndex;
-            int noTwin = 0, wrongFace = 0, alreadyMerged = 0, notTri = 0;
-            for (uint32_t i = 0; i < 3; ++i) {
-                uint32_t twin = m_halfEdges[he].twinIndex;
-                if (twin == UINT32_MAX) noTwin++;
-                else {
-                    uint32_t neighborFace = m_halfEdges[twin].faceIndex;
-                    if (neighborFace == UINT32_MAX) wrongFace++;
-                    else if (merged[neighborFace]) alreadyMerged++;
-                    else if (m_faces[neighborFace].vertexCount != 3) notTri++;
-                }
-                he = m_halfEdges[he].nextIndex;
-            }
-            std::cout << "  Face " << faceIdx << " unmerged: noTwin=" << noTwin
-                      << " wrongFace=" << wrongFace << " alreadyMerged=" << alreadyMerged
-                      << " notTri=" << notTri << std::endl;
-        }
     }
 
     if (mergeList.empty()) {
-        std::cout << "mergeTrianglesToQuads: No pairs found to merge (mergeList is empty)" << std::endl;
         return;
     }
-    std::cout << "mergeTrianglesToQuads: Found " << mergeList.size() << " pairs to merge" << std::endl;
+    std::cout << "mergeTrianglesToQuads: " << m_faces.size() << " faces -> merged " << mergeList.size() << " pairs" << std::endl;
 
     // Rebuild mesh with quads
     std::vector<HEVertex> newVertices = m_vertices;

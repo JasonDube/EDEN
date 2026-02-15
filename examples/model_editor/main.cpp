@@ -4239,7 +4239,7 @@ private:
     glm::vec4 m_modelingHoverColor = glm::vec4(1.0f, 1.0f, 0.0f, 0.6f);
     glm::vec4 m_modelingVertexColor = glm::vec4(0.0f, 0.8f, 1.0f, 1.0f);
     glm::vec4 m_modelingEdgeColor = glm::vec4(0.0f, 1.0f, 0.5f, 1.0f);
-    bool m_showModelingWireframe = true;
+    bool m_showModelingWireframe = false;
     bool m_showFaceNormals = false;
     float m_normalDisplayLength = 0.2f;
     float m_uvProjectionScale = 1.0f;

@@ -1167,14 +1167,35 @@ class SpeciesDataManager:
                 "physical_desc": "Small wiry humanoids with mottled green-brown skin perfect for forest camouflage. Large ears and wide eyes for night activity. Prehensile toes.",
                 "culture_notes": "Egalitarian bands with no permanent leaders. Decisions by campfire consensus. Refuse to farm or settle — foraging is freedom. Gift economy.",
                 "homeworld_type": "Dense primeval forest with scattered temporary camps",
-                "building_style": "Temporary lean-tos and treehouse platforms, no permanent structures, hidden caches of tools"
+                "building_style": "Temporary lean-tos and treehouse platforms, no permanent structures, hidden caches of tools",
+                "trade_goods": [
+                    "wooden ladders", "rope bridges", "woven baskets", "rope bags",
+                    "stone knives", "stone spears", "thorn-tipped darts",
+                    "bone needles", "bark containers", "woven mats",
+                    "herbal poultices", "dried foraged food stores",
+                    "thorn traps", "thorn fences", "thorn-woven shields",
+                    "fire sticks", "wooden totems", "hide shelters",
+                    "raised wooden platforms"
+                ]
             },
             "anarchist_2": {
                 "name": "Freehold Communes",
                 "physical_desc": "Wiry humanoids with patchwork skin of different earth tones — every individual is visually unique. Wild unkempt hair. Bright defiant eyes.",
                 "culture_notes": "Network of self-governing communes rejecting all kingdoms. Iron tools shared communally. No taxes, no kings, no standing armies — only volunteer militia.",
                 "homeworld_type": "Hidden valleys and forest clearings between larger empires",
-                "building_style": "Communal roundhouses with shared workshops, hidden paths between settlements, no walls or fortifications"
+                "building_style": "Communal roundhouses with shared workshops, hidden paths between settlements, no walls or fortifications",
+                "trade_goods": [
+                    "iron tools", "iron hammers", "iron tongs", "iron chisels", "iron axes",
+                    "iron plowshares", "iron sickles", "iron cookware", "iron pots", "iron kettles",
+                    "spears", "shields", "short swords",
+                    "patchwork textiles", "dyed fabrics", "pottery",
+                    "communal bread", "fermented drinks", "preserved foods",
+                    "herbal medicines", "salves",
+                    "woven sandals", "leather goods",
+                    "rare herbs", "foraged mushrooms", "honey", "beeswax",
+                    "charcoal", "timber", "carved wood furniture",
+                    "hand-pressed broadsheets", "trade tokens", "oral tradition carvings"
+                ]
             },
             "anarchist_3": {
                 "name": "Drifter Collectives",
@@ -1195,7 +1216,24 @@ class SpeciesDataManager:
                 "physical_desc": "Highly varied humanoids embracing body modification — piercings, tattoos, experimental implants. No two look alike. Reject conformity as principle.",
                 "culture_notes": "Decentralized hacktivist networks running open-source governance. No central authority. Internet enables coordination without hierarchy. Maker spaces replace factories.",
                 "homeworld_type": "Distributed network of autonomous zones within and between nation-states",
-                "building_style": "Repurposed buildings covered in murals, maker spaces, server farms in basements, community gardens on rooftops"
+                "building_style": "Repurposed buildings covered in murals, maker spaces, server farms in basements, community gardens on rooftops",
+                "trade_goods": [
+                    "custom circuit boards", "open-source microcontrollers",
+                    "3D-printed tools", "3D-printed parts", "3D printer kits",
+                    "modular electronics", "DIY sensor kits",
+                    "salvaged computers", "refurbished devices",
+                    "mesh network routers", "pirate radio transmitters",
+                    "solar panels", "DIY battery packs",
+                    "body modification implants", "experimental prosthetics",
+                    "open-source software packages", "encryption tools", "privacy firmware",
+                    "decentralized governance platforms", "technical manuals",
+                    "organic produce", "rooftop garden seeds", "hydroponic kits",
+                    "fermented foods", "herbal remedies",
+                    "mural supplies", "spray paint", "stencil kits",
+                    "zines", "printed manifestos",
+                    "DIY clothing", "upcycled fashion",
+                    "circuit jewelry", "tech-art sculptures"
+                ]
             },
             # ANARCHIST (Tech Levels 6-10)
             "anarchist_6": {

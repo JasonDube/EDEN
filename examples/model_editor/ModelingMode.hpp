@@ -163,6 +163,20 @@ private:
     glm::vec2 m_uvRectStart{0.0f};
     glm::vec2 m_uvRectEnd{0.0f};
 
+    // Wireframe/vertex overlay cache (avoid per-frame rebuild for high-poly meshes)
+    bool m_wireframeDirty = true;
+    glm::mat4 m_cachedModelMatrix{1.0f};
+    std::vector<glm::vec3> m_cachedWireLines;
+    std::vector<glm::vec3> m_cachedSelectedLines;
+    std::vector<glm::vec3> m_cachedNormalVerts;
+    std::vector<glm::vec3> m_cachedSelectedVerts;
+    std::vector<glm::vec3> m_cachedHoveredVerts;
+    int m_cachedHoveredVertex = -1;
+    size_t m_cachedSelectedEdgeCount = 0;
+    size_t m_cachedSelectedVertCount = 0;
+    ModelingSelectionMode m_cachedSelectionMode = ModelingSelectionMode::Face;
+    void invalidateWireframeCache() { m_wireframeDirty = true; }
+
     // Snap helper methods
     void cancelSnapMode();
     void cancelSnapVertexMode();

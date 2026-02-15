@@ -180,7 +180,15 @@ private:
     void* m_pointMappedMemories[NUM_POINT_BUFFERS] = {};
     size_t m_currentPointBuffer = 0;  // Cycles through buffers each call
 
-    static constexpr size_t MAX_LINE_VERTICES = 8192;
+    static constexpr size_t MAX_LINE_VERTICES = 524288;  // 512K - enough for high-poly wireframe
+
+    // Selection batch rendering buffer (for batching renderSelection draw calls)
+    static constexpr size_t NUM_SELECTION_BUFFERS = 2;
+    VkBuffer m_selectionIndexBuffers[NUM_SELECTION_BUFFERS] = {};
+    VkDeviceMemory m_selectionIndexMemories[NUM_SELECTION_BUFFERS] = {};
+    void* m_selectionIndexMapped[NUM_SELECTION_BUFFERS] = {};
+    size_t m_currentSelectionBuffer = 0;
+    static constexpr size_t MAX_SELECTION_INDICES = 1048576;  // 1M indices (~333K faces)
 };
 
 } // namespace eden
