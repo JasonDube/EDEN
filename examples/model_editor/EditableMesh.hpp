@@ -267,6 +267,10 @@ public:
     // Flips all selected to match the minority normal direction
     void flipSelectedNormals();
 
+    // Catmull-Clark subdivision - smooths mesh by splitting each face into sub-quads
+    // levels: number of subdivision iterations (1-3 recommended)
+    void catmullClarkSubdivide(int levels = 1);
+
     // Raycasting for selection
     MeshRayHit raycastVertex(const glm::vec3& origin, const glm::vec3& dir,
                              float threshold = 0.1f) const;
@@ -351,18 +355,24 @@ private:
     // Helper to find or create half-edge between two vertices
     uint32_t findHalfEdge(uint32_t fromVert, uint32_t toVert) const;
 
+public:
     // Add a face to the mesh (handles half-edge creation)
     uint32_t addFace(const std::vector<uint32_t>& vertIndices);
+
+private:
 
     // Remove a face (updates topology)
     void removeFace(uint32_t faceIdx);
 
+public:
     // Rebuild edge map from half-edges
     void rebuildEdgeMap();
 
     // Link twin half-edges by vertex POSITION (not index)
     // This handles meshes with duplicate vertices at same position (e.g. for different normals)
     void linkTwinsByPosition();
+
+private:
 
     // Rebuild mesh from faces, removing deleted faces (vertexCount == 0)
     void rebuildFromFaces();

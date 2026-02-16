@@ -22,6 +22,7 @@
 #include "ModelingMode.hpp"
 #include "EditableMesh.hpp"
 #include "MCPServer.hpp"
+#include "Hunyuan3DClient.hpp"
 
 #include <eden/Camera.hpp>
 #include <eden/Input.hpp>
@@ -41,6 +42,13 @@
 #include <memory>
 #include <filesystem>
 #include <algorithm>
+#include <thread>
+#include <atomic>
+#include <chrono>
+#include <csignal>
+#include <unistd.h>
+#include <sys/types.h>
+#include <sys/wait.h>
 
 using namespace eden;
 namespace fs = std::filesystem;
@@ -290,6 +298,15 @@ protected:
     }
 
     void onCleanup() override {
+        // Stop AI generation thread (always try to join if joinable)
+        m_aiGenerateCancelled = true;
+        if (m_aiGenerateThread.joinable()) {
+            m_aiGenerateThread.join();
+        }
+
+        // Stop Hunyuan server if we started it
+        stopHunyuanServer();
+
         // Stop MCP server
         if (m_mcpServer) {
             m_mcpServer->stop();
@@ -1068,6 +1085,20 @@ protected:
             m_mcpServer->processCommands();
         }
 
+        // Check for completed AI generation
+        if (m_aiGenerateComplete) {
+            m_aiGenerateComplete = false;
+            if (m_aiGenerateThread.joinable()) {
+                m_aiGenerateThread.join();
+            }
+            m_aiGenerating = false;
+            if (!m_aiGeneratedGLBPath.empty()) {
+                loadModel(m_aiGeneratedGLBPath);
+                m_aiGenerateStatus = "Model loaded!";
+                std::cout << "[Hunyuan3D] Auto-loaded generated model" << std::endl;
+            }
+        }
+
         // Initialize ImGui frame BEFORE input processing so IsWindowHovered() uses current state
         ImGui_ImplVulkan_NewFrame();
         ImGui_ImplGlfw_NewFrame();
@@ -1375,7 +1406,21 @@ private:
             },
             .destroyCloneImageTextureCallback = [this](CloneSourceImage& img) {
                 cleanupCloneSourceImage(img);
-            }
+            },
+            .generateModelCallback = [this](const std::string& prompt, const std::string& imagePath) {
+                startAIGeneration(prompt, imagePath);
+            },
+            .cancelGenerationCallback = [this]() {
+                cancelAIGeneration();
+            },
+            .toggleServerCallback = [this](bool lowVRAM, bool enableTex) {
+                toggleHunyuanServer(lowVRAM, enableTex);
+            },
+            .aiGenerating = m_aiGenerating,
+            .aiGenerateStatus = m_aiGenerateStatus,
+            .aiServerRunning = m_aiServerRunning,
+            .aiServerReady = m_aiServerReady,
+            .aiLogLines = m_aiLogLines
         });
     }
 
@@ -2895,6 +2940,266 @@ private:
         m_gizmoMode = GizmoMode::Move;
     }
 
+    void startAIGeneration(const std::string& prompt, const std::string& imagePath) {
+        if (m_aiGenerating) return;
+
+        // Check server
+        if (!m_hunyuanClient.isServerRunning()) {
+            m_aiGenerateStatus = "Server not running (localhost:8081)";
+            std::cerr << "[Hunyuan3D] Server not reachable" << std::endl;
+            return;
+        }
+
+        // Get generation params from the modeling mode UI state
+        int steps = 5, octreeRes = 256, maxFaces = 10000, seed = 12345, texSize = 1024;
+        float guidance = 5.0f;
+        bool texture = true, remBG = true, multiView = false;
+        std::string leftPath, rightPath, backPath;
+        if (m_modelingMode) {
+            auto* mode = m_modelingMode.get();
+            steps = mode->m_generateSteps;
+            octreeRes = mode->m_generateOctreeRes;
+            guidance = mode->m_generateGuidance;
+            maxFaces = mode->m_generateMaxFaces;
+            texture = mode->m_generateTexture;
+            texSize = mode->m_generateTexSize;
+            remBG = mode->m_generateRemBG;
+            seed = mode->m_generateSeed;
+            multiView = mode->m_generateMultiView;
+            leftPath = mode->m_generateLeftPath;
+            rightPath = mode->m_generateRightPath;
+            backPath = mode->m_generateBackPath;
+        }
+
+        // Base64 encode front/single image
+        std::string imageBase64;
+        if (!imagePath.empty()) {
+            imageBase64 = Hunyuan3DClient::base64EncodeFile(imagePath);
+            if (imageBase64.empty()) {
+                m_aiGenerateStatus = "Failed to read image file";
+                return;
+            }
+        }
+
+        // Base64 encode multi-view images (if provided)
+        std::string leftBase64, rightBase64, backBase64;
+        if (multiView) {
+            if (!leftPath.empty())  leftBase64  = Hunyuan3DClient::base64EncodeFile(leftPath);
+            if (!rightPath.empty()) rightBase64 = Hunyuan3DClient::base64EncodeFile(rightPath);
+            if (!backPath.empty())  backBase64  = Hunyuan3DClient::base64EncodeFile(backPath);
+        }
+
+        // Send generation request
+        std::string uid = m_hunyuanClient.startGeneration(
+            prompt, imageBase64, steps, octreeRes, guidance, maxFaces, texture, seed, texSize, remBG,
+            multiView, leftBase64, rightBase64, backBase64);
+        if (uid.empty()) {
+            m_aiGenerateStatus = "Failed to start generation";
+            return;
+        }
+
+        m_aiGenerateJobUID = uid;
+        m_aiGenerating = true;
+        m_aiGenerateComplete = false;
+        m_aiGenerateCancelled = false;
+        m_aiGenerateStatus = "Generating...";
+
+        // Reset log index for new generation
+        m_aiLogIndex = 0;
+        m_aiLogLines.clear();
+
+        // Launch background polling thread
+        m_aiGenerateThread = std::thread([this, uid]() {
+            Hunyuan3DClient client("localhost", 8081);
+            while (!m_aiGenerateCancelled) {
+                std::this_thread::sleep_for(std::chrono::seconds(2));
+                if (m_aiGenerateCancelled) break;
+
+                // Fetch new log lines from server
+                std::vector<std::string> newLines;
+                int newTotal = client.fetchLog(m_aiLogIndex, newLines);
+                if (newTotal >= 0) {
+                    for (auto& line : newLines) {
+                        m_aiLogLines.push_back(std::move(line));
+                    }
+                    m_aiLogIndex = newTotal;
+                }
+
+                std::string base64GLB;
+                std::string status = client.checkStatus(uid, base64GLB);
+
+                if (status == "completed" && !base64GLB.empty()) {
+                    // Save GLB to models directory
+                    auto now = std::chrono::system_clock::now();
+                    auto timestamp = std::chrono::duration_cast<std::chrono::seconds>(
+                        now.time_since_epoch()).count();
+                    std::string outputDir = "models";
+                    std::filesystem::create_directories(outputDir);
+                    std::string outputPath = outputDir + "/ai_generated_" + std::to_string(timestamp) + ".glb";
+
+                    if (Hunyuan3DClient::base64DecodeToFile(base64GLB, outputPath)) {
+                        m_aiGeneratedGLBPath = outputPath;
+                        m_aiGenerateComplete = true;
+                        std::cout << "[Hunyuan3D] Model saved to: " << outputPath << std::endl;
+                    } else {
+                        m_aiGenerateStatus = "Failed to decode model data";
+                        m_aiGenerating = false;
+                    }
+                    return;
+                } else if (status == "error") {
+                    m_aiGenerateStatus = "Server error during generation";
+                    m_aiGenerating = false;
+                    return;
+                }
+                // Still processing, continue polling
+            }
+            // Cancelled
+            m_aiGenerating = false;
+            m_aiGenerateStatus = "Cancelled";
+        });
+    }
+
+    void cancelAIGeneration() {
+        if (!m_aiGenerating) return;
+        m_aiGenerateCancelled = true;
+        if (m_aiGenerateThread.joinable()) {
+            m_aiGenerateThread.join();
+        }
+        m_aiGenerating = false;
+        m_aiGenerateStatus = "Cancelled";
+    }
+
+    void toggleHunyuanServer(bool lowVRAM, bool enableTex) {
+        if (m_aiServerRunning) {
+            stopHunyuanServer();
+        } else {
+            startHunyuanServer(lowVRAM, enableTex);
+        }
+    }
+
+    void startHunyuanServer(bool lowVRAM, bool enableTex = false) {
+        if (m_aiServerRunning) return;
+
+        pid_t pid = fork();
+        if (pid == 0) {
+            // New process group so we can kill all children cleanly
+            setpgid(0, 0);
+
+            // Child process — launch the server via bash
+            // Texture is loaded on-demand (freed between shape/tex steps)
+            // so --enable_tex is safe on 12GB — it just enables the capability
+            // --low_vram adds CPU offload for texture pipeline
+            std::string modelPath = lowVRAM ? "tencent/Hunyuan3D-2mini" : "tencent/Hunyuan3D-2";
+            std::string subfolder = lowVRAM ? "hunyuan3d-dit-v2-mini-turbo" : "hunyuan3d-dit-v2-0-turbo";
+            std::string cmd =
+                "cd ~/Desktop/hunyuan3d2/Hunyuan3D-2 && "
+                "source .venv/bin/activate && "
+                "python api_server.py"
+                " --model_path " + modelPath +
+                " --subfolder " + subfolder +
+                " --port 8081"
+                " --enable_tex" +
+                std::string(lowVRAM ? " --low_vram" : "");
+
+            execl("/bin/bash", "bash", "-c", cmd.c_str(), nullptr);
+            _exit(1);  // exec failed
+        } else if (pid > 0) {
+            // Also set pgid from parent side (race condition guard)
+            setpgid(pid, pid);
+            m_aiServerPID = pid;
+            m_aiServerRunning = true;
+            m_aiServerReady = false;
+            std::string modeDesc = std::string(lowVRAM ? "mini" : "full") + (enableTex ? " + texture" : "");
+            m_aiGenerateStatus = "Starting server (" + modeDesc + ")...";
+            std::cout << "[Hunyuan3D] Server process launched, PID=" << pid << " (" << modeDesc << ")" << std::endl;
+
+            // Launch background thread to poll until server is actually responding
+            if (m_aiServerStartupThread.joinable()) {
+                m_aiServerStartupThread.join();
+            }
+            m_aiServerStartupThread = std::thread([this]() {
+                Hunyuan3DClient probe("localhost", 8081);
+                for (int attempt = 0; attempt < 120; ++attempt) {  // Up to ~4 minutes
+                    std::this_thread::sleep_for(std::chrono::seconds(2));
+                    if (!m_aiServerRunning) return;  // Server was stopped
+
+                    // Check if child process is still alive using kill(pid, 0)
+                    // Returns 0 if process exists, -1 with ESRCH if it doesn't
+                    if (m_aiServerPID > 0 && kill(m_aiServerPID, 0) != 0) {
+                        // Process is gone
+                        m_aiServerRunning = false;
+                        m_aiServerReady = false;
+                        m_aiServerPID = -1;
+                        m_aiGenerateStatus = "Server process exited unexpectedly";
+                        std::cerr << "[Hunyuan3D] Server process no longer exists" << std::endl;
+                        return;
+                    }
+
+                    if (probe.isServerRunning()) {
+                        m_aiServerReady = true;
+                        m_aiGenerateStatus = "Server ready";
+                        std::cout << "[Hunyuan3D] Server is ready (took ~" << (attempt + 1) * 2 << "s)" << std::endl;
+                        return;
+                    }
+
+                    // Update status with elapsed time
+                    m_aiGenerateStatus = "Starting server... (" + std::to_string((attempt + 1) * 2) + "s)";
+                }
+                // Timed out
+                m_aiGenerateStatus = "Server startup timed out";
+                std::cerr << "[Hunyuan3D] Server did not respond after 4 minutes" << std::endl;
+            });
+        } else {
+            m_aiGenerateStatus = "Failed to start server (fork error)";
+            std::cerr << "[Hunyuan3D] fork() failed" << std::endl;
+        }
+    }
+
+    void stopHunyuanServer() {
+        if (!m_aiServerRunning || m_aiServerPID <= 0) return;
+
+        // Cancel any in-progress generation first
+        if (m_aiGenerating) {
+            cancelAIGeneration();
+        }
+
+        // Signal stop so startup thread exits
+        m_aiServerRunning = false;
+        m_aiServerReady = false;
+
+        // Join startup polling thread
+        if (m_aiServerStartupThread.joinable()) {
+            m_aiServerStartupThread.join();
+        }
+
+        // Kill the server process group (SIGTERM first, then SIGKILL if needed)
+        pid_t pid = m_aiServerPID;
+        m_aiServerPID = -1;
+
+        kill(-pid, SIGTERM);
+        kill(pid, SIGTERM);
+
+        // Wait up to 3 seconds for graceful shutdown
+        int status;
+        bool exited = false;
+        for (int i = 0; i < 30; i++) {
+            pid_t ret = waitpid(pid, &status, WNOHANG);
+            if (ret == pid || ret == -1) { exited = true; break; }
+            usleep(100000);  // 100ms
+        }
+
+        if (!exited) {
+            // Force kill if SIGTERM didn't work
+            std::cout << "[Hunyuan3D] Server didn't exit gracefully, sending SIGKILL" << std::endl;
+            kill(-pid, SIGKILL);
+            kill(pid, SIGKILL);
+            waitpid(pid, &status, 0);  // Blocking wait to reap
+        }
+
+        m_aiGenerateStatus = "Server stopped";
+        std::cout << "[Hunyuan3D] Server stopped" << std::endl;
+    }
+
     void createTestCube() {
         auto obj = std::make_unique<SceneObject>("Cube");
 
@@ -4113,6 +4418,26 @@ private:
 private:
     // MCP Server for AI integration
     std::unique_ptr<MCPServer> m_mcpServer;
+
+    // Hunyuan3D generation state
+    Hunyuan3DClient m_hunyuanClient{"localhost", 8081};
+    bool m_aiGenerating = false;
+    std::string m_aiGenerateStatus;
+    std::string m_aiGenerateJobUID;
+    std::thread m_aiGenerateThread;
+    std::atomic<bool> m_aiGenerateComplete{false};
+    std::atomic<bool> m_aiGenerateCancelled{false};
+    std::string m_aiGeneratedGLBPath;
+
+    // Hunyuan3D server process management
+    bool m_aiServerRunning = false;       // Process launched (checkbox state)
+    bool m_aiServerReady = false;         // Server actually responding to HTTP
+    pid_t m_aiServerPID = -1;
+    std::thread m_aiServerStartupThread;
+
+    // Hunyuan3D server log
+    std::vector<std::string> m_aiLogLines;
+    int m_aiLogIndex = 0;  // Tracks /log?since= position
 
     // Renderers
     std::unique_ptr<ModelRenderer> m_modelRenderer;

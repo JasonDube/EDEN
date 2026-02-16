@@ -420,6 +420,16 @@ void ModelingMode::renderSceneOverlay(VkCommandBuffer cmd, const glm::mat4& view
             }
         }
     }
+
+    // Path tube 3D preview (spline + wireframe tube)
+    if (m_pathTubeMode) {
+        renderPathTubePreview3D(cmd, viewProj);
+    }
+
+    // Slice plane 3D overlay
+    if (m_sliceMode) {
+        drawSlicePlaneOverlay3D(cmd, viewProj);
+    }
 }
 
 void ModelingMode::drawOverlays(float vpX, float vpY, float vpW, float vpH) {
@@ -519,6 +529,11 @@ void ModelingMode::drawOverlays(float vpX, float vpY, float vpW, float vpH) {
     // Draw retopology overlay (numbered vertices, quad wireframes, existing vert dots)
     if (m_retopologyMode && (!m_retopologyVerts.empty() || !m_retopologyQuads.empty())) {
         drawRetopologyOverlay(vpX, vpY, vpW, vpH);
+    }
+
+    // Draw path tube overlay (node circles, connecting lines)
+    if (m_pathTubeMode && !m_pathNodes.empty()) {
+        drawPathTubeOverlay(vpX, vpY, vpW, vpH);
     }
 }
 
@@ -1095,6 +1110,121 @@ void ModelingMode::renderModelingEditorUI() {
                 }
                 if (ImGui::IsItemHovered()) {
                     ImGui::SetTooltip("Generate all-quad mesh from live surface using voxel remeshing");
+                }
+            }
+        }
+
+        // Path Tube tools
+        {
+            ImGui::TextColored(ImVec4(0.0f, 0.8f, 1.0f, 1.0f), "Path Tube");
+            ImGui::Separator();
+
+            if (m_pathTubeMode) {
+                ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f), "PATH TUBE MODE");
+                ImGui::Text("Nodes: %zu", m_pathNodes.size());
+                ImGui::Text("LMB: place/select node");
+                ImGui::Text("G: grab node | Del: delete");
+                ImGui::Text("Ctrl+Z: undo | Enter: generate");
+                ImGui::Text("ESC: cancel");
+
+                ImGui::Spacing();
+                ImGui::SliderFloat("Radius", &m_pathTubeRadius, 0.001f, 1.0f, "%.3f");
+                int prevSegments = m_pathTubeSegments;
+                ImGui::SliderInt("Segments", &m_pathTubeSegments, 3, 32);
+                if (m_pathTubeSegments != prevSegments) {
+                    resetPathTubeProfile();
+                }
+                ImGui::SliderInt("Samples/Span", &m_pathTubeSamplesPerSpan, 2, 32);
+                ImGui::SliderFloat("Taper Start", &m_pathTubeRadiusStart, 0.0f, 4.0f, "%.2f");
+                ImGui::SliderFloat("Taper End", &m_pathTubeRadiusEnd, 0.0f, 4.0f, "%.2f");
+
+                ImGui::Spacing();
+                drawProfileEditor();
+                float profilePct = m_pathTubeProfileExtent * 100.0f;
+                if (ImGui::SliderFloat("Profile %", &profilePct, 0.0f, 100.0f, "%.0f%%")) {
+                    m_pathTubeProfileExtent = profilePct / 100.0f;
+                }
+
+                ImGui::Spacing();
+                if (ImGui::Button("Generate (Enter)") && m_pathNodes.size() >= 2) {
+                    generatePathTubeMesh();
+                }
+                ImGui::SameLine();
+                if (ImGui::Button("Cancel (ESC)")) {
+                    cancelPathTubeMode();
+                }
+            } else {
+                if (ImGui::Button("Path Tube")) {
+                    m_pathTubeMode = true;
+                    m_pathNodes.clear();
+                    m_pathSelectedNode = -1;
+                    resetPathTubeProfile();
+                    // Disable conflicting modes
+                    if (m_retopologyMode) cancelRetopologyMode();
+                    if (m_snapMode) cancelSnapMode();
+                    if (m_vertexPaintMode) m_vertexPaintMode = false;
+                    std::cout << "[PathTube] Mode enabled" << std::endl;
+                }
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("Click to place spline nodes, Enter to generate tube mesh");
+                }
+            }
+        }
+
+        // Mesh Slice tool
+        {
+            ImGui::TextColored(ImVec4(0.0f, 0.8f, 1.0f, 1.0f), "Mesh Slice");
+            ImGui::Separator();
+
+            if (m_sliceMode) {
+                ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f), "SLICE MODE");
+                ImGui::Text("Position the cutting plane");
+                ImGui::Text("ESC: cancel | Enter: slice");
+
+                ImGui::Spacing();
+
+                const char* axisNames[] = {"X", "Y", "Z"};
+                if (ImGui::Combo("Align to Axis", &m_slicePresetAxis, axisNames, 3)) {
+                    updateSlicePlaneFromParams();
+                }
+
+                if (ImGui::SliderFloat("Offset", &m_slicePlaneOffset, -2.0f, 2.0f, "%.3f")) {
+                    updateSlicePlaneFromParams();
+                }
+                if (ImGui::SliderFloat("Pitch", &m_slicePlaneRotationX, -90.0f, 90.0f, "%.1f deg")) {
+                    updateSlicePlaneFromParams();
+                }
+                if (ImGui::SliderFloat("Yaw", &m_slicePlaneRotationY, -180.0f, 180.0f, "%.1f deg")) {
+                    updateSlicePlaneFromParams();
+                }
+
+                ImGui::Spacing();
+                if (ImGui::Button("Slice (Enter)")) {
+                    performSlice();
+                }
+                ImGui::SameLine();
+                if (ImGui::Button("Cancel (ESC)")) {
+                    cancelSliceMode();
+                }
+            } else {
+                if (ImGui::Button("Slice Mesh")) {
+                    if (m_ctx.selectedObject && m_ctx.selectedObject->hasEditableMeshData()) {
+                        m_sliceMode = true;
+                        m_slicePlaneOffset = 0.0f;
+                        m_slicePlaneRotationX = 0.0f;
+                        m_slicePlaneRotationY = 0.0f;
+                        m_slicePresetAxis = 1;
+                        // Disable conflicting modes
+                        if (m_pathTubeMode) cancelPathTubeMode();
+                        if (m_retopologyMode) cancelRetopologyMode();
+                        if (m_snapMode) cancelSnapMode();
+                        if (m_vertexPaintMode) m_vertexPaintMode = false;
+                        updateSlicePlaneFromParams();
+                        std::cout << "[Slice] Mode enabled" << std::endl;
+                    }
+                }
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("Cut the selected mesh into two pieces with a plane");
                 }
             }
         }
@@ -1945,6 +2075,50 @@ void ModelingMode::renderModelingEditorUI() {
                 ImGui::SetTooltip("Cut a hole through the selected mesh\nusing the cutter object's bounding box.\nBest for axis-aligned doors/windows.");
             }
         }
+
+        // Catmull-Clark Subdivision with level navigation
+        ImGui::Spacing();
+        ImGui::Text("Subdivision:");
+        static int currentSubdivLevel = 0;
+        static std::vector<HEVertex> subdivBaseVerts;
+        static std::vector<HalfEdge> subdivBaseHE;
+        static std::vector<HEFace> subdivBaseFaces;
+        static bool hasSubdivBase = false;
+
+        int newLevel = currentSubdivLevel;
+        ImGui::SliderInt("##subdivLevel", &newLevel, 0, 4, "Level %d");
+        if (newLevel != currentSubdivLevel) {
+            m_ctx.editableMesh.saveState();
+
+            // Store base mesh when first leaving level 0
+            if (!hasSubdivBase && currentSubdivLevel == 0 && newLevel > 0) {
+                subdivBaseVerts = m_ctx.editableMesh.getVerticesData();
+                subdivBaseHE = m_ctx.editableMesh.getHalfEdges();
+                subdivBaseFaces = m_ctx.editableMesh.getFacesData();
+                hasSubdivBase = true;
+            }
+
+            if (newLevel == 0 && hasSubdivBase) {
+                // Restore base mesh
+                m_ctx.editableMesh.setFromData(subdivBaseVerts, subdivBaseHE, subdivBaseFaces);
+                hasSubdivBase = false;
+            } else if (newLevel > 0 && hasSubdivBase) {
+                // Restore base, then subdivide to target level
+                m_ctx.editableMesh.setFromData(subdivBaseVerts, subdivBaseHE, subdivBaseFaces);
+                m_ctx.editableMesh.catmullClarkSubdivide(newLevel);
+            } else if (newLevel > currentSubdivLevel) {
+                // No base stored (shouldn't happen), just subdivide the difference
+                m_ctx.editableMesh.catmullClarkSubdivide(newLevel - currentSubdivLevel);
+            }
+
+            currentSubdivLevel = newLevel;
+            m_ctx.meshDirty = true;
+            invalidateWireframeCache();
+        }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Catmull-Clark subdivision level.\nDrag to change level. 0 = base mesh.\nGoing down restores the base mesh.\nEdit at level 0, then raise level to re-smooth.");
+        }
+
         ImGui::EndChild();
         ImGui::PopStyleColor();
 
@@ -2594,12 +2768,97 @@ void ModelingMode::renderModelingEditorUI() {
 
         ImGui::Spacing();
 
+        // UV Re-projection section
+        ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.12f, 0.05f, 0.12f, 0.5f));
+        ImGui::BeginChild("UVReprojSection", ImVec2(0, 0), ImGuiChildFlags_AutoResizeY | ImGuiChildFlags_Borders);
+        ImGui::TextColored(ImVec4(1.0f, 0.5f, 1.0f, 1), "UV Pack & Re-project");
+        ImGui::Separator();
+        ImGui::TextDisabled("Shrink existing UVs to a corner, re-project texture");
+
+        {
+            bool canPack = m_ctx.selectedObject && m_ctx.editableMesh.isValid()
+                           && m_ctx.selectedObject->hasTextureData();
+
+            // Pack scale
+            ImGui::SetNextItemWidth(100);
+            const char* scaleLabels[] = { "25%", "33%", "50%", "75%" };
+            const float scaleValues[] = { 0.25f, 0.33f, 0.5f, 0.75f };
+            int scaleIdx = 2;  // default 50%
+            for (int i = 0; i < 4; ++i) {
+                if (std::abs(m_packScale - scaleValues[i]) < 0.01f) { scaleIdx = i; break; }
+            }
+            if (ImGui::Combo("UV Scale##pack", &scaleIdx, scaleLabels, 4)) {
+                m_packScale = scaleValues[scaleIdx];
+            }
+
+            // Corner selection
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(120);
+            const char* cornerLabels[] = { "Bottom-Left", "Bottom-Right", "Top-Left", "Top-Right" };
+            ImGui::Combo("Corner##pack", &m_packCorner, cornerLabels, 4);
+
+            // Texture size
+            ImGui::SetNextItemWidth(100);
+            const char* sizes[] = { "512", "1024", "2048", "4096" };
+            int sizeIdx = (m_reprojectTexSize == 512) ? 0 : (m_reprojectTexSize == 2048) ? 2 : (m_reprojectTexSize == 4096) ? 3 : 1;
+            if (ImGui::Combo("Texture Size##pack", &sizeIdx, sizes, 4)) {
+                const int vals[] = { 512, 1024, 2048, 4096 };
+                m_reprojectTexSize = vals[sizeIdx];
+            }
+
+            // One-click button
+            if (!canPack) ImGui::BeginDisabled();
+            if (ImGui::Button("Pack & Re-project", ImVec2(-1, 30))) {
+                packAndReprojectUVs();
+            }
+            if (!canPack) ImGui::EndDisabled();
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+                ImGui::SetTooltip("One click: shrinks all UVs to chosen corner,\n"
+                                  "re-projects texture onto new UV layout.\n"
+                                  "Frees up UV space for new projections.");
+            }
+
+            // Manual re-project (for after manual UV edits)
+            if (m_hasStoredUVs) {
+                ImGui::TextColored(ImVec4(0.3f, 1.0f, 0.3f, 1.0f), "Old UVs stored (%dx%d tex)",
+                                   m_storedOldTexW, m_storedOldTexH);
+                if (ImGui::Button("Re-project Only")) {
+                    reprojectTexture(m_reprojectTexSize);
+                }
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("Re-project using stored UVs onto current UV layout.\n"
+                                      "Use after manually editing UVs.");
+                }
+            }
+        }
+
+        ImGui::EndChild();
+        ImGui::PopStyleColor();
+        ImGui::Spacing();
+
         // Vertex Color Painting section (no UVs needed)
         ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.05f, 0.12f, 0.05f, 0.5f));
         ImGui::BeginChild("VertexColorSection", ImVec2(0, 0), ImGuiChildFlags_AutoResizeY | ImGuiChildFlags_Borders);
         ImGui::TextColored(ImVec4(0.5f, 1.0f, 0.5f, 1), "Vertex Color Painting");
         ImGui::Separator();
         ImGui::TextDisabled("Paint directly on vertices (no UVs needed)");
+
+        // Bake texture to vertex colors button
+        {
+            bool canBake = m_ctx.selectedObject && m_ctx.editableMesh.isValid()
+                           && m_ctx.selectedObject->hasTextureData();
+            if (!canBake) ImGui::BeginDisabled();
+            if (ImGui::Button("Bake Texture to Vertex Colors")) {
+                bakeTextureToVertexColors();
+            }
+            if (!canBake) ImGui::EndDisabled();
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+                ImGui::SetTooltip("Sample texture at each vertex UV and store as vertex color.\n"
+                                  "Removes the texture — mesh renders with vertex colors only.\n"
+                                  "Works best on high-poly meshes (10k+ faces).");
+            }
+        }
+        ImGui::Spacing();
 
         ImGui::Checkbox("Vertex Paint Mode", &m_vertexPaintMode);
         if (ImGui::IsItemHovered()) {
@@ -2702,6 +2961,232 @@ void ModelingMode::renderModelingEditorUI() {
         }
         ImGui::EndChild();
         ImGui::PopStyleColor();
+    }
+
+    // Button to open AI Generate window
+    if (ImGui::Button("AI Generate (Hunyuan3D)", ImVec2(-1, 0))) {
+        m_ctx.showAIGenerateWindow = true;
+    }
+
+    ImGui::End();
+    }
+
+    // ===== AI Generate Window (standalone) =====
+    if (m_ctx.showAIGenerateWindow) {
+    ImGui::SetNextWindowPos(ImVec2(400, 100), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSize(ImVec2(520, 620), ImGuiCond_FirstUseEver);
+    if (ImGui::Begin("AI Generate (Hunyuan3D)##window", &m_ctx.showAIGenerateWindow)) {
+
+        // -- Server control row --
+        bool serverOn = m_ctx.aiServerRunning;
+        if (ImGui::Checkbox("Server##hunyuan", &serverOn)) {
+            if (m_ctx.toggleServerCallback) {
+                m_ctx.toggleServerCallback(m_generateLowVRAM, false);
+            }
+        }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip(serverOn ? "Click to stop Hunyuan3D server" : "Click to start Hunyuan3D server");
+        }
+        ImGui::SameLine();
+        if (serverOn && m_ctx.aiServerReady) {
+            ImGui::TextColored(ImVec4(0.3f, 1.0f, 0.3f, 1.0f), "Ready");
+        } else if (serverOn) {
+            ImGui::TextColored(ImVec4(1.0f, 1.0f, 0.3f, 1.0f), "Starting...");
+        } else {
+            ImGui::TextDisabled("Stopped");
+        }
+        ImGui::SameLine(0, 20);
+        ImGui::Checkbox("Low VRAM##srv", &m_generateLowVRAM);
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Mini model + CPU offload for texture (recommended for 12GB).\nStop and restart server after changing.");
+        }
+
+        ImGui::Separator();
+
+        // -- Prompt --
+        ImGui::Text("Prompt:");
+        ImGui::InputTextMultiline("##prompt", m_generatePrompt, sizeof(m_generatePrompt),
+            ImVec2(-1, 40), ImGuiInputTextFlags_None);
+
+        // -- Image input mode tabs --
+        if (ImGui::BeginTabBar("##imgmode")) {
+            if (ImGui::BeginTabItem("Single Image")) {
+                m_generateMultiView = false;
+                if (ImGui::Button("Browse##single")) {
+                    nfdchar_t* outPath = nullptr;
+                    nfdfilteritem_t filters[1] = {{"Images", "png,jpg,jpeg,bmp"}};
+                    if (NFD_OpenDialog(&outPath, filters, 1, nullptr) == NFD_OKAY) {
+                        m_generateImagePath = outPath;
+                        NFD_FreePath(outPath);
+                    }
+                }
+                ImGui::SameLine();
+                if (!m_generateImagePath.empty()) {
+                    std::string fn = m_generateImagePath.substr(m_generateImagePath.find_last_of("/\\") + 1);
+                    ImGui::Text("%s", fn.c_str());
+                    ImGui::SameLine();
+                    if (ImGui::SmallButton("X##clrsingle")) m_generateImagePath.clear();
+                } else {
+                    ImGui::TextColored(ImVec4(1, 0.4f, 0.4f, 1), "No image (required)");
+                }
+                ImGui::EndTabItem();
+            }
+            if (ImGui::BeginTabItem("Multi-View")) {
+                m_generateMultiView = true;
+
+                // Helper lambda for browse + display
+                auto browseSlot = [](const char* label, const char* btnId, const char* clrId,
+                                     std::string& path, bool required) {
+                    ImGui::Text("%s", label);
+                    ImGui::SameLine(80);
+                    std::string browseLabel = std::string("Browse##") + btnId;
+                    if (ImGui::SmallButton(browseLabel.c_str())) {
+                        nfdchar_t* outPath = nullptr;
+                        nfdfilteritem_t filters[1] = {{"Images", "png,jpg,jpeg,bmp"}};
+                        if (NFD_OpenDialog(&outPath, filters, 1, nullptr) == NFD_OKAY) {
+                            path = outPath;
+                            NFD_FreePath(outPath);
+                        }
+                    }
+                    ImGui::SameLine();
+                    if (!path.empty()) {
+                        std::string fn = path.substr(path.find_last_of("/\\") + 1);
+                        ImGui::Text("%s", fn.c_str());
+                        ImGui::SameLine();
+                        std::string clrLabel = std::string("X##") + clrId;
+                        if (ImGui::SmallButton(clrLabel.c_str())) path.clear();
+                    } else if (required) {
+                        ImGui::TextColored(ImVec4(1, 0.4f, 0.4f, 1), "(required)");
+                    } else {
+                        ImGui::TextDisabled("(uses front)");
+                    }
+                };
+
+                browseSlot("Front:",  "mvfront",  "clrfront",  m_generateFrontPath, true);
+                browseSlot("Left:",   "mvleft",   "clrleft",   m_generateLeftPath,  false);
+                browseSlot("Right:",  "mvright",  "clrright",  m_generateRightPath, false);
+                browseSlot("Back:",   "mvback",   "clrback",   m_generateBackPath,  false);
+
+                if (ImGui::SmallButton("Clear All##mvclr")) {
+                    m_generateFrontPath.clear();
+                    m_generateLeftPath.clear();
+                    m_generateRightPath.clear();
+                    m_generateBackPath.clear();
+                }
+
+                ImGui::EndTabItem();
+            }
+            ImGui::EndTabBar();
+        }
+
+        // -- Key settings (always visible) --
+        ImGui::SliderInt("Max Faces", &m_generateMaxFaces, 1000, 100000);
+
+        ImGui::Checkbox("Texture", &m_generateTexture);
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Generate texture (loaded on-demand, adds ~30-60s)");
+        }
+        if (m_generateTexture) {
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(80);
+            const char* texSizes[] = {"512", "1024", "2048"};
+            int texIdx = (m_generateTexSize == 512) ? 0 : (m_generateTexSize == 2048) ? 2 : 1;
+            if (ImGui::Combo("##texsize", &texIdx, texSizes, 3)) {
+                m_generateTexSize = (texIdx == 0) ? 512 : (texIdx == 2) ? 2048 : 1024;
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Texture resolution (higher = better quality, more VRAM)");
+            }
+        }
+
+        ImGui::Checkbox("Remove Background", &m_generateRemBG);
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Auto-remove background from input image.\nDisable if your image already has a transparent/clean background.");
+        }
+
+        // -- Advanced settings --
+        if (ImGui::TreeNode("Advanced##aigen")) {
+            ImGui::SliderInt("Steps", &m_generateSteps, 1, 50);
+            ImGui::SliderInt("Octree Res", &m_generateOctreeRes, 64, 512);
+            ImGui::SliderFloat("Guidance", &m_generateGuidance, 1.0f, 20.0f, "%.1f");
+            ImGui::InputInt("Seed", &m_generateSeed);
+            ImGui::TreePop();
+        }
+
+        // -- Generate / Cancel --
+        bool isGenerating = m_ctx.aiGenerating;
+        bool hasImage = m_generateMultiView ? !m_generateFrontPath.empty() : !m_generateImagePath.empty();
+        bool canGenerate = m_ctx.aiServerReady && !isGenerating && hasImage;
+
+        if (!canGenerate) ImGui::BeginDisabled();
+        if (ImGui::Button("Generate", ImVec2(ImGui::GetContentRegionAvail().x * 0.65f, 32))) {
+            if (m_ctx.generateModelCallback) {
+                // Pass front image path for both single and multi-view (server needs at least front)
+                std::string primaryImage = m_generateMultiView ? m_generateFrontPath : m_generateImagePath;
+                m_ctx.generateModelCallback(std::string(m_generatePrompt), primaryImage);
+            }
+        }
+        if (!canGenerate) {
+            ImGui::EndDisabled();
+            if (!hasImage && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+                ImGui::SetTooltip(m_generateMultiView ?
+                    "Front image is required for multi-view generation" :
+                    "Browse an image first — image input required");
+            }
+        }
+
+        if (isGenerating) {
+            ImGui::SameLine();
+            if (ImGui::Button("Cancel", ImVec2(-1, 32))) {
+                if (m_ctx.cancelGenerationCallback) {
+                    m_ctx.cancelGenerationCallback();
+                }
+            }
+        }
+
+        // -- Status --
+        if (!m_ctx.aiGenerateStatus.empty()) {
+            ImVec4 statusColor = isGenerating ? ImVec4(1, 1, 0, 1) : ImVec4(0.5f, 1, 0.5f, 1);
+            ImGui::TextColored(statusColor, "%s", m_ctx.aiGenerateStatus.c_str());
+        }
+
+        ImGui::Separator();
+
+        // -- Server Output Log --
+        ImGui::Text("Server Output:");
+        float logHeight = ImGui::GetContentRegionAvail().y - 4;
+        if (logHeight < 80) logHeight = 80;
+        ImGui::BeginChild("##serverlog", ImVec2(-1, logHeight), ImGuiChildFlags_Borders,
+                          ImGuiWindowFlags_HorizontalScrollbar);
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.7f, 0.9f, 0.7f, 1.0f));
+
+        if (m_ctx.aiLogLines.empty()) {
+            ImGui::TextDisabled("No output yet. Start server and generate to see progress.");
+        } else {
+            for (const auto& line : m_ctx.aiLogLines) {
+                // Color code lines
+                if (line.find("ERROR") != std::string::npos || line.find("error") != std::string::npos ||
+                    line.find("OOM") != std::string::npos || line.find("Failed") != std::string::npos) {
+                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.3f, 0.3f, 1.0f));
+                    ImGui::TextWrapped("%s", line.c_str());
+                    ImGui::PopStyleColor();
+                } else if (line.find("DONE") != std::string::npos) {
+                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.3f, 1.0f, 0.3f, 1.0f));
+                    ImGui::TextWrapped("%s", line.c_str());
+                    ImGui::PopStyleColor();
+                } else {
+                    ImGui::TextWrapped("%s", line.c_str());
+                }
+            }
+            // Auto-scroll to bottom
+            if (ImGui::GetScrollY() >= ImGui::GetScrollMaxY() - 20) {
+                ImGui::SetScrollHereY(1.0f);
+            }
+        }
+
+        ImGui::PopStyleColor();
+        ImGui::EndChild();
+
     }
     ImGui::End();
     }
@@ -4009,6 +4494,21 @@ void ModelingMode::processModelingInput(float deltaTime, bool gizmoActive) {
         cancelRetopologyMode();
     }
 
+    // Slice mode input
+    if (m_sliceMode) {
+        if (Input::isKeyPressed(Input::KEY_ESCAPE)) {
+            cancelSliceMode();
+            return;
+        }
+        if (Input::isKeyPressed(Input::KEY_ENTER)) {
+            performSlice();
+            return;
+        }
+    }
+
+    // Path tube input processing
+    processPathTubeInput(mouseOverImGui);
+
     // Snap mode face selection
     if (m_snapMode && !mouseOverImGui && Input::isMouseButtonPressed(Input::MOUSE_LEFT)) {
         glm::vec3 rayOrigin, rayDir;
@@ -4553,11 +5053,12 @@ void ModelingMode::processModelingInput(float deltaTime, bool gizmoActive) {
         }
 
         // Paint select handling - continuous selection while dragging
+        // Always accumulates; click empty space to clear, or Ctrl+click to deselect
         if (m_ctx.selectionTool == SelectionTool::Paint && !m_ctx.isPainting) {
+            if (Input::isMouseButtonPressed(Input::MOUSE_LEFT) && !hit.hit && !shiftHeld) {
+                m_ctx.editableMesh.clearSelection();
+            }
             if (Input::isMouseButtonDown(Input::MOUSE_LEFT)) {
-                if (Input::isMouseButtonPressed(Input::MOUSE_LEFT) && !shiftHeld) {
-                    m_ctx.editableMesh.clearSelection();
-                }
                 if (hit.hit) {
                     switch (m_ctx.modelingSelectionMode) {
                         case ModelingSelectionMode::Vertex:
@@ -4892,9 +5393,18 @@ void ModelingMode::buildEditableMeshFromObject() {
 
     // Check if we have stored EditableMesh data (preserves quad topology)
     if (m_ctx.selectedObject->hasEditableMeshData()) {
+        std::cout << "  -> Path A: restoring from stored HE data" << std::endl;
         const auto& storedVerts = m_ctx.selectedObject->getHEVertices();
         const auto& storedHE = m_ctx.selectedObject->getHEHalfEdges();
         const auto& storedFaces = m_ctx.selectedObject->getHEFaces();
+
+        // Debug: print UV range from stored HE data
+        glm::vec2 uvMin(FLT_MAX), uvMax(-FLT_MAX);
+        for (const auto& v : storedVerts) {
+            uvMin = glm::min(uvMin, v.uv);
+            uvMax = glm::max(uvMax, v.uv);
+        }
+        std::cout << "  -> Stored HE UV range: [" << uvMin.x << "," << uvMin.y << "] - [" << uvMax.x << "," << uvMax.y << "]" << std::endl;
 
         // Convert from SceneObject storage format to EditableMesh format
         std::vector<HEVertex> heVerts;
@@ -4937,6 +5447,7 @@ void ModelingMode::buildEditableMeshFromObject() {
     }
 
     // Fall back to building from triangles and attempting to merge back to quads
+    std::cout << "  -> Path B: rebuilding from triangles (no stored HE data)" << std::endl;
     const auto& vertices = m_ctx.selectedObject->getVertices();
     const auto& indices = m_ctx.selectedObject->getIndices();
 
@@ -5117,6 +5628,348 @@ void ModelingMode::updateMeshFromEditable() {
     }
 
     m_ctx.meshDirty = false;
+}
+
+void ModelingMode::bakeTextureToVertexColors() {
+    if (!m_ctx.selectedObject || !m_ctx.editableMesh.isValid()) return;
+    if (!m_ctx.selectedObject->hasTextureData()) return;
+
+    const auto& texData = m_ctx.selectedObject->getTextureData();
+    int texW = m_ctx.selectedObject->getTextureWidth();
+    int texH = m_ctx.selectedObject->getTextureHeight();
+    if (texW <= 0 || texH <= 0 || texData.empty()) return;
+
+    m_ctx.editableMesh.saveState();
+
+    uint32_t vertCount = m_ctx.editableMesh.getVertexCount();
+    int sampled = 0;
+
+    for (uint32_t i = 0; i < vertCount; ++i) {
+        auto& vert = m_ctx.editableMesh.getVertex(i);
+        glm::vec2 uv = vert.uv;
+
+        // Wrap UVs to [0,1] range
+        uv.x = uv.x - std::floor(uv.x);
+        uv.y = uv.y - std::floor(uv.y);
+
+        // Bilinear sample the texture
+        float fx = uv.x * (texW - 1);
+        float fy = uv.y * (texH - 1);
+        int x0 = std::max(0, std::min(static_cast<int>(fx), texW - 1));
+        int y0 = std::max(0, std::min(static_cast<int>(fy), texH - 1));
+        int x1 = std::min(x0 + 1, texW - 1);
+        int y1 = std::min(y0 + 1, texH - 1);
+        float sx = fx - x0;
+        float sy = fy - y0;
+
+        auto sample = [&](int x, int y) -> glm::vec4 {
+            size_t idx = (static_cast<size_t>(y) * texW + x) * 4;
+            if (idx + 3 >= texData.size()) return glm::vec4(1.0f);
+            return glm::vec4(
+                texData[idx] / 255.0f,
+                texData[idx + 1] / 255.0f,
+                texData[idx + 2] / 255.0f,
+                texData[idx + 3] / 255.0f
+            );
+        };
+
+        glm::vec4 c00 = sample(x0, y0);
+        glm::vec4 c10 = sample(x1, y0);
+        glm::vec4 c01 = sample(x0, y1);
+        glm::vec4 c11 = sample(x1, y1);
+
+        glm::vec4 color = glm::mix(glm::mix(c00, c10, sx), glm::mix(c01, c11, sx), sy);
+        color.a = 1.0f;
+        vert.color = color;
+        sampled++;
+    }
+
+    // Defer texture removal to next frame (safe point for GPU sync)
+    m_ctx.pendingTextureDelete = true;
+
+    m_ctx.meshDirty = true;
+    std::cout << "[ModelEditor] Baked texture to vertex colors (" << sampled
+              << " vertices, " << texW << "x" << texH << " texture)" << std::endl;
+}
+
+void ModelingMode::storeUVsForReprojection() {
+    if (!m_ctx.selectedObject || !m_ctx.editableMesh.isValid()) return;
+    if (!m_ctx.selectedObject->hasTextureData()) return;
+
+    uint32_t vertCount = m_ctx.editableMesh.getVertexCount();
+    m_storedOldUVs.resize(vertCount);
+    for (uint32_t i = 0; i < vertCount; ++i) {
+        m_storedOldUVs[i].uv = m_ctx.editableMesh.getVertex(i).uv;
+    }
+
+    const auto& texData = m_ctx.selectedObject->getTextureData();
+    m_storedOldTexture = texData;
+    m_storedOldTexW = m_ctx.selectedObject->getTextureWidth();
+    m_storedOldTexH = m_ctx.selectedObject->getTextureHeight();
+    m_hasStoredUVs = true;
+
+    std::cout << "[ModelEditor] Stored " << vertCount << " vertex UVs and "
+              << m_storedOldTexW << "x" << m_storedOldTexH << " texture for re-projection" << std::endl;
+}
+
+void ModelingMode::reprojectTexture(int outputSize) {
+    if (!m_hasStoredUVs || m_storedOldTexture.empty()) return;
+    if (!m_ctx.selectedObject || !m_ctx.editableMesh.isValid()) return;
+
+    int outW = outputSize > 0 ? outputSize : m_storedOldTexW;
+    int outH = outputSize > 0 ? outputSize : m_storedOldTexH;
+    int srcW = m_storedOldTexW;
+    int srcH = m_storedOldTexH;
+
+    // Create output texture (RGBA, initialized to black transparent)
+    // Initialize with black opaque (alpha=255) so paint shows in UV editor
+    size_t outTexBytes = static_cast<size_t>(outW) * outH * 4;
+    std::vector<unsigned char> outTex(outTexBytes, 0);
+    for (size_t i = 3; i < outTexBytes; i += 4) {
+        outTex[i] = 255;
+    }
+
+    uint32_t faceCount = m_ctx.editableMesh.getFaceCount();
+    uint32_t vertCount = m_ctx.editableMesh.getVertexCount();
+
+    // Verify stored UV count matches
+    if (m_storedOldUVs.size() != vertCount) {
+        std::cerr << "[ModelEditor] Re-project: vertex count changed ("
+                  << m_storedOldUVs.size() << " stored vs " << vertCount << " current). Aborting." << std::endl;
+        return;
+    }
+
+    // Helper: sample old texture with bilinear filtering
+    auto sampleOld = [&](float u, float v) -> glm::vec4 {
+        u = u - std::floor(u);
+        v = v - std::floor(v);
+        float fx = u * (srcW - 1);
+        float fy = v * (srcH - 1);
+        int x0 = std::max(0, std::min(static_cast<int>(fx), srcW - 1));
+        int y0 = std::max(0, std::min(static_cast<int>(fy), srcH - 1));
+        int x1 = std::min(x0 + 1, srcW - 1);
+        int y1 = std::min(y0 + 1, srcH - 1);
+        float sx = fx - x0;
+        float sy = fy - y0;
+
+        auto fetch = [&](int x, int y) -> glm::vec4 {
+            size_t idx = (static_cast<size_t>(y) * srcW + x) * 4;
+            if (idx + 3 >= m_storedOldTexture.size()) return glm::vec4(0.0f);
+            return glm::vec4(
+                m_storedOldTexture[idx] / 255.0f,
+                m_storedOldTexture[idx + 1] / 255.0f,
+                m_storedOldTexture[idx + 2] / 255.0f,
+                m_storedOldTexture[idx + 3] / 255.0f
+            );
+        };
+
+        glm::vec4 c00 = fetch(x0, y0);
+        glm::vec4 c10 = fetch(x1, y0);
+        glm::vec4 c01 = fetch(x0, y1);
+        glm::vec4 c11 = fetch(x1, y1);
+        return glm::mix(glm::mix(c00, c10, sx), glm::mix(c01, c11, sx), sy);
+    };
+
+    int pixelsFilled = 0;
+
+    // Software rasterize each face: for each face, get its new UVs (current) and old UVs (stored)
+    // Triangulate quads into triangles for rasterization
+    for (uint32_t fi = 0; fi < faceCount; ++fi) {
+        auto faceVerts = m_ctx.editableMesh.getFaceVertices(fi);
+        if (faceVerts.size() < 3) continue;
+
+        // Triangulate (fan from first vertex)
+        for (size_t t = 1; t + 1 < faceVerts.size(); ++t) {
+            uint32_t vi0 = faceVerts[0];
+            uint32_t vi1 = faceVerts[t];
+            uint32_t vi2 = faceVerts[t + 1];
+
+            // New UVs (current mesh state) — where to write in output texture
+            glm::vec2 newUV0 = m_ctx.editableMesh.getVertex(vi0).uv;
+            glm::vec2 newUV1 = m_ctx.editableMesh.getVertex(vi1).uv;
+            glm::vec2 newUV2 = m_ctx.editableMesh.getVertex(vi2).uv;
+
+            // Old UVs (stored) — where to read from old texture
+            glm::vec2 oldUV0 = m_storedOldUVs[vi0].uv;
+            glm::vec2 oldUV1 = m_storedOldUVs[vi1].uv;
+            glm::vec2 oldUV2 = m_storedOldUVs[vi2].uv;
+
+            // Pixel bounding box of the triangle in output texture
+            glm::vec2 uvMin = glm::min(glm::min(newUV0, newUV1), newUV2);
+            glm::vec2 uvMax = glm::max(glm::max(newUV0, newUV1), newUV2);
+
+            int minPX = std::max(0, static_cast<int>(std::floor(uvMin.x * outW)) - 1);
+            int maxPX = std::min(outW - 1, static_cast<int>(std::ceil(uvMax.x * outW)) + 1);
+            int minPY = std::max(0, static_cast<int>(std::floor(uvMin.y * outH)) - 1);
+            int maxPY = std::min(outH - 1, static_cast<int>(std::ceil(uvMax.y * outH)) + 1);
+
+            // Rasterize: for each pixel, check if inside triangle, compute barycentrics
+            for (int py = minPY; py <= maxPY; ++py) {
+                for (int px = minPX; px <= maxPX; ++px) {
+                    glm::vec2 p((px + 0.5f) / outW, (py + 0.5f) / outH);
+
+                    // Barycentric coordinates
+                    glm::vec2 v0 = newUV2 - newUV0;
+                    glm::vec2 v1 = newUV1 - newUV0;
+                    glm::vec2 v2 = p - newUV0;
+
+                    float dot00 = glm::dot(v0, v0);
+                    float dot01 = glm::dot(v0, v1);
+                    float dot02 = glm::dot(v0, v2);
+                    float dot11 = glm::dot(v1, v1);
+                    float dot12 = glm::dot(v1, v2);
+
+                    float denom = dot00 * dot11 - dot01 * dot01;
+                    if (std::abs(denom) < 1e-10f) continue;
+
+                    float invDenom = 1.0f / denom;
+                    float u = (dot11 * dot02 - dot01 * dot12) * invDenom;
+                    float v = (dot00 * dot12 - dot01 * dot02) * invDenom;
+
+                    // Check if inside triangle (with small margin for edge coverage)
+                    if (u < -0.001f || v < -0.001f || u + v > 1.001f) continue;
+
+                    // Interpolate old UVs using barycentrics
+                    float w0 = 1.0f - u - v;
+                    glm::vec2 oldUV = w0 * oldUV0 + v * oldUV1 + u * oldUV2;
+
+                    // Sample old texture
+                    glm::vec4 color = sampleOld(oldUV.x, oldUV.y);
+
+                    // Write to output texture
+                    size_t idx = (static_cast<size_t>(py) * outW + px) * 4;
+                    outTex[idx]     = static_cast<unsigned char>(std::min(255.0f, color.r * 255.0f));
+                    outTex[idx + 1] = static_cast<unsigned char>(std::min(255.0f, color.g * 255.0f));
+                    outTex[idx + 2] = static_cast<unsigned char>(std::min(255.0f, color.b * 255.0f));
+                    outTex[idx + 3] = 255;
+                    pixelsFilled++;
+                }
+            }
+        }
+    }
+
+    // Apply new texture to the scene object
+    m_ctx.selectedObject->setTextureData(outTex, outW, outH);
+    m_ctx.selectedObject->markTextureModified();
+    m_ctx.meshDirty = true;
+
+    std::cout << "[ModelEditor] Re-projected texture: " << outW << "x" << outH
+              << ", " << pixelsFilled << " pixels filled from " << faceCount << " faces" << std::endl;
+}
+
+void ModelingMode::packAndReprojectUVs() {
+    if (!m_ctx.selectedObject || !m_ctx.editableMesh.isValid()) return;
+    if (!m_ctx.selectedObject->hasTextureData()) return;
+
+    const auto& srcTex = m_ctx.selectedObject->getTextureData();
+    int srcW = m_ctx.selectedObject->getTextureWidth();
+    int srcH = m_ctx.selectedObject->getTextureHeight();
+    if (srcW <= 0 || srcH <= 0 || srcTex.empty()) return;
+
+    // Store old UVs in case user wants manual re-project later
+    storeUVsForReprojection();
+
+    int outSize = m_reprojectTexSize;
+
+    // Step 1: Create new texture, place downscaled original in chosen corner
+    // Initialize with black opaque (alpha=255) so paint shows in UV editor
+    size_t texBytes = static_cast<size_t>(outSize) * outSize * 4;
+    std::vector<unsigned char> outTex(texBytes, 0);
+    for (size_t i = 3; i < texBytes; i += 4) {
+        outTex[i] = 255;  // Set alpha channel to opaque
+    }
+
+    // Corner pixel offsets
+    int cornerPX = 0, cornerPY = 0;
+    int regionSize = static_cast<int>(outSize * m_packScale);
+    switch (m_packCorner) {
+        case 0: cornerPX = 0; cornerPY = 0; break;                                // bottom-left
+        case 1: cornerPX = outSize - regionSize; cornerPY = 0; break;              // bottom-right
+        case 2: cornerPX = 0; cornerPY = outSize - regionSize; break;              // top-left
+        case 3: cornerPX = outSize - regionSize; cornerPY = outSize - regionSize; break; // top-right
+    }
+
+    // Bilinear downscale original texture into the corner region
+    for (int dy = 0; dy < regionSize; ++dy) {
+        for (int dx = 0; dx < regionSize; ++dx) {
+            // Map destination pixel to source texture coordinate
+            float srcX = (static_cast<float>(dx) + 0.5f) / regionSize * srcW;
+            float srcY = (static_cast<float>(dy) + 0.5f) / regionSize * srcH;
+
+            // Bilinear sample
+            int x0 = std::max(0, std::min(static_cast<int>(srcX), srcW - 1));
+            int y0 = std::max(0, std::min(static_cast<int>(srcY), srcH - 1));
+            int x1 = std::min(x0 + 1, srcW - 1);
+            int y1 = std::min(y0 + 1, srcH - 1);
+            float fx = srcX - x0;
+            float fy = srcY - y0;
+
+            auto sample = [&](int x, int y) -> glm::vec4 {
+                size_t idx = (static_cast<size_t>(y) * srcW + x) * 4;
+                if (idx + 3 >= srcTex.size()) return glm::vec4(0.0f);
+                return glm::vec4(srcTex[idx], srcTex[idx+1], srcTex[idx+2], srcTex[idx+3]);
+            };
+
+            glm::vec4 c00 = sample(x0, y0);
+            glm::vec4 c10 = sample(x1, y0);
+            glm::vec4 c01 = sample(x0, y1);
+            glm::vec4 c11 = sample(x1, y1);
+            glm::vec4 c = glm::mix(glm::mix(c00, c10, fx), glm::mix(c01, c11, fx), fy);
+
+            size_t outIdx = (static_cast<size_t>(cornerPY + dy) * outSize + (cornerPX + dx)) * 4;
+            outTex[outIdx]     = static_cast<unsigned char>(std::min(255.0f, c.r));
+            outTex[outIdx + 1] = static_cast<unsigned char>(std::min(255.0f, c.g));
+            outTex[outIdx + 2] = static_cast<unsigned char>(std::min(255.0f, c.b));
+            outTex[outIdx + 3] = static_cast<unsigned char>(std::min(255.0f, c.a));
+        }
+    }
+
+    // Step 2: Scale and offset all UVs to point at the corner region
+    uint32_t vertCount = m_ctx.editableMesh.getVertexCount();
+
+    // Find actual UV bounds
+    glm::vec2 uvMin(FLT_MAX), uvMax(-FLT_MAX);
+    for (uint32_t i = 0; i < vertCount; ++i) {
+        glm::vec2 uv = m_ctx.editableMesh.getVertex(i).uv;
+        uv.x = uv.x - std::floor(uv.x);
+        uv.y = uv.y - std::floor(uv.y);
+        uvMin = glm::min(uvMin, uv);
+        uvMax = glm::max(uvMax, uv);
+    }
+
+    glm::vec2 uvRange = uvMax - uvMin;
+    if (uvRange.x < 0.001f || uvRange.y < 0.001f) {
+        std::cerr << "[ModelEditor] UV range too small to pack" << std::endl;
+        return;
+    }
+
+    // Corner UV offset (matches pixel placement)
+    glm::vec2 cornerUV(static_cast<float>(cornerPX) / outSize,
+                       static_cast<float>(cornerPY) / outSize);
+    float uvScale = static_cast<float>(regionSize) / outSize;
+
+    m_ctx.editableMesh.saveState();
+    for (uint32_t i = 0; i < vertCount; ++i) {
+        auto& vert = m_ctx.editableMesh.getVertex(i);
+        glm::vec2 uv = vert.uv;
+        uv.x = uv.x - std::floor(uv.x);
+        uv.y = uv.y - std::floor(uv.y);
+
+        // Normalize to [0,1] within actual UV bounds, then scale to corner
+        uv = (uv - uvMin) / uvRange;
+        uv = uv * uvScale + cornerUV;
+
+        vert.uv = uv;
+    }
+
+    // Step 3: Apply new texture
+    m_ctx.selectedObject->setTextureData(outTex, outSize, outSize);
+    m_ctx.selectedObject->markTextureModified();
+    m_ctx.meshDirty = true;
+
+    std::cout << "[ModelEditor] Pack complete: texture " << srcW << "x" << srcH
+              << " → " << regionSize << "x" << regionSize << " region in "
+              << outSize << "x" << outSize << " texture (corner " << m_packCorner << ")" << std::endl;
 }
 
 void ModelingMode::saveEditableMeshAsGLB() {

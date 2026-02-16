@@ -167,7 +167,7 @@ private:
     uint32_t m_nextHandle = 1;
 
     // Line rendering buffers (SEPARATE buffers for each renderLines call per frame)
-    static constexpr size_t NUM_LINE_BUFFERS = 16;  // Support up to 16 renderLines calls per frame (grid + gizmo axes + wireframe + selected edges)
+    static constexpr size_t NUM_LINE_BUFFERS = 32;  // Support up to 32 renderLines calls per frame (split view doubles usage: grid + axes + wireframe + selected edges per viewport)
     VkBuffer m_lineBuffers[NUM_LINE_BUFFERS] = {};
     VkDeviceMemory m_lineMemories[NUM_LINE_BUFFERS] = {};
     void* m_lineMappedMemories[NUM_LINE_BUFFERS] = {};

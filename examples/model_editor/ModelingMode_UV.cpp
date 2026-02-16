@@ -194,6 +194,29 @@ void ModelingMode::renderModelingUVWindow() {
             ImGui::SetTooltip("Draw UV edges onto texture (uses wireframe color)");
         }
         if (!canBake) ImGui::EndDisabled();
+
+        ImGui::SameLine();
+        bool patchAvail = m_ctx.selectedObject && m_ctx.selectedObject->hasTextureData();
+        if (!patchAvail) ImGui::BeginDisabled();
+        if (m_patchMoveMode) {
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.2f, 0.6f, 0.9f, 1.0f));
+            if (ImGui::Button("Patch Move")) {
+                cancelPatchMoveMode();
+            }
+            ImGui::PopStyleColor();
+        } else {
+            if (ImGui::Button("Patch Move")) {
+                m_patchMoveMode = true;
+                m_patchSelected = false;
+                m_patchDragging = false;
+                m_patchScaling = false;
+                std::cout << "[UV] Patch Move mode activated" << std::endl;
+            }
+        }
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+            ImGui::SetTooltip("Select UV island + texture pixels and move/scale them together");
+        }
+        if (!patchAvail) ImGui::EndDisabled();
         ImGui::Separator();
 
         ImVec2 available = ImGui::GetContentRegionAvail();
@@ -293,6 +316,167 @@ void ModelingMode::renderModelingUVWindow() {
             } else {
                 m_ctx.uvPanning = false;
                 std::cout << "[UV] Stopped panning. Pan offset: (" << m_ctx.uvPan.x << ", " << m_ctx.uvPan.y << ")" << std::endl;
+            }
+        }
+
+        // --- Patch Move interaction ---
+        if (m_patchMoveMode && isHovered && !m_ctx.uvPanning) {
+            glm::vec2 mouseUV = screenToUV(mousePos);
+
+            if (!m_patchSelected) {
+                // Selection phase: draw rect to select patch
+                if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+                    m_uvRectSelecting = true;
+                    m_uvRectStart = mouseUV;
+                    m_uvRectEnd = mouseUV;
+                }
+                if (m_uvRectSelecting && ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+                    m_uvRectEnd = mouseUV;
+                }
+                if (m_uvRectSelecting && !ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+                    m_uvRectSelecting = false;
+                    m_patchRectMin = glm::min(m_uvRectStart, m_uvRectEnd);
+                    m_patchRectMax = glm::max(m_uvRectStart, m_uvRectEnd);
+
+                    // Need some minimum size
+                    if (m_patchRectMax.x - m_patchRectMin.x > 0.005f &&
+                        m_patchRectMax.y - m_patchRectMin.y > 0.005f) {
+                        // Find UV vertices inside rect
+                        m_patchVertices.clear();
+                        m_patchOrigUVs.clear();
+                        for (uint32_t faceIdx = 0; faceIdx < m_ctx.editableMesh.getFaceCount(); ++faceIdx) {
+                            auto faceVerts = m_ctx.editableMesh.getFaceVertices(faceIdx);
+                            for (uint32_t vertIdx : faceVerts) {
+                                glm::vec2 uv = m_ctx.editableMesh.getVertex(vertIdx).uv;
+                                if (uv.x >= m_patchRectMin.x && uv.x <= m_patchRectMax.x &&
+                                    uv.y >= m_patchRectMin.y && uv.y <= m_patchRectMax.y) {
+                                    m_patchVertices.insert(vertIdx);
+                                    m_patchOrigUVs[vertIdx] = uv;
+                                }
+                            }
+                        }
+
+                        // Backup texture and extract patch pixels
+                        auto& texData = m_ctx.selectedObject->getTextureData();
+                        m_patchTextureBackup = texData;
+                        extractPatchPixels();
+
+                        m_patchOrigRectMin = m_patchRectMin;
+                        m_patchOrigRectMax = m_patchRectMax;
+                        m_patchSelected = true;
+                        m_patchDragging = false;
+                        m_patchScaling = false;
+
+                        std::cout << "[UV] Patch selected: " << m_patchVertices.size()
+                                  << " vertices, " << m_patchPixelW << "x" << m_patchPixelH << " pixels" << std::endl;
+                    }
+                }
+            } else {
+                // Transform phase: drag/scale the patch
+                float handleRadius = 8.0f / texSize;
+
+                // Corner handles for scaling
+                glm::vec2 corners[4] = {
+                    glm::vec2(m_patchRectMin.x, m_patchRectMax.y),  // TL
+                    glm::vec2(m_patchRectMax.x, m_patchRectMax.y),  // TR
+                    glm::vec2(m_patchRectMax.x, m_patchRectMin.y),  // BR
+                    glm::vec2(m_patchRectMin.x, m_patchRectMin.y),  // BL
+                };
+
+                if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+                    m_patchDragStart = mouseUV;
+                    int clickedHandle = -1;
+
+                    // Check corner handles
+                    for (int i = 0; i < 4; ++i) {
+                        if (glm::length(mouseUV - corners[i]) < handleRadius) {
+                            clickedHandle = i;
+                            break;
+                        }
+                    }
+
+                    if (clickedHandle >= 0) {
+                        m_patchScaling = true;
+                        m_patchScaleHandle = clickedHandle;
+                        m_patchDragging = false;
+                    } else if (mouseUV.x >= m_patchRectMin.x && mouseUV.x <= m_patchRectMax.x &&
+                               mouseUV.y >= m_patchRectMin.y && mouseUV.y <= m_patchRectMax.y) {
+                        // Click inside rect = drag
+                        m_patchDragging = true;
+                        m_patchScaling = false;
+                    }
+                }
+
+                if (ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+                    glm::vec2 delta = mouseUV - m_patchDragStart;
+
+                    if (m_patchDragging) {
+                        m_patchRectMin = m_patchOrigRectMin + delta;
+                        m_patchRectMax = m_patchOrigRectMax + delta;
+                        applyPatchTransform();
+                    } else if (m_patchScaling) {
+                        // Scale from opposite corner
+                        int anchor = (m_patchScaleHandle + 2) % 4;
+                        glm::vec2 anchorUV = (anchor == 0) ? glm::vec2(m_patchOrigRectMin.x, m_patchOrigRectMax.y) :
+                                             (anchor == 1) ? glm::vec2(m_patchOrigRectMax.x, m_patchOrigRectMax.y) :
+                                             (anchor == 2) ? glm::vec2(m_patchOrigRectMax.x, m_patchOrigRectMin.y) :
+                                                             glm::vec2(m_patchOrigRectMin.x, m_patchOrigRectMin.y);
+
+                        glm::vec2 origSize = m_patchOrigRectMax - m_patchOrigRectMin;
+                        glm::vec2 startOffset = m_patchDragStart - anchorUV;
+                        glm::vec2 currentOffset = mouseUV - anchorUV;
+
+                        float startDist = glm::length(startOffset);
+                        float currentDist = glm::length(currentOffset);
+                        float scale = (startDist > 0.001f) ? (currentDist / startDist) : 1.0f;
+                        scale = std::max(scale, 0.01f);  // Minimum scale
+
+                        glm::vec2 newSize = origSize * scale;
+                        // Rebuild rect from anchor
+                        glm::vec2 newMin, newMax;
+                        newMin.x = std::min(anchorUV.x, anchorUV.x + (m_patchOrigRectMax.x - anchorUV.x) * scale + (m_patchOrigRectMin.x - anchorUV.x) * scale);
+                        newMin.y = std::min(anchorUV.y, anchorUV.y + (m_patchOrigRectMax.y - anchorUV.y) * scale + (m_patchOrigRectMin.y - anchorUV.y) * scale);
+                        newMax.x = std::max(anchorUV.x, anchorUV.x + (m_patchOrigRectMax.x - anchorUV.x) * scale + (m_patchOrigRectMin.x - anchorUV.x) * scale);
+                        newMax.y = std::max(anchorUV.y, anchorUV.y + (m_patchOrigRectMax.y - anchorUV.y) * scale + (m_patchOrigRectMin.y - anchorUV.y) * scale);
+
+                        // Simpler: just scale from anchor
+                        m_patchRectMin.x = anchorUV.x + (m_patchOrigRectMin.x - anchorUV.x) * scale;
+                        m_patchRectMin.y = anchorUV.y + (m_patchOrigRectMin.y - anchorUV.y) * scale;
+                        m_patchRectMax.x = anchorUV.x + (m_patchOrigRectMax.x - anchorUV.x) * scale;
+                        m_patchRectMax.y = anchorUV.y + (m_patchOrigRectMax.y - anchorUV.y) * scale;
+
+                        // Ensure min < max
+                        if (m_patchRectMin.x > m_patchRectMax.x) std::swap(m_patchRectMin.x, m_patchRectMax.x);
+                        if (m_patchRectMin.y > m_patchRectMax.y) std::swap(m_patchRectMin.y, m_patchRectMax.y);
+
+                        applyPatchTransform();
+                    }
+                }
+
+                if (!ImGui::IsMouseDown(ImGuiMouseButton_Left) && (m_patchDragging || m_patchScaling)) {
+                    // Finished drag/scale — update originals for next operation
+                    m_patchOrigRectMin = m_patchRectMin;
+                    m_patchOrigRectMax = m_patchRectMax;
+                    // Update orig UVs to current
+                    for (auto& [vertIdx, origUV] : m_patchOrigUVs) {
+                        origUV = m_ctx.editableMesh.getVertex(vertIdx).uv;
+                    }
+                    // Re-extract pixels from current state for next operation
+                    auto& texData = m_ctx.selectedObject->getTextureData();
+                    m_patchTextureBackup = texData;
+                    extractPatchPixels();
+                    m_patchDragging = false;
+                    m_patchScaling = false;
+                }
+
+                // Confirm with Enter or double-click
+                if (ImGui::IsKeyPressed(ImGuiKey_Enter) || ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
+                    confirmPatchMove();
+                }
+                // Cancel with ESC
+                if (ImGui::IsKeyPressed(ImGuiKey_Escape)) {
+                    cancelPatchMoveMode();
+                }
             }
         }
 
@@ -401,7 +585,7 @@ void ModelingMode::renderModelingUVWindow() {
 
         // Check for gizmo clicks based on current mode
         if (!m_ctx.uvSelectedFaces.empty() && isHovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left) &&
-            !m_ctx.uvScaling && !m_ctx.uvRotating && !m_ctx.uvDraggingSelection && !m_ctx.isPainting) {
+            !m_ctx.uvScaling && !m_ctx.uvRotating && !m_ctx.uvDraggingSelection && !m_ctx.isPainting && !m_patchMoveMode) {
 
             glm::vec2 selMin, selMax;
             getUVSelectionBounds(selMin, selMax);
@@ -506,8 +690,10 @@ void ModelingMode::renderModelingUVWindow() {
             }
         }
 
-        // Skip selection handling if we're painting
-        if (m_ctx.isPainting && m_ctx.selectedObject && isHovered && ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+        // Skip selection handling if we're painting or in patch move mode
+        if (m_patchMoveMode) {
+            // Patch move handles its own clicks
+        } else if (m_ctx.isPainting && m_ctx.selectedObject && isHovered && ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
             // Don't process selection clicks while painting
         } else if (isHovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left) && !m_ctx.uvPanning && !m_ctx.uvScaling) {
             glm::vec2 clickUV = screenToUV(mousePos);
@@ -812,6 +998,17 @@ void ModelingMode::renderModelingUVWindow() {
 
         // Draw texture if available (flip Y to match UV convention)
         if (m_ctx.selectedObject) {
+            // Ensure GPU texture is up-to-date (handles 3D painting updates)
+            if (m_ctx.selectedObject->isTextureModified()) {
+                uint32_t handle = m_ctx.selectedObject->getBufferHandle();
+                auto& texData = m_ctx.selectedObject->getTextureData();
+                int w = m_ctx.selectedObject->getTextureWidth();
+                int h = m_ctx.selectedObject->getTextureHeight();
+                if (!texData.empty() && w > 0 && h > 0) {
+                    m_ctx.modelRenderer.updateTexture(handle, texData.data(), w, h);
+                    m_ctx.selectedObject->clearTextureModified();
+                }
+            }
             ModelGPUData* gpuData = m_ctx.modelRenderer.getModelData(m_ctx.selectedObject->getBufferHandle());
             if (gpuData && gpuData->descriptorSet) {
                 // Flip texture vertically: uv0=(0,1), uv1=(1,0)
@@ -1110,6 +1307,36 @@ void ModelingMode::renderModelingUVWindow() {
             drawList->AddRect(screenMin, screenMax, IM_COL32(100, 150, 255, 200), 0.0f, 0, 2.0f);
         }
 
+        // Draw Patch Move rect + handles
+        if (m_patchMoveMode && m_patchSelected) {
+            ImVec2 pMin(offsetX + m_patchRectMin.x * texSize, offsetY + (1.0f - m_patchRectMax.y) * texSize);
+            ImVec2 pMax(offsetX + m_patchRectMax.x * texSize, offsetY + (1.0f - m_patchRectMin.y) * texSize);
+
+            // Dashed rect outline (simulated with thick colored rect)
+            ImU32 patchOutline = IM_COL32(255, 200, 50, 255);
+            ImU32 patchFill = IM_COL32(255, 200, 50, 30);
+            drawList->AddRectFilled(pMin, pMax, patchFill);
+            drawList->AddRect(pMin, pMax, patchOutline, 0.0f, 0, 2.5f);
+
+            // Corner handles
+            float hs = 6.0f;
+            ImU32 handleColor = IM_COL32(255, 255, 255, 255);
+            ImU32 handleBorder = IM_COL32(0, 0, 0, 255);
+            ImVec2 handleCorners[4] = {
+                ImVec2(pMin.x, pMin.y),  // TL
+                ImVec2(pMax.x, pMin.y),  // TR
+                ImVec2(pMax.x, pMax.y),  // BR
+                ImVec2(pMin.x, pMax.y),  // BL
+            };
+            for (int i = 0; i < 4; ++i) {
+                ImU32 c = (m_patchScaling && m_patchScaleHandle == i) ? IM_COL32(255, 150, 50, 255) : handleColor;
+                drawList->AddRectFilled(ImVec2(handleCorners[i].x - hs, handleCorners[i].y - hs),
+                                        ImVec2(handleCorners[i].x + hs, handleCorners[i].y + hs), c);
+                drawList->AddRect(ImVec2(handleCorners[i].x - hs, handleCorners[i].y - hs),
+                                  ImVec2(handleCorners[i].x + hs, handleCorners[i].y + hs), handleBorder);
+            }
+        }
+
         // UV space border
         drawList->AddRect(texMin, texMax, IM_COL32(200, 200, 200, 255), 0.0f, 0, 2.0f);
 
@@ -1178,7 +1405,11 @@ void ModelingMode::renderModelingUVWindow() {
             ImGui::SameLine();
             ImGui::TextColored(ImVec4(0.3f, 0.6f, 1.0f, 1.0f), "| UV Selected: %zu", m_ctx.uvSelectedFaces.size());
         }
-        if (m_ctx.uvScaling) {
+        if (m_patchMoveMode && !m_patchSelected) {
+            ImGui::TextColored(ImVec4(0.2f, 0.7f, 1.0f, 1.0f), "PATCH MOVE: Draw rectangle around UV island");
+        } else if (m_patchMoveMode && m_patchSelected) {
+            ImGui::TextColored(ImVec4(0.2f, 0.7f, 1.0f, 1.0f), "Drag to move | Corner handles to scale | Enter: confirm | ESC: cancel");
+        } else if (m_ctx.uvScaling) {
             ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.2f, 1.0f), "SCALING - Release to confirm, Esc to cancel");
         } else if (m_ctx.uvRotating) {
             ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), "ROTATING - Click to confirm, Esc to cancel");
@@ -1748,4 +1979,207 @@ void ModelingMode::bakeUVEdgesToTexture(const glm::vec3& edgeColor, int lineThic
     m_ctx.selectedObject->clearTextureModified();
 
     std::cout << "[UV] Baked " << edgeCount << " edges to texture (" << texW << "x" << texH << ")" << std::endl;
+}
+
+// --- Patch Move methods ---
+
+void ModelingMode::extractPatchPixels() {
+    if (!m_ctx.selectedObject || !m_ctx.selectedObject->hasTextureData()) return;
+
+    int texW = m_ctx.selectedObject->getTextureWidth();
+    int texH = m_ctx.selectedObject->getTextureHeight();
+    auto& texData = m_ctx.selectedObject->getTextureData();
+
+    // Convert UV rect to pixel coordinates (no Y-flip: UV.y maps directly to pixel row)
+    int pixMinX = static_cast<int>(std::floor(m_patchRectMin.x * texW));
+    int pixMaxX = static_cast<int>(std::ceil(m_patchRectMax.x * texW));
+    int pixMinY = static_cast<int>(std::floor(m_patchRectMin.y * texH));
+    int pixMaxY = static_cast<int>(std::ceil(m_patchRectMax.y * texH));
+
+    // Clamp to texture bounds
+    pixMinX = std::clamp(pixMinX, 0, texW);
+    pixMaxX = std::clamp(pixMaxX, 0, texW);
+    pixMinY = std::clamp(pixMinY, 0, texH);
+    pixMaxY = std::clamp(pixMaxY, 0, texH);
+
+    m_patchPixelW = pixMaxX - pixMinX;
+    m_patchPixelH = pixMaxY - pixMinY;
+
+    if (m_patchPixelW <= 0 || m_patchPixelH <= 0) {
+        m_patchPixels.clear();
+        return;
+    }
+
+    m_patchPixels.resize(m_patchPixelW * m_patchPixelH * 4);
+
+    for (int y = 0; y < m_patchPixelH; ++y) {
+        for (int x = 0; x < m_patchPixelW; ++x) {
+            int srcX = pixMinX + x;
+            int srcY = pixMinY + y;
+            if (srcX < 0 || srcX >= texW || srcY < 0 || srcY >= texH) continue;
+
+            size_t srcIdx = (static_cast<size_t>(srcY) * texW + srcX) * 4;
+            size_t dstIdx = (static_cast<size_t>(y) * m_patchPixelW + x) * 4;
+
+            m_patchPixels[dstIdx + 0] = texData[srcIdx + 0];
+            m_patchPixels[dstIdx + 1] = texData[srcIdx + 1];
+            m_patchPixels[dstIdx + 2] = texData[srcIdx + 2];
+            m_patchPixels[dstIdx + 3] = texData[srcIdx + 3];
+        }
+    }
+}
+
+void ModelingMode::applyPatchTransform() {
+    if (!m_ctx.selectedObject || m_patchPixels.empty()) return;
+
+    int texW = m_ctx.selectedObject->getTextureWidth();
+    int texH = m_ctx.selectedObject->getTextureHeight();
+    auto& texData = m_ctx.selectedObject->getTextureData();
+
+    // 1. Restore texture from backup
+    if (m_patchTextureBackup.size() == texData.size()) {
+        texData = m_patchTextureBackup;
+    }
+
+    // 2. Clear original rect region (fill with transparent black)
+    {
+        int oldMinX = static_cast<int>(std::floor(m_patchOrigRectMin.x * texW));
+        int oldMaxX = static_cast<int>(std::ceil(m_patchOrigRectMax.x * texW));
+        int oldMinY = static_cast<int>(std::floor(m_patchOrigRectMin.y * texH));
+        int oldMaxY = static_cast<int>(std::ceil(m_patchOrigRectMax.y * texH));
+        oldMinX = std::clamp(oldMinX, 0, texW);
+        oldMaxX = std::clamp(oldMaxX, 0, texW);
+        oldMinY = std::clamp(oldMinY, 0, texH);
+        oldMaxY = std::clamp(oldMaxY, 0, texH);
+
+        for (int y = oldMinY; y < oldMaxY; ++y) {
+            for (int x = oldMinX; x < oldMaxX; ++x) {
+                size_t idx = (static_cast<size_t>(y) * texW + x) * 4;
+                texData[idx + 0] = 0;
+                texData[idx + 1] = 0;
+                texData[idx + 2] = 0;
+                texData[idx + 3] = 0;
+            }
+        }
+    }
+
+    // 3. Blit patch pixels to new rect position (bilinear if scaled)
+    {
+        int newMinX = static_cast<int>(std::floor(m_patchRectMin.x * texW));
+        int newMaxX = static_cast<int>(std::ceil(m_patchRectMax.x * texW));
+        int newMinY = static_cast<int>(std::floor(m_patchRectMin.y * texH));
+        int newMaxY = static_cast<int>(std::ceil(m_patchRectMax.y * texH));
+
+        int newW = newMaxX - newMinX;
+        int newH = newMaxY - newMinY;
+
+        if (newW > 0 && newH > 0) {
+            for (int dy = 0; dy < newH; ++dy) {
+                for (int dx = 0; dx < newW; ++dx) {
+                    int dstX = newMinX + dx;
+                    int dstY = newMinY + dy;
+                    if (dstX < 0 || dstX >= texW || dstY < 0 || dstY >= texH) continue;
+
+                    // Sample from patch pixels with bilinear interpolation
+                    float srcFX = static_cast<float>(dx) / std::max(newW - 1, 1) * (m_patchPixelW - 1);
+                    float srcFY = static_cast<float>(dy) / std::max(newH - 1, 1) * (m_patchPixelH - 1);
+
+                    int sx0 = static_cast<int>(std::floor(srcFX));
+                    int sy0 = static_cast<int>(std::floor(srcFY));
+                    int sx1 = std::min(sx0 + 1, m_patchPixelW - 1);
+                    int sy1 = std::min(sy0 + 1, m_patchPixelH - 1);
+                    sx0 = std::clamp(sx0, 0, m_patchPixelW - 1);
+                    sy0 = std::clamp(sy0, 0, m_patchPixelH - 1);
+
+                    float fx = srcFX - std::floor(srcFX);
+                    float fy = srcFY - std::floor(srcFY);
+
+                    auto sample = [&](int sx, int sy, int ch) -> float {
+                        return static_cast<float>(m_patchPixels[(static_cast<size_t>(sy) * m_patchPixelW + sx) * 4 + ch]);
+                    };
+
+                    size_t dstIdx = (static_cast<size_t>(dstY) * texW + dstX) * 4;
+                    for (int ch = 0; ch < 4; ++ch) {
+                        float v00 = sample(sx0, sy0, ch);
+                        float v10 = sample(sx1, sy0, ch);
+                        float v01 = sample(sx0, sy1, ch);
+                        float v11 = sample(sx1, sy1, ch);
+                        float top = v00 * (1.0f - fx) + v10 * fx;
+                        float bot = v01 * (1.0f - fx) + v11 * fx;
+                        float val = top * (1.0f - fy) + bot * fy;
+                        texData[dstIdx + ch] = static_cast<unsigned char>(std::clamp(val, 0.0f, 255.0f));
+                    }
+                }
+            }
+        }
+    }
+
+    // 4. Remap UV vertices
+    {
+        glm::vec2 origSize = m_patchOrigRectMax - m_patchOrigRectMin;
+        glm::vec2 newSize = m_patchRectMax - m_patchRectMin;
+
+        for (auto& [vertIdx, origUV] : m_patchOrigUVs) {
+            glm::vec2 t;
+            t.x = (origSize.x > 0.0001f) ? (origUV.x - m_patchOrigRectMin.x) / origSize.x : 0.0f;
+            t.y = (origSize.y > 0.0001f) ? (origUV.y - m_patchOrigRectMin.y) / origSize.y : 0.0f;
+            m_ctx.editableMesh.getVertex(vertIdx).uv = m_patchRectMin + t * newSize;
+        }
+    }
+
+    // 5. Upload texture to GPU
+    uint32_t handle = m_ctx.selectedObject->getBufferHandle();
+    m_ctx.modelRenderer.updateTexture(handle, texData.data(), texW, texH);
+    m_ctx.meshDirty = true;
+}
+
+void ModelingMode::cancelPatchMoveMode() {
+    if (m_patchSelected && m_ctx.selectedObject) {
+        // Restore texture from backup
+        auto& texData = m_ctx.selectedObject->getTextureData();
+        if (m_patchTextureBackup.size() == texData.size()) {
+            texData = m_patchTextureBackup;
+            uint32_t handle = m_ctx.selectedObject->getBufferHandle();
+            int texW = m_ctx.selectedObject->getTextureWidth();
+            int texH = m_ctx.selectedObject->getTextureHeight();
+            m_ctx.modelRenderer.updateTexture(handle, texData.data(), texW, texH);
+        }
+
+        // Restore original UVs
+        for (auto& [vertIdx, origUV] : m_patchOrigUVs) {
+            m_ctx.editableMesh.getVertex(vertIdx).uv = origUV;
+        }
+        m_ctx.meshDirty = true;
+    }
+
+    m_patchMoveMode = false;
+    m_patchSelected = false;
+    m_patchDragging = false;
+    m_patchScaling = false;
+    m_patchVertices.clear();
+    m_patchOrigUVs.clear();
+    m_patchTextureBackup.clear();
+    m_patchPixels.clear();
+    m_patchPixelW = 0;
+    m_patchPixelH = 0;
+
+    std::cout << "[UV] Patch Move mode cancelled" << std::endl;
+}
+
+void ModelingMode::confirmPatchMove() {
+    // Finalize — clear backup data, keep current texture and UVs
+    m_patchSelected = false;
+    m_patchDragging = false;
+    m_patchScaling = false;
+    m_patchVertices.clear();
+    m_patchOrigUVs.clear();
+    m_patchTextureBackup.clear();
+    m_patchPixels.clear();
+    m_patchPixelW = 0;
+    m_patchPixelH = 0;
+
+    // Stay in patch move mode for next selection
+    m_ctx.meshDirty = true;
+
+    std::cout << "[UV] Patch Move confirmed" << std::endl;
 }

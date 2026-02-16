@@ -355,6 +355,17 @@ struct EditorContext {
     std::function<void(CloneSourceImage&)> createCloneImageTextureCallback;
     std::function<void(CloneSourceImage&)> destroyCloneImageTextureCallback;
 
+    // AI model generation (Hunyuan3D)
+    std::function<void(const std::string& prompt, const std::string& imagePath)> generateModelCallback;
+    std::function<void()> cancelGenerationCallback;
+    std::function<void(bool, bool)> toggleServerCallback;  // start/stop (lowVRAM, enableTex)
+    bool& aiGenerating;
+    std::string& aiGenerateStatus;
+    bool& aiServerRunning;
+    bool& aiServerReady;
+    std::vector<std::string>& aiLogLines;  // Server log output
+    bool showAIGenerateWindow = false;
+
     // Helper methods
 
     /**

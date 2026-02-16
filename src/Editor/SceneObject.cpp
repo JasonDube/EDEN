@@ -645,6 +645,10 @@ void SceneObject::paintAt(const glm::vec2& uv, const glm::vec3& color, float rad
             m_textureData[idx] = static_cast<unsigned char>(std::clamp(r, 0.0f, 1.0f) * 255.0f);
             m_textureData[idx + 1] = static_cast<unsigned char>(std::clamp(g, 0.0f, 1.0f) * 255.0f);
             m_textureData[idx + 2] = static_cast<unsigned char>(std::clamp(b, 0.0f, 1.0f) * 255.0f);
+            // Blend alpha too — ensures painted pixels become visible in UV editor
+            float a = m_textureData[idx + 3] / 255.0f;
+            a = a * (1.0f - alpha) + alpha;
+            m_textureData[idx + 3] = static_cast<unsigned char>(std::clamp(a, 0.0f, 1.0f) * 255.0f);
         }
     }
 

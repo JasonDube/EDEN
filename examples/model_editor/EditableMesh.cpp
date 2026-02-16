@@ -1623,10 +1623,33 @@ void EditableMesh::mergeTrianglesToQuads(float normalThreshold) {
                     float dotProduct = glm::dot(normal1, normal2);
 
                     if (dotProduct > normalThreshold) {
-                        mergeList.push_back({faceIdx, neighborFace, he});
-                        merged[faceIdx] = true;
-                        merged[neighborFace] = true;
-                        break;
+                        // Check UV continuity — don't merge across UV seams
+                        // Compare the shared edge vertices: if the twin uses different vertex
+                        // indices, check that UVs match (same index = same UV, no seam)
+                        uint32_t heFrom = m_halfEdges[m_halfEdges[he].prevIndex].vertexIndex;
+                        uint32_t heTo = m_halfEdges[he].vertexIndex;
+                        uint32_t twinFrom = m_halfEdges[m_halfEdges[twin].prevIndex].vertexIndex;
+                        uint32_t twinTo = m_halfEdges[twin].vertexIndex;
+
+                        // Twin edge is reversed: he goes A→B, twin goes B'→A'
+                        // So heTo matches twinFrom position, heFrom matches twinTo position
+                        bool uvMatch = true;
+                        const float uvTol = 0.001f;
+                        if (heTo != twinFrom) {
+                            glm::vec2 d = m_vertices[heTo].uv - m_vertices[twinFrom].uv;
+                            if (std::abs(d.x) > uvTol || std::abs(d.y) > uvTol) uvMatch = false;
+                        }
+                        if (heFrom != twinTo) {
+                            glm::vec2 d = m_vertices[heFrom].uv - m_vertices[twinTo].uv;
+                            if (std::abs(d.x) > uvTol || std::abs(d.y) > uvTol) uvMatch = false;
+                        }
+
+                        if (uvMatch) {
+                            mergeList.push_back({faceIdx, neighborFace, he});
+                            merged[faceIdx] = true;
+                            merged[neighborFace] = true;
+                            break;
+                        }
                     }
                 }
             }
@@ -3610,6 +3633,250 @@ void EditableMesh::flipSelectedNormals() {
         if (faceIdx < m_faces.size()) {
             m_faces[faceIdx].selected = true;
         }
+    }
+}
+
+void EditableMesh::catmullClarkSubdivide(int levels) {
+    if (m_faces.empty() || m_vertices.empty()) return;
+    levels = std::max(1, std::min(levels, 3));
+
+    for (int level = 0; level < levels; ++level) {
+        uint32_t origVertCount = static_cast<uint32_t>(m_vertices.size());
+        uint32_t origFaceCount = static_cast<uint32_t>(m_faces.size());
+        uint32_t origHECount = static_cast<uint32_t>(m_halfEdges.size());
+
+        // === Step 1: Compute face points ===
+        std::vector<uint32_t> facePointIdx(origFaceCount);
+        for (uint32_t fi = 0; fi < origFaceCount; ++fi) {
+            auto verts = getFaceVertices(fi);
+            if (verts.empty()) continue;
+
+            HEVertex fp{};
+            fp.halfEdgeIndex = UINT32_MAX;
+            float n = static_cast<float>(verts.size());
+            for (uint32_t vi : verts) {
+                const auto& v = m_vertices[vi];
+                fp.position += v.position;
+                fp.uv += v.uv;
+                fp.color += v.color;
+            }
+            fp.position /= n;
+            fp.uv /= n;
+            fp.color /= n;
+            facePointIdx[fi] = static_cast<uint32_t>(m_vertices.size());
+            m_vertices.push_back(fp);
+        }
+
+        // === Step 2: Compute edge points ===
+        // Use half-edge canonical index (min of he, twin) as edge key
+        // This correctly handles split-vertex meshes where the same geometric edge
+        // has different vertex indices on different faces.
+        struct EdgeInfo {
+            uint32_t he;           // one of the half-edges
+            uint32_t face0, face1; // adjacent faces
+            bool boundary;
+        };
+        std::unordered_map<uint32_t, EdgeInfo> edgeInfoMap;   // canonical he → info
+        std::unordered_map<uint32_t, uint32_t> edgePointMap;  // canonical he → new vertex index
+
+        for (uint32_t fi = 0; fi < origFaceCount; ++fi) {
+            auto heEdges = getFaceEdges(fi);
+            for (uint32_t he : heEdges) {
+                uint32_t twin = m_halfEdges[he].twinIndex;
+                uint32_t canonKey = (twin != UINT32_MAX) ? std::min(he, twin) : he;
+
+                auto it = edgeInfoMap.find(canonKey);
+                if (it == edgeInfoMap.end()) {
+                    EdgeInfo ei;
+                    ei.he = he;
+                    ei.face0 = fi;
+                    ei.face1 = UINT32_MAX;
+                    ei.boundary = (twin == UINT32_MAX);
+                    edgeInfoMap[canonKey] = ei;
+                } else {
+                    it->second.face1 = fi;
+                    it->second.boundary = false;
+                }
+            }
+        }
+
+        for (auto& [canonKey, ei] : edgeInfoMap) {
+            uint32_t fromV = m_halfEdges[m_halfEdges[ei.he].prevIndex].vertexIndex;
+            uint32_t toV = m_halfEdges[ei.he].vertexIndex;
+            const auto& v0 = m_vertices[fromV];
+            const auto& v1 = m_vertices[toV];
+
+            HEVertex ep{};
+            ep.halfEdgeIndex = UINT32_MAX;
+
+            if (ei.boundary || ei.face1 == UINT32_MAX) {
+                ep.position = (v0.position + v1.position) * 0.5f;
+                ep.uv = (v0.uv + v1.uv) * 0.5f;
+                ep.color = (v0.color + v1.color) * 0.5f;
+            } else {
+                const auto& fp0 = m_vertices[facePointIdx[ei.face0]];
+                const auto& fp1 = m_vertices[facePointIdx[ei.face1]];
+                ep.position = (v0.position + v1.position + fp0.position + fp1.position) * 0.25f;
+                ep.uv = (v0.uv + v1.uv + fp0.uv + fp1.uv) * 0.25f;
+                ep.color = (v0.color + v1.color + fp0.color + fp1.color) * 0.25f;
+            }
+            edgePointMap[canonKey] = static_cast<uint32_t>(m_vertices.size());
+            m_vertices.push_back(ep);
+        }
+
+        // === Step 3: Move original vertices ===
+        std::vector<glm::vec3> newPositions(origVertCount);
+        std::vector<glm::vec2> newUVs(origVertCount);
+        std::vector<glm::vec4> newColors(origVertCount);
+
+        for (uint32_t vi = 0; vi < origVertCount; ++vi) {
+            auto adjFaces = getVertexFaces(vi);
+            auto adjEdges = getVertexEdges(vi);
+            const auto& P = m_vertices[vi];
+
+            // Check if boundary vertex using half-edge twins
+            bool isBoundary = false;
+            std::vector<uint32_t> boundaryEdgeCanonKeys;
+            for (uint32_t he : adjEdges) {
+                if (m_halfEdges[he].twinIndex == UINT32_MAX) {
+                    isBoundary = true;
+                    boundaryEdgeCanonKeys.push_back(he); // no twin, he IS the canonical key
+                }
+            }
+
+            if (isBoundary) {
+                // Boundary vertex: average of adjacent boundary edge midpoints + original position
+                // Rule: (M + P) / 2 where M = average of boundary edge midpoints
+                glm::vec3 M(0);
+                glm::vec2 Muv(0);
+                glm::vec4 Mcolor(0);
+                int count = 0;
+                for (uint32_t ck : boundaryEdgeCanonKeys) {
+                    uint32_t fromV = m_halfEdges[m_halfEdges[ck].prevIndex].vertexIndex;
+                    uint32_t toV = m_halfEdges[ck].vertexIndex;
+                    M += (m_vertices[fromV].position + m_vertices[toV].position) * 0.5f;
+                    Muv += (m_vertices[fromV].uv + m_vertices[toV].uv) * 0.5f;
+                    Mcolor += (m_vertices[fromV].color + m_vertices[toV].color) * 0.5f;
+                    count++;
+                }
+                if (count >= 2) {
+                    float w = 1.0f / static_cast<float>(count);
+                    M *= w; Muv *= w; Mcolor *= w;
+                    newPositions[vi] = (M + P.position) * 0.5f;
+                    newUVs[vi] = (Muv + P.uv) * 0.5f;
+                    newColors[vi] = (Mcolor + P.color) * 0.5f;
+                } else {
+                    newPositions[vi] = P.position;
+                    newUVs[vi] = P.uv;
+                    newColors[vi] = P.color;
+                }
+            } else {
+                int n = static_cast<int>(adjFaces.size());
+                if (n == 0) {
+                    newPositions[vi] = P.position;
+                    newUVs[vi] = P.uv;
+                    newColors[vi] = P.color;
+                    continue;
+                }
+                float fn = static_cast<float>(n);
+
+                // Q = average of face points
+                glm::vec3 Q(0);
+                glm::vec2 Quv(0);
+                glm::vec4 Qcolor(0);
+                for (uint32_t fi : adjFaces) {
+                    if (fi < origFaceCount) {
+                        const auto& fp = m_vertices[facePointIdx[fi]];
+                        Q += fp.position;
+                        Quv += fp.uv;
+                        Qcolor += fp.color;
+                    }
+                }
+                Q /= fn;
+                Quv /= fn;
+                Qcolor /= fn;
+
+                // R = average of edge midpoints (using topological neighbors)
+                glm::vec3 R(0);
+                glm::vec2 Ruv(0);
+                glm::vec4 Rcolor(0);
+                int edgeCount = 0;
+                for (uint32_t he : adjEdges) {
+                    uint32_t ni = m_halfEdges[he].vertexIndex;
+                    if (ni < origVertCount) {
+                        R += (P.position + m_vertices[ni].position) * 0.5f;
+                        Ruv += (P.uv + m_vertices[ni].uv) * 0.5f;
+                        Rcolor += (P.color + m_vertices[ni].color) * 0.5f;
+                        edgeCount++;
+                    }
+                }
+                if (edgeCount > 0) {
+                    float ec = static_cast<float>(edgeCount);
+                    R /= ec;
+                    Ruv /= ec;
+                    Rcolor /= ec;
+                }
+
+                // New position: (Q + 2R + (n-3)P) / n
+                newPositions[vi] = (Q + 2.0f * R + (fn - 3.0f) * P.position) / fn;
+                newUVs[vi] = (Quv + 2.0f * Ruv + (fn - 3.0f) * P.uv) / fn;
+                newColors[vi] = (Qcolor + 2.0f * Rcolor + (fn - 3.0f) * P.color) / fn;
+            }
+        }
+
+        // Apply moved positions to original vertices
+        for (uint32_t vi = 0; vi < origVertCount; ++vi) {
+            m_vertices[vi].position = newPositions[vi];
+            m_vertices[vi].uv = newUVs[vi];
+            m_vertices[vi].color = newColors[vi];
+        }
+
+        // === Step 4: Create new quads ===
+        // Each original N-gon face produces N new quads
+        // Use half-edge indices to look up edge points (not vertex-index pairs)
+        std::vector<std::array<uint32_t, 4>> newQuads;
+
+        for (uint32_t fi = 0; fi < origFaceCount; ++fi) {
+            auto verts = getFaceVertices(fi);
+            auto heEdges = getFaceEdges(fi);
+            uint32_t nv = static_cast<uint32_t>(verts.size());
+            uint32_t fpIdx = facePointIdx[fi];
+
+            for (uint32_t i = 0; i < nv; ++i) {
+                uint32_t curr = verts[i];
+                uint32_t heNext = heEdges[i];                        // edge: curr → next
+                uint32_t hePrev = heEdges[(i + nv - 1) % nv];        // edge: prev → curr
+
+                // Canonical edge keys
+                uint32_t twinNext = m_halfEdges[heNext].twinIndex;
+                uint32_t canonNext = (twinNext != UINT32_MAX) ? std::min(heNext, twinNext) : heNext;
+
+                uint32_t twinPrev = m_halfEdges[hePrev].twinIndex;
+                uint32_t canonPrev = (twinPrev != UINT32_MAX) ? std::min(hePrev, twinPrev) : hePrev;
+
+                uint32_t epNext = edgePointMap[canonNext];
+                uint32_t epPrev = edgePointMap[canonPrev];
+
+                // Quad: face_point, edge_point_prev, original_vertex, edge_point_next
+                newQuads.push_back({fpIdx, epPrev, curr, epNext});
+            }
+        }
+
+        // Rebuild mesh with new topology
+        m_halfEdges.clear();
+        m_faces.clear();
+        m_edgeMap.clear();
+        m_selectedEdges.clear();
+        for (auto& v : m_vertices) {
+            v.halfEdgeIndex = UINT32_MAX;
+        }
+
+        addQuadFacesBatch(newQuads);
+        recalculateNormals();
+
+        std::cout << "Catmull-Clark subdivision level " << (level + 1)
+                  << ": " << m_vertices.size() << " verts, "
+                  << m_faces.size() << " faces" << std::endl;
     }
 }
 
@@ -6580,7 +6847,14 @@ bool EditableMesh::saveLime(const std::string& filepath, const unsigned char* te
     file << "# Quads: " << quadCount << ", Tris: " << triCount << ", Other: " << otherCount << "\n";
 
     file.close();
-    std::cout << "Saved mesh with texture and transform to " << filepath << std::endl;
+    // Debug: print UV range for save verification
+    glm::vec2 uvMin(FLT_MAX), uvMax(-FLT_MAX);
+    for (const auto& v : m_vertices) {
+        uvMin = glm::min(uvMin, v.uv);
+        uvMax = glm::max(uvMax, v.uv);
+    }
+    std::cout << "Saved mesh with texture and transform to " << filepath
+              << " | UV range: [" << uvMin.x << "," << uvMin.y << "] - [" << uvMax.x << "," << uvMax.y << "]" << std::endl;
     return true;
 }
 
@@ -6919,7 +7193,14 @@ bool EditableMesh::loadLime(const std::string& filepath, std::vector<unsigned ch
         std::cout << ", texture " << outTexWidth << "x" << outTexHeight;
     }
     std::cout << ", transform: pos(" << outPosition.x << "," << outPosition.y << "," << outPosition.z << ")"
-              << " scale(" << outScale.x << "," << outScale.y << "," << outScale.z << ")" << std::endl;
+              << " scale(" << outScale.x << "," << outScale.y << "," << outScale.z << ")";
+    // Debug: print UV range for load verification
+    glm::vec2 uvMin(FLT_MAX), uvMax(-FLT_MAX);
+    for (const auto& v : m_vertices) {
+        uvMin = glm::min(uvMin, v.uv);
+        uvMax = glm::max(uvMax, v.uv);
+    }
+    std::cout << " | UV range: [" << uvMin.x << "," << uvMin.y << "] - [" << uvMax.x << "," << uvMax.y << "]" << std::endl;
 
     return true;
 }

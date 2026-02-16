@@ -109,6 +109,27 @@ private:
     // UV baking - draws UV edges onto texture
     void bakeUVEdgesToTexture(const glm::vec3& edgeColor, int lineThickness = 1);
 
+    // Bake texture colors into vertex colors (then remove texture)
+    void bakeTextureToVertexColors();
+
+    // UV re-projection: store old UVs + texture, then re-project after UV edit
+    void storeUVsForReprojection();
+    void reprojectTexture(int outputSize = 0);  // 0 = use original texture size
+    void packAndReprojectUVs();  // One-click: store, shrink, reproject
+
+    // Stored UV/texture state for re-projection
+    struct StoredVertexUV {
+        glm::vec2 uv;
+    };
+    std::vector<StoredVertexUV> m_storedOldUVs;
+    std::vector<unsigned char> m_storedOldTexture;
+    int m_storedOldTexW = 0;
+    int m_storedOldTexH = 0;
+    bool m_hasStoredUVs = false;
+    int m_reprojectTexSize = 1024;  // Output texture size for re-projection
+    float m_packScale = 0.5f;       // How much to shrink UVs (0.25 = 25%, 0.5 = 50%)
+    int m_packCorner = 0;           // 0=bottom-left, 1=bottom-right, 2=top-left, 3=top-right
+
     // Vertex paint state
     bool m_vertexPaintMode = false;
     glm::vec3 m_vertexPaintColor = glm::vec3(1.0f, 0.0f, 0.0f);
@@ -215,4 +236,96 @@ private:
     void autoRetopology();           // Auto-retopo from live surface
     int m_autoRetopResolution = 32;
     int m_autoRetopSmoothIter = 5;
+
+    // Path Tube state
+    bool m_pathTubeMode = false;
+    std::vector<glm::vec3> m_pathNodes;
+    int m_pathSelectedNode = -1;
+    bool m_pathDragging = false;
+    int m_pathDragNodeIdx = -1;
+    glm::vec3 m_pathDragOrigPos{0.0f};
+
+    // Path Tube parameters
+    float m_pathTubeRadius = 0.05f;
+    float m_pathTubeRadiusStart = 1.0f;  // Taper multiplier at start
+    float m_pathTubeRadiusEnd = 1.0f;    // Taper multiplier at end
+    int m_pathTubeSegments = 8;
+    int m_pathTubeSamplesPerSpan = 8;
+
+    // Profile editor state
+    std::vector<glm::vec2> m_pathTubeProfile;  // Custom cross-section shape (unit-scale)
+    int m_profileDragIdx = -1;                 // Currently dragged profile vertex (-1 = none)
+    float m_pathTubeProfileExtent = 1.0f;      // How much of tube uses custom profile (0=none, 1=all)
+    void resetPathTubeProfile();               // Reset to circle from m_pathTubeSegments
+    void drawProfileEditor();                  // ImGui widget for profile editing
+
+    // Path Tube methods
+    void processPathTubeInput(bool mouseOverImGui);
+    void drawPathTubeOverlay(float vpX, float vpY, float vpW, float vpH);
+    void renderPathTubePreview3D(VkCommandBuffer cmd, const glm::mat4& viewProj);
+    void generatePathTubeMesh();
+    void cancelPathTubeMode();
+
+    // Slice tool state
+    bool m_sliceMode = false;
+    glm::vec3 m_slicePlaneCenter{0.0f};
+    glm::vec3 m_slicePlaneNormal{0, 1, 0};
+    float m_slicePlaneOffset = 0.0f;
+    float m_slicePlaneRotationX = 0.0f;   // Pitch (degrees)
+    float m_slicePlaneRotationY = 0.0f;   // Yaw (degrees)
+    int m_slicePresetAxis = 1;            // 0=X, 1=Y, 2=Z
+
+    // Slice methods
+    void cancelSliceMode();
+    void performSlice();
+    void drawSlicePlaneOverlay3D(VkCommandBuffer cmd, const glm::mat4& viewProj);
+    void updateSlicePlaneFromParams();
+    static glm::vec3 pathCatmullRom(const glm::vec3& p0, const glm::vec3& p1,
+                                     const glm::vec3& p2, const glm::vec3& p3, float t);
+    static glm::vec3 pathEvaluateSpline(const std::vector<glm::vec3>& points, float t);
+    static std::vector<glm::vec3> pathSampleSpline(const std::vector<glm::vec3>& points,
+                                                    int samplesPerSegment);
+
+    // Patch Move state (UV editor: move UV island + texture pixels together)
+    bool m_patchMoveMode = false;
+    bool m_patchSelected = false;
+    bool m_patchDragging = false;
+    bool m_patchScaling = false;
+    int m_patchScaleHandle = -1;
+    glm::vec2 m_patchRectMin{0.0f};
+    glm::vec2 m_patchRectMax{1.0f};
+    glm::vec2 m_patchOrigRectMin{0.0f};
+    glm::vec2 m_patchOrigRectMax{1.0f};
+    glm::vec2 m_patchDragStart{0.0f};
+    std::vector<unsigned char> m_patchTextureBackup;
+    std::vector<unsigned char> m_patchPixels;
+    int m_patchPixelW = 0, m_patchPixelH = 0;
+    std::set<uint32_t> m_patchVertices;
+    std::map<uint32_t, glm::vec2> m_patchOrigUVs;
+
+    // Patch Move methods
+    void cancelPatchMoveMode();
+    void confirmPatchMove();
+    void extractPatchPixels();
+    void applyPatchTransform();
+
+public:
+    // AI Generate (Hunyuan3D) UI state — public so main.cpp can read params
+    char m_generatePrompt[512] = "";
+    std::string m_generateImagePath;         // Single mode image
+    bool m_generateMultiView = false;        // Multi-view mode
+    std::string m_generateFrontPath;         // Multi-view: front (required)
+    std::string m_generateLeftPath;          // Multi-view: left (optional, defaults to front)
+    std::string m_generateRightPath;         // Multi-view: right (optional, defaults to front)
+    std::string m_generateBackPath;          // Multi-view: back (optional, defaults to front)
+    int m_generateSteps = 5;
+    int m_generateOctreeRes = 256;
+    float m_generateGuidance = 5.0f;
+    int m_generateMaxFaces = 10000;
+    bool m_generateTexture = true;
+    int m_generateTexSize = 1024;        // Texture resolution (512, 1024, 2048)
+    bool m_generateRemBG = true;         // Remove background from input image
+    int m_generateSeed = 12345;
+    bool m_generateSettingsOpen = false;
+    bool m_generateLowVRAM = false;      // Mini model + CPU offload for texture
 };

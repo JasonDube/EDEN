@@ -10,6 +10,8 @@ add_executable(model_editor
     ModelingMode_Retopo.cpp
     ModelingMode_AutoRetopo.cpp
     ModelingMode_Primitives.cpp
+    ModelingMode_PathTube.cpp
+    ModelingMode_Slice.cpp
     PaintBrushRing.cpp
     MCPServer.cpp
 )
