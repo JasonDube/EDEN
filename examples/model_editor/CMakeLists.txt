@@ -12,6 +12,7 @@ add_executable(model_editor
     ModelingMode_Primitives.cpp
     ModelingMode_PathTube.cpp
     ModelingMode_Slice.cpp
+    ModelingMode_Rigging.cpp
     PaintBrushRing.cpp
     MCPServer.cpp
 )

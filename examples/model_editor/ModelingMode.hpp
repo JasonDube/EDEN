@@ -245,6 +245,10 @@ private:
     int m_pathDragNodeIdx = -1;
     glm::vec3 m_pathDragOrigPos{0.0f};
 
+    // Path tube surface attachment (first node snapped to live mesh)
+    bool m_pathTubeAttached = false;          // First node is attached to live surface
+    glm::vec3 m_pathTubeAttachNormal{0,1,0};  // Surface normal at attachment point
+
     // Path Tube parameters
     float m_pathTubeRadius = 0.05f;
     float m_pathTubeRadiusStart = 1.0f;  // Taper multiplier at start
@@ -286,6 +290,21 @@ private:
     static std::vector<glm::vec3> pathSampleSpline(const std::vector<glm::vec3>& points,
                                                     int samplesPerSegment);
 
+    // Rigging state
+    bool m_riggingMode = false;
+    int m_selectedBone = -1;
+    bool m_showSkeleton = true;
+    bool m_showBoneNames = true;
+    bool m_placingBone = false;      // Click mesh surface to place bone head
+    float m_boneInsetDepth = 0.2f;   // How far to push bone inward along surface normal
+    std::vector<glm::vec3> m_bonePositions;  // Editor-side head positions per bone
+    char m_newBoneName[64] = "Bone";
+
+    void drawSkeletonOverlay(float vpX, float vpY, float vpW, float vpH);
+    void cancelRiggingMode();
+    int pickBoneAtScreenPos(const glm::vec2& screenPos, float threshold = 20.0f);
+    std::vector<int> getDescendantBones(int boneIdx);  // Get all children recursively
+
     // Patch Move state (UV editor: move UV island + texture pixels together)
     bool m_patchMoveMode = false;
     bool m_patchSelected = false;
@@ -308,6 +327,9 @@ private:
     void confirmPatchMove();
     void extractPatchPixels();
     void applyPatchTransform();
+
+    // Auto UV island packing
+    void autoPackUVIslands(bool fitToUV = false);
 
 public:
     // AI Generate (Hunyuan3D) UI state — public so main.cpp can read params

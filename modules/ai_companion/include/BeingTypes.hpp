@@ -21,6 +21,7 @@ enum class BeingType : uint8_t {
     EVE = 7,          // Eve companion android (special)
     AI_ARCHITECT = 8, // AI world architect (Xenk)
     ALGOBOT = 9,      // Algorithmic bot — executes Grove scripts, no chat
+    EDEN_COMPANION = 10, // EDEN companion — tabula rasa AI partner (Liora etc.)
 
     COUNT
 };
@@ -40,6 +41,7 @@ inline const char* getBeingTypeName(BeingType type) {
         case BeingType::EVE:          return "Eve";
         case BeingType::AI_ARCHITECT: return "AI Architect";
         case BeingType::ALGOBOT:      return "AlgoBot";
+        case BeingType::EDEN_COMPANION: return "EDEN Companion";
         default: return "Unknown";
     }
 }
@@ -59,7 +61,8 @@ inline bool isArtificial(BeingType type) {
            type == BeingType::ANDROID ||
            type == BeingType::EVE ||
            type == BeingType::AI_ARCHITECT ||
-           type == BeingType::ALGOBOT;
+           type == BeingType::ALGOBOT ||
+           type == BeingType::EDEN_COMPANION;
 }
 
 } // namespace ai

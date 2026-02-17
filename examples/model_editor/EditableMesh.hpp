@@ -1,6 +1,8 @@
 #pragma once
 
 #include "Renderer/ModelRenderer.hpp"
+#include "Renderer/SkinnedModelRenderer.hpp"
+#include "eden/Animation.hpp"
 #include <glm/glm.hpp>
 #include <vector>
 #include <unordered_map>
@@ -27,6 +29,8 @@ struct HEVertex {
     glm::vec4 color;
     uint32_t halfEdgeIndex;    // One outgoing half-edge
     bool selected = false;
+    glm::ivec4 boneIndices = glm::ivec4(0);   // Up to 4 bone indices
+    glm::vec4 boneWeights = glm::vec4(0.0f);  // Corresponding weights (sum to 1.0)
 };
 
 // Half-edge face (supports quads and n-gons)
@@ -149,6 +153,13 @@ public:
     void triangulate(std::vector<ModelVertex>& outVerts,
                     std::vector<uint32_t>& outIndices,
                     const std::set<uint32_t>& hiddenFaces) const;
+
+    // Export skinned mesh for GPU rendering (includes bone indices/weights)
+    void triangulateSkinned(std::vector<SkinnedVertex>& outVerts,
+                           std::vector<uint32_t>& outIndices) const;
+    void triangulateSkinned(std::vector<SkinnedVertex>& outVerts,
+                           std::vector<uint32_t>& outIndices,
+                           const std::set<uint32_t>& hiddenFaces) const;
 
     // Save/Load .lime format (with optional embedded texture and transform)
     bool saveLime(const std::string& filepath) const;
@@ -287,6 +298,19 @@ public:
                        ModelingSelectionMode mode, float threshold,
                        const std::set<uint32_t>& skipFaces) const;
 
+    // Skeleton / rigging support
+    Skeleton& getSkeleton() { return m_skeleton; }
+    const Skeleton& getSkeleton() const { return m_skeleton; }
+    void setSkeleton(const Skeleton& skel) { m_skeleton = skel; }
+    bool hasSkeleton() const { return !m_skeleton.bones.empty(); }
+    void clearSkeleton() { m_skeleton.bones.clear(); m_skeleton.boneNameToIndex.clear(); }
+
+    // Auto-weight generation: assigns 4 closest bones per vertex using inverse distance
+    void generateAutoWeights(const std::vector<glm::vec3>& boneHeadPositions);
+
+    // Clear all bone weights from vertices
+    void clearBoneWeights();
+
     // Recalculate normals from geometry
     void recalculateNormals();
 
@@ -394,6 +418,9 @@ private:
     std::vector<HEVertex> m_vertices;
     std::vector<HalfEdge> m_halfEdges;
     std::vector<HEFace> m_faces;
+
+    // Skeleton data for rigging
+    Skeleton m_skeleton;
 
     // Edge lookup: (minVert, maxVert) -> one of the half-edges for that edge
     std::unordered_map<uint64_t, uint32_t> m_edgeMap;

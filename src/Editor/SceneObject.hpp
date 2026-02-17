@@ -2,10 +2,12 @@
 
 #include <eden/Transform.hpp>
 #include <eden/Action.hpp>
+#include <eden/Animation.hpp>
 #include <glm/glm.hpp>
 #include <string>
 #include <cstdint>
 #include <vector>
+#include <memory>
 #include <algorithm>
 #include <functional>
 
@@ -43,7 +45,8 @@ enum class BeingType {
     ALIEN,         // Extraterrestrial being
     EVE,           // Eve companion android
     AI_ARCHITECT,  // AI world architect (Xenk)
-    ALGOBOT        // Algorithmic bot — executes Grove scripts, no chat
+    ALGOBOT,       // Algorithmic bot — executes Grove scripts, no chat
+    EDEN_COMPANION // EDEN companion — tabula rasa AI partner (Liora etc.)
 };
 
 // Get string name for being type
@@ -59,6 +62,7 @@ inline const char* getBeingTypeName(BeingType type) {
         case BeingType::EVE:          return "Eve";
         case BeingType::AI_ARCHITECT: return "AI Architect";
         case BeingType::ALGOBOT:      return "AlgoBot";
+        case BeingType::EDEN_COMPANION: return "EDEN Companion";
         default: return "Unknown";
     }
 }
@@ -527,6 +531,13 @@ public:
     void setAnimationNames(const std::vector<std::string>& names) { m_animationNames = names; }
     const std::vector<std::string>& getAnimationNames() const { return m_animationNames; }
 
+    // Editor skeleton (for LIME rigging - separate from GLB skinned model)
+    void setEditorSkeleton(std::unique_ptr<Skeleton> skel) { m_editorSkeleton = std::move(skel); m_isEditorRigged = true; }
+    const Skeleton* getEditorSkeleton() const { return m_editorSkeleton.get(); }
+    Skeleton* getEditorSkeleton() { return m_editorSkeleton.get(); }
+    bool hasEditorSkeleton() const { return m_isEditorRigged && m_editorSkeleton != nullptr; }
+    void clearEditorSkeleton() { m_editorSkeleton.reset(); m_isEditorRigged = false; }
+
     // Mesh data for raycasting (CPU copy)
     void setMeshData(const std::vector<ModelVertex>& vertices, const std::vector<uint32_t>& indices);
     const std::vector<ModelVertex>& getVertices() const { return m_vertices; }
@@ -542,6 +553,8 @@ public:
         glm::vec4 color;
         uint32_t halfEdgeIndex;
         bool selected;
+        glm::ivec4 boneIndices = glm::ivec4(0);
+        glm::vec4 boneWeights = glm::vec4(0.0f);
     };
     struct StoredHalfEdge {
         uint32_t vertexIndex;
@@ -790,6 +803,10 @@ private:
     bool m_isSkinned = false;
     std::string m_currentAnimation;
     std::vector<std::string> m_animationNames;
+
+    // Editor skeleton (for LIME-rigged meshes)
+    std::unique_ptr<Skeleton> m_editorSkeleton;
+    bool m_isEditorRigged = false;
 };
 
 } // namespace eden

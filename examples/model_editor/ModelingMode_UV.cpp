@@ -16,6 +16,7 @@
 #include <limits>
 #include <random>
 #include <algorithm>
+#include <numeric>
 #include <cmath>
 
 using namespace eden;
@@ -215,6 +216,23 @@ void ModelingMode::renderModelingUVWindow() {
         }
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
             ImGui::SetTooltip("Select UV island + texture pixels and move/scale them together");
+        }
+        if (!patchAvail) ImGui::EndDisabled();
+
+        ImGui::SameLine();
+        if (!patchAvail) ImGui::BeginDisabled();
+        if (ImGui::Button("Auto Pack")) {
+            autoPackUVIslands(false);
+        }
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+            ImGui::SetTooltip("Auto-pack all UV islands tightly, moving texture pixels with them");
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Pack & Fit")) {
+            autoPackUVIslands(true);
+        }
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+            ImGui::SetTooltip("Auto-pack UV islands and scale up to fill the full 0-1 UV space");
         }
         if (!patchAvail) ImGui::EndDisabled();
         ImGui::Separator();
@@ -2182,4 +2200,269 @@ void ModelingMode::confirmPatchMove() {
     m_ctx.meshDirty = true;
 
     std::cout << "[UV] Patch Move confirmed" << std::endl;
+}
+
+// --- Auto UV Island Packing ---
+
+void ModelingMode::autoPackUVIslands(bool fitToUV) {
+    if (!m_ctx.selectedObject || !m_ctx.selectedObject->hasTextureData()) return;
+
+    int texW = m_ctx.selectedObject->getTextureWidth();
+    int texH = m_ctx.selectedObject->getTextureHeight();
+    auto& texData = m_ctx.selectedObject->getTextureData();
+
+    if (texW <= 0 || texH <= 0 || texData.empty()) return;
+
+    uint32_t faceCount = m_ctx.editableMesh.getFaceCount();
+    if (faceCount == 0) return;
+
+    // Save undo state
+    m_ctx.editableMesh.saveState();
+
+    struct IslandInfo {
+        std::set<uint32_t> faces;
+        std::set<uint32_t> verts;
+        glm::vec2 uvMin, uvMax;
+        glm::vec2 padMin, padMax;
+        std::vector<unsigned char> pixels;
+        int pixW, pixH;
+        glm::vec2 packedMin, packedMax;
+    };
+
+    // 1. Find all UV islands
+    std::vector<IslandInfo> islands;
+    std::set<uint32_t> visited;
+
+    for (uint32_t f = 0; f < faceCount; ++f) {
+        if (visited.count(f)) continue;
+        std::set<uint32_t> islandFaces = getUVIslandFaces(f);
+        for (uint32_t fi : islandFaces) visited.insert(fi);
+
+        IslandInfo info;
+        info.faces = islandFaces;
+        info.verts = getIslandVertices(islandFaces);
+        islands.push_back(std::move(info));
+    }
+
+    if (islands.empty()) return;
+
+    float bleedU = 2.0f / static_cast<float>(texW);
+    float bleedV = 2.0f / static_cast<float>(texH);
+
+    // 2-3. Compute bounding box + bleed margin per island
+    for (auto& isl : islands) {
+        isl.uvMin = glm::vec2(1e9f);
+        isl.uvMax = glm::vec2(-1e9f);
+        for (uint32_t v : isl.verts) {
+            glm::vec2 uv = m_ctx.editableMesh.getVertex(v).uv;
+            isl.uvMin = glm::min(isl.uvMin, uv);
+            isl.uvMax = glm::max(isl.uvMax, uv);
+        }
+
+        // Padded bbox with 2px bleed
+        isl.padMin = glm::max(isl.uvMin - glm::vec2(bleedU, bleedV), glm::vec2(0.0f));
+        isl.padMax = glm::min(isl.uvMax + glm::vec2(bleedU, bleedV), glm::vec2(1.0f));
+    }
+
+    // 4. Extract texture rect per island
+    for (auto& isl : islands) {
+        int pixMinX = static_cast<int>(std::floor(isl.padMin.x * texW));
+        int pixMaxX = static_cast<int>(std::ceil(isl.padMax.x * texW));
+        int pixMinY = static_cast<int>(std::floor(isl.padMin.y * texH));
+        int pixMaxY = static_cast<int>(std::ceil(isl.padMax.y * texH));
+        pixMinX = std::clamp(pixMinX, 0, texW);
+        pixMaxX = std::clamp(pixMaxX, 0, texW);
+        pixMinY = std::clamp(pixMinY, 0, texH);
+        pixMaxY = std::clamp(pixMaxY, 0, texH);
+
+        isl.pixW = pixMaxX - pixMinX;
+        isl.pixH = pixMaxY - pixMinY;
+
+        if (isl.pixW <= 0 || isl.pixH <= 0) {
+            isl.pixels.clear();
+            continue;
+        }
+
+        isl.pixels.resize(static_cast<size_t>(isl.pixW) * isl.pixH * 4);
+        for (int y = 0; y < isl.pixH; ++y) {
+            for (int x = 0; x < isl.pixW; ++x) {
+                int srcX = pixMinX + x;
+                int srcY = pixMinY + y;
+                size_t srcIdx = (static_cast<size_t>(srcY) * texW + srcX) * 4;
+                size_t dstIdx = (static_cast<size_t>(y) * isl.pixW + x) * 4;
+                isl.pixels[dstIdx + 0] = texData[srcIdx + 0];
+                isl.pixels[dstIdx + 1] = texData[srcIdx + 1];
+                isl.pixels[dstIdx + 2] = texData[srcIdx + 2];
+                isl.pixels[dstIdx + 3] = texData[srcIdx + 3];
+            }
+        }
+    }
+
+    // 5. Sort islands by pixel height descending (shelf pack heuristic)
+    std::vector<size_t> sortedIdx(islands.size());
+    std::iota(sortedIdx.begin(), sortedIdx.end(), 0);
+    std::sort(sortedIdx.begin(), sortedIdx.end(), [&](size_t a, size_t b) {
+        return islands[a].pixH > islands[b].pixH;
+    });
+
+    // 6. Shelf-pack into UV space
+    float gap = 2.0f / static_cast<float>(std::max(texW, texH));
+
+    // Lambda: shelf-pack with a given max shelf width, returns packed positions and max extent
+    auto shelfPack = [&](float maxWidth) -> std::pair<std::vector<std::pair<glm::vec2, glm::vec2>>, float> {
+        std::vector<std::pair<glm::vec2, glm::vec2>> result(islands.size());
+        float cx = gap, cy = gap, sh = 0.0f;
+        float maxExtent = 0.0f;
+
+        for (size_t idx : sortedIdx) {
+            float paddedW = islands[idx].padMax.x - islands[idx].padMin.x;
+            float paddedH = islands[idx].padMax.y - islands[idx].padMin.y;
+
+            if (paddedW <= 0.0f || paddedH <= 0.0f) {
+                result[idx] = {glm::vec2(cx, cy), glm::vec2(cx, cy)};
+                continue;
+            }
+
+            if (cx + paddedW > maxWidth) {
+                cx = gap;
+                cy += sh + gap;
+                sh = 0.0f;
+            }
+
+            result[idx] = {glm::vec2(cx, cy), glm::vec2(cx + paddedW, cy + paddedH)};
+            cx += paddedW + gap;
+            sh = std::max(sh, paddedH);
+            maxExtent = std::max(maxExtent, std::max(cx, cy + sh));
+        }
+        return {result, maxExtent};
+    };
+
+    if (fitToUV) {
+        // Try multiple shelf widths, pick the one giving the best (most square) packing
+        // which maximizes the uniform scale factor
+        float bestScale = 0.0f;
+        std::vector<std::pair<glm::vec2, glm::vec2>> bestResult;
+
+        // Find widest island to set minimum shelf width
+        float maxIslandW = 0.0f;
+        for (auto& isl : islands) {
+            maxIslandW = std::max(maxIslandW, isl.padMax.x - isl.padMin.x);
+        }
+
+        for (int step = 0; step < 20; ++step) {
+            float t = static_cast<float>(step) / 19.0f;
+            float trialWidth = maxIslandW + gap + t * (2.0f - maxIslandW);  // range: just fits widest → 2.0
+            auto [positions, maxExtent] = shelfPack(trialWidth);
+            if (maxExtent > 1e-6f) {
+                float scale = (1.0f - 2.0f * gap) / maxExtent;
+                if (scale > bestScale) {
+                    bestScale = scale;
+                    bestResult = positions;
+                }
+            }
+        }
+
+        if (!bestResult.empty()) {
+            for (size_t i = 0; i < islands.size(); ++i) {
+                islands[i].packedMin = bestResult[i].first * bestScale + glm::vec2(gap);
+                islands[i].packedMax = bestResult[i].second * bestScale + glm::vec2(gap);
+                // Shift since pack started at gap, now we scale from origin then re-add gap
+            }
+            // Recenter: scale all positions from gap origin
+            for (size_t i = 0; i < islands.size(); ++i) {
+                glm::vec2 origMin = bestResult[i].first;
+                glm::vec2 origMax = bestResult[i].second;
+                islands[i].packedMin = (origMin - glm::vec2(gap)) * bestScale + glm::vec2(gap);
+                islands[i].packedMax = (origMax - glm::vec2(gap)) * bestScale + glm::vec2(gap);
+            }
+            std::cout << "[UV] Pack & Fit scale: " << bestScale << "x" << std::endl;
+        }
+    } else {
+        // Standard pack: use full width
+        auto [positions, maxExtent] = shelfPack(1.0f - gap);
+        for (size_t i = 0; i < islands.size(); ++i) {
+            islands[i].packedMin = positions[i].first;
+            islands[i].packedMax = positions[i].second;
+        }
+
+        // Scale down if overflow
+        float maxAllowed = 1.0f - gap;
+        if (maxExtent > maxAllowed) {
+            float scale = maxAllowed / maxExtent;
+            for (auto& isl : islands) {
+                isl.packedMin *= scale;
+                isl.packedMax *= scale;
+            }
+        }
+    }
+
+    // 7. Clear entire texture to transparent black
+    std::fill(texData.begin(), texData.end(), 0);
+
+    // 8. Blit each island's pixels to new packed position (bilinear when scaled)
+    for (auto& isl : islands) {
+        if (isl.pixels.empty() || isl.pixW <= 0 || isl.pixH <= 0) continue;
+
+        int dstMinX = static_cast<int>(std::floor(isl.packedMin.x * texW));
+        int dstMinY = static_cast<int>(std::floor(isl.packedMin.y * texH));
+        int dstMaxX = static_cast<int>(std::ceil(isl.packedMax.x * texW));
+        int dstMaxY = static_cast<int>(std::ceil(isl.packedMax.y * texH));
+        int dstW = dstMaxX - dstMinX;
+        int dstH = dstMaxY - dstMinY;
+
+        if (dstW <= 0 || dstH <= 0) continue;
+
+        for (int dy = 0; dy < dstH; ++dy) {
+            for (int dx = 0; dx < dstW; ++dx) {
+                int dstX = dstMinX + dx;
+                int dstY = dstMinY + dy;
+                if (dstX < 0 || dstX >= texW || dstY < 0 || dstY >= texH) continue;
+
+                // Map destination pixel back to source with bilinear sampling
+                float srcFX = static_cast<float>(dx) / std::max(dstW - 1, 1) * (isl.pixW - 1);
+                float srcFY = static_cast<float>(dy) / std::max(dstH - 1, 1) * (isl.pixH - 1);
+
+                int sx0 = std::clamp(static_cast<int>(std::floor(srcFX)), 0, isl.pixW - 1);
+                int sy0 = std::clamp(static_cast<int>(std::floor(srcFY)), 0, isl.pixH - 1);
+                int sx1 = std::min(sx0 + 1, isl.pixW - 1);
+                int sy1 = std::min(sy0 + 1, isl.pixH - 1);
+                float fx = srcFX - std::floor(srcFX);
+                float fy = srcFY - std::floor(srcFY);
+
+                size_t dIdx = (static_cast<size_t>(dstY) * texW + dstX) * 4;
+                for (int ch = 0; ch < 4; ++ch) {
+                    float v00 = isl.pixels[(static_cast<size_t>(sy0) * isl.pixW + sx0) * 4 + ch];
+                    float v10 = isl.pixels[(static_cast<size_t>(sy0) * isl.pixW + sx1) * 4 + ch];
+                    float v01 = isl.pixels[(static_cast<size_t>(sy1) * isl.pixW + sx0) * 4 + ch];
+                    float v11 = isl.pixels[(static_cast<size_t>(sy1) * isl.pixW + sx1) * 4 + ch];
+                    float top = v00 * (1.0f - fx) + v10 * fx;
+                    float bot = v01 * (1.0f - fx) + v11 * fx;
+                    float val = top * (1.0f - fy) + bot * fy;
+                    texData[dIdx + ch] = static_cast<unsigned char>(std::clamp(val, 0.0f, 255.0f));
+                }
+            }
+        }
+    }
+
+    // 9. Remap UVs
+    for (auto& isl : islands) {
+        glm::vec2 padSize = isl.padMax - isl.padMin;
+        glm::vec2 packSize = isl.packedMax - isl.packedMin;
+
+        for (uint32_t v : isl.verts) {
+            glm::vec2& uv = m_ctx.editableMesh.getVertex(v).uv;
+            glm::vec2 t;
+            t.x = (padSize.x > 1e-6f) ? (uv.x - isl.padMin.x) / padSize.x : 0.0f;
+            t.y = (padSize.y > 1e-6f) ? (uv.y - isl.padMin.y) / padSize.y : 0.0f;
+            uv = isl.packedMin + t * packSize;
+        }
+    }
+
+    // 10. Upload texture to GPU, mark dirty
+    uint32_t handle = m_ctx.selectedObject->getBufferHandle();
+    m_ctx.modelRenderer.updateTexture(handle, texData.data(), texW, texH);
+    m_ctx.meshDirty = true;
+
+    std::cout << "[UV] Auto-packed " << islands.size() << " UV islands"
+              << (fitToUV ? " (fit to 0-1)" : "") << std::endl;
 }

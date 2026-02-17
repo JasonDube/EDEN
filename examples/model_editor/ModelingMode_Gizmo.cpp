@@ -8,11 +8,18 @@
 
 #include <iostream>
 #include <limits>
+#include <set>
 
 using namespace eden;
 
 glm::vec3 ModelingMode::getGizmoPosition() {
     if (!m_ctx.selectedObject) return glm::vec3(0.0f);
+
+    // Rigging mode: gizmo at selected bone position
+    if (m_riggingMode && m_selectedBone >= 0 && m_selectedBone < static_cast<int>(m_bonePositions.size())) {
+        glm::mat4 modelMatrix = m_ctx.selectedObject->getTransform().getMatrix();
+        return glm::vec3(modelMatrix * glm::vec4(m_bonePositions[m_selectedBone], 1.0f)) + m_ctx.gizmoOffset;
+    }
 
     // Use custom pivot if set (e.g., after face snap)
     if (m_useCustomGizmoPivot) {
@@ -258,9 +265,13 @@ bool ModelingMode::processGizmoInput() {
     if (ImGui::IsWindowHovered(ImGuiHoveredFlags_AnyWindow)) return false;
     if (!m_ctx.selectedObject) return false;
 
+    // In rigging mode, gizmo shows for selected bone
+    bool riggingBoneSelected = m_riggingMode && m_selectedBone >= 0 &&
+                               m_selectedBone < static_cast<int>(m_bonePositions.size());
+
     // In object mode, gizmo always shows for selected object
     // In component mode, need actual component selection
-    if (!m_ctx.objectMode) {
+    if (!m_ctx.objectMode && !riggingBoneSelected) {
         auto selectedVerts = m_ctx.editableMesh.getSelectedVertices();
         auto selectedFaces = m_ctx.editableMesh.getSelectedFaces();
         auto selectedEdges = m_ctx.editableMesh.getSelectedEdges();
@@ -316,7 +327,46 @@ bool ModelingMode::processGizmoInput() {
                 }
 
                 if (std::abs(angle) > 0.001f) {
-                    if (m_ctx.objectMode && m_ctx.selectedObject) {
+                    if (riggingBoneSelected && m_ctx.selectedObject) {
+                        // Rigging mode: rotate selected bone's children around bone pivot
+                        glm::mat4 modelMat = m_ctx.selectedObject->getTransform().getMatrix();
+                        glm::mat4 invModel = glm::inverse(modelMat);
+                        float angleRad = glm::radians(angle);
+                        glm::vec3 localAxis = glm::normalize(glm::vec3(invModel * glm::vec4(axisDir, 0.0f)));
+                        glm::quat rotation = glm::angleAxis(angleRad, localAxis);
+                        glm::mat4 rotMat = glm::mat4_cast(rotation);
+
+                        glm::vec3 pivot = m_bonePositions[m_selectedBone];
+
+                        // Rotate all descendant bone positions
+                        auto descendants = getDescendantBones(m_selectedBone);
+                        for (int di : descendants) {
+                            if (di < static_cast<int>(m_bonePositions.size())) {
+                                glm::vec3 rel = m_bonePositions[di] - pivot;
+                                m_bonePositions[di] = pivot + glm::vec3(rotMat * glm::vec4(rel, 1.0f));
+                            }
+                        }
+
+                        // Deform weighted vertices
+                        std::set<int> affectedSet(descendants.begin(), descendants.end());
+                        affectedSet.insert(m_selectedBone);
+                        for (size_t vi = 0; vi < m_ctx.editableMesh.getVertexCount(); ++vi) {
+                            auto& v = m_ctx.editableMesh.getVertex(static_cast<uint32_t>(vi));
+                            float totalAffectedWeight = 0.0f;
+                            for (int j = 0; j < 4; ++j) {
+                                if (v.boneWeights[j] > 0.0f && affectedSet.count(v.boneIndices[j])) {
+                                    totalAffectedWeight += v.boneWeights[j];
+                                }
+                            }
+                            if (totalAffectedWeight > 0.001f) {
+                                glm::vec3 rel = v.position - pivot;
+                                glm::vec3 rotatedPos = pivot + glm::vec3(rotMat * glm::vec4(rel, 1.0f));
+                                v.position = glm::mix(v.position, rotatedPos, totalAffectedWeight);
+                            }
+                        }
+                        m_ctx.meshDirty = true;
+                        invalidateWireframeCache();
+                    } else if (m_ctx.objectMode && m_ctx.selectedObject) {
                         // Object mode: rotate the object's transform
                         m_ctx.selectedObject->getTransform().rotate(angle, axisDir);
                     } else if (!m_ctx.objectMode && m_ctx.selectedObject) {
@@ -402,7 +452,44 @@ bool ModelingMode::processGizmoInput() {
                     delta = axisDir * snappedLen;
                 }
 
-                if (m_ctx.objectMode && m_ctx.selectedObject) {
+                if (riggingBoneSelected && m_ctx.selectedObject && m_ctx.gizmoMode == GizmoMode::Move) {
+                    // Rigging mode: move selected bone + all children + deform weighted vertices
+                    glm::mat4 invModel = glm::inverse(m_ctx.selectedObject->getTransform().getMatrix());
+                    glm::vec3 localDelta = glm::vec3(invModel * glm::vec4(delta, 0.0f));
+
+                    // Move selected bone
+                    m_bonePositions[m_selectedBone] += localDelta;
+
+                    // Move all descendant bones by same delta
+                    auto descendants = getDescendantBones(m_selectedBone);
+                    for (int di : descendants) {
+                        if (di < static_cast<int>(m_bonePositions.size())) {
+                            m_bonePositions[di] += localDelta;
+                        }
+                    }
+
+                    // Deform weighted vertices proportional to bone weights
+                    std::set<int> affectedSet(descendants.begin(), descendants.end());
+                    affectedSet.insert(m_selectedBone);
+                    for (size_t vi = 0; vi < m_ctx.editableMesh.getVertexCount(); ++vi) {
+                        auto& v = m_ctx.editableMesh.getVertex(static_cast<uint32_t>(vi));
+                        float totalAffectedWeight = 0.0f;
+                        for (int j = 0; j < 4; ++j) {
+                            if (v.boneWeights[j] > 0.0f && affectedSet.count(v.boneIndices[j])) {
+                                totalAffectedWeight += v.boneWeights[j];
+                            }
+                        }
+                        if (totalAffectedWeight > 0.001f) {
+                            v.position += localDelta * totalAffectedWeight;
+                        }
+                    }
+                    m_ctx.meshDirty = true;
+                    invalidateWireframeCache();
+
+                    // Update drag start for incremental movement
+                    m_ctx.gizmoDragStart = currentPoint;
+                    m_ctx.gizmoDragStartPos = getGizmoPosition();
+                } else if (m_ctx.objectMode && m_ctx.selectedObject) {
                     auto& transform = m_ctx.selectedObject->getTransform();
 
                     if (m_ctx.gizmoMode == GizmoMode::Scale) {
@@ -597,9 +684,13 @@ void ModelingMode::renderGizmo(VkCommandBuffer cmd, const glm::mat4& viewProj) {
     if (m_ctx.gizmoMode == GizmoMode::None) return;
     if (!m_ctx.selectedObject) return;
 
+    // In rigging mode, show gizmo for selected bone
+    bool riggingGizmo = m_riggingMode && m_selectedBone >= 0 &&
+                        m_selectedBone < static_cast<int>(m_bonePositions.size());
+
     // In object mode, always show gizmo for selected object
     // In component mode, need actual component selection
-    if (!m_ctx.objectMode) {
+    if (!m_ctx.objectMode && !riggingGizmo) {
         auto selectedVerts = m_ctx.editableMesh.getSelectedVertices();
         auto selectedFaces = m_ctx.editableMesh.getSelectedFaces();
         auto selectedEdges = m_ctx.editableMesh.getSelectedEdges();

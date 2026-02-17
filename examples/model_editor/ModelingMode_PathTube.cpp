@@ -228,6 +228,10 @@ void ModelingMode::processPathTubeInput(bool mouseOverImGui) {
             if (m_pathSelectedNode >= static_cast<int>(m_pathNodes.size())) {
                 m_pathSelectedNode = m_pathNodes.empty() ? -1 : static_cast<int>(m_pathNodes.size()) - 1;
             }
+            // Reset surface attachment if first node was removed
+            if (m_pathNodes.empty()) {
+                m_pathTubeAttached = false;
+            }
             std::cout << "[PathTube] Undo — " << m_pathNodes.size() << " nodes" << std::endl;
         }
         return;
@@ -383,20 +387,40 @@ void ModelingMode::processPathTubeInput(bool mouseOverImGui) {
             m_pathSelectedNode = bestIdx;
             std::cout << "[PathTube] Selected node " << bestIdx << std::endl;
         } else {
-            // Place new node via plane intersection
+            // Place new node
             glm::vec3 rayOrigin, rayDir;
             m_ctx.getMouseRay(rayOrigin, rayDir);
 
-            glm::vec3 planeNormal;
-            float planeD;
-            getPlacementPlane(planeNormal, planeD);
+            // First node: try to snap to live mesh surface
+            if (m_pathNodes.empty() && m_retopologyLiveObj) {
+                auto hit = m_retopologyLiveObj->raycast(rayOrigin, rayDir);
+                if (hit.hit) {
+                    m_pathNodes.push_back(hit.position);
+                    m_pathTubeAttachNormal = hit.normal;
+                    m_pathTubeAttached = true;
+                    m_pathSelectedNode = 0;
+                    std::cout << "[PathTube] Attached node 1 to surface '"
+                              << m_retopologyLiveObj->getName()
+                              << "' at (" << hit.position.x << ", " << hit.position.y << ", " << hit.position.z
+                              << ") normal (" << hit.normal.x << ", " << hit.normal.y << ", " << hit.normal.z << ")" << std::endl;
+                    // Skip plane intersection — attached to surface
+                } else {
+                    goto plane_fallback;
+                }
+            } else {
+                plane_fallback:
+                // Standard plane intersection for all other nodes (or if raycast missed)
+                glm::vec3 planeNormal;
+                float planeD;
+                getPlacementPlane(planeNormal, planeD);
 
-            glm::vec3 hitPos;
-            if (intersectPlane(rayOrigin, rayDir, planeNormal, planeD, hitPos)) {
-                m_pathNodes.push_back(hitPos);
-                m_pathSelectedNode = static_cast<int>(m_pathNodes.size()) - 1;
-                std::cout << "[PathTube] Placed node " << m_pathNodes.size()
-                          << " at (" << hitPos.x << ", " << hitPos.y << ", " << hitPos.z << ")" << std::endl;
+                glm::vec3 hitPos;
+                if (intersectPlane(rayOrigin, rayDir, planeNormal, planeD, hitPos)) {
+                    m_pathNodes.push_back(hitPos);
+                    m_pathSelectedNode = static_cast<int>(m_pathNodes.size()) - 1;
+                    std::cout << "[PathTube] Placed node " << m_pathNodes.size()
+                              << " at (" << hitPos.x << ", " << hitPos.y << ", " << hitPos.z << ")" << std::endl;
+                }
             }
         }
     }
@@ -431,6 +455,17 @@ void ModelingMode::drawPathTubeOverlay(float vpX, float vpY, float vpW, float vp
             if (a.x > -500 && b.x > -500) {
                 drawList->AddLine(a, b, lineColor, 2.0f);
             }
+        }
+    }
+
+    // Draw surface normal indicator for attached first node
+    if (m_pathTubeAttached && !m_pathNodes.empty()) {
+        ImVec2 basePos = worldToScreen(m_pathNodes[0]);
+        glm::vec3 normalTip = m_pathNodes[0] + m_pathTubeAttachNormal * 0.15f;
+        ImVec2 tipPos = worldToScreen(normalTip);
+        if (basePos.x > -500 && tipPos.x > -500) {
+            drawList->AddLine(basePos, tipPos, IM_COL32(0, 255, 100, 255), 2.5f);
+            drawList->AddCircleFilled(tipPos, 4.0f, IM_COL32(0, 255, 100, 255));
         }
     }
 
@@ -494,10 +529,19 @@ void ModelingMode::renderPathTubePreview3D(VkCommandBuffer cmd, const glm::mat4&
             tangent = glm::normalize(samples[i + 1] - samples[i - 1]);
         }
 
-        glm::vec3 normal = prevNormal - glm::dot(prevNormal, tangent) * tangent;
-        if (glm::length(normal) < 0.001f) {
-            normal = glm::abs(tangent.y) < 0.9f ? glm::vec3(0, 1, 0) : glm::vec3(1, 0, 0);
-            normal = normal - glm::dot(normal, tangent) * tangent;
+        glm::vec3 normal;
+        if (i == 0 && m_pathTubeAttached) {
+            normal = m_pathTubeAttachNormal - glm::dot(m_pathTubeAttachNormal, tangent) * tangent;
+            if (glm::length(normal) < 0.001f) {
+                normal = glm::abs(tangent.y) < 0.9f ? glm::vec3(0, 1, 0) : glm::vec3(1, 0, 0);
+                normal = normal - glm::dot(normal, tangent) * tangent;
+            }
+        } else {
+            normal = prevNormal - glm::dot(prevNormal, tangent) * tangent;
+            if (glm::length(normal) < 0.001f) {
+                normal = glm::abs(tangent.y) < 0.9f ? glm::vec3(0, 1, 0) : glm::vec3(1, 0, 0);
+                normal = normal - glm::dot(normal, tangent) * tangent;
+            }
         }
         normal = glm::normalize(normal);
         prevNormal = normal;
@@ -533,6 +577,19 @@ void ModelingMode::renderPathTubePreview3D(VkCommandBuffer cmd, const glm::mat4&
             glm::vec2 blended = glm::mix(circle, prof, profileBlend);
             glm::vec3 offset = (normal * blended.y + binormal * blended.x) * r;
             rings[i][j] = samples[i] + offset;
+        }
+
+        // Snap first ring vertices onto live mesh surface
+        if (i == 0 && m_pathTubeAttached && m_retopologyLiveObj) {
+            for (int j = 0; j < segments; ++j) {
+                // Cast ray from above the surface (along normal) down toward it
+                glm::vec3 rayOrigin = rings[0][j] + m_pathTubeAttachNormal * m_pathTubeRadius * 2.0f;
+                glm::vec3 rayDir = -m_pathTubeAttachNormal;
+                auto hit = m_retopologyLiveObj->raycast(rayOrigin, rayDir);
+                if (hit.hit) {
+                    rings[0][j] = hit.position;
+                }
+            }
         }
     }
 
@@ -605,10 +662,22 @@ void ModelingMode::generatePathTubeMesh() {
             tangent = glm::normalize(samples[i + 1] - samples[i - 1]);
         }
 
-        glm::vec3 normal = prevNormal - glm::dot(prevNormal, tangent) * tangent;
-        if (glm::length(normal) < 0.001f) {
-            normal = glm::abs(tangent.y) < 0.9f ? glm::vec3(0, 1, 0) : glm::vec3(1, 0, 0);
-            normal = normal - glm::dot(normal, tangent) * tangent;
+        glm::vec3 normal;
+        if (i == 0 && m_pathTubeAttached) {
+            // First ring: orient perpendicular to surface normal for flush fit
+            // Use the surface normal as the frame normal, then orthogonalize
+            normal = m_pathTubeAttachNormal - glm::dot(m_pathTubeAttachNormal, tangent) * tangent;
+            if (glm::length(normal) < 0.001f) {
+                // Surface normal parallel to tangent — fall back to default
+                normal = glm::abs(tangent.y) < 0.9f ? glm::vec3(0, 1, 0) : glm::vec3(1, 0, 0);
+                normal = normal - glm::dot(normal, tangent) * tangent;
+            }
+        } else {
+            normal = prevNormal - glm::dot(prevNormal, tangent) * tangent;
+            if (glm::length(normal) < 0.001f) {
+                normal = glm::abs(tangent.y) < 0.9f ? glm::vec3(0, 1, 0) : glm::vec3(1, 0, 0);
+                normal = normal - glm::dot(normal, tangent) * tangent;
+            }
         }
         normal = glm::normalize(normal);
         prevNormal = normal;
@@ -670,10 +739,20 @@ void ModelingMode::generatePathTubeMesh() {
             float u = static_cast<float>(j) / segments;
             float v = static_cast<float>(i) / (samples.size() - 1);
 
+            // Snap first ring vertices onto live mesh surface
+            if (i == 0 && m_pathTubeAttached && m_retopologyLiveObj) {
+                glm::vec3 rayOrigin = pos + m_pathTubeAttachNormal * m_pathTubeRadius * 2.0f;
+                glm::vec3 rayDir = -m_pathTubeAttachNormal;
+                auto hit = m_retopologyLiveObj->raycast(rayOrigin, rayDir);
+                if (hit.hit) {
+                    pos = hit.position;
+                    norm = hit.normal;
+                }
+            }
+
             HEVertex vert;
             vert.position = pos;
             vert.normal = norm;
-            vert.uv = glm::vec2(u, v);
             vert.color = glm::vec4(0.7f, 0.7f, 0.7f, 1.0f);
             vert.halfEdgeIndex = UINT32_MAX;
             vert.selected = false;
@@ -793,6 +872,7 @@ void ModelingMode::generatePathTubeMesh() {
     m_pathNodes.clear();
     m_pathSelectedNode = -1;
     m_pathTubeMode = false;
+    m_pathTubeAttached = false;
 
     std::cout << "[PathTube] Generated tube: " << tubeMesh.getFaceCount()
               << " faces, " << tubeMesh.getVertexCount() << " vertices, "
@@ -807,5 +887,6 @@ void ModelingMode::cancelPathTubeMode() {
     m_pathSelectedNode = -1;
     m_pathDragging = false;
     m_pathDragNodeIdx = -1;
+    m_pathTubeAttached = false;
     std::cout << "[PathTube] Mode cancelled" << std::endl;
 }

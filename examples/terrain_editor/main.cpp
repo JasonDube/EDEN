@@ -6552,6 +6552,8 @@ private:
             return ImVec4(0.4f, 0.6f, 1.0f, alpha);
         } else if (sender.find("Robot") != std::string::npos || sender.find("robot") != std::string::npos) {
             return ImVec4(1.0f, 0.6f, 0.2f, alpha);
+        } else if (sender == "Liora" || sender.find("Liora") == 0) {
+            return ImVec4(0.9f, 0.5f, 1.0f, alpha);
         } else if (sender == "System") {
             return ImVec4(1.0f, 1.0f, 0.4f, alpha);
         } else {
@@ -6712,7 +6714,7 @@ private:
             ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings |
             ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoBackground |
             ImGuiWindowFlags_NoFocusOnAppearing)) {
-            ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), "/eve | /xenk | /robot <msg> — Enter to send, Esc to cancel");
+            ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), "/eve | /xenk | /robot | /liora <msg> — Enter to send, Esc to cancel");
         }
         ImGui::End();
     }
@@ -6767,6 +6769,11 @@ private:
             message = message.substr(spacePos + 1);
         } else if (lowerMsg.rfind("/robot ", 0) == 0 || lowerMsg.rfind("robot ", 0) == 0) {
             targetType = BeingType::ROBOT;
+            hasTargetPrefix = true;
+            size_t spacePos = message.find(' ');
+            message = message.substr(spacePos + 1);
+        } else if (lowerMsg.rfind("/liora ", 0) == 0 || lowerMsg.rfind("liora ", 0) == 0) {
+            targetType = BeingType::EDEN_COMPANION;
             hasTargetPrefix = true;
             size_t spacePos = message.find(' ');
             message = message.substr(spacePos + 1);
@@ -6836,7 +6843,8 @@ private:
             // For AI NPCs (Xenk, Eve, Robot), include perception data and parse actions
             if (closestSentient->getBeingType() == BeingType::AI_ARCHITECT ||
                 closestSentient->getBeingType() == BeingType::EVE ||
-                closestSentient->getBeingType() == BeingType::ROBOT) {
+                closestSentient->getBeingType() == BeingType::ROBOT ||
+                closestSentient->getBeingType() == BeingType::EDEN_COMPANION) {
                 PerceptionData perception;
                 if (m_hasFullScanResult) {
                     perception = m_lastFullScanResult;

@@ -8,7 +8,10 @@
 #include <stb_image.h>
 
 #include <iostream>
+#include <fstream>
 #include <queue>
+#include <set>
+#include <map>
 #include <filesystem>
 #include <limits>
 #include <random>
@@ -534,6 +537,11 @@ void ModelingMode::drawOverlays(float vpX, float vpY, float vpW, float vpH) {
     // Draw path tube overlay (node circles, connecting lines)
     if (m_pathTubeMode && !m_pathNodes.empty()) {
         drawPathTubeOverlay(vpX, vpY, vpW, vpH);
+    }
+
+    // Draw skeleton overlay (bone lines + joint markers)
+    if (m_riggingMode && m_showSkeleton) {
+        drawSkeletonOverlay(vpX, vpY, vpW, vpH);
     }
 }
 
@@ -1122,6 +1130,11 @@ void ModelingMode::renderModelingEditorUI() {
             if (m_pathTubeMode) {
                 ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f), "PATH TUBE MODE");
                 ImGui::Text("Nodes: %zu", m_pathNodes.size());
+                if (m_pathTubeAttached && m_retopologyLiveObj) {
+                    ImGui::TextColored(ImVec4(0.0f, 1.0f, 0.4f, 1.0f), "Attached to: %s", m_retopologyLiveObj->getName().c_str());
+                } else if (m_retopologyLiveObj && m_pathNodes.empty()) {
+                    ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), "Live: %s (click to attach)", m_retopologyLiveObj->getName().c_str());
+                }
                 ImGui::Text("LMB: place/select node");
                 ImGui::Text("G: grab node | Del: delete");
                 ImGui::Text("Ctrl+Z: undo | Enter: generate");
@@ -1158,6 +1171,7 @@ void ModelingMode::renderModelingEditorUI() {
                     m_pathTubeMode = true;
                     m_pathNodes.clear();
                     m_pathSelectedNode = -1;
+                    m_pathTubeAttached = false;
                     resetPathTubeProfile();
                     // Disable conflicting modes
                     if (m_retopologyMode) cancelRetopologyMode();
@@ -1208,7 +1222,7 @@ void ModelingMode::renderModelingEditorUI() {
                 }
             } else {
                 if (ImGui::Button("Slice Mesh")) {
-                    if (m_ctx.selectedObject && m_ctx.selectedObject->hasEditableMeshData()) {
+                    if (m_ctx.selectedObject && m_ctx.editableMesh.isValid()) {
                         m_sliceMode = true;
                         m_slicePlaneOffset = 0.0f;
                         m_slicePlaneRotationX = 0.0f;
@@ -1225,6 +1239,447 @@ void ModelingMode::renderModelingEditorUI() {
                 }
                 if (ImGui::IsItemHovered()) {
                     ImGui::SetTooltip("Cut the selected mesh into two pieces with a plane");
+                }
+            }
+        }
+
+        // Rigging / Skeleton tools
+        if (m_ctx.selectedObject && m_ctx.editableMesh.isValid()) {
+            ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.2f, 1.0f), "Rigging");
+            ImGui::Separator();
+
+            if (m_riggingMode) {
+                auto& skel = m_ctx.editableMesh.getSkeleton();
+                int numBones = static_cast<int>(skel.bones.size());
+
+                ImGui::Checkbox("Show Skeleton", &m_showSkeleton);
+                ImGui::Checkbox("Show Bone Names", &m_showBoneNames);
+
+                // Add bone
+                ImGui::InputText("##bonename", m_newBoneName, sizeof(m_newBoneName));
+                ImGui::SameLine();
+                if (ImGui::Button("Add Bone")) {
+                    Bone newBone;
+                    newBone.name = m_newBoneName;
+                    newBone.parentIndex = m_selectedBone;  // parent = currently selected bone
+                    int newIdx = static_cast<int>(skel.bones.size());
+                    skel.bones.push_back(newBone);
+                    skel.boneNameToIndex[newBone.name] = newIdx;
+                    // Add default position at origin (or near parent)
+                    glm::vec3 pos(0.0f);
+                    if (m_selectedBone >= 0 && m_selectedBone < static_cast<int>(m_bonePositions.size())) {
+                        pos = m_bonePositions[m_selectedBone] + glm::vec3(0.0f, 0.5f, 0.0f);
+                    }
+                    m_bonePositions.push_back(pos);
+                    m_selectedBone = newIdx;
+                    // Increment name
+                    snprintf(m_newBoneName, sizeof(m_newBoneName), "Bone.%03d", newIdx + 1);
+                    m_ctx.meshDirty = true;
+                    invalidateWireframeCache();
+                }
+
+                // Bone list with inline parent dropdowns
+                if (numBones > 0) {
+                    ImGui::Text("Bones: %d", numBones);
+                    float listHeight = std::min(numBones * 26.0f + 4.0f, 200.0f);
+                    ImGui::BeginChild("##bonelist", ImVec2(0, listHeight), true);
+                    for (int i = 0; i < numBones; ++i) {
+                        ImGui::PushID(i);
+                        bool isSelected = (m_selectedBone == i);
+
+                        // Selectable bone name (left side)
+                        std::string boneName = std::to_string(i) + ": " + skel.bones[i].name;
+                        if (ImGui::Selectable(boneName.c_str(), isSelected, 0, ImVec2(ImGui::GetContentRegionAvail().x * 0.4f, 0))) {
+                            m_selectedBone = i;
+                        }
+
+                        // Parent combo (right side, inline)
+                        ImGui::SameLine();
+                        ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
+                        int parentIdx = skel.bones[i].parentIndex;
+                        std::string parentLabel = (parentIdx >= 0 && parentIdx < numBones)
+                            ? skel.bones[parentIdx].name : "(root)";
+                        if (ImGui::BeginCombo("##parent", parentLabel.c_str())) {
+                            if (ImGui::Selectable("(root)", parentIdx == -1)) {
+                                skel.bones[i].parentIndex = -1;
+                            }
+                            for (int j = 0; j < numBones; ++j) {
+                                if (j == i) continue;
+                                bool sel = (parentIdx == j);
+                                if (ImGui::Selectable(skel.bones[j].name.c_str(), sel)) {
+                                    skel.bones[i].parentIndex = j;
+                                }
+                            }
+                            ImGui::EndCombo();
+                        }
+
+                        ImGui::PopID();
+                    }
+                    ImGui::EndChild();
+
+                    // Selected bone properties
+                    if (m_selectedBone >= 0 && m_selectedBone < numBones) {
+                        ImGui::Text("Selected: %s", skel.bones[m_selectedBone].name.c_str());
+
+                        // Position
+                        if (m_selectedBone < static_cast<int>(m_bonePositions.size())) {
+                            if (ImGui::DragFloat3("Position", &m_bonePositions[m_selectedBone].x, 0.01f)) {
+                                m_ctx.meshDirty = true;
+                            }
+                        }
+
+                        // Place bone mode
+                        if (m_placingBone) {
+                            ImGui::TextColored(ImVec4(0, 1, 0, 1), "Click mesh to place bone...");
+                            if (ImGui::Button("Cancel Place")) {
+                                m_placingBone = false;
+                            }
+                        } else {
+                            if (ImGui::Button("Place on Mesh")) {
+                                m_placingBone = true;
+                            }
+                            ImGui::SameLine();
+                            ImGui::TextDisabled("W/E/R = gizmo");
+                        }
+                        ImGui::SliderFloat("Inset Depth", &m_boneInsetDepth, 0.0f, 1.0f, "%.2f");
+                        if (ImGui::IsItemHovered()) {
+                            ImGui::SetTooltip("How far to push bone inward from surface (along normal)");
+                        }
+
+                        // Delete bone
+                        ImGui::SameLine();
+                        if (ImGui::Button("Delete Bone")) {
+                            // Remove bone and fix up indices
+                            skel.boneNameToIndex.erase(skel.bones[m_selectedBone].name);
+                            skel.bones.erase(skel.bones.begin() + m_selectedBone);
+                            m_bonePositions.erase(m_bonePositions.begin() + m_selectedBone);
+                            // Fix parent indices
+                            for (auto& b : skel.bones) {
+                                if (b.parentIndex == m_selectedBone) b.parentIndex = -1;
+                                else if (b.parentIndex > m_selectedBone) b.parentIndex--;
+                            }
+                            // Rebuild name map
+                            skel.boneNameToIndex.clear();
+                            for (int i = 0; i < static_cast<int>(skel.bones.size()); ++i) {
+                                skel.boneNameToIndex[skel.bones[i].name] = i;
+                            }
+                            m_selectedBone = std::min(m_selectedBone, static_cast<int>(skel.bones.size()) - 1);
+                            m_ctx.meshDirty = true;
+                            invalidateWireframeCache();
+                        }
+                    }
+
+                    ImGui::Separator();
+
+                    // Auto-weights
+                    if (ImGui::Button("Auto Weights")) {
+                        m_ctx.editableMesh.saveState();
+                        // Build inverse bind matrices from bone positions
+                        for (int i = 0; i < numBones; ++i) {
+                            skel.bones[i].inverseBindMatrix = glm::inverse(
+                                glm::translate(glm::mat4(1.0f), m_bonePositions[i]));
+                            skel.bones[i].localTransform = glm::translate(glm::mat4(1.0f), m_bonePositions[i]);
+                        }
+                        m_ctx.editableMesh.generateAutoWeights(m_bonePositions);
+                        m_ctx.meshDirty = true;
+                        invalidateWireframeCache();
+                        std::cout << "[Rigging] Auto weights generated" << std::endl;
+                    }
+                    if (ImGui::IsItemHovered()) {
+                        ImGui::SetTooltip("Assign bone weights to each vertex based on distance to nearest bones");
+                    }
+
+                    ImGui::SameLine();
+                    if (ImGui::Button("Clear Weights")) {
+                        m_ctx.editableMesh.saveState();
+                        m_ctx.editableMesh.clearBoneWeights();
+                        m_ctx.meshDirty = true;
+                        invalidateWireframeCache();
+                    }
+
+                    ImGui::Separator();
+
+                    // Save skeleton to .limesk
+                    if (ImGui::Button("Save Skeleton")) {
+                        nfdchar_t* outPath = nullptr;
+                        nfdfilteritem_t filters[1] = {{"Skeleton", "limesk"}};
+                        if (NFD_SaveDialog(&outPath, filters, 1, nullptr, "skeleton.limesk") == NFD_OKAY) {
+                            std::ofstream file(outPath);
+                            if (file.is_open()) {
+                                file << "# LIMESK v1.0\n";
+                                file << "# Skeleton file for LIME editor\n";
+                                file << "bones: " << numBones << "\n";
+                                for (int i = 0; i < numBones; ++i) {
+                                    file << "bone " << i << ": " << skel.bones[i].parentIndex
+                                         << " \"" << skel.bones[i].name << "\" | ";
+                                    // Position
+                                    if (i < static_cast<int>(m_bonePositions.size())) {
+                                        file << m_bonePositions[i].x << " "
+                                             << m_bonePositions[i].y << " "
+                                             << m_bonePositions[i].z;
+                                    } else {
+                                        file << "0 0 0";
+                                    }
+                                    file << "\n";
+                                }
+                                file.close();
+                                std::cout << "[Rigging] Saved skeleton to " << outPath << std::endl;
+                            }
+                            NFD_FreePath(outPath);
+                        }
+                    }
+
+                    ImGui::SameLine();
+
+                    // Load skeleton from .limesk
+                    if (ImGui::Button("Load Skeleton")) {
+                        nfdchar_t* outPath = nullptr;
+                        nfdfilteritem_t filters[1] = {{"Skeleton", "limesk"}};
+                        if (NFD_OpenDialog(&outPath, filters, 1, nullptr) == NFD_OKAY) {
+                            std::ifstream file(outPath);
+                            if (file.is_open()) {
+                                std::string line;
+                                std::getline(file, line); // header
+                                std::getline(file, line); // comment
+                                int boneCount = 0;
+                                if (std::getline(file, line)) {
+                                    sscanf(line.c_str(), "bones: %d", &boneCount);
+                                }
+
+                                Skeleton newSkel;
+                                std::vector<glm::vec3> newPositions;
+
+                                for (int i = 0; i < boneCount; ++i) {
+                                    if (!std::getline(file, line)) break;
+                                    Bone bone;
+                                    int idx, parentIdx;
+                                    char nameBuffer[256] = {};
+                                    float px, py, pz;
+
+                                    // Parse: bone 0: -1 "Bone.000" | 0.0 1.0 2.0
+                                    const char* nameStart = strchr(line.c_str(), '"');
+                                    const char* nameEnd = nameStart ? strchr(nameStart + 1, '"') : nullptr;
+                                    if (nameStart && nameEnd) {
+                                        size_t nameLen = std::min<size_t>(nameEnd - nameStart - 1, 255);
+                                        strncpy(nameBuffer, nameStart + 1, nameLen);
+                                        nameBuffer[nameLen] = '\0';
+                                    }
+
+                                    sscanf(line.c_str(), "bone %d: %d", &idx, &parentIdx);
+
+                                    const char* pipePos = strchr(line.c_str(), '|');
+                                    px = py = pz = 0.0f;
+                                    if (pipePos) {
+                                        sscanf(pipePos + 1, " %f %f %f", &px, &py, &pz);
+                                    }
+
+                                    bone.name = nameBuffer;
+                                    bone.parentIndex = parentIdx;
+                                    bone.localTransform = glm::translate(glm::mat4(1.0f), glm::vec3(px, py, pz));
+                                    bone.inverseBindMatrix = glm::inverse(bone.localTransform);
+                                    newSkel.bones.push_back(bone);
+                                    newSkel.boneNameToIndex[bone.name] = i;
+                                    newPositions.push_back(glm::vec3(px, py, pz));
+                                }
+                                file.close();
+
+                                m_ctx.editableMesh.setSkeleton(newSkel);
+                                m_bonePositions = newPositions;
+                                m_selectedBone = newPositions.empty() ? -1 : 0;
+                                snprintf(m_newBoneName, sizeof(m_newBoneName), "Bone.%03d", boneCount);
+                                m_ctx.meshDirty = true;
+                                invalidateWireframeCache();
+                                std::cout << "[Rigging] Loaded skeleton (" << boneCount << " bones) from " << outPath << std::endl;
+                            }
+                            NFD_FreePath(outPath);
+                        }
+                    }
+                }
+
+                // Delete entire skeleton
+                if (numBones > 0) {
+                    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.6f, 0.15f, 0.15f, 1.0f));
+                    if (ImGui::Button("Delete Skeleton")) {
+                        m_ctx.editableMesh.saveState();
+                        m_ctx.editableMesh.clearSkeleton();
+                        m_ctx.editableMesh.clearBoneWeights();
+                        m_bonePositions.clear();
+                        m_selectedBone = -1;
+                        m_placingBone = false;
+                        snprintf(m_newBoneName, sizeof(m_newBoneName), "Bone.000");
+                        m_ctx.meshDirty = true;
+                        invalidateWireframeCache();
+                        std::cout << "[Rigging] Skeleton deleted" << std::endl;
+                    }
+                    ImGui::PopStyleColor();
+                }
+
+                // === Weight Editor ===
+                if (numBones > 0) {
+                    // Gather all selected vertices (from vert/edge/face selection)
+                    std::set<uint32_t> selectedVertSet;
+                    auto selVerts = m_ctx.editableMesh.getSelectedVertices();
+                    for (uint32_t vi : selVerts) selectedVertSet.insert(vi);
+                    auto selEdges = m_ctx.editableMesh.getSelectedEdges();
+                    for (uint32_t ei : selEdges) {
+                        auto ep = m_ctx.editableMesh.getEdgeVertices(ei);
+                        selectedVertSet.insert(ep.first);
+                        selectedVertSet.insert(ep.second);
+                    }
+                    auto selFaces = m_ctx.editableMesh.getSelectedFaces();
+                    for (uint32_t fi : selFaces) {
+                        auto fv = m_ctx.editableMesh.getFaceVertices(fi);
+                        for (uint32_t vi : fv) selectedVertSet.insert(vi);
+                    }
+
+                    if (!selectedVertSet.empty()) {
+                        ImGui::Separator();
+                        ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), "Weight Editor (%d verts)", (int)selectedVertSet.size());
+
+                        // Find all bones that influence the selection + compute average weights
+                        std::map<int, float> boneWeightSums;  // boneIdx -> sum of weights
+                        std::map<int, int> boneWeightCounts;   // boneIdx -> count of verts with nonzero weight
+                        for (uint32_t vi : selectedVertSet) {
+                            const auto& v = m_ctx.editableMesh.getVertex(vi);
+                            for (int j = 0; j < 3; ++j) {
+                                if (v.boneWeights[j] > 0.0f) {
+                                    boneWeightSums[v.boneIndices[j]] += v.boneWeights[j];
+                                    boneWeightCounts[v.boneIndices[j]]++;
+                                }
+                            }
+                        }
+
+                        // Bone influence summary with sliders
+                        int numSelected = static_cast<int>(selectedVertSet.size());
+                        for (auto& [boneIdx, weightSum] : boneWeightSums) {
+                            if (boneIdx < 0 || boneIdx >= numBones) continue;
+                            float avgWeight = weightSum / numSelected;
+                            ImGui::PushID(boneIdx + 10000);
+                            ImGui::Text("%s", skel.bones[boneIdx].name.c_str());
+                            ImGui::SameLine(100);
+                            float newWeight = avgWeight;
+                            ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
+                            if (ImGui::SliderFloat("##weight", &newWeight, 0.0f, 1.0f, "%.3f")) {
+                                // Apply weight change to all selected vertices
+                                float delta = newWeight - avgWeight;
+                                for (uint32_t vi : selectedVertSet) {
+                                    auto& v = m_ctx.editableMesh.getVertex(vi);
+                                    // Find if this bone already influences this vertex
+                                    int slot = -1;
+                                    for (int j = 0; j < 3; ++j) {
+                                        if (v.boneIndices[j] == boneIdx && v.boneWeights[j] > 0.0f) {
+                                            slot = j;
+                                            break;
+                                        }
+                                    }
+                                    if (slot >= 0) {
+                                        v.boneWeights[slot] = glm::clamp(v.boneWeights[slot] + delta, 0.0f, 1.0f);
+                                    } else if (delta > 0.0f) {
+                                        // Find an empty slot or the smallest weight slot
+                                        int minSlot = 0;
+                                        for (int j = 1; j < 3; ++j) {
+                                            if (v.boneWeights[j] < v.boneWeights[minSlot]) minSlot = j;
+                                        }
+                                        if (v.boneWeights[minSlot] == 0.0f) {
+                                            v.boneIndices[minSlot] = boneIdx;
+                                            v.boneWeights[minSlot] = delta;
+                                        }
+                                    }
+                                    // Normalize weights to sum to 1.0
+                                    float total = v.boneWeights[0] + v.boneWeights[1] + v.boneWeights[2];
+                                    if (total > 0.001f) {
+                                        v.boneWeights[0] /= total;
+                                        v.boneWeights[1] /= total;
+                                        v.boneWeights[2] /= total;
+                                    }
+                                }
+                                m_ctx.meshDirty = true;
+                                invalidateWireframeCache();
+                            }
+                            ImGui::PopID();
+                        }
+
+                        // Per-vertex detail (collapsible)
+                        if (numSelected <= 100 && ImGui::TreeNode("Per-Vertex Weights")) {
+                            ImGui::BeginChild("##vertweights", ImVec2(0, std::min((float)numSelected * 24.0f + 4.0f, 200.0f)), true);
+                            for (uint32_t vi : selectedVertSet) {
+                                auto& v = m_ctx.editableMesh.getVertex(vi);
+                                ImGui::PushID(static_cast<int>(vi));
+                                ImGui::Text("v%d:", vi);
+                                bool changed = false;
+                                for (int j = 0; j < 3; ++j) {
+                                    if (v.boneWeights[j] <= 0.0f && v.boneIndices[j] == 0) {
+                                        // Empty slot — offer bone assignment
+                                        ImGui::SameLine();
+                                        ImGui::SetNextItemWidth(60);
+                                        std::string comboId = "##b" + std::to_string(j);
+                                        if (ImGui::BeginCombo(comboId.c_str(), "--")) {
+                                            for (int b = 0; b < numBones; ++b) {
+                                                if (ImGui::Selectable(skel.bones[b].name.c_str())) {
+                                                    v.boneIndices[j] = b;
+                                                    v.boneWeights[j] = 0.01f;
+                                                    changed = true;
+                                                }
+                                            }
+                                            ImGui::EndCombo();
+                                        }
+                                        continue;
+                                    }
+                                    ImGui::SameLine();
+                                    std::string bName = (v.boneIndices[j] >= 0 && v.boneIndices[j] < numBones)
+                                        ? skel.bones[v.boneIndices[j]].name : "?";
+                                    ImGui::SetNextItemWidth(60);
+                                    std::string fieldId = bName + "##w" + std::to_string(j);
+                                    if (ImGui::DragFloat(fieldId.c_str(), &v.boneWeights[j], 0.01f, 0.0f, 1.0f, "%.2f")) {
+                                        changed = true;
+                                    }
+                                }
+                                if (changed) {
+                                    // Normalize
+                                    float total = v.boneWeights[0] + v.boneWeights[1] + v.boneWeights[2];
+                                    if (total > 0.001f) {
+                                        v.boneWeights[0] /= total;
+                                        v.boneWeights[1] /= total;
+                                        v.boneWeights[2] /= total;
+                                    }
+                                    m_ctx.meshDirty = true;
+                                    invalidateWireframeCache();
+                                }
+                                ImGui::PopID();
+                            }
+                            ImGui::EndChild();
+                            ImGui::TreePop();
+                        }
+                    }
+                }
+
+                if (ImGui::Button("Exit Rigging")) {
+                    cancelRiggingMode();
+                }
+            } else {
+                if (ImGui::Button("Enter Rigging Mode")) {
+                    m_riggingMode = true;
+                    m_selectedBone = -1;
+                    m_placingBone = false;
+                    m_showSkeleton = true;
+                    // Switch to component mode with vertex selection + wireframe visible
+                    m_ctx.objectMode = false;
+                    m_ctx.modelingSelectionMode = ModelingSelectionMode::Vertex;
+                    m_ctx.showModelingWireframe = true;
+                    // Sync bone positions from existing skeleton
+                    auto& skel = m_ctx.editableMesh.getSkeleton();
+                    m_bonePositions.clear();
+                    for (const auto& bone : skel.bones) {
+                        // Extract position from localTransform
+                        m_bonePositions.push_back(glm::vec3(bone.localTransform[3]));
+                    }
+                    // Disable conflicting modes
+                    if (m_pathTubeMode) cancelPathTubeMode();
+                    if (m_retopologyMode) cancelRetopologyMode();
+                    if (m_sliceMode) cancelSliceMode();
+                    if (m_vertexPaintMode) m_vertexPaintMode = false;
+                    snprintf(m_newBoneName, sizeof(m_newBoneName), "Bone.%03d",
+                             static_cast<int>(skel.bones.size()));
                 }
             }
         }
@@ -1413,6 +1868,15 @@ void ModelingMode::renderModelingEditorUI() {
                 std::vector<SceneObject::StoredHEFace> combinedHEFaces;
                 bool allHaveHEData = true;
 
+                // Find the first textured object to preserve its texture
+                SceneObject* texturedSource = nullptr;
+                for (auto& obj : m_ctx.sceneObjects) {
+                    if (obj->hasTextureData()) {
+                        texturedSource = obj.get();
+                        break;
+                    }
+                }
+
                 for (auto& obj : m_ctx.sceneObjects) {
                     if (!obj->hasMeshData()) continue;
 
@@ -1430,7 +1894,10 @@ void ModelingMode::renderModelingEditorUI() {
                         glm::vec4 worldPos = modelMatrix * glm::vec4(v.position, 1.0f);
                         newVert.position = glm::vec3(worldPos);
                         newVert.normal = glm::normalize(normalMatrix * v.normal);
-                        // UVs preserved as-is
+                        // Offset UVs of non-textured objects outside 0-1 to avoid texture clash
+                        if (texturedSource && obj.get() != texturedSource) {
+                            newVert.texCoord.x += 1.0f;
+                        }
                         combinedVerts.push_back(newVert);
                     }
 
@@ -1451,6 +1918,10 @@ void ModelingMode::renderModelingEditorUI() {
                             newV.position = glm::vec3(worldPos);
                             newV.normal = glm::normalize(normalMatrix * v.normal);
                             if (newV.halfEdgeIndex != UINT32_MAX) newV.halfEdgeIndex += heOffset;
+                            // Offset UVs of non-textured objects outside 0-1
+                            if (texturedSource && obj.get() != texturedSource) {
+                                newV.uv.x += 1.0f;
+                            }
                             combinedHEVerts.push_back(newV);
                         }
 
@@ -1477,7 +1948,16 @@ void ModelingMode::renderModelingEditorUI() {
                 if (!combinedVerts.empty()) {
                     // Create new combined object
                     auto combinedObj = std::make_unique<SceneObject>("Combined");
-                    uint32_t handle = m_ctx.modelRenderer.createModel(combinedVerts, combinedIndices, nullptr, 0, 0);
+
+                    // Pass texture from the textured source object
+                    const unsigned char* texPtr = nullptr;
+                    int texW = 0, texH = 0;
+                    if (texturedSource && texturedSource->hasTextureData()) {
+                        texPtr = texturedSource->getTextureData().data();
+                        texW = texturedSource->getTextureWidth();
+                        texH = texturedSource->getTextureHeight();
+                    }
+                    uint32_t handle = m_ctx.modelRenderer.createModel(combinedVerts, combinedIndices, texPtr, texW, texH);
                     combinedObj->setBufferHandle(handle);
                     combinedObj->setIndexCount(static_cast<uint32_t>(combinedIndices.size()));
                     combinedObj->setVertexCount(static_cast<uint32_t>(combinedVerts.size()));
@@ -1486,6 +1966,13 @@ void ModelingMode::renderModelingEditorUI() {
                     // Store combined half-edge data if all sources had it
                     if (allHaveHEData && !combinedHEVerts.empty()) {
                         combinedObj->setEditableMeshData(combinedHEVerts, combinedHE, combinedHEFaces);
+                    }
+
+                    // Copy texture data to combined object so it persists
+                    if (texturedSource && texturedSource->hasTextureData()) {
+                        combinedObj->setTextureData(texturedSource->getTextureData(),
+                                                    texturedSource->getTextureWidth(),
+                                                    texturedSource->getTextureHeight());
                     }
 
                     // Queue all existing objects for deletion
@@ -1698,7 +2185,7 @@ void ModelingMode::renderModelingEditorUI() {
         }
 
         if (m_ctx.gizmoMode != GizmoMode::None) {
-            ImGui::SliderFloat("Gizmo Size", &m_ctx.gizmoSize, 0.5f, 3.0f, "%.1f");
+            ImGui::SliderFloat("Gizmo Size", &m_ctx.gizmoSize, 0.1f, 3.0f, "%.1f");
             ImGui::SliderFloat3("Gizmo Offset", &m_ctx.gizmoOffset.x, -2.0f, 2.0f, "%.2f");
             if (m_ctx.gizmoMode == GizmoMode::Move) {
                 ImGui::Checkbox("Local Space (Face Normal)", &m_ctx.gizmoLocalSpace);
@@ -4243,6 +4730,49 @@ void ModelingMode::processModelingInput(float deltaTime, bool gizmoActive) {
         cancelSnapVertexMode();
     }
 
+    // Rigging: click to place bone on mesh surface
+    if (m_riggingMode && m_placingBone && m_selectedBone >= 0 && !mouseOverImGui && Input::isMouseButtonPressed(Input::MOUSE_LEFT)) {
+        glm::vec3 rayOrigin, rayDir;
+        m_ctx.getMouseRay(rayOrigin, rayDir);
+
+        // Transform ray into model space
+        if (m_ctx.selectedObject) {
+            glm::mat4 modelMatrix = m_ctx.selectedObject->getTransform().getMatrix();
+            glm::mat4 invModel = glm::inverse(modelMatrix);
+            rayOrigin = glm::vec3(invModel * glm::vec4(rayOrigin, 1.0f));
+            rayDir = glm::normalize(glm::vec3(invModel * glm::vec4(rayDir, 0.0f)));
+        }
+
+        auto hit = m_ctx.editableMesh.raycastFace(rayOrigin, rayDir);
+        if (hit.hit && m_selectedBone < static_cast<int>(m_bonePositions.size())) {
+            // Inset along surface normal so bone ends up inside the mesh
+            glm::vec3 placedPos = hit.position - hit.normal * m_boneInsetDepth;
+            m_bonePositions[m_selectedBone] = placedPos;
+            m_placingBone = false;
+            m_ctx.meshDirty = true;
+            invalidateWireframeCache();
+            std::cout << "[Rigging] Placed bone " << m_ctx.editableMesh.getSkeleton().bones[m_selectedBone].name
+                      << " at (" << placedPos.x << ", " << placedPos.y << ", " << placedPos.z
+                      << ") inset=" << m_boneInsetDepth << std::endl;
+        }
+    }
+
+    // ESC cancels rigging bone placement
+    if (m_riggingMode && m_placingBone && Input::isKeyPressed(Input::KEY_ESCAPE)) {
+        m_placingBone = false;
+    }
+
+    // Rigging: click to select bone in viewport (when not placing and gizmo not active)
+    if (m_riggingMode && !m_placingBone && !m_ctx.gizmoDragging && !mouseOverImGui &&
+        Input::isMouseButtonPressed(Input::MOUSE_LEFT) &&
+        m_ctx.gizmoHoveredAxis == GizmoAxis::None) {
+        glm::vec2 mousePos = Input::getMousePosition();
+        int picked = pickBoneAtScreenPos(mousePos);
+        if (picked >= 0) {
+            m_selectedBone = picked;
+        }
+    }
+
     // Retopology: click to place vertex on live surface or pick existing retopo vertex (not while G-grab active)
     if (m_retopologyMode && !m_retopologyDragging && m_retopologyLiveObj && !mouseOverImGui && Input::isMouseButtonPressed(Input::MOUSE_LEFT)) {
         if (m_retopologyVerts.size() < 4) {
@@ -5410,7 +5940,16 @@ void ModelingMode::buildEditableMeshFromObject() {
         std::vector<HEVertex> heVerts;
         heVerts.reserve(storedVerts.size());
         for (const auto& v : storedVerts) {
-            heVerts.push_back({v.position, v.normal, v.uv, v.color, v.halfEdgeIndex, v.selected});
+            HEVertex hv;
+            hv.position = v.position;
+            hv.normal = v.normal;
+            hv.uv = v.uv;
+            hv.color = v.color;
+            hv.halfEdgeIndex = v.halfEdgeIndex;
+            hv.selected = v.selected;
+            hv.boneIndices = v.boneIndices;
+            hv.boneWeights = v.boneWeights;
+            heVerts.push_back(hv);
         }
 
         std::vector<HalfEdge> heHalfEdges;
@@ -5426,6 +5965,11 @@ void ModelingMode::buildEditableMeshFromObject() {
         }
 
         m_ctx.editableMesh.setFromData(heVerts, heHalfEdges, heFaces);
+
+        // Restore skeleton from SceneObject if present
+        if (m_ctx.selectedObject->hasEditorSkeleton()) {
+            m_ctx.editableMesh.setSkeleton(*m_ctx.selectedObject->getEditorSkeleton());
+        }
 
         // Build faceToTriangles mapping - only for visible faces
         m_ctx.faceToTriangles.clear();
@@ -5452,25 +5996,17 @@ void ModelingMode::buildEditableMeshFromObject() {
     const auto& indices = m_ctx.selectedObject->getIndices();
 
     m_ctx.editableMesh.buildFromTriangles(vertices, indices);
-    size_t triCount = m_ctx.editableMesh.getFaceCount();
     m_ctx.editableMesh.mergeTrianglesToQuads();  // Uses 0.85 threshold for faceted geometry
 
-    // Build faceToTriangles mapping - only for visible faces
-    m_ctx.faceToTriangles.clear();
-    uint32_t triIndex = 0;
-    for (uint32_t faceIdx = 0; faceIdx < m_ctx.editableMesh.getFaceCount(); ++faceIdx) {
-        // Skip hidden faces - they're not in the rendered mesh
-        if (m_ctx.hiddenFaces.find(faceIdx) != m_ctx.hiddenFaces.end()) {
-            continue;
-        }
-        uint32_t vertCount = m_ctx.editableMesh.getFace(faceIdx).vertexCount;
-        uint32_t numTris = (vertCount >= 3) ? (vertCount - 2) : 0;
-        for (uint32_t i = 0; i < numTris && triIndex < triCount; ++i) {
-            m_ctx.faceToTriangles[faceIdx].push_back(triIndex++);
-        }
-    }
-
-    m_ctx.meshDirty = false;
+    // IMPORTANT: must rebuild the render mesh after mergeTrianglesToQuads().
+    // mergeTrianglesToQuads reorders the HE face array (merged quads first, remaining
+    // tris after), so the GPU render buffer's triangle order no longer matches.
+    // Without this, faceToTriangles maps HE faces to wrong render triangles, causing
+    // face selection to highlight random faces on the model.
+    // NOTE: this only manifests on models where mergeTrianglesToQuads actually merges
+    // pairs (smooth surfaces). Faceted models where no pairs pass the 0.85 normal
+    // threshold return early from merge with face order unchanged, so they worked fine.
+    updateMeshFromEditable();
 }
 
 void ModelingMode::duplicateSelectedObject() {
@@ -5555,12 +6091,26 @@ void ModelingMode::duplicateSelectedObject() {
 void ModelingMode::updateMeshFromEditable() {
     if (!m_ctx.selectedObject || !m_ctx.editableMesh.isValid()) return;
 
+    bool hasSkeleton = m_ctx.editableMesh.hasSkeleton();
+
+    // For non-skinned rendering, we still need ModelVertex triangulation for raycasting/mesh data
     std::vector<ModelVertex> vertices;
     std::vector<uint32_t> indices;
     m_ctx.editableMesh.triangulate(vertices, indices, m_ctx.hiddenFaces);
 
+    // Destroy old handles
     uint32_t oldHandle = m_ctx.selectedObject->getBufferHandle();
-    m_ctx.modelRenderer.destroyModel(oldHandle);
+    if (oldHandle != UINT32_MAX && oldHandle != 0) {
+        m_ctx.modelRenderer.destroyModel(oldHandle);
+    }
+    // Also destroy old skinned handle if present
+    if (m_ctx.selectedObject->hasEditorSkeleton()) {
+        uint32_t oldSkinnedHandle = m_ctx.selectedObject->getSkinnedModelHandle();
+        if (oldSkinnedHandle != UINT32_MAX) {
+            m_ctx.skinnedModelRenderer.destroyModel(oldSkinnedHandle);
+            m_ctx.selectedObject->setSkinnedModelHandle(UINT32_MAX);
+        }
+    }
 
     // Handle case where all faces are hidden (empty mesh)
     if (indices.empty()) {
@@ -5568,11 +6118,12 @@ void ModelingMode::updateMeshFromEditable() {
         m_ctx.selectedObject->setIndexCount(0);
         m_ctx.selectedObject->setVertexCount(0);
         m_ctx.selectedObject->setMeshData({}, {});
+        m_ctx.selectedObject->clearEditorSkeleton();
         m_ctx.meshDirty = false;
         return;
     }
 
-    // Preserve texture data if present
+    // Create GPU mesh
     uint32_t newHandle;
     if (m_ctx.selectedObject->hasTextureData()) {
         const auto& texData = m_ctx.selectedObject->getTextureData();
@@ -5587,6 +6138,14 @@ void ModelingMode::updateMeshFromEditable() {
     m_ctx.selectedObject->setVertexCount(static_cast<uint32_t>(vertices.size()));
     m_ctx.selectedObject->setMeshData(vertices, indices);
 
+    // If skeleton exists, also create skinned model and store skeleton on SceneObject
+    if (hasSkeleton) {
+        auto skelCopy = std::make_unique<Skeleton>(m_ctx.editableMesh.getSkeleton());
+        m_ctx.selectedObject->setEditorSkeleton(std::move(skelCopy));
+    } else {
+        m_ctx.selectedObject->clearEditorSkeleton();
+    }
+
     // Also save EditableMesh half-edge data (preserves quad topology for duplicate)
     const auto& heVerts = m_ctx.editableMesh.getVerticesData();
     const auto& heHalfEdges = m_ctx.editableMesh.getHalfEdges();
@@ -5595,7 +6154,8 @@ void ModelingMode::updateMeshFromEditable() {
     std::vector<SceneObject::StoredHEVertex> storedVerts;
     storedVerts.reserve(heVerts.size());
     for (const auto& v : heVerts) {
-        storedVerts.push_back({v.position, v.normal, v.uv, v.color, v.halfEdgeIndex, v.selected});
+        storedVerts.push_back({v.position, v.normal, v.uv, v.color, v.halfEdgeIndex, v.selected,
+                               v.boneIndices, v.boneWeights});
     }
 
     std::vector<SceneObject::StoredHalfEdge> storedHE;

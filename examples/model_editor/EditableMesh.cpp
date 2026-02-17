@@ -1898,6 +1898,150 @@ void EditableMesh::triangulate(std::vector<ModelVertex>& outVerts,
     }
 }
 
+void EditableMesh::triangulateSkinned(std::vector<SkinnedVertex>& outVerts,
+                                       std::vector<uint32_t>& outIndices) const {
+    std::set<uint32_t> noHidden;
+    triangulateSkinned(outVerts, outIndices, noHidden);
+}
+
+void EditableMesh::triangulateSkinned(std::vector<SkinnedVertex>& outVerts,
+                                       std::vector<uint32_t>& outIndices,
+                                       const std::set<uint32_t>& hiddenFaces) const {
+    outVerts.clear();
+    outIndices.clear();
+
+    outVerts.reserve(m_vertices.size());
+    for (const auto& hv : m_vertices) {
+        SkinnedVertex sv;
+        sv.position = hv.position;
+        sv.normal = hv.normal;
+        sv.texCoord = hv.uv;
+        sv.color = hv.color;
+        sv.color.a = 1.0f;
+        sv.joints = hv.boneIndices;
+        sv.weights = hv.boneWeights;
+        outVerts.push_back(sv);
+    }
+
+    for (size_t faceIdx = 0; faceIdx < m_faces.size(); ++faceIdx) {
+        if (!hiddenFaces.empty() &&
+            hiddenFaces.find(static_cast<uint32_t>(faceIdx)) != hiddenFaces.end()) {
+            continue;
+        }
+
+        const auto& face = m_faces[faceIdx];
+        std::vector<uint32_t> faceVerts;
+        uint32_t he = face.halfEdgeIndex;
+        uint32_t loopCount = 0;
+        const uint32_t maxLoops = 100;
+
+        for (uint32_t i = 0; i < face.vertexCount && loopCount < maxLoops; ++i) {
+            if (he >= m_halfEdges.size()) break;
+            uint32_t prevHE = m_halfEdges[he].prevIndex;
+            if (prevHE >= m_halfEdges.size()) break;
+            uint32_t vertIdx = m_halfEdges[prevHE].vertexIndex;
+            if (vertIdx >= m_vertices.size()) break;
+            faceVerts.push_back(vertIdx);
+            he = m_halfEdges[he].nextIndex;
+            loopCount++;
+        }
+
+        if (loopCount >= maxLoops) continue;
+
+        for (uint32_t i = 1; i + 1 < faceVerts.size(); ++i) {
+            outIndices.push_back(faceVerts[0]);
+            outIndices.push_back(faceVerts[i]);
+            outIndices.push_back(faceVerts[i + 1]);
+        }
+    }
+}
+
+// Helper: distance from point to line segment
+static float pointToSegmentDistance(const glm::vec3& point, const glm::vec3& segA, const glm::vec3& segB) {
+    glm::vec3 ab = segB - segA;
+    float lenSq = glm::dot(ab, ab);
+    if (lenSq < 1e-8f) {
+        return glm::length(point - segA);
+    }
+    float t = glm::clamp(glm::dot(point - segA, ab) / lenSq, 0.0f, 1.0f);
+    glm::vec3 closest = segA + t * ab;
+    return glm::length(point - closest);
+}
+
+void EditableMesh::generateAutoWeights(const std::vector<glm::vec3>& boneHeadPositions) {
+    if (m_skeleton.bones.empty() || boneHeadPositions.empty()) return;
+
+    int numBones = static_cast<int>(m_skeleton.bones.size());
+
+    // Precompute children for each bone
+    std::vector<std::vector<int>> boneChildren(numBones);
+    for (int b = 0; b < numBones; ++b) {
+        int p = m_skeleton.bones[b].parentIndex;
+        if (p >= 0 && p < numBones) {
+            boneChildren[p].push_back(b);
+        }
+    }
+
+    for (auto& vert : m_vertices) {
+        // Each bone owns the segments toward its CHILDREN, not toward its parent
+        // This way Bone.001 owns the space from 001→002, Bone.002 owns 002→003, etc.
+        std::vector<std::pair<float, int>> distances; // (distance, boneIndex)
+        for (int b = 0; b < numBones; ++b) {
+            glm::vec3 head = boneHeadPositions[b];
+            float dist;
+            if (boneChildren[b].empty()) {
+                // Leaf bone: just point distance
+                dist = glm::length(vert.position - head);
+            } else {
+                // Min distance to any segment from this bone to its children
+                dist = std::numeric_limits<float>::max();
+                for (int child : boneChildren[b]) {
+                    float d = pointToSegmentDistance(vert.position, head, boneHeadPositions[child]);
+                    dist = std::min(dist, d);
+                }
+            }
+            distances.push_back({dist, b});
+        }
+
+        // Sort by distance, take 3 closest
+        std::sort(distances.begin(), distances.end());
+        int count = std::min(3, static_cast<int>(distances.size()));
+
+        glm::ivec4 indices(0);
+        glm::vec4 weights(0.0f);
+        float totalWeight = 0.0f;
+
+        for (int i = 0; i < count; ++i) {
+            indices[i] = distances[i].second;
+            float d = distances[i].first + 0.001f;
+            weights[i] = 1.0f / (d * d * d);
+            totalWeight += weights[i];
+        }
+
+        // Normalize
+        if (totalWeight > 0.0f) {
+            weights /= totalWeight;
+        } else {
+            weights = glm::vec4(1.0f, 0.0f, 0.0f, 0.0f);
+        }
+        weights[3] = 0.0f;
+        indices[3] = 0;
+
+        vert.boneIndices = indices;
+        vert.boneWeights = weights;
+    }
+
+    std::cout << "[AutoWeights] Assigned weights for " << m_vertices.size()
+              << " vertices using " << numBones << " bones" << std::endl;
+}
+
+void EditableMesh::clearBoneWeights() {
+    for (auto& vert : m_vertices) {
+        vert.boneIndices = glm::ivec4(0);
+        vert.boneWeights = glm::vec4(0.0f);
+    }
+}
+
 std::vector<uint32_t> EditableMesh::getFaceVertices(uint32_t faceIdx) const {
     std::vector<uint32_t> result;
     if (faceIdx >= m_faces.size()) return result;
@@ -6768,14 +6912,38 @@ bool EditableMesh::saveLime(const std::string& filepath, const unsigned char* te
         return false;
     }
 
-    file << "# LIME Model Format v2.1\n";
-    file << "# Half-edge mesh with embedded texture and transform\n\n";
+    // Use v3.0 if skeleton data present, otherwise v2.1 for backward compat
+    bool hasBones = !m_skeleton.bones.empty();
+    if (hasBones) {
+        file << "# LIME Model Format v3.0\n";
+        file << "# Half-edge mesh with skeleton, embedded texture and transform\n\n";
+    } else {
+        file << "# LIME Model Format v2.1\n";
+        file << "# Half-edge mesh with embedded texture and transform\n\n";
+    }
 
     // Transform section
     file << "# TRANSFORM\n";
     file << "transform_pos: " << position.x << " " << position.y << " " << position.z << "\n";
     file << "transform_rot: " << rotation.w << " " << rotation.x << " " << rotation.y << " " << rotation.z << "\n";
     file << "transform_scale: " << scale.x << " " << scale.y << " " << scale.z << "\n\n";
+
+    // Skeleton section (v3.0 only)
+    if (hasBones) {
+        file << "# SKELETON: " << m_skeleton.bones.size() << "\n";
+        file << "# bone idx: parentIdx \"name\" | 16 inverseBindMatrix floats | 16 localTransform floats\n";
+        for (size_t i = 0; i < m_skeleton.bones.size(); ++i) {
+            const auto& bone = m_skeleton.bones[i];
+            file << "bone " << i << ": " << bone.parentIndex << " \"" << bone.name << "\" |";
+            const float* ibm = &bone.inverseBindMatrix[0][0];
+            for (int j = 0; j < 16; ++j) file << " " << ibm[j];
+            file << " |";
+            const float* lt = &bone.localTransform[0][0];
+            for (int j = 0; j < 16; ++j) file << " " << lt[j];
+            file << "\n";
+        }
+        file << "\n";
+    }
 
     // Texture section (if provided)
     if (textureData && texWidth > 0 && texHeight > 0) {
@@ -6788,7 +6956,11 @@ bool EditableMesh::saveLime(const std::string& filepath, const unsigned char* te
 
     // Vertices
     file << "# VERTICES: " << m_vertices.size() << "\n";
-    file << "# idx: pos.x pos.y pos.z | nrm.x nrm.y nrm.z | uv.u uv.v | col.r col.g col.b col.a | halfEdgeIdx selected\n";
+    if (hasBones) {
+        file << "# idx: pos.x pos.y pos.z | nrm.x nrm.y nrm.z | uv.u uv.v | col.r col.g col.b col.a | halfEdgeIdx selected | bi0 bi1 bi2 bi3 | bw0 bw1 bw2 bw3\n";
+    } else {
+        file << "# idx: pos.x pos.y pos.z | nrm.x nrm.y nrm.z | uv.u uv.v | col.r col.g col.b col.a | halfEdgeIdx selected\n";
+    }
     for (size_t i = 0; i < m_vertices.size(); ++i) {
         const auto& v = m_vertices[i];
         file << "v " << i << ": "
@@ -6796,7 +6968,12 @@ bool EditableMesh::saveLime(const std::string& filepath, const unsigned char* te
              << v.normal.x << " " << v.normal.y << " " << v.normal.z << " | "
              << v.uv.x << " " << v.uv.y << " | "
              << v.color.r << " " << v.color.g << " " << v.color.b << " " << v.color.a << " | "
-             << v.halfEdgeIndex << " " << (v.selected ? 1 : 0) << "\n";
+             << v.halfEdgeIndex << " " << (v.selected ? 1 : 0);
+        if (hasBones) {
+            file << " | " << v.boneIndices.x << " " << v.boneIndices.y << " " << v.boneIndices.z << " " << v.boneIndices.w
+                 << " | " << v.boneWeights.x << " " << v.boneWeights.y << " " << v.boneWeights.z << " " << v.boneWeights.w;
+        }
+        file << "\n";
     }
     file << "\n";
 
@@ -7076,6 +7253,8 @@ bool EditableMesh::loadLime(const std::string& filepath, std::vector<unsigned ch
     m_halfEdges.clear();
     m_edgeMap.clear();
     m_selectedEdges.clear();
+    m_skeleton.bones.clear();
+    m_skeleton.boneNameToIndex.clear();
     outTextureData.clear();
     outTexWidth = 0;
     outTexHeight = 0;
@@ -7085,8 +7264,14 @@ bool EditableMesh::loadLime(const std::string& filepath, std::vector<unsigned ch
     outRotation = glm::quat(1.0f, 0.0f, 0.0f, 0.0f);  // Identity quaternion
     outScale = glm::vec3(1.0f);
 
+    bool isV3 = false;
+
     std::string line;
     while (std::getline(file, line)) {
+        // Check for v3.0 header
+        if (line.find("v3.0") != std::string::npos) {
+            isV3 = true;
+        }
         if (line.empty() || line[0] == '#') continue;
 
         std::istringstream iss(line);
@@ -7110,8 +7295,45 @@ bool EditableMesh::loadLime(const std::string& filepath, std::vector<unsigned ch
             iss >> encoded;
             outTextureData = base64_decode(encoded);
         }
+        else if (type == "bone") {
+            // Parse bone: bone idx: parentIdx "name" | 16 inverseBindMatrix floats | 16 localTransform floats
+            uint32_t idx;
+            int parentIdx;
+            char colon, pipe1, pipe2;
+            iss >> idx >> colon >> parentIdx;
+
+            // Parse quoted name
+            std::string boneName;
+            char c;
+            // Skip to opening quote
+            while (iss.get(c) && c != '"') {}
+            while (iss.get(c) && c != '"') {
+                boneName += c;
+            }
+
+            iss >> pipe1;
+            Bone bone;
+            bone.name = boneName;
+            bone.parentIndex = parentIdx;
+
+            // Read 16 inverse bind matrix floats
+            float* ibm = &bone.inverseBindMatrix[0][0];
+            for (int j = 0; j < 16; ++j) iss >> ibm[j];
+
+            iss >> pipe2;
+
+            // Read 16 local transform floats
+            float* lt = &bone.localTransform[0][0];
+            for (int j = 0; j < 16; ++j) iss >> lt[j];
+
+            if (idx >= m_skeleton.bones.size()) {
+                m_skeleton.bones.resize(idx + 1);
+            }
+            m_skeleton.bones[idx] = bone;
+            m_skeleton.boneNameToIndex[boneName] = static_cast<int>(idx);
+        }
         else if (type == "v") {
-            // Parse vertex: v idx: pos | nrm | uv | col | halfEdgeIdx selected
+            // Parse vertex: v idx: pos | nrm | uv | col | halfEdgeIdx selected [| bi0 bi1 bi2 bi3 | bw0 bw1 bw2 bw3]
             uint32_t idx;
             char colon, pipe1, pipe2, pipe3, pipe4;
             HEVertex v;
@@ -7122,11 +7344,23 @@ bool EditableMesh::loadLime(const std::string& filepath, std::vector<unsigned ch
                 >> v.normal.x >> v.normal.y >> v.normal.z >> pipe2
                 >> v.uv.x >> v.uv.y >> pipe3;
 
-            // Try to read color (v2.0 format)
+            // Try to read color (v2.0+ format)
             float r, g, b, a;
             if (iss >> r >> g >> b >> a >> pipe4) {
                 v.color = glm::vec4(r, g, b, a);
                 iss >> v.halfEdgeIndex >> selected;
+
+                // Try to read bone data (v3.0 format)
+                char pipe5;
+                int bi0, bi1, bi2, bi3;
+                if (iss >> pipe5 >> bi0 >> bi1 >> bi2 >> bi3) {
+                    v.boneIndices = glm::ivec4(bi0, bi1, bi2, bi3);
+                    char pipe6;
+                    float bw0, bw1, bw2, bw3;
+                    if (iss >> pipe6 >> bw0 >> bw1 >> bw2 >> bw3) {
+                        v.boneWeights = glm::vec4(bw0, bw1, bw2, bw3);
+                    }
+                }
             } else {
                 // Fallback for v1.0 format (no color)
                 v.color = glm::vec4(1.0f);
