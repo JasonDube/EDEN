@@ -70,6 +70,7 @@
 #include "MCPServer.hpp"
 #include <httplib.h>
 
+#include <dirent.h>
 #include <iostream>
 #include <sstream>
 #include <csignal>
@@ -928,6 +929,90 @@ protected:
         // Poll for AI backend responses
         if (m_httpClient) {
             m_httpClient->pollResponses();
+        }
+
+        // Update TTS cooldown timer
+        if (m_ttsCooldown > 0.0f) m_ttsCooldown -= deltaTime;
+
+        // Heartbeat: passive perception for all EDEN companions in scene (play mode only)
+        // Skip heartbeat while chat TTS is playing or pending to prevent audio overlap
+        if (m_heartbeatEnabled && m_isPlayMode && m_httpClient && m_httpClient->isConnected()
+            && !m_heartbeatInFlight && !m_ttsInFlight && m_ttsCooldown <= 0.0f) {
+            m_heartbeatTimer += deltaTime;
+            if (m_heartbeatTimer >= m_heartbeatInterval) {
+                m_heartbeatTimer = 0.0f;
+
+                // Find first EDEN companion in the scene
+                SceneObject* companion = nullptr;
+                for (const auto& obj : m_sceneObjects) {
+                    if (obj && obj->getBeingType() == BeingType::EDEN_COMPANION) {
+                        companion = obj.get();
+                        break;
+                    }
+                }
+
+                if (companion) {
+                    m_heartbeatInFlight = true;
+                    PerceptionData perception = performScanCone(companion, 360.0f, 50.0f);
+                    std::string npcName = companion->getName();
+                    int beingType = static_cast<int>(companion->getBeingType());
+
+                    // Use quick chat session for this NPC (persists across heartbeats)
+                    std::string sessionId = m_quickChatSessionIds.count(npcName) ?
+                                            m_quickChatSessionIds[npcName] : "";
+
+                    m_httpClient->sendHeartbeat(sessionId, npcName, beingType, perception,
+                        [this, npcName, companion](const AsyncHttpClient::Response& resp) {
+                            m_heartbeatInFlight = false;
+                            if (!resp.success) return;
+
+                            try {
+                                auto json = nlohmann::json::parse(resp.body);
+
+                                // Track session ID
+                                if (json.contains("session_id") && !json["session_id"].is_null()) {
+                                    m_quickChatSessionIds[npcName] = json["session_id"].get<std::string>();
+                                }
+
+                                // Extract response text
+                                std::string responseText;
+                                if (json.contains("response") && !json["response"].is_null()) {
+                                    responseText = json["response"].get<std::string>();
+                                }
+
+                                // If NPC has something to say, show in chat log and speak
+                                if (!responseText.empty()) {
+                                    addChatMessage(npcName, responseText);
+
+                                    // Also add to conversation history if we're talking to this NPC
+                                    if (m_inConversation && m_currentInteractObject == companion) {
+                                        m_conversationHistory.push_back({npcName, responseText, false});
+                                        m_scrollToBottom = true;
+                                    }
+
+                                    // speakTTS internally blocks if another TTS is playing
+                                    speakTTS(responseText, npcName);
+
+                                    // Cycle expression on each response
+                                    cycleExpression(companion);
+                                }
+
+                                // Handle action if present (needs m_currentInteractObject)
+                                if (json.contains("action") && !json["action"].is_null()) {
+                                    SceneObject* prevTarget = m_currentInteractObject;
+                                    m_currentInteractObject = companion;
+                                    executeAIAction(json["action"]);
+                                    if (!m_inConversation) {
+                                        m_currentInteractObject = prevTarget;
+                                    }
+                                }
+
+                            } catch (const std::exception& e) {
+                                std::cerr << "[Heartbeat] Parse error: " << e.what() << std::endl;
+                            }
+                        });
+                }
+            }
         }
 
         // Process MCP server commands
@@ -3243,6 +3328,49 @@ private:
             wasF6 = f6;
         }
 
+        // V key: push-to-talk (hold to record, release to transcribe + send to nearest NPC)
+        if (m_isPlayMode && !ImGui::GetIO().WantTextInput) {
+            bool vDown = Input::isKeyDown(Input::KEY_V);
+            if (vDown && !m_pttRecording && !m_pttProcessing) {
+                // Start recording
+                if (Audio::getInstance().startRecording()) {
+                    m_pttRecording = true;
+                    std::cout << "[PTT] Recording started (hold V to talk)" << std::endl;
+                }
+            } else if (!vDown && m_pttRecording) {
+                // Stop recording and transcribe
+                m_pttRecording = false;
+                std::string wavPath = "/tmp/eden_ptt.wav";
+                if (Audio::getInstance().stopRecording(wavPath)) {
+                    m_pttProcessing = true;
+                    std::cout << "[PTT] Transcribing..." << std::endl;
+
+                    m_httpClient->requestSTT(wavPath,
+                        [this](const AsyncHttpClient::Response& resp) {
+                            m_pttProcessing = false;
+                            if (!resp.success) {
+                                std::cerr << "[PTT] STT request failed" << std::endl;
+                                return;
+                            }
+                            try {
+                                auto json = nlohmann::json::parse(resp.body);
+                                std::string text = json.value("text", "");
+                                if (text.empty()) {
+                                    std::cout << "[PTT] No speech detected" << std::endl;
+                                    return;
+                                }
+                                std::cout << "[PTT] You said: \"" << text << "\"" << std::endl;
+
+                                // Send as quick chat to nearest NPC
+                                handleVoiceMessage(text);
+                            } catch (const std::exception& e) {
+                                std::cerr << "[PTT] Parse error: " << e.what() << std::endl;
+                            }
+                        });
+                }
+            }
+        }
+
         // Skip all other shortcuts when in conversation or quick chat (only Escape works)
         if (m_inConversation || m_quickChatMode) return;
 
@@ -3510,6 +3638,40 @@ private:
 
         // Update player avatar position to track camera
         updatePlayerAvatar();
+
+        // EDEN companions track the player — turn to face camera
+        {
+            glm::vec3 playerPos = m_camera.getPosition();
+            for (auto& obj : m_sceneObjects) {
+                if (!obj || obj->getBeingType() != BeingType::EDEN_COMPANION) continue;
+                // Skip if NPC is doing a motor action (look_around, move_to, etc.)
+                if (m_aiActionActive && m_currentInteractObject == obj.get()) continue;
+
+                glm::vec3 npcPos = obj->getTransform().getPosition();
+                glm::vec3 toPlayer = playerPos - npcPos;
+                toPlayer.y = 0.0f;  // only rotate on Y axis
+
+                if (glm::length(toPlayer) < 0.1f) continue;  // too close, skip
+
+                float targetYaw = glm::degrees(atan2(toPlayer.x, toPlayer.z));
+                glm::vec3 euler = obj->getEulerRotation();
+
+                // Smooth rotation towards player
+                float diff = targetYaw - euler.y;
+                // Normalize to [-180, 180]
+                while (diff > 180.0f) diff -= 360.0f;
+                while (diff < -180.0f) diff += 360.0f;
+
+                float rotSpeed = 90.0f; // degrees per second
+                float step = rotSpeed * deltaTime;
+                if (std::abs(diff) < step) {
+                    euler.y = targetYaw;
+                } else {
+                    euler.y += (diff > 0 ? step : -step);
+                }
+                obj->setEulerRotation(euler);
+            }
+        }
 
         // Update game time
         int previousMinute = static_cast<int>(m_gameTimeMinutes);
@@ -6439,6 +6601,7 @@ private:
         // Send to AI backend
         if (m_httpClient && m_httpClient->isConnected()) {
             m_waitingForAIResponse = true;
+            // (TTS overlap prevented by m_ttsInFlight + m_ttsCooldown in speakTTS)
             int beingType = static_cast<int>(m_currentInteractObject->getBeingType());
             
             // For AI NPCs (Xenk, Eve, Robot), include updated perception data and parse actions
@@ -6468,6 +6631,14 @@ private:
                                 std::string response = json.value("response", "...");
                                 m_conversationHistory.push_back({npcName, response, false});
                                 std::cout << npcName << " responded: " << response << std::endl;
+
+                                // Speak the response via TTS
+                                speakTTS(response, npcName);
+
+                                // Cycle expression on each response
+                                if (m_currentInteractObject) {
+                                    cycleExpression(m_currentInteractObject);
+                                }
 
                                 // Check for and execute AI action
                                 if (json.contains("action") && !json["action"].is_null()) {
@@ -6530,6 +6701,149 @@ private:
         m_worldChatScrollToBottom = true;
     }
 
+    // Handle transcribed voice message — find nearest NPC and send as quick chat
+    void handleVoiceMessage(const std::string& text) {
+        glm::vec3 playerPos = m_camera.getPosition();
+
+        // Find nearest sentient NPC
+        SceneObject* nearestNPC = nullptr;
+        float nearestDist = 100.0f;
+        for (auto& obj : m_sceneObjects) {
+            if (!obj || !obj->isVisible() || !obj->isSentient()) continue;
+            if (obj.get() == m_playerAvatar) continue;
+            float dist = glm::length(obj->getTransform().getPosition() - playerPos);
+            if (dist < nearestDist) {
+                nearestDist = dist;
+                nearestNPC = obj.get();
+            }
+        }
+
+        if (!nearestNPC) {
+            addChatMessage("System", "No one nearby to hear you.");
+            return;
+        }
+
+        // Show player message in chat log
+        addChatMessage("You", text);
+
+        std::string npcName = nearestNPC->getName();
+        int beingType = static_cast<int>(nearestNPC->getBeingType());
+        m_currentInteractObject = nearestNPC;
+
+        // Reuse session
+        std::string sessionId;
+        auto it = m_quickChatSessionIds.find(npcName);
+        if (it != m_quickChatSessionIds.end()) sessionId = it->second;
+
+        // Send with perception
+        PerceptionData perception = performScanCone(nearestNPC, 120.0f, 50.0f);
+        m_httpClient->sendChatMessageWithPerception(sessionId, text,
+            npcName, "", beingType, perception,
+            [this, npcName, nearestNPC](const AsyncHttpClient::Response& resp) {
+                if (resp.success) {
+                    try {
+                        auto json = nlohmann::json::parse(resp.body);
+                        if (json.contains("session_id")) {
+                            m_quickChatSessionIds[npcName] = json["session_id"].get<std::string>();
+                        }
+                        std::string response = json.value("response", "...");
+                        addChatMessage(npcName, response);
+                        speakTTS(response, npcName);
+
+                        m_currentInteractObject = nearestNPC;
+                        if (json.contains("action") && !json["action"].is_null()) {
+                            executeAIAction(json["action"]);
+                        }
+                    } catch (...) {
+                        addChatMessage(npcName, "...");
+                    }
+                } else {
+                    addChatMessage(npcName, "(No response)");
+                }
+            });
+    }
+
+    // Cycle to the next expression texture on an NPC (for testing)
+    void cycleExpression(SceneObject* npc) {
+        if (!npc || npc->getExpressionCount() == 0) return;
+        int next = (npc->getCurrentExpression() + 1) % npc->getExpressionCount();
+        if (npc->setExpression(next)) {
+            auto& tex = npc->getTextureData();
+            m_modelRenderer->updateTexture(
+                npc->getBufferHandle(), tex.data(),
+                npc->getTextureWidth(), npc->getTextureHeight());
+            std::cout << "[Expression] " << npc->getName() << " -> '"
+                      << npc->getExpressionName(next) << "'" << std::endl;
+        }
+    }
+
+    // Request TTS audio and play it via miniaudio
+    // Only one TTS can be in-flight or playing at a time — all others are dropped
+    void speakTTS(const std::string& text, const std::string& npcName) {
+        if (!m_httpClient || text.empty()) return;
+
+        // Block if another TTS is still in-flight or playing
+        if (m_ttsInFlight || m_ttsCooldown > 0.0f) {
+            std::cout << "[TTS] Skipped (already playing): \"" << text.substr(0, 40) << "...\"" << std::endl;
+            return;
+        }
+
+        // Pick voice based on NPC
+        std::string voice = "en-US-AvaNeural";  // Liora default
+        std::string rate;
+        bool useRobotVoice = false;
+        if (npcName == "Eve") voice = "en-GB-SoniaNeural";
+        else if (npcName == "Xenk") voice = "en-US-GuyNeural";
+        else if (npcName.find("Robot") != std::string::npos) voice = "en-US-GuyNeural";
+        else if ([&]() { std::string lower = npcName; std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower); return lower.find("lionel") != std::string::npos; }()) {
+            useRobotVoice = true;
+        }
+
+        m_ttsInFlight = true;
+        std::cout << "[TTS] Requesting: \"" << text.substr(0, 60) << "...\" (" << (useRobotVoice ? "robot" : voice) << ")" << std::endl;
+
+        m_httpClient->requestTTS(text, voice,
+            [this](const AsyncHttpClient::Response& resp) {
+                m_ttsInFlight = false;
+                if (!resp.success) {
+                    std::cerr << "[TTS] Request failed: " << resp.error << " (status " << resp.statusCode << ")" << std::endl;
+                    return;
+                }
+                if (resp.body.empty()) {
+                    std::cerr << "[TTS] Empty audio response" << std::endl;
+                    return;
+                }
+
+                // Estimate audio duration: WAV ~32kB/s (16-bit mono 16kHz), MP3 ~16kB/s
+                bool isWav = resp.body.size() >= 4 && resp.body[0] == 'R' && resp.body[1] == 'I' && resp.body[2] == 'F' && resp.body[3] == 'F';
+                float estimatedDuration = isWav
+                    ? static_cast<float>(resp.body.size()) / 32000.0f
+                    : static_cast<float>(resp.body.size()) / 16000.0f;
+
+                // Write audio to temp file and play
+                std::string ext = isWav ? ".wav" : ".mp3";
+                std::string tempPath = "/tmp/eden_tts_" + std::to_string(m_ttsFileCounter++) + ext;
+                std::ofstream out(tempPath, std::ios::binary);
+                if (out) {
+                    out.write(resp.body.data(), resp.body.size());
+                    out.close();
+
+                    if (!m_lastTTSFile.empty()) {
+                        std::remove(m_lastTTSFile.c_str());
+                    }
+                    m_lastTTSFile = tempPath;
+
+                    std::cout << "[TTS] Playing: " << tempPath << " (~" << estimatedDuration << "s)" << std::endl;
+                    Audio::getInstance().playSound(tempPath, 0.8f);
+
+                    // Set cooldown — no new TTS until this one finishes
+                    m_ttsCooldown = estimatedDuration + 0.5f;
+                } else {
+                    std::cerr << "[TTS] Failed to write temp file: " << tempPath << std::endl;
+                }
+            }, rate, useRobotVoice);
+    }
+
     // Update chat log timers (call from update loop)
     void updateChatLog(float deltaTime) {
         for (auto it = m_chatLog.begin(); it != m_chatLog.end(); ) {
@@ -6563,6 +6877,29 @@ private:
 
     // Render the chat log overlay (bottom-left, Minecraft style)
     void renderChatLog() {
+        // PTT recording/processing indicator
+        if (m_pttRecording || m_pttProcessing) {
+            float windowWidth = static_cast<float>(getWindow().getWidth());
+            float windowHeight = static_cast<float>(getWindow().getHeight());
+            ImGui::SetNextWindowPos(ImVec2(windowWidth * 0.5f - 80.0f, windowHeight - 120.0f));
+            ImGui::SetNextWindowBgAlpha(0.7f);
+            if (ImGui::Begin("##PTTIndicator", nullptr,
+                ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+                ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings |
+                ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoFocusOnAppearing)) {
+                if (m_pttRecording) {
+                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.3f, 0.3f, 1.0f));
+                    ImGui::Text("  Recording...  ");
+                    ImGui::PopStyleColor();
+                } else {
+                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 1.0f, 0.4f, 1.0f));
+                    ImGui::Text("  Transcribing...  ");
+                    ImGui::PopStyleColor();
+                }
+            }
+            ImGui::End();
+        }
+
         if (m_chatLog.empty() && !m_quickChatMode) return;
 
         float windowWidth = static_cast<float>(getWindow().getWidth());
@@ -6831,6 +7168,7 @@ private:
 
         // Set interact object so AI motor actions (look_around, move_to) have a target
         m_currentInteractObject = closestSentient;
+        // (TTS overlap prevented by m_ttsInFlight + m_ttsCooldown in speakTTS)
 
         if (m_httpClient && m_httpClient->isConnected()) {
             // Reuse session for same NPC, or start fresh
@@ -6867,6 +7205,12 @@ private:
                                 std::string response = json.value("response", "...");
                                 addChatMessage(npcName, response);
                                 std::cout << npcName << " says: " << response << std::endl;
+
+                                // Speak the response via TTS
+                                speakTTS(response, npcName);
+
+                                // Cycle expression on each response
+                                cycleExpression(closestSentient);
 
                                 // Restore interact object for this NPC (may have been cleared since send)
                                 m_currentInteractObject = closestSentient;
@@ -8206,6 +8550,58 @@ private:
         return true;
     }
 
+    // Load expression textures from assets/textures/expressions/<npcName>/
+    // Each .png in the folder becomes a named expression (filename without extension)
+    void loadExpressionsForNPC(SceneObject* obj) {
+        std::string npcName = obj->getName();
+        // Convert to lowercase for folder lookup
+        std::string folderName = npcName;
+        std::transform(folderName.begin(), folderName.end(), folderName.begin(), ::tolower);
+
+        std::string exprDir = "textures/expressions/" + folderName + "/";
+
+        // Check if directory exists
+        DIR* dir = opendir(exprDir.c_str());
+        if (!dir) return;
+
+        std::cout << "[Expressions] Loading expressions for " << npcName << " from " << exprDir << std::endl;
+
+        struct dirent* entry;
+        while ((entry = readdir(dir)) != nullptr) {
+            std::string filename = entry->d_name;
+            // Only load .png files
+            if (filename.size() < 5 || filename.substr(filename.size() - 4) != ".png") continue;
+
+            std::string filepath = exprDir + filename;
+            std::string exprName = filename.substr(0, filename.size() - 4);  // strip .png
+
+            int w, h, channels;
+            unsigned char* pixels = stbi_load(filepath.c_str(), &w, &h, &channels, STBI_rgb_alpha);
+            if (!pixels) {
+                std::cerr << "[Expressions] Failed to load: " << filepath << std::endl;
+                continue;
+            }
+
+            std::vector<unsigned char> pixelData(pixels, pixels + w * h * 4);
+            obj->addExpression(exprName, pixelData, w, h);
+            stbi_image_free(pixels);
+
+            std::cout << "[Expressions]   Loaded '" << exprName << "' (" << w << "x" << h << ")" << std::endl;
+        }
+        closedir(dir);
+
+        std::cout << "[Expressions] " << npcName << ": " << obj->getExpressionCount() << " expressions loaded" << std::endl;
+
+        // Set neutral as default if available
+        if (obj->getExpressionCount() > 0) {
+            obj->setExpressionByName("neutral");
+            if (obj->getCurrentExpression() >= 0) {
+                auto& tex = obj->getTextureData();
+                m_modelRenderer->updateTexture(obj->getBufferHandle(), tex.data(), obj->getTextureWidth(), obj->getTextureHeight());
+            }
+        }
+    }
+
     void loadLevel(const std::string& filepath) {
         LevelData levelData;
 
@@ -8576,6 +8972,13 @@ private:
 
         m_currentLevelPath = filepath;
         std::cout << "Level loaded from: " << filepath << std::endl;
+
+        // Load expression textures for sentient NPCs
+        for (auto& obj : m_sceneObjects) {
+            if (obj && obj->isSentient()) {
+                loadExpressionsForNPC(obj.get());
+            }
+        }
 
         // Auto-load game save if it exists
         loadGame();
@@ -11658,6 +12061,27 @@ private:
             std::cout << "[AI Action] Stopped for " << m_currentInteractObject->getName()
                       << " (remaining followers: " << m_aiFollowers.size() << ")" << std::endl;
         }
+        else if (actionType == "set_expression") {
+            // Swap NPC's face texture to a named expression
+            std::string exprName = action.value("expression", "");
+            if (exprName.empty()) {
+                std::cout << "[AI Action] set_expression: no expression name provided" << std::endl;
+            } else if (m_currentInteractObject->getExpressionCount() == 0) {
+                std::cout << "[AI Action] set_expression: NPC has no expressions loaded" << std::endl;
+            } else {
+                if (m_currentInteractObject->setExpressionByName(exprName)) {
+                    auto& tex = m_currentInteractObject->getTextureData();
+                    m_modelRenderer->updateTexture(
+                        m_currentInteractObject->getBufferHandle(),
+                        tex.data(),
+                        m_currentInteractObject->getTextureWidth(),
+                        m_currentInteractObject->getTextureHeight());
+                    std::cout << "[AI Action] Expression changed to '" << exprName << "'" << std::endl;
+                } else {
+                    std::cout << "[AI Action] set_expression: '" << exprName << "' not found or already active" << std::endl;
+                }
+            }
+        }
         else {
             std::cout << "[AI Action] Unknown action type: '" << actionType << "'" << std::endl;
         }
@@ -12096,6 +12520,8 @@ private:
             m_currentInteractObject = closestObject;
             m_inConversation = true;
             m_waitingForAIResponse = true;
+            m_heartbeatTimer = 0.0f;
+            m_heartbeatInFlight = false;
 
             // Free the mouse for conversation (cursor visible for chat UI)
             m_playModeCursorVisible = true;
@@ -12467,6 +12893,22 @@ private:
     std::string m_currentSessionId;
     std::unordered_map<std::string, std::string> m_quickChatSessionIds;  // npcName -> session_id
     bool m_waitingForAIResponse = false;
+
+    // Heartbeat (passive perception for EDEN companions)
+    float m_heartbeatTimer = 0.0f;
+    float m_heartbeatInterval = 5.0f;   // seconds between heartbeat polls
+    bool m_heartbeatEnabled = true;
+    bool m_heartbeatInFlight = false;    // prevent stacking requests
+
+    // TTS (text-to-speech)
+    int m_ttsFileCounter = 0;
+    std::string m_lastTTSFile;
+    float m_ttsCooldown = 0.0f;        // seconds until next TTS can play (prevents overlap)
+    bool m_ttsInFlight = false;        // a TTS request is waiting for audio from backend
+
+    // Push-to-talk (speech-to-text)
+    bool m_pttRecording = false;
+    bool m_pttProcessing = false;
 
     // MCP Server (Claude Code integration)
     std::unique_ptr<MCPServer> m_mcpServer;

@@ -8,6 +8,7 @@
 #include <httplib.h>
 
 #include <iostream>
+#include <fstream>
 
 namespace eden {
 
@@ -86,7 +87,25 @@ AsyncHttpClient::Response AsyncHttpClient::executeRequest(const Request& request
 
     httplib::Result result;
 
-    if (request.method == "GET") {
+    if (!request.uploadFilePath.empty()) {
+        // Multipart file upload
+        std::ifstream file(request.uploadFilePath, std::ios::binary);
+        if (file) {
+            std::string fileData((std::istreambuf_iterator<char>(file)),
+                                  std::istreambuf_iterator<char>());
+            file.close();
+
+            // Extract filename from path
+            std::string filename = request.uploadFilePath;
+            auto slashPos = filename.find_last_of('/');
+            if (slashPos != std::string::npos) filename = filename.substr(slashPos + 1);
+
+            httplib::MultipartFormDataItems items = {
+                {"audio", fileData, filename, "audio/wav"}
+            };
+            result = client.Post(request.path, items);
+        }
+    } else if (request.method == "GET") {
         result = client.Get(request.path);
     } else if (request.method == "POST") {
         result = client.Post(request.path, request.body, "application/json");
@@ -180,6 +199,67 @@ void AsyncHttpClient::endSession(const std::string& sessionId, ResponseCallback 
     request.method = "POST";
     request.path = "/session/" + sessionId + "/end";
     request.body = "{}";
+    request.callback = callback;
+
+    {
+        std::lock_guard<std::mutex> lock(m_requestMutex);
+        m_requestQueue.push(std::move(request));
+    }
+}
+
+void AsyncHttpClient::sendHeartbeat(const std::string& sessionId, const std::string& npcName,
+                                     int beingType, const PerceptionData& perception,
+                                     ResponseCallback callback) {
+    nlohmann::json body;
+    if (!sessionId.empty()) {
+        body["session_id"] = sessionId;
+    }
+    body["npc_name"] = npcName;
+    body["being_type"] = beingType;
+    body["perception"] = perception.toJson();
+
+    Request request;
+    request.method = "POST";
+    request.path = "/heartbeat";
+    request.body = body.dump();
+    request.callback = callback;
+
+    {
+        std::lock_guard<std::mutex> lock(m_requestMutex);
+        m_requestQueue.push(std::move(request));
+    }
+}
+
+void AsyncHttpClient::requestTTS(const std::string& text, const std::string& voice,
+                                  ResponseCallback callback, const std::string& rate,
+                                  bool robot) {
+    nlohmann::json body;
+    body["text"] = text;
+    body["voice"] = voice;
+    if (!rate.empty()) {
+        body["rate"] = rate;
+    }
+    if (robot) {
+        body["robot"] = true;
+    }
+
+    Request request;
+    request.method = "POST";
+    request.path = "/tts";
+    request.body = body.dump();
+    request.callback = callback;
+
+    {
+        std::lock_guard<std::mutex> lock(m_requestMutex);
+        m_requestQueue.push(std::move(request));
+    }
+}
+
+void AsyncHttpClient::requestSTT(const std::string& wavFilePath, ResponseCallback callback) {
+    Request request;
+    request.method = "POST";
+    request.path = "/stt";
+    request.uploadFilePath = wavFilePath;
     request.callback = callback;
 
     {

@@ -265,6 +265,49 @@ void SceneObject::setTextureData(const std::vector<unsigned char>& data, int wid
     m_textureModified = false;
 }
 
+// Expression texture system
+void SceneObject::addExpression(const std::string& name, const std::vector<unsigned char>& pixels, int w, int h) {
+    m_expressions.push_back({name, pixels, w, h});
+}
+
+static const std::string s_emptyExpressionName;
+
+const std::string& SceneObject::getExpressionName(int index) const {
+    if (index < 0 || index >= static_cast<int>(m_expressions.size())) return s_emptyExpressionName;
+    return m_expressions[index].name;
+}
+
+bool SceneObject::setExpression(int index) {
+    if (index == m_currentExpression) return false;
+    if (index < -1 || index >= static_cast<int>(m_expressions.size())) return false;
+
+    if (index == -1) {
+        // Revert to base texture — caller would need to reload base, but we don't store it separately.
+        // For now, -1 just clears the expression tracking (base texture should already be in m_textureData).
+        m_currentExpression = -1;
+        return false;
+    }
+
+    const auto& expr = m_expressions[index];
+    setTextureData(expr.pixels, expr.width, expr.height);
+    m_currentExpression = index;
+    return true;
+}
+
+bool SceneObject::setExpressionByName(const std::string& name) {
+    for (int i = 0; i < static_cast<int>(m_expressions.size()); i++) {
+        if (m_expressions[i].name == name) {
+            return setExpression(i);
+        }
+    }
+    return false;
+}
+
+const SceneObject::ExpressionTexture* SceneObject::getExpression(int index) const {
+    if (index < 0 || index >= static_cast<int>(m_expressions.size())) return nullptr;
+    return &m_expressions[index];
+}
+
 SceneObject::RayHit SceneObject::raycast(const glm::vec3& rayOrigin, const glm::vec3& rayDir) const {
     RayHit result;
     if (m_vertices.empty() || m_indices.empty()) {

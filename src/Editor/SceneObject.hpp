@@ -586,6 +586,15 @@ public:
         m_heFaces.clear();
     }
 
+    // Named control points for modular part connections
+    struct StoredControlPoint {
+        uint32_t vertexIndex;
+        std::string name;
+    };
+    void setControlPoints(const std::vector<StoredControlPoint>& cps) { m_controlPoints = cps; }
+    const std::vector<StoredControlPoint>& getControlPoints() const { return m_controlPoints; }
+    bool hasControlPoints() const { return !m_controlPoints.empty(); }
+
     // Texture data for painting (CPU copy)
     void setTextureData(const std::vector<unsigned char>& data, int width, int height);
     std::vector<unsigned char>& getTextureData() { return m_textureData; }
@@ -597,6 +606,21 @@ public:
     void markTextureModified() { m_textureModified = true; }
     bool isTextureModified() const { return m_textureModified; }
     void clearTextureModified() { m_textureModified = false; }
+
+    // Expression texture system (for NPC facial expression swapping)
+    struct ExpressionTexture {
+        std::string name;           // "happy", "sad", "angry", etc.
+        std::vector<unsigned char> pixels;
+        int width, height;
+    };
+
+    void addExpression(const std::string& name, const std::vector<unsigned char>& pixels, int w, int h);
+    int getExpressionCount() const { return static_cast<int>(m_expressions.size()); }
+    int getCurrentExpression() const { return m_currentExpression; }
+    const std::string& getExpressionName(int index) const;
+    bool setExpression(int index);  // returns true if changed (caller must call updateTexture)
+    bool setExpressionByName(const std::string& name);  // convenience lookup by name
+    const ExpressionTexture* getExpression(int index) const;
 
     // Texture undo for painting
     void saveTextureState();    // Call before starting a paint stroke
@@ -784,11 +808,18 @@ private:
     std::vector<StoredHalfEdge> m_heHalfEdges;
     std::vector<StoredHEFace> m_heFaces;
 
+    // Named control points
+    std::vector<StoredControlPoint> m_controlPoints;
+
     // Texture data for painting
     std::vector<unsigned char> m_textureData;
     int m_textureWidth = 0;
     int m_textureHeight = 0;
     bool m_textureModified = false;
+
+    // Expression textures (for NPC face swapping)
+    std::vector<ExpressionTexture> m_expressions;
+    int m_currentExpression = -1;  // -1 = base texture, 0+ = expression index
 
     // Texture undo stack for paint operations
     static constexpr size_t MAX_TEXTURE_UNDO_LEVELS = 20;

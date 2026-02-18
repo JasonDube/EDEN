@@ -113,6 +113,19 @@ public:
     // End a session
     void endSession(const std::string& sessionId, ResponseCallback callback);
 
+    // Heartbeat (passive perception for EDEN companions)
+    void sendHeartbeat(const std::string& sessionId, const std::string& npcName,
+                       int beingType, const PerceptionData& perception,
+                       ResponseCallback callback);
+
+    // Text-to-speech: POST text, get audio bytes back in response.body
+    void requestTTS(const std::string& text, const std::string& voice,
+                    ResponseCallback callback, const std::string& rate = "",
+                    bool robot = false);
+
+    // Speech-to-text: upload WAV file, get transcription in response.body (JSON)
+    void requestSTT(const std::string& wavFilePath, ResponseCallback callback);
+
     // Health check
     void checkHealth(ResponseCallback callback);
 
@@ -124,6 +137,7 @@ private:
         std::string method;
         std::string path;
         std::string body;
+        std::string uploadFilePath;  // if non-empty, do multipart file upload instead
         ResponseCallback callback;
     };
 

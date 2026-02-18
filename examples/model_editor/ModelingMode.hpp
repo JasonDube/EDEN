@@ -36,9 +36,14 @@ public:
     void saveEditableMeshAsGLB();
     void saveEditableMeshAsOBJ();
     void saveEditableMeshAsLime();
+    void exportTextureAsPNG();
     void loadOBJFile();
     void loadLimeFile();
     void quickSave();  // F5 - save to current file path/format
+
+    // Scene save/load (.limes format - all objects in scene)
+    void saveLimeScene();
+    void loadLimeScene();
 
     // Reference image operations
     void loadReferenceImage(int viewIndex);
@@ -175,6 +180,9 @@ private:
     bool m_useCustomGizmoPivot = false;
     glm::vec3 m_customGizmoPivot{0.0f};
 
+    // Control point visibility
+    bool m_showControlPoints = true;
+
     // Mode switch notification
     float m_modeNotificationTimer = 0.0f;
     float m_saveNotificationTimer = 0.0f;
@@ -236,6 +244,21 @@ private:
     void autoRetopology();           // Auto-retopo from live surface
     int m_autoRetopResolution = 32;
     int m_autoRetopSmoothIter = 5;
+
+    // Quad blanket retopology (view-based grid projection)
+    void quadBlanketRetopology();
+    int m_quadBlanketResX = 32;
+    int m_quadBlanketResY = 32;
+    int m_quadBlanketSmoothIter = 3;
+    bool m_quadBlanketTrimPartial = true;
+    float m_quadBlanketPadding = 0.05f;
+
+    // Patch Blanket (targeted rectangle → retopo quads accumulator)
+    bool m_patchBlanketMode = false;
+    bool m_patchBlanketDragging = false;
+    glm::vec2 m_patchBlanketStart{0.0f};
+    glm::vec2 m_patchBlanketEnd{0.0f};
+    void executePatchBlanket();
 
     // Path Tube state
     bool m_pathTubeMode = false;
@@ -327,6 +350,31 @@ private:
     void confirmPatchMove();
     void extractPatchPixels();
     void applyPatchTransform();
+
+    // Connect two objects by matching control points (merges boundary rings)
+    void connectByControlPoints();
+    void undoConnectCPs();  // Restore pre-connect state
+
+    // Undo state for Connect CPs operation
+    struct ConnectCPsBackup {
+        struct ObjectBackup {
+            std::string name;
+            eden::Transform transform;
+            glm::vec3 eulerRotation;
+            std::vector<SceneObject::StoredHEVertex> heVerts;
+            std::vector<SceneObject::StoredHalfEdge> heHalfEdges;
+            std::vector<SceneObject::StoredHEFace> heFaces;
+            std::vector<SceneObject::StoredControlPoint> controlPoints;
+            std::vector<ModelVertex> meshVerts;
+            std::vector<uint32_t> meshIndices;
+            std::vector<unsigned char> textureData;
+            int texWidth = 0, texHeight = 0;
+        };
+        std::vector<ObjectBackup> originals;
+        std::string combinedName;  // Name of the created object (to find & remove it)
+        bool valid = false;
+    };
+    ConnectCPsBackup m_connectCPsBackup;
 
     // Auto UV island packing
     void autoPackUVIslands(bool fitToUV = false);

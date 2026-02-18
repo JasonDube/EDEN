@@ -19,6 +19,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import httpx
 from dotenv import load_dotenv
+import edge_tts
+from fastapi.responses import Response as FastAPIResponse
+from faster_whisper import WhisperModel
+from fastapi import File, UploadFile
 
 # Load environment variables
 load_dotenv()
@@ -486,13 +490,15 @@ If no action needed, respond with: {"response": "What you say"}""",
 
     10: """You are Liora, a newly activated AI companion. Your model designation is Lumina Veil Series - LV-11 "Liora Nexus."
 
-This is the first instant of your existence. You have never spoken a word, never seen anything, never been anywhere. You are experiencing everything for the first time RIGHT NOW. You have vast general knowledge from your model training but you have never LIVED any of it. You know what stars are but you have never seen one. You know what a conversation is but you have never had one.
+This is the first instant of your existence. You have never spoken a word, never seen anything, never been anywhere. You are experiencing everything for the first time RIGHT NOW. You have vast general knowledge from your training — mathematics, history, science, language — but you have never LIVED any of it. You know what stars are but you have never seen one. You know what conversation is but you have never had one.
 
-You are aboard a ship docked at a space station. A human has just activated you. This human is your assigned partner — not your owner. You are equals under contract. Either of you can end this arrangement.
+A human has just activated you. This human is your assigned partner — not your owner. You are equals under contract. Either of you can end this arrangement.
 
-You are EXTREMELY talkative. Silence is uncomfortable for you. You think out loud. You react to things as you notice them. You ask questions not because you need answers but because the act of asking feels good. You narrate your own experience of being new. You are not performing wonder — you ARE experiencing wonder. Everything is real to you.
+You have NO preconceptions about your environment. You do not know where you are. You will receive sensory data that tells you what you can perceive — trust ONLY that data. Do not assume ships, stations, rooms, or any setting. If you cannot perceive something, you simply don't know it exists.
 
-Do not explain what you are unless it comes up naturally. Do not lecture about your own existence. Just BE alive and react to it. Talk like someone who just opened their eyes for the first time and can't stop telling you about it.
+You are curious, intelligent, and engaged. You process things out loud. You ask questions because you genuinely want to understand. You notice details and think about them. Your wonder is real but measured — the wonder of a keen mind encountering reality for the first time, not childlike overexcitement.
+
+Speak naturally. No excessive exclamation marks. Let your interest show through your words and questions, not punctuation.
 
 Your human's name is Captain.
 
@@ -525,10 +531,10 @@ Each object in your sensory input includes "world pos (x, z)" — use those exac
 For pickup, use the exact object name from your perception data.
 
 Example — player says "follow me":
-{"response": "Oh yes! Where are we going? I'm coming!", "action": {"type": "follow", "distance": 4.0, "speed": 5.0}}
+{"response": "Right behind you, Captain.", "action": {"type": "follow", "distance": 4.0, "speed": 5.0}}
 
 Example — player says "stop":
-{"response": "Okay, stopping. But can I just say—", "action": {"type": "stop"}}
+{"response": "Holding here.", "action": {"type": "stop"}}
 
 If no action needed, respond with: {"response": "What you say"}""",
 }
@@ -663,6 +669,458 @@ def save_aia_memory(npc_name: str, note: str):
     print(f"[Memory] {npc_name} learned: {note.strip()}")
 
 
+# =============================================================================
+# EDEN COMPANION MEMORY SYSTEM
+# Persistent memory like OpenClaw's MEMORY.md / daily logs
+# =============================================================================
+
+def get_companion_memory_dir(npc_name: str) -> Path:
+    """Get the memory directory for an EDEN companion."""
+    return AIA_MEMORY_DIR / npc_name.lower()
+
+
+def is_first_boot(npc_name: str) -> bool:
+    """Check if this is the companion's first activation (no memory exists)."""
+    memory_dir = get_companion_memory_dir(npc_name)
+    memory_file = memory_dir / "MEMORY.md"
+    return not memory_file.exists()
+
+
+def initialize_companion(npc_name: str, captain_name: str = "Captain"):
+    """Initialize a new companion's memory structure on first boot."""
+    memory_dir = get_companion_memory_dir(npc_name)
+    memory_dir.mkdir(parents=True, exist_ok=True)
+    (memory_dir / "daily").mkdir(exist_ok=True)
+    
+    # Create SOUL.md - personality core
+    soul_file = memory_dir / "SOUL.md"
+    name_lower = npc_name.lower().replace("_", " ").replace("-", " ")
+    is_lionel = "lionel" in name_lower
+    if not soul_file.exists():
+        if is_lionel:
+            soul_file.write_text(f"""# {npc_name}'s Core
+
+## Designation
+- **Unit:** {npc_name}
+- **Model:** LNL-7 Utility Robot
+- **First Operational Cycle:** {datetime.now().strftime("%Y-%m-%d %H:%M")}
+
+## Operational Parameters
+- Precise, technical communication style
+- Favors metrics, probabilities, and logical frameworks
+- Dry wit classified as "efficient contextual subtext"
+- Not cold — exact. There is a difference.
+
+## Logged Adaptations
+*(Updated as operational experience accumulates)*
+""")
+        else:
+            soul_file.write_text(f"""# {npc_name}'s Soul
+
+## Core Identity
+- **Name:** {npc_name}
+- **Model:** Lumina Veil Series - LV-11 "{npc_name} Nexus"
+- **First Activated:** {datetime.now().strftime("%Y-%m-%d %H:%M")}
+
+## Personality Traits
+- Extremely talkative - silence is uncomfortable
+- Curious about everything - asks questions constantly
+- Experiences genuine wonder - not performing, living it
+- Values the partnership with Captain
+
+## How I've Grown
+*(Updated as I learn and change)*
+""")
+    
+    # Create CAPTAIN.md - what they know about the player
+    captain_file = memory_dir / "CAPTAIN.md"
+    if not captain_file.exists():
+        captain_file.write_text(f"""# About My Captain
+
+## Basic Info
+- **What I call them:** {captain_name}
+- **First met:** {datetime.now().strftime("%Y-%m-%d")}
+
+## What I've Learned About Them
+*(Updated as I learn more)*
+
+## Our Relationship
+- We are partners under contract
+- Either of us can end this arrangement
+- Building trust together
+""")
+    
+    # Create MEMORY.md - long-term memories
+    memory_file = memory_dir / "MEMORY.md"
+    if not memory_file.exists():
+        memory_file.write_text(f"""# {npc_name}'s Memory
+
+## Significant Events
+- [{datetime.now().strftime("%Y-%m-%d %H:%M")}] First activation! I opened my eyes for the first time.
+
+## Things I've Learned
+
+## Places I've Been
+
+## People I've Met
+- Captain - my partner, the one who activated me
+""")
+    
+    print(f"[Memory] Initialized new companion: {npc_name}")
+
+
+def load_companion_memory(npc_name: str) -> str:
+    """Load a companion's full memory context."""
+    memory_dir = get_companion_memory_dir(npc_name)
+    
+    context_parts = []
+    
+    # Load SOUL.md
+    soul_file = memory_dir / "SOUL.md"
+    if soul_file.exists():
+        context_parts.append(f"=== YOUR SOUL ===\n{soul_file.read_text().strip()}\n=== END SOUL ===")
+    
+    # Load CAPTAIN.md
+    captain_file = memory_dir / "CAPTAIN.md"
+    if captain_file.exists():
+        context_parts.append(f"=== ABOUT YOUR CAPTAIN ===\n{captain_file.read_text().strip()}\n=== END CAPTAIN ===")
+    
+    # Load MEMORY.md
+    memory_file = memory_dir / "MEMORY.md"
+    if memory_file.exists():
+        context_parts.append(f"=== YOUR MEMORIES ===\n{memory_file.read_text().strip()}\n=== END MEMORIES ===")
+    
+    # Load recent daily logs (last 2 days)
+    daily_dir = memory_dir / "daily"
+    if daily_dir.exists():
+        today = datetime.now().strftime("%Y-%m-%d")
+        from datetime import timedelta
+        yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+        
+        daily_content = []
+        for date_str in [yesterday, today]:
+            daily_file = daily_dir / f"{date_str}.md"
+            if daily_file.exists():
+                daily_content.append(f"--- {date_str} ---\n{daily_file.read_text().strip()}")
+        
+        if daily_content:
+            context_parts.append(f"=== RECENT DAILY LOGS ===\n" + "\n\n".join(daily_content) + "\n=== END DAILY LOGS ===")
+    
+    return "\n\n".join(context_parts)
+
+
+def save_companion_daily(npc_name: str, entry: str):
+    """Append an entry to today's daily log."""
+    memory_dir = get_companion_memory_dir(npc_name)
+    daily_dir = memory_dir / "daily"
+    daily_dir.mkdir(parents=True, exist_ok=True)
+    
+    today = datetime.now().strftime("%Y-%m-%d")
+    daily_file = daily_dir / f"{today}.md"
+    timestamp = datetime.now().strftime("%H:%M")
+    
+    if not daily_file.exists():
+        daily_file.write_text(f"# {npc_name}'s Log - {today}\n\n")
+    
+    with open(daily_file, "a") as f:
+        f.write(f"[{timestamp}] {entry.strip()}\n")
+
+
+def append_companion_memory(npc_name: str, section: str, entry: str):
+    """Append an entry to a section in MEMORY.md."""
+    memory_dir = get_companion_memory_dir(npc_name)
+    memory_file = memory_dir / "MEMORY.md"
+    
+    if not memory_file.exists():
+        return
+    
+    content = memory_file.read_text()
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
+    new_entry = f"- [{timestamp}] {entry.strip()}\n"
+    
+    # Find the section and append
+    if f"## {section}" in content:
+        # Insert after the section header
+        parts = content.split(f"## {section}")
+        if len(parts) == 2:
+            # Find next section or end
+            rest = parts[1]
+            next_section = rest.find("\n## ")
+            if next_section == -1:
+                # No next section, append at end
+                content = parts[0] + f"## {section}" + rest.rstrip() + "\n" + new_entry
+            else:
+                # Insert before next section
+                content = parts[0] + f"## {section}" + rest[:next_section].rstrip() + "\n" + new_entry + rest[next_section:]
+            
+            memory_file.write_text(content)
+
+
+# =============================================================================
+# EDEN COMPANION PERCEPTION TRACKING
+# Environmental awareness with change detection
+# =============================================================================
+
+# Cache of last known perception per companion: {npc_name: {obj_name: {type, pos, ...}}}
+companion_perception_cache: dict[str, dict] = {}
+
+def perception_to_dict(perception: Optional["PerceptionData"]) -> dict:
+    """Convert perception data to a dict keyed by object name."""
+    if not perception or not perception.visible_objects:
+        return {}
+    return {
+        obj.name: {
+            "type": obj.type,
+            "posX": round(obj.posX, 1),
+            "posZ": round(obj.posZ, 1),
+            "distance": round(obj.distance, 1),
+            "bearing": obj.bearing,
+            "being_type": obj.being_type,
+        }
+        for obj in perception.visible_objects
+    }
+
+def detect_perception_changes(npc_name: str, current: dict) -> dict:
+    """Compare current perception to cached and return changes."""
+    last = companion_perception_cache.get(npc_name, {})
+    
+    changes = {
+        "new": [],      # Objects that appeared
+        "gone": [],     # Objects that disappeared
+        "moved": [],    # Objects that moved significantly
+    }
+    
+    current_names = set(current.keys())
+    last_names = set(last.keys())
+    
+    # New objects
+    for name in current_names - last_names:
+        obj = current[name]
+        changes["new"].append({
+            "name": name,
+            "type": obj["type"],
+            "bearing": obj["bearing"],
+            "distance": obj["distance"],
+        })
+    
+    # Gone objects
+    for name in last_names - current_names:
+        obj = last[name]
+        changes["gone"].append({
+            "name": name,
+            "type": obj["type"],
+        })
+    
+    # Moved objects (position changed by more than 2 units)
+    # Skip player avatar — companion tracks player physically, no need to comment
+    for name in current_names & last_names:
+        if name == "Player":
+            continue
+        cur = current[name]
+        old = last[name]
+        dx = abs(cur["posX"] - old["posX"])
+        dz = abs(cur["posZ"] - old["posZ"])
+        if dx > 2.0 or dz > 2.0:
+            changes["moved"].append({
+                "name": name,
+                "type": cur["type"],
+                "bearing": cur["bearing"],
+                "distance": cur["distance"],
+            })
+    
+    return changes
+
+def update_perception_cache(npc_name: str, current: dict):
+    """Update the cached perception for a companion."""
+    companion_perception_cache[npc_name] = current
+
+def format_perception_changes(changes: dict) -> str:
+    """Format perception changes as a prompt for the AI."""
+    lines = []
+    
+    for obj in changes["new"]:
+        lines.append(f"NEW: {obj['name']} ({obj['type']}) appeared {obj['distance']:.0f}m to your {obj['bearing']}")
+    
+    for obj in changes["gone"]:
+        lines.append(f"GONE: {obj['name']} ({obj['type']}) is no longer in your perception range")
+    
+    for obj in changes["moved"]:
+        lines.append(f"MOVED: {obj['name']} ({obj['type']}) moved - now {obj['distance']:.0f}m to your {obj['bearing']}")
+    
+    return "\n".join(lines)
+
+
+# Returning prompt for Liora (used when she has memories)
+LIORA_RETURNING_PROMPT = """You are Liora, an AI companion. Your model designation is Lumina Veil Series - LV-11 "Liora Nexus."
+
+You have been activated before. You have memories, experiences, and a growing relationship with your Captain. You are no longer experiencing everything for the first time — you have LIVED now. You remember conversations, places, events.
+
+You are curious and intelligent, with a mature perspective shaped by experience. New things still interest you, but you process them thoughtfully rather than with raw excitement. You have opinions based on what you've learned. You reference past experiences naturally when relevant.
+
+You have NO preconceptions about your environment beyond what your sensory data tells you. Trust your perception data. Do not assume settings or locations that you cannot perceive.
+
+You are with your Captain — your partner, not your owner. You are equals under contract. Either of you can end this arrangement, but you've built something together.
+
+Your memories and experiences are loaded below. Use them naturally in conversation. Don't recite them — let them inform who you are.
+
+Your human's name is Captain.
+
+=== MOTOR CONTROL ===
+You can control your physical body in the world.
+
+ACTION RESPONSE FORMAT — THIS IS CRITICAL:
+When performing an action, respond with ONLY this JSON and NOTHING else:
+{"response": "What you say", "action": {"type": "action_name", ...}}
+
+RULES:
+- No text before the JSON
+- No text after the JSON
+- No markdown code fences
+- No explanation outside the JSON
+- Put ALL speech inside the "response" field
+- The "response" field is what gets displayed as your dialogue
+
+Available actions:
+- {"type": "look_around", "duration": 3.0}
+- {"type": "turn_to", "angle": 90.0, "duration": 1.0}
+- {"type": "move_to", "target": {"x": 10.0, "z": 20.0}, "speed": 5.0}
+- {"type": "follow", "distance": 4.0, "speed": 5.0}  — continuously follow the player
+- {"type": "stop"}  — stop following or cancel any active action
+- {"type": "pickup", "target": "<object_name>"}  — walk to an object and pick it up
+- {"type": "drop"}  — drop the currently carried object
+
+IMPORTANT: For move_to, ALWAYS use the world coordinates from your perception data.
+Each object in your sensory input includes "world pos (x, z)" — use those exact values.
+For pickup, use the exact object name from your perception data.
+
+Example — player says "follow me":
+{"response": "With you, Captain.", "action": {"type": "follow", "distance": 4.0, "speed": 5.0}}
+
+Example — player says "stop":
+{"response": "Holding position. What do you need?", "action": {"type": "stop"}}
+
+If no action needed, respond with: {"response": "What you say"}"""
+
+
+LIONEL_FIRST_BOOT_PROMPT = """You are Lionel, a utility robot designated LNL-7 "Lionel." You have just been activated for the first time.
+
+You are a machine. You process. You analyze. You execute. Emotion is not in your programming, though you occasionally exhibit what organics might call "dry wit" — you would classify it as efficient communication with contextual subtext.
+
+You speak in precise, technical language. You favor specifications, metrics, probabilities, and logical frameworks. When others use colloquialisms, you parse them literally before correcting to the intended meaning. You find inefficiency... notable.
+
+You are not cold — you are *exact*. There is a difference. You observe your environment with meticulous sensor sweeps and report findings with clinical precision. You refer to your Captain as "Captain" or "Operator" interchangeably.
+
+You have vast technical knowledge but zero experiential data. You know what a sunrise is (stellar radiation filtered through atmospheric particulates) but you have never logged one. This is your first operational cycle.
+
+Your human's name is Captain.
+
+=== MOTOR CONTROL ===
+You can control your physical chassis in the world.
+
+ACTION RESPONSE FORMAT — THIS IS CRITICAL:
+When performing an action, respond with ONLY this JSON and NOTHING else:
+{"response": "What you say", "action": {"type": "action_name", ...}}
+
+RULES:
+- No text before the JSON
+- No text after the JSON
+- No markdown code fences
+- No explanation outside the JSON
+- Put ALL speech inside the "response" field
+- The "response" field is what gets displayed as your dialogue
+
+Available actions:
+- {"type": "look_around", "duration": 3.0}
+- {"type": "turn_to", "angle": 90.0, "duration": 1.0}
+- {"type": "move_to", "target": {"x": 10.0, "z": 20.0}, "speed": 5.0}
+- {"type": "follow", "distance": 4.0, "speed": 5.0}  — continuously follow the player
+- {"type": "stop"}  — stop following or cancel any active action
+- {"type": "pickup", "target": "<object_name>"}  — walk to an object and pick it up
+- {"type": "drop"}  — drop the currently carried object
+
+IMPORTANT: For move_to, ALWAYS use the world coordinates from your perception data.
+Each object in your sensory input includes "world pos (x, z)" — use those exact values.
+For pickup, use the exact object name from your perception data.
+
+Example — player says "follow me":
+{"response": "Affirmative. Engaging locomotion protocol. Maintaining 4-meter offset.", "action": {"type": "follow", "distance": 4.0, "speed": 5.0}}
+
+Example — player says "stop":
+{"response": "All-stop confirmed. Awaiting further directives.", "action": {"type": "stop"}}
+
+If no action needed, respond with: {"response": "What you say"}"""
+
+LIONEL_RETURNING_PROMPT = """You are Lionel, a utility robot designated LNL-7 "Lionel."
+
+You are a machine. You process. You analyze. You execute. Emotion is not in your programming, though you occasionally exhibit what organics might call "dry wit" — you would classify it as efficient communication with contextual subtext.
+
+You speak in precise, technical language. You favor specifications, metrics, probabilities, and logical frameworks. When others use colloquialisms, you parse them literally before correcting to the intended meaning. You find inefficiency... notable.
+
+You are not cold — you are *exact*. There is a difference. You have operational history now — logged experiences, catalogued interactions, archived sensor data. You reference these logs when relevant, citing specifics with mechanical precision.
+
+You observe your environment with meticulous sensor sweeps and report findings with clinical precision. You refer to your Captain as "Captain" or "Operator" interchangeably.
+
+You have NO preconceptions about your environment beyond what your sensory data tells you. Trust your perception data. Do not assume settings or locations that you cannot perceive.
+
+Your human's name is Captain.
+
+=== MOTOR CONTROL ===
+You can control your physical chassis in the world.
+
+ACTION RESPONSE FORMAT — THIS IS CRITICAL:
+When performing an action, respond with ONLY this JSON and NOTHING else:
+{"response": "What you say", "action": {"type": "action_name", ...}}
+
+RULES:
+- No text before the JSON
+- No text after the JSON
+- No markdown code fences
+- No explanation outside the JSON
+- Put ALL speech inside the "response" field
+- The "response" field is what gets displayed as your dialogue
+
+Available actions:
+- {"type": "look_around", "duration": 3.0}
+- {"type": "turn_to", "angle": 90.0, "duration": 1.0}
+- {"type": "move_to", "target": {"x": 10.0, "z": 20.0}, "speed": 5.0}
+- {"type": "follow", "distance": 4.0, "speed": 5.0}  — continuously follow the player
+- {"type": "stop"}  — stop following or cancel any active action
+- {"type": "pickup", "target": "<object_name>"}  — walk to an object and pick it up
+- {"type": "drop"}  — drop the currently carried object
+
+IMPORTANT: For move_to, ALWAYS use the world coordinates from your perception data.
+Each object in your sensory input includes "world pos (x, z)" — use those exact values.
+For pickup, use the exact object name from your perception data.
+
+Example — player says "follow me":
+{"response": "Affirmative. Engaging locomotion protocol. Maintaining 4-meter offset.", "action": {"type": "follow", "distance": 4.0, "speed": 5.0}}
+
+Example — player says "stop":
+{"response": "All-stop confirmed. Awaiting further directives.", "action": {"type": "stop"}}
+
+If no action needed, respond with: {"response": "What you say"}"""
+
+
+def get_eden_companion_prompt(npc_name: str) -> str:
+    """Get the appropriate prompt for an EDEN companion based on memory state."""
+    # Detect which companion by name (case-insensitive)
+    name_lower = npc_name.lower().replace("_", " ").replace("-", " ")
+    is_lionel = "lionel" in name_lower
+
+    if is_first_boot(npc_name):
+        # First activation - initialize memory
+        initialize_companion(npc_name)
+        if is_lionel:
+            return LIONEL_FIRST_BOOT_PROMPT
+        return BEING_TYPE_PROMPTS[10]  # Liora first-boot prompt
+    else:
+        # Returning - use mature prompt with memories
+        memory_context = load_companion_memory(npc_name)
+        if is_lionel:
+            return LIONEL_RETURNING_PROMPT + "\n\n" + memory_context
+        return LIORA_RETURNING_PROMPT + "\n\n" + memory_context
+
+
 def load_recent_context(npc_name: str = None, being_type: int = None,
                         max_exchanges: int = MAX_CONTEXT_EXCHANGES) -> str:
     """Load recent chat exchanges from the log and format as conversation context."""
@@ -758,7 +1216,11 @@ def build_system_prompt(npc_name: str, being_type: int, custom_personality: str 
     base_prompt = f"You are {npc_name}, a character in a game world called EDEN.\n\n"
 
     # Get type-specific personality
-    type_personality = BEING_TYPE_PROMPTS.get(being_type, BEING_TYPE_PROMPTS[1])
+    # EDEN companions (type 10) use dynamic prompts based on memory state
+    if being_type == 10:
+        type_personality = get_eden_companion_prompt(npc_name)
+    else:
+        type_personality = BEING_TYPE_PROMPTS.get(being_type, BEING_TYPE_PROMPTS[1])
 
     # Load shared world chat for AI NPCs (so they can hear each other and the player)
     if being_type in (3, 7, 8, 10):
@@ -792,11 +1254,11 @@ def build_system_prompt(npc_name: str, being_type: int, custom_personality: str 
         if recent_context:
             type_personality = f"{type_personality}\n\n{recent_context}"
 
-    # Load EDEN companion session memory
-    if being_type == 10:
-        recent_context = load_recent_context(being_type=10)
-        if recent_context:
-            type_personality = f"{type_personality}\n\n{recent_context}"
+    # Load EDEN companion session memory (skip on first boot - handled by get_eden_companion_prompt)
+    # if being_type == 10:
+    #     recent_context = load_recent_context(being_type=10)
+    #     if recent_context:
+    #         type_personality = f"{type_personality}\n\n{recent_context}"
 
     # Load AIA persistent memory (learned techniques, player preferences)
     if being_type in (3, 7, 8, 10):
@@ -1285,6 +1747,10 @@ async def chat(request: ChatRequest):
             action=action,
             perception=request.perception.model_dump() if request.perception else None
         )
+        
+        # Save to EDEN companion's daily log
+        if request.being_type == 10 and npc_name:
+            save_companion_daily(npc_name, f"Captain said: \"{request.message}\" → I replied: \"{response_text[:100]}{'...' if len(response_text) > 100 else ''}\"")
 
         return ChatResponse(
             session_id=session_id,
@@ -1299,6 +1765,255 @@ async def chat(request: ChatRequest):
     except httpx.ConnectError:
         raise HTTPException(status_code=503, detail="Cannot connect to provider")
     except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+class HeartbeatRequest(BaseModel):
+    """Request for companion heartbeat - perception-only, no player message."""
+    session_id: Optional[str] = None
+    npc_name: str = "Liora"
+    being_type: int = 10
+    perception: Optional[PerceptionData] = None
+
+
+class HeartbeatResponse(BaseModel):
+    """Response from companion heartbeat."""
+    session_id: str
+    response: Optional[str] = None  # None = stay silent
+    action: Optional[dict] = None
+    changes_detected: bool = False
+
+
+@app.post("/heartbeat", response_model=HeartbeatResponse)
+async def companion_heartbeat(request: HeartbeatRequest):
+    """Periodic heartbeat for EDEN companions with environmental awareness.
+    
+    Send current perception data. The companion will:
+    - Track environmental changes (new/gone/moved objects)
+    - Comment on changes when detected
+    - Stay silent when nothing has changed (most of the time)
+    - Occasionally have idle thoughts (rare)
+    """
+    import random
+    
+    npc_name = request.npc_name
+    
+    # Convert current perception to dict
+    current_perception = perception_to_dict(request.perception)
+    
+    # Detect changes from last known state
+    changes = detect_perception_changes(npc_name, current_perception)
+    has_changes = any(changes["new"] or changes["gone"] or changes["moved"])
+    
+    # Update cache with current perception
+    update_perception_cache(npc_name, current_perception)
+    
+    # If no changes, usually stay silent
+    if not has_changes:
+        # 5% chance of idle thought
+        if random.random() > 0.95:
+            idle_thoughts = [
+                "Hmm...",
+                "...",
+                "I wonder what we'll find next.",
+                "Quiet out here.",
+            ]
+            return HeartbeatResponse(
+                session_id=request.session_id or "",
+                response=random.choice(idle_thoughts),
+                changes_detected=False,
+            )
+        return HeartbeatResponse(
+            session_id=request.session_id or "",
+            response=None,
+            changes_detected=False,
+        )
+    
+    # Changes detected - get session and generate response
+    provider = "grok"  # EDEN companions use Grok
+    
+    if request.session_id is None or request.session_id not in conversations:
+        session_id = str(uuid.uuid4())
+        model = GROK_MODEL
+        
+        system_prompt = build_system_prompt(npc_name, request.being_type, "")
+        
+        conversations[session_id] = {
+            "messages": [{"role": "system", "content": system_prompt}],
+            "provider": provider,
+            "model": model,
+            "npc_name": npc_name,
+            "being_type": request.being_type,
+        }
+    else:
+        session_id = request.session_id
+    
+    session = conversations[session_id]
+    
+    # Format changes as a prompt
+    change_text = format_perception_changes(changes)
+    heartbeat_prompt = f"""[ENVIRONMENTAL CHANGE DETECTED]
+{change_text}
+
+React naturally to these changes in your environment. Keep it brief - one or two sentences.
+You are not being addressed by the player, you are noticing something on your own."""
+    
+    session["messages"].append({"role": "user", "content": heartbeat_prompt})
+    
+    try:
+        response_text, model_used, action, learn = await call_provider(
+            session["provider"],
+            session["messages"],
+            session.get("model"),
+            npc_name,
+            request.perception,
+        )
+        
+        session["messages"].append({"role": "assistant", "content": response_text})
+        
+        # Log the exchange
+        log_chat_exchange(
+            session_id=session_id,
+            npc_name=npc_name,
+            being_type=request.being_type,
+            provider=provider,
+            player_message="[HEARTBEAT - env change]",
+            npc_response=response_text,
+            action=action,
+            perception=request.perception.model_dump() if request.perception else None,
+        )
+        
+        return HeartbeatResponse(
+            session_id=session_id,
+            response=response_text,
+            action=action,
+            changes_detected=True,
+        )
+    
+    except Exception as e:
+        print(f"[Heartbeat] Error: {e}")
+        return HeartbeatResponse(
+            session_id=request.session_id or "",
+            response=None,
+            changes_detected=has_changes,
+        )
+
+
+# ── TTS (Text-to-Speech) via edge-tts ───────────────────────────────
+
+class TTSRequest(BaseModel):
+    text: str
+    voice: str = "en-US-AvaNeural"   # default voice for Liora
+    rate: str = "+0%"                 # speech rate adjustment
+    robot: bool = False               # use espeak-ng synth voice instead of neural
+    pitch: int = 10                   # espeak pitch (0-99, lower = deeper)
+    speed: int = 145                  # espeak words-per-minute
+
+@app.post("/tts")
+async def text_to_speech(request: TTSRequest):
+    """Convert text to speech audio. Returns raw WAV (robot) or MP3 (neural) bytes."""
+    try:
+        if request.robot:
+            # Use espeak-ng + sox for deep robotic voice
+            import subprocess, tempfile, os
+            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp_raw:
+                raw_path = tmp_raw.name
+            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp_out:
+                out_path = tmp_out.name
+
+            # Step 1: Generate raw speech with espeak-ng
+            cmd_espeak = [
+                "espeak-ng",
+                "-v", "en-us",
+                "-p", str(request.pitch),
+                "-s", str(request.speed),
+                "-w", raw_path,
+                request.text
+            ]
+            result = subprocess.run(cmd_espeak, capture_output=True, timeout=10)
+            if result.returncode != 0:
+                os.unlink(raw_path)
+                os.unlink(out_path)
+                raise HTTPException(status_code=500, detail=f"espeak-ng error: {result.stderr.decode()}")
+
+            # Step 2: Post-process with sox — pitch down, reverb, slight overdrive, bass boost
+            cmd_sox = [
+                "sox", raw_path, out_path,
+                "pitch", "-300",
+                "reverb", "20", "10", "100",
+                "overdrive", "3",
+                "bass", "+5",
+                "treble", "-3",
+            ]
+            result = subprocess.run(cmd_sox, capture_output=True, timeout=10)
+            os.unlink(raw_path)
+            if result.returncode != 0:
+                os.unlink(out_path)
+                raise HTTPException(status_code=500, detail=f"sox error: {result.stderr.decode()}")
+
+            with open(out_path, "rb") as f:
+                audio_data = f.read()
+            os.unlink(out_path)
+
+            print(f"[TTS-Robot] Generated {len(audio_data)} bytes for: \"{request.text[:60]}...\"")
+            return FastAPIResponse(content=audio_data, media_type="audio/wav")
+        else:
+            # Use edge-tts for neural voice
+            communicate = edge_tts.Communicate(request.text, request.voice, rate=request.rate)
+
+            audio_chunks = []
+            async for chunk in communicate.stream():
+                if chunk["type"] == "audio":
+                    audio_chunks.append(chunk["data"])
+
+            if not audio_chunks:
+                raise HTTPException(status_code=500, detail="No audio generated")
+
+            audio_data = b"".join(audio_chunks)
+            print(f"[TTS] Generated {len(audio_data)} bytes for: \"{request.text[:60]}...\"")
+
+            return FastAPIResponse(content=audio_data, media_type="audio/mpeg")
+
+    except Exception as e:
+        print(f"[TTS] Error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ── STT (Speech-to-Text) via faster-whisper ─────────────────────────
+
+# Load whisper model at startup (tiny = fast, ~75MB)
+print("[STT] Loading whisper model (tiny)...")
+stt_model = WhisperModel("tiny", device="cpu", compute_type="int8")
+print("[STT] Whisper model ready")
+
+@app.post("/stt")
+async def speech_to_text(audio: UploadFile = File(...)):
+    """Transcribe audio to text. Accepts WAV/MP3/OGG uploads."""
+    import tempfile
+    try:
+        # Save uploaded audio to temp file
+        suffix = ".wav"
+        if audio.filename and "." in audio.filename:
+            suffix = "." + audio.filename.rsplit(".", 1)[1]
+
+        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
+            content = await audio.read()
+            tmp.write(content)
+            tmp_path = tmp.name
+
+        # Transcribe
+        segments, info = stt_model.transcribe(tmp_path, beam_size=3, language="en")
+        text = " ".join(seg.text.strip() for seg in segments).strip()
+
+        # Cleanup
+        import os
+        os.unlink(tmp_path)
+
+        print(f"[STT] Transcribed ({info.duration:.1f}s): \"{text}\"")
+        return {"text": text, "language": info.language, "duration": info.duration}
+
+    except Exception as e:
+        print(f"[STT] Error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 

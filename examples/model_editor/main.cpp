@@ -1787,6 +1787,18 @@ private:
                     }
                 }
                 ImGui::Separator();
+                bool hasScene = m_modelingMode && m_editorContext && !m_editorContext->sceneObjects.empty();
+                if (ImGui::MenuItem("Save Scene (.limes)...", nullptr, false, hasScene)) {
+                    if (m_modelingMode) {
+                        m_modelingMode->saveLimeScene();
+                    }
+                }
+                if (ImGui::MenuItem("Load Scene (.limes)...")) {
+                    if (m_modelingMode) {
+                        m_modelingMode->loadLimeScene();
+                    }
+                }
+                ImGui::Separator();
                 bool hasEditableMesh = m_modelingMode && m_editorContext && m_editorContext->editableMesh.isValid();
                 if (ImGui::MenuItem("Save as LIME...", "Ctrl+S", false, hasEditableMesh)) {
                     if (m_modelingMode) {
@@ -1801,6 +1813,12 @@ private:
                 if (ImGui::MenuItem("Save as GLB...", nullptr, false, hasEditableMesh)) {
                     if (m_modelingMode) {
                         m_modelingMode->saveEditableMeshAsGLB();
+                    }
+                }
+                bool hasTexture = m_selectedObject && m_selectedObject->hasTextureData();
+                if (ImGui::MenuItem("Export Texture as PNG...", nullptr, false, hasTexture)) {
+                    if (m_modelingMode) {
+                        m_modelingMode->exportTextureAsPNG();
                     }
                 }
                 ImGui::Separator();
@@ -4564,7 +4582,7 @@ private:
     glm::vec4 m_modelingHoverColor = glm::vec4(1.0f, 1.0f, 0.0f, 0.6f);
     glm::vec4 m_modelingVertexColor = glm::vec4(0.0f, 0.8f, 1.0f, 1.0f);
     glm::vec4 m_modelingEdgeColor = glm::vec4(0.0f, 1.0f, 0.5f, 1.0f);
-    bool m_showModelingWireframe = false;
+    bool m_showModelingWireframe = true;
     bool m_showFaceNormals = false;
     float m_normalDisplayLength = 0.2f;
     float m_uvProjectionScale = 1.0f;

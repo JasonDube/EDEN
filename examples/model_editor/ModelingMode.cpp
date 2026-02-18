@@ -6,6 +6,7 @@
 #include <nfd.h>
 #include <GLFW/glfw3.h>
 #include <stb_image.h>
+#include <stb_image_write.h>
 
 #include <iostream>
 #include <fstream>
@@ -16,8 +17,45 @@
 #include <limits>
 #include <random>
 #include <unordered_set>
+#include <unordered_map>
 
 using namespace eden;
+
+// Base64 encoding/decoding for .limes texture embedding
+static const char* limes_b64_chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+static std::string limes_base64_encode(const unsigned char* data, size_t len) {
+    std::string ret;
+    ret.reserve((len + 2) / 3 * 4);
+    for (size_t i = 0; i < len; i += 3) {
+        unsigned int n = (unsigned int)data[i] << 16;
+        if (i + 1 < len) n |= (unsigned int)data[i + 1] << 8;
+        if (i + 2 < len) n |= (unsigned int)data[i + 2];
+        ret.push_back(limes_b64_chars[(n >> 18) & 0x3F]);
+        ret.push_back(limes_b64_chars[(n >> 12) & 0x3F]);
+        ret.push_back((i + 1 < len) ? limes_b64_chars[(n >> 6) & 0x3F] : '=');
+        ret.push_back((i + 2 < len) ? limes_b64_chars[n & 0x3F] : '=');
+    }
+    return ret;
+}
+
+static std::vector<unsigned char> limes_base64_decode(const std::string& encoded) {
+    std::vector<unsigned char> ret;
+    std::vector<int> T(256, -1);
+    for (int i = 0; i < 64; i++) T[(unsigned char)limes_b64_chars[i]] = i;
+    int val = 0, valb = -8;
+    for (unsigned char c : encoded) {
+        if (T[c] == -1) break;
+        val = (val << 6) + T[c];
+        valb += 6;
+        if (valb >= 0) {
+            ret.push_back((unsigned char)((val >> valb) & 0xFF));
+            valb -= 8;
+        }
+    }
+    return ret;
+}
+
 
 // Debug flag for wireframe rendering (reset when mesh is rebuilt)
 static bool g_wireframeDebugPrinted = false;
@@ -524,9 +562,77 @@ void ModelingMode::drawOverlays(float vpX, float vpY, float vpW, float vpH) {
         drawList->PopClipRect();
     }
 
+    // Draw control point diamonds on ALL objects that have CPs
+    if (m_showControlPoints) {
+        ImDrawList* drawList = ImGui::GetBackgroundDrawList();
+        drawList->PushClipRect(ImVec2(vpX, vpY), ImVec2(vpX + vpW, vpY + vpH), true);
+
+        glm::mat4 view = activeCamera.getViewMatrix();
+        float aspectRatio = vpW / vpH;
+        glm::mat4 proj = activeCamera.getProjectionMatrix(aspectRatio);
+        glm::mat4 vp = proj * view;
+
+        ImU32 cpColor = IM_COL32(255, 0, 255, 255);
+        ImU32 cpOutline = IM_COL32(0, 0, 0, 220);
+        ImU32 cpTextColor = IM_COL32(255, 200, 255, 255);
+        ImU32 cpTextBg = IM_COL32(0, 0, 0, 180);
+        float cpSize = 8.0f;
+
+        for (auto& obj : m_ctx.sceneObjects) {
+            if (!obj->hasControlPoints() || !obj->isVisible()) continue;
+            if (!obj->hasEditableMeshData()) continue;
+
+            const auto& cps = obj->getControlPoints();
+            const auto& heVerts = obj->getHEVertices();
+            glm::mat4 modelMatrix = obj->getTransform().getMatrix();
+
+            for (const auto& cp : cps) {
+                if (cp.vertexIndex >= heVerts.size()) continue;
+                glm::vec3 localPos = heVerts[cp.vertexIndex].position;
+                glm::vec4 worldPos = modelMatrix * glm::vec4(localPos, 1.0f);
+                glm::vec4 clip = vp * worldPos;
+                if (clip.w <= 0.0f) continue;
+                glm::vec3 ndc = glm::vec3(clip) / clip.w;
+                ImVec2 sp(vpX + (ndc.x + 1.0f) * 0.5f * vpW, vpY + (1.0f - ndc.y) * 0.5f * vpH);
+
+                // Diamond shape
+                ImVec2 top(sp.x, sp.y - cpSize);
+                ImVec2 right(sp.x + cpSize, sp.y);
+                ImVec2 bottom(sp.x, sp.y + cpSize);
+                ImVec2 left(sp.x - cpSize, sp.y);
+                drawList->AddQuadFilled(top, right, bottom, left, cpColor);
+                drawList->AddQuad(top, right, bottom, left, cpOutline, 2.0f);
+
+                // Name label
+                if (!cp.name.empty()) {
+                    ImVec2 textSize = ImGui::CalcTextSize(cp.name.c_str());
+                    ImVec2 textPos(sp.x - textSize.x * 0.5f, sp.y - cpSize - textSize.y - 2);
+                    drawList->AddRectFilled(
+                        ImVec2(textPos.x - 2, textPos.y - 1),
+                        ImVec2(textPos.x + textSize.x + 2, textPos.y + textSize.y + 1),
+                        cpTextBg, 2.0f);
+                    drawList->AddText(textPos, cpTextColor, cp.name.c_str());
+                }
+            }
+        }
+
+        drawList->PopClipRect();
+    }
+
     // Draw snap vertex mode overlay (numbered vertices)
     if (m_snapVertexMode) {
         drawSnapVertexOverlay(vpX, vpY, vpW, vpH);
+    }
+
+    // Draw patch blanket selection rectangle
+    if (m_patchBlanketMode && m_patchBlanketDragging) {
+        ImDrawList* drawList = ImGui::GetForegroundDrawList();
+        glm::vec2 rMin = glm::min(m_patchBlanketStart, m_patchBlanketEnd);
+        glm::vec2 rMax = glm::max(m_patchBlanketStart, m_patchBlanketEnd);
+        ImU32 rectColor = IM_COL32(255, 160, 50, 200);
+        ImU32 fillColor = IM_COL32(255, 160, 50, 30);
+        drawList->AddRectFilled(ImVec2(rMin.x, rMin.y), ImVec2(rMax.x, rMax.y), fillColor);
+        drawList->AddRect(ImVec2(rMin.x, rMin.y), ImVec2(rMax.x, rMax.y), rectColor, 0.0f, 0, 2.0f);
     }
 
     // Draw retopology overlay (numbered vertices, quad wireframes, existing vert dots)
@@ -638,6 +744,40 @@ void ModelingMode::renderModelingEditorUI() {
                 if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0)) {
                     m_ctx.renamingObjectIndex = static_cast<int>(i);
                     strncpy(m_ctx.renameBuffer, obj->getName().c_str(), m_ctx.renameBufferSize - 1);
+                }
+            }
+
+            // Show control points for this object
+            if (obj->hasControlPoints()) {
+                const auto& objCPs = obj->getControlPoints();
+                for (size_t ci = 0; ci < objCPs.size(); ++ci) {
+                    ImGui::PushID(static_cast<int>(1000 + i * 100 + ci));
+                    ImGui::Indent(20.0f);
+                    ImGui::TextColored(ImVec4(1.0f, 0.0f, 1.0f, 1.0f), "%s", objCPs[ci].name.c_str());
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("(v%u)", objCPs[ci].vertexIndex);
+                    ImGui::SameLine();
+                    if (ImGui::SmallButton("X")) {
+                        if (isSelected) {
+                            // Selected object: remove from editableMesh and sync
+                            m_ctx.editableMesh.removeControlPoint(objCPs[ci].vertexIndex);
+                            std::vector<SceneObject::StoredControlPoint> updatedCPs;
+                            for (const auto& cp : m_ctx.editableMesh.getControlPoints()) {
+                                updatedCPs.push_back({cp.vertexIndex, cp.name});
+                            }
+                            obj->setControlPoints(updatedCPs);
+                        } else {
+                            // Non-selected object: remove directly from SceneObject
+                            auto cps = obj->getControlPoints();
+                            cps.erase(cps.begin() + ci);
+                            obj->setControlPoints(cps);
+                        }
+                        ImGui::Unindent(20.0f);
+                        ImGui::PopID();
+                        break;
+                    }
+                    ImGui::Unindent(20.0f);
+                    ImGui::PopID();
                 }
             }
 
@@ -856,6 +996,43 @@ void ModelingMode::renderModelingEditorUI() {
                 m_ctx.editableMesh.clear();
                 m_ctx.meshDirty = false;
             }
+
+            // Control point creation (requires vertex mode with 1 vertex selected)
+            auto cpSelectedVerts = m_ctx.editableMesh.getSelectedVertices();
+            static char cpNameBuf[64] = "";
+            ImGui::SetNextItemWidth(120);
+            ImGui::InputTextWithHint("##cpname", "CP name...", cpNameBuf, sizeof(cpNameBuf));
+            ImGui::SameLine();
+            bool cpDisabled = (cpSelectedVerts.size() != 1 || strlen(cpNameBuf) == 0);
+            if (cpDisabled) ImGui::BeginDisabled();
+            if (ImGui::Button("Create CP")) {
+                if (cpSelectedVerts.size() == 1 && strlen(cpNameBuf) > 0) {
+                    uint32_t vi = *cpSelectedVerts.begin();
+                    if (m_ctx.editableMesh.isControlPoint(vi)) {
+                        std::string existingName = m_ctx.editableMesh.getControlPointName(vi);
+                        std::cout << "[CP] Vertex " << vi << " already has CP '" << existingName
+                                  << "' — select a different vertex for '" << cpNameBuf << "'" << std::endl;
+                    } else {
+                        m_ctx.editableMesh.addControlPoint(vi, std::string(cpNameBuf));
+                        // Save CPs to SceneObject immediately
+                        std::vector<SceneObject::StoredControlPoint> storedCPs;
+                        for (const auto& cp : m_ctx.editableMesh.getControlPoints()) {
+                            storedCPs.push_back({cp.vertexIndex, cp.name});
+                        }
+                        m_ctx.selectedObject->setControlPoints(storedCPs);
+                        std::cout << "[CP] Created '" << cpNameBuf << "' at v" << vi
+                                  << " on '" << m_ctx.selectedObject->getName()
+                                  << "' (total: " << storedCPs.size() << ")" << std::endl;
+                        cpNameBuf[0] = '\0';
+                    }
+                }
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Select 1 vertex, type a name, click Create CP.\nParts connect by matching CP names across objects.");
+            }
+            if (cpDisabled) ImGui::EndDisabled();
+            ImGui::SameLine();
+            ImGui::Checkbox("Show CPs", &m_showControlPoints);
         }
 
         // Snap tool - requires at least 2 objects
@@ -1118,6 +1295,58 @@ void ModelingMode::renderModelingEditorUI() {
                 }
                 if (ImGui::IsItemHovered()) {
                     ImGui::SetTooltip("Generate all-quad mesh from live surface using voxel remeshing");
+                }
+
+                // Quad Blanket retopology controls
+                ImGui::Spacing();
+                ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), "Quad Blanket");
+                ImGui::Separator();
+                ImGui::SliderInt("Grid X", &m_quadBlanketResX, 4, 128);
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("Horizontal grid resolution");
+                }
+                ImGui::SliderInt("Grid Y", &m_quadBlanketResY, 4, 128);
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("Vertical grid resolution");
+                }
+                ImGui::SliderInt("Smooth Iters##qb", &m_quadBlanketSmoothIter, 0, 10);
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("Laplacian smoothing passes after projection");
+                }
+                ImGui::Checkbox("Trim Partial", &m_quadBlanketTrimPartial);
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("Only keep quads where all 4 vertices hit the surface");
+                }
+                ImGui::SliderFloat("Padding##qb", &m_quadBlanketPadding, 0.0f, 0.3f, "%.2f");
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("Extra padding around mesh bounds (fraction of extent)");
+                }
+                if (ImGui::Button("Quad Blanket")) {
+                    quadBlanketRetopology();
+                }
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("Project a quad grid from current view onto the live surface");
+                }
+
+                // Patch Blanket — targeted rectangle into retopo quads
+                ImGui::Spacing();
+                if (m_patchBlanketMode) {
+                    ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.2f, 1.0f), "PATCH BLANKET MODE");
+                    ImGui::Text("Alt+drag rectangle on viewport");
+                    ImGui::Text("ESC to cancel");
+                    if (ImGui::Button("Cancel Patch Blanket")) {
+                        m_patchBlanketMode = false;
+                        m_patchBlanketDragging = false;
+                    }
+                } else {
+                    if (ImGui::Button("Patch Blanket")) {
+                        m_patchBlanketMode = true;
+                        m_patchBlanketDragging = false;
+                        std::cout << "[PatchBlanket] Mode enabled — Alt+drag a rectangle" << std::endl;
+                    }
+                    if (ImGui::IsItemHovered()) {
+                        ImGui::SetTooltip("Alt+drag a rectangle, blanket only that region into retopo quads");
+                    }
                 }
             }
         }
@@ -1848,6 +2077,40 @@ void ModelingMode::renderModelingEditorUI() {
                 ImGui::SetTooltip("Merge selected objects into one combined mesh.\nCtrl+Click or Shift+Click to multi-select in list.");
             }
             ImGui::SameLine();
+
+            // Connect CPs button - enabled when exactly 2 objects selected with matching CPs
+            {
+                bool canConnect = false;
+                if (m_ctx.selectedObjects.size() == 2) {
+                    // Check for matching CP names between the two objects
+                    std::vector<SceneObject*> selVec(m_ctx.selectedObjects.begin(), m_ctx.selectedObjects.end());
+                    auto& cps1 = selVec[0]->getControlPoints();
+                    auto& cps2 = selVec[1]->getControlPoints();
+                    int matchCount = 0;
+                    for (auto& cp1 : cps1)
+                        for (auto& cp2 : cps2)
+                            if (cp1.name == cp2.name) matchCount++;
+                    canConnect = (matchCount >= 2);
+                }
+                if (!canConnect) ImGui::BeginDisabled();
+                if (ImGui::Button("Connect CPs")) {
+                    // Clear all selections before connecting
+                    m_ctx.editableMesh.clearSelection();
+                    m_ctx.selectedFaces.clear();
+                    m_ctx.hiddenFaces.clear();
+                    connectByControlPoints();
+                }
+                if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+                    ImGui::SetTooltip("Connect two objects by matching control points.\nAligns obj2 to obj1, merges boundary rings, removes caps.\nRequires 2 selected objects with 2+ matching CP names.");
+                }
+                if (!canConnect) ImGui::EndDisabled();
+                if (m_connectCPsBackup.valid) {
+                    ImGui::SameLine();
+                    if (ImGui::Button("Undo Connect")) {
+                        undoConnectCPs();
+                    }
+                }
+            }
         }
 
         // Combine all objects button
@@ -2441,6 +2704,22 @@ void ModelingMode::renderModelingEditorUI() {
         }
         if (selectedVerts.size() < 2) ImGui::EndDisabled();
 
+        if (selectedVerts.empty()) ImGui::BeginDisabled();
+        if (ImGui::Button("Snap to X=0")) {
+            m_ctx.editableMesh.saveState();
+            for (uint32_t vi : selectedVerts) {
+                m_ctx.editableMesh.setVertexPosition(vi,
+                    glm::vec3(0.0f,
+                              m_ctx.editableMesh.getVertex(vi).position.y,
+                              m_ctx.editableMesh.getVertex(vi).position.z));
+            }
+            m_ctx.meshDirty = true;
+        }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Set X=0 on selected vertices.\nUse before Mirror Merge X to align the center seam.");
+        }
+        if (selectedVerts.empty()) ImGui::EndDisabled();
+
         // Measurement display (when exactly 2 vertices selected)
         if (selectedVerts.size() == 2 && m_ctx.selectedObject) {
             auto it = selectedVerts.begin();
@@ -2497,6 +2776,24 @@ void ModelingMode::renderModelingEditorUI() {
         }
         ImGui::SameLine();
         ImGui::SliderFloat("##hollow", &m_ctx.hollowThickness, 0.01f, 1.0f, "%.3f");
+
+        if (ImGui::Button("Clean Orphaned Vertices")) {
+            m_ctx.editableMesh.saveState();
+            m_ctx.editableMesh.removeOrphanedVertices();
+            m_ctx.meshDirty = true;
+        }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Remove vertices not used by any face.\nFixes floating vertex dots after face deletion.");
+        }
+
+        if (ImGui::Button("Mirror Merge X")) {
+            m_ctx.editableMesh.saveState();
+            m_ctx.editableMesh.mirrorMergeX(0.001f);
+            m_ctx.meshDirty = true;
+        }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Mirror mesh across X=0 and weld seam vertices.\nModel one half, mirror to get a symmetric mesh.");
+        }
 
         // Boolean Cut - use another object as a cutter
         ImGui::Spacing();
@@ -4534,6 +4831,9 @@ void ModelingMode::processModelingInput(float deltaTime, bool gizmoActive) {
                 m_ctx.modelRenderer.updateTexture(handle, texData.data(), w, h);
                 m_ctx.selectedObject->clearTextureModified();
             }
+        } else if (m_connectCPsBackup.valid) {
+            // Undo Connect CPs operation (scene-level)
+            undoConnectCPs();
         } else if (m_ctx.editableMesh.undo()) {
             m_ctx.meshDirty = true;
         }
@@ -4770,6 +5070,36 @@ void ModelingMode::processModelingInput(float deltaTime, bool gizmoActive) {
         int picked = pickBoneAtScreenPos(mousePos);
         if (picked >= 0) {
             m_selectedBone = picked;
+        }
+    }
+
+    // Patch Blanket: Shift+drag rectangle to define patch region
+    if (m_patchBlanketMode && !mouseOverImGui) {
+        bool altDown = Input::isKeyDown(Input::KEY_LEFT_ALT) || Input::isKeyDown(Input::KEY_RIGHT_ALT);
+
+        if (!m_patchBlanketDragging && altDown && Input::isMouseButtonPressed(Input::MOUSE_LEFT)) {
+            // Start drag
+            glm::vec2 mousePos = Input::getMousePosition();
+            m_patchBlanketStart = mousePos;
+            m_patchBlanketEnd = mousePos;
+            m_patchBlanketDragging = true;
+        }
+
+        if (m_patchBlanketDragging) {
+            m_patchBlanketEnd = Input::getMousePosition();
+
+            if (!Input::isMouseButtonDown(Input::MOUSE_LEFT)) {
+                // Mouse released — execute
+                m_patchBlanketDragging = false;
+                m_patchBlanketMode = false;
+                executePatchBlanket();
+            }
+        }
+
+        if (Input::isKeyPressed(Input::KEY_ESCAPE)) {
+            m_patchBlanketMode = false;
+            m_patchBlanketDragging = false;
+            std::cout << "[PatchBlanket] Cancelled" << std::endl;
         }
     }
 
@@ -5355,7 +5685,7 @@ void ModelingMode::processModelingInput(float deltaTime, bool gizmoActive) {
         bool ctrlHeld = Input::isKeyDown(Input::KEY_LEFT_CONTROL) || Input::isKeyDown(Input::KEY_RIGHT_CONTROL);
 
         // Normal selection mode - click for point select, drag for rectangle select
-        if (m_ctx.selectionTool == SelectionTool::Normal && !m_ctx.isPainting) {
+        if (m_ctx.selectionTool == SelectionTool::Normal && !m_ctx.isPainting && !m_patchBlanketMode) {
             if (Input::isMouseButtonPressed(Input::MOUSE_LEFT)) {
                 // Start tracking for potential rectangle selection
                 m_ctx.isRectSelecting = true;
@@ -5966,6 +6296,12 @@ void ModelingMode::buildEditableMeshFromObject() {
 
         m_ctx.editableMesh.setFromData(heVerts, heHalfEdges, heFaces);
 
+        // Restore control points from SceneObject
+        m_ctx.editableMesh.clearControlPoints();
+        for (const auto& cp : m_ctx.selectedObject->getControlPoints()) {
+            m_ctx.editableMesh.addControlPoint(cp.vertexIndex, cp.name);
+        }
+
         // Restore skeleton from SceneObject if present
         if (m_ctx.selectedObject->hasEditorSkeleton()) {
             m_ctx.editableMesh.setSkeleton(*m_ctx.selectedObject->getEditorSkeleton());
@@ -6088,6 +6424,580 @@ void ModelingMode::duplicateSelectedObject() {
     std::cout << "Duplicated object: " << m_ctx.selectedObject->getName() << std::endl;
 }
 
+void ModelingMode::connectByControlPoints() {
+    if (m_ctx.selectedObjects.size() != 2) return;
+
+    // Sync current edits
+    if (m_ctx.meshDirty && m_ctx.selectedObject) {
+        updateMeshFromEditable();
+    }
+
+    // obj1 = stationary (first selected), obj2 = moves to obj1 (last selected / active)
+    // m_ctx.selectedObject is the last-clicked (active) object, so it becomes obj2.
+    SceneObject* obj2 = m_ctx.selectedObject;
+    SceneObject* obj1 = nullptr;
+    for (auto* obj : m_ctx.selectedObjects) {
+        if (obj != obj2) { obj1 = obj; break; }
+    }
+    if (!obj1 || !obj2) return;
+
+    // ── Save backup for undo ──
+    m_connectCPsBackup = ConnectCPsBackup{};
+    auto saveObjBackup = [](SceneObject* obj) -> ConnectCPsBackup::ObjectBackup {
+        ConnectCPsBackup::ObjectBackup b;
+        b.name = obj->getName();
+        b.transform = obj->getTransform();
+        b.eulerRotation = obj->getEulerRotation();
+        b.heVerts = obj->getHEVertices();
+        b.heHalfEdges = obj->getHEHalfEdges();
+        b.heFaces = obj->getHEFaces();
+        b.controlPoints = obj->getControlPoints();
+        b.meshVerts = obj->getVertices();
+        b.meshIndices = obj->getIndices();
+        if (obj->hasTextureData()) {
+            b.textureData = obj->getTextureData();
+            b.texWidth = obj->getTextureWidth();
+            b.texHeight = obj->getTextureHeight();
+        }
+        return b;
+    };
+    m_connectCPsBackup.originals.push_back(saveObjBackup(obj1));
+    m_connectCPsBackup.originals.push_back(saveObjBackup(obj2));
+
+    if (!obj1->hasEditableMeshData() || !obj2->hasEditableMeshData()) {
+        std::cout << "[Connect CPs] Both objects must have editable mesh data" << std::endl;
+        return;
+    }
+    if (!obj1->hasControlPoints() || !obj2->hasControlPoints()) {
+        std::cout << "[Connect CPs] Both objects must have control points" << std::endl;
+        return;
+    }
+
+    std::cout << "[Connect CPs] Obj1='" << obj1->getName() << "' (" << obj1->getHEVertices().size()
+              << " verts, " << obj1->getHEFaces().size() << " faces, " << obj1->getControlPoints().size() << " CPs)"
+              << std::endl;
+    std::cout << "[Connect CPs] Obj2='" << obj2->getName() << "' (" << obj2->getHEVertices().size()
+              << " verts, " << obj2->getHEFaces().size() << " faces, " << obj2->getControlPoints().size() << " CPs)"
+              << std::endl;
+
+    // ── 1. Find matching CPs ──
+    auto& cps1 = obj1->getControlPoints();
+    auto& cps2 = obj2->getControlPoints();
+    struct CPMatch { std::string name; uint32_t vi1; uint32_t vi2; };
+    std::vector<CPMatch> matches;
+    for (auto& cp1 : cps1)
+        for (auto& cp2 : cps2)
+            if (cp1.name == cp2.name)
+                matches.push_back({cp1.name, cp1.vertexIndex, cp2.vertexIndex});
+
+    if (matches.size() < 2) {
+        std::cout << "[Connect CPs] Need 2+ matching CP names, found " << matches.size() << std::endl;
+        return;
+    }
+    for (auto& m : matches)
+        std::cout << "[Connect CPs]   Match: '" << m.name << "' vi1=" << m.vi1 << " vi2=" << m.vi2 << std::endl;
+
+    // ── 2. Load HE data into EditableMesh for each object (preserves original twin info) ──
+    auto loadMesh = [](SceneObject* obj, eden::EditableMesh& mesh) {
+        auto& sv = obj->getHEVertices();
+        auto& sh = obj->getHEHalfEdges();
+        auto& sf = obj->getHEFaces();
+        std::vector<eden::HEVertex> verts(sv.size());
+        std::vector<eden::HalfEdge> hes(sh.size());
+        std::vector<eden::HEFace> faces(sf.size());
+        for (size_t i = 0; i < sv.size(); i++) {
+            verts[i] = {sv[i].position, sv[i].normal, sv[i].uv, sv[i].color,
+                        sv[i].halfEdgeIndex, sv[i].selected, sv[i].boneIndices, sv[i].boneWeights};
+        }
+        for (size_t i = 0; i < sh.size(); i++) {
+            hes[i] = {sh[i].vertexIndex, sh[i].faceIndex, sh[i].nextIndex, sh[i].prevIndex, sh[i].twinIndex};
+        }
+        for (size_t i = 0; i < sf.size(); i++) {
+            faces[i] = {sf[i].halfEdgeIndex, sf[i].vertexCount, sf[i].selected};
+        }
+        mesh.setFromData(verts, hes, faces);
+        mesh.clearControlPoints();
+        for (auto& cp : obj->getControlPoints())
+            mesh.addControlPoint(cp.vertexIndex, cp.name);
+    };
+
+    eden::EditableMesh mesh1, mesh2;
+    loadMesh(obj1, mesh1);
+    loadMesh(obj2, mesh2);
+
+    // ── 3. Build boundary adjacency maps ──
+    // boundaryNext[fromVert] = toVert  (for half-edges with no twin = boundary)
+    auto buildBoundaryMap = [](const eden::EditableMesh& mesh) {
+        std::unordered_map<uint32_t, uint32_t> boundaryNext;
+        for (uint32_t i = 0; i < mesh.getHalfEdgeCount(); i++) {
+            auto& he = mesh.getHalfEdge(i);
+            if (he.twinIndex == UINT32_MAX) {
+                // he goes from prev->vertexIndex TO he.vertexIndex
+                uint32_t from = mesh.getHalfEdge(he.prevIndex).vertexIndex;
+                uint32_t to = he.vertexIndex;
+                boundaryNext[from] = to;
+            }
+        }
+        return boundaryNext;
+    };
+
+    auto bndNext1 = buildBoundaryMap(mesh1);
+    auto bndNext2 = buildBoundaryMap(mesh2);
+
+    std::cout << "[Connect CPs] Boundary edges: obj1=" << bndNext1.size() << " obj2=" << bndNext2.size() << std::endl;
+
+    if (bndNext1.empty() || bndNext2.empty()) {
+        std::cout << "[Connect CPs] Objects must have boundary edges (open meshes)" << std::endl;
+        return;
+    }
+
+    // Check that our first CP is actually on a boundary
+    if (bndNext1.find(matches[0].vi1) == bndNext1.end()) {
+        std::cout << "[Connect CPs] CP '" << matches[0].name << "' vertex " << matches[0].vi1
+                  << " is NOT on a boundary of obj1!" << std::endl;
+        return;
+    }
+    if (bndNext2.find(matches[0].vi2) == bndNext2.end()) {
+        std::cout << "[Connect CPs] CP '" << matches[0].name << "' vertex " << matches[0].vi2
+                  << " is NOT on a boundary of obj2!" << std::endl;
+        return;
+    }
+
+    // ── 4. Walk boundary ring starting from first matched CP ──
+    auto walkRing = [](const std::unordered_map<uint32_t, uint32_t>& bndNext, uint32_t startVert) {
+        std::vector<uint32_t> ring;
+        uint32_t cur = startVert;
+        do {
+            ring.push_back(cur);
+            auto it = bndNext.find(cur);
+            if (it == bndNext.end()) break;
+            cur = it->second;
+        } while (cur != startVert && ring.size() < 10000);
+        return ring;
+    };
+
+    auto ring1 = walkRing(bndNext1, matches[0].vi1);
+    auto ring2 = walkRing(bndNext2, matches[0].vi2);
+
+    if (ring1.empty() || ring2.empty()) {
+        std::cout << "[Connect CPs] Failed to walk boundary rings" << std::endl;
+        return;
+    }
+
+    std::cout << "[Connect CPs] Ring1: " << ring1.size() << " verts, Ring2: " << ring2.size() << " verts" << std::endl;
+
+    // Debug: print first few ring vertex positions
+    glm::mat4 mat1 = obj1->getTransform().getMatrix();
+    glm::mat4 mat2 = obj2->getTransform().getMatrix();
+    for (size_t i = 0; i < std::min(ring1.size(), (size_t)5); i++) {
+        auto p = glm::vec3(mat1 * glm::vec4(mesh1.getVertex(ring1[i]).position, 1.0f));
+        std::cout << "[Connect CPs]   ring1[" << i << "] v" << ring1[i]
+                  << " pos=(" << p.x << ", " << p.y << ", " << p.z << ")" << std::endl;
+    }
+    for (size_t i = 0; i < std::min(ring2.size(), (size_t)5); i++) {
+        auto p = glm::vec3(mat2 * glm::vec4(mesh2.getVertex(ring2[i]).position, 1.0f));
+        std::cout << "[Connect CPs]   ring2[" << i << "] v" << ring2[i]
+                  << " pos=(" << p.x << ", " << p.y << ", " << p.z << ")" << std::endl;
+    }
+
+    if (ring1.size() != ring2.size()) {
+        std::cout << "[Connect CPs] Boundary rings have different vertex counts ("
+                  << ring1.size() << " vs " << ring2.size() << ") — cannot connect" << std::endl;
+        return;
+    }
+
+    // ── 5. Compute alignment rotation from ring frames (uses CPs, always correct) ──
+
+    // Get world positions for both rings
+    std::vector<glm::vec3> ring1World(ring1.size()), ring2World(ring2.size());
+    for (size_t i = 0; i < ring1.size(); i++)
+        ring1World[i] = glm::vec3(mat1 * glm::vec4(mesh1.getVertex(ring1[i]).position, 1.0f));
+    for (size_t i = 0; i < ring2.size(); i++)
+        ring2World[i] = glm::vec3(mat2 * glm::vec4(mesh2.getVertex(ring2[i]).position, 1.0f));
+
+    // Centroids
+    glm::vec3 centroid1(0), centroid2(0);
+    for (size_t i = 0; i < ring1.size(); i++) centroid1 += ring1World[i];
+    for (size_t i = 0; i < ring2.size(); i++) centroid2 += ring2World[i];
+    centroid1 /= (float)ring1.size();
+    centroid2 /= (float)ring2.size();
+
+    // Compute ring normals from cross products of consecutive edges
+    auto ringNormal = [](const std::vector<glm::vec3>& worldPositions, const glm::vec3& center) {
+        glm::vec3 n(0);
+        for (size_t i = 0; i < worldPositions.size(); i++) {
+            glm::vec3 a = worldPositions[i] - center;
+            glm::vec3 b = worldPositions[(i + 1) % worldPositions.size()] - center;
+            n += glm::cross(a, b);
+        }
+        float len = glm::length(n);
+        return len > 0.0001f ? n / len : glm::vec3(0, 1, 0);
+    };
+
+    glm::vec3 normal1 = ringNormal(ring1World, centroid1);
+    glm::vec3 normal2 = ringNormal(ring2World, centroid2);
+
+    // Build orthonormal frames using CP tangent vectors (CP0 → CP_halfway)
+    // These are always correct regardless of winding.
+    glm::vec3 tangent1 = glm::normalize(ring1World[ring1.size() / 2] - ring1World[0]);
+    glm::vec3 tangent2 = glm::normalize(ring2World[ring2.size() / 2] - ring2World[0]);
+
+    // Orthogonalize tangents against their normals (Gram-Schmidt)
+    tangent1 = glm::normalize(tangent1 - glm::dot(tangent1, normal1) * normal1);
+    tangent2 = glm::normalize(tangent2 - glm::dot(tangent2, normal2) * normal2);
+
+    glm::vec3 bitangent1 = glm::cross(normal1, tangent1);
+    glm::vec3 bitangent2 = glm::cross(normal2, tangent2);
+
+    // Source frame: ring2's actual orientation
+    glm::mat3 srcFrame(tangent2, normal2, bitangent2);
+    // Target frame: ring2's normal should face opposite to ring1's normal (they face each other)
+    glm::mat3 dstFrame(tangent1, -normal1, -bitangent1);
+    glm::mat3 alignRotation = dstFrame * glm::transpose(srcFrame);
+
+    // Full alignment transform: rotate obj2 around its ring centroid, then translate to centroid1
+    glm::mat4 alignTransform = glm::translate(glm::mat4(1.0f), centroid1)
+                              * glm::mat4(alignRotation)
+                              * glm::translate(glm::mat4(1.0f), -centroid2);
+
+    // Apply alignment to ring2 world positions
+    std::vector<glm::vec3> ring2Aligned(ring2.size());
+    for (size_t i = 0; i < ring2.size(); i++)
+        ring2Aligned[i] = glm::vec3(alignTransform * glm::vec4(ring2World[i], 1.0f));
+
+    std::cout << "[Connect CPs] Ring centroid1=(" << centroid1.x << ", " << centroid1.y << ", " << centroid1.z << ")" << std::endl;
+    std::cout << "[Connect CPs] Ring centroid2=(" << centroid2.x << ", " << centroid2.y << ", " << centroid2.z << ")" << std::endl;
+
+    // ── 6. Verify winding using ALIGNED positions ──
+    // Compare ring1[1] against ring2Aligned[1] (forward) vs ring2Aligned[N-1] (reversed).
+    {
+        float distFwd = glm::length(ring1World[1] - ring2Aligned[1]);
+        float distRev = glm::length(ring1World[1] - ring2Aligned[ring2.size() - 1]);
+
+        std::cout << "[Connect CPs] Winding test (post-align): distFwd=" << distFwd << " distRev=" << distRev << std::endl;
+
+        if (distRev < distFwd) {
+            std::reverse(ring2.begin() + 1, ring2.end());
+            // Also reverse ring2Aligned to match
+            std::reverse(ring2Aligned.begin() + 1, ring2Aligned.end());
+            std::cout << "[Connect CPs] Reversed ring2 winding (rev is closer)" << std::endl;
+        } else {
+            std::cout << "[Connect CPs] Winding OK (forward)" << std::endl;
+        }
+    }
+
+    // Compute merged positions: average of obj1 ring pos and aligned obj2 ring pos
+    std::vector<glm::vec3> mergedWorldPositions(ring1.size());
+    for (size_t i = 0; i < ring1.size(); i++) {
+        mergedWorldPositions[i] = (ring1World[i] + ring2Aligned[i]) * 0.5f;
+    }
+
+    // ── 7. Identify cap faces (faces with ALL vertices on the boundary ring) ──
+    auto findCapFaces = [](const eden::EditableMesh& mesh, const std::vector<uint32_t>& ring) {
+        std::set<uint32_t> ringSet(ring.begin(), ring.end());
+        std::vector<uint32_t> capFaces;
+        for (uint32_t fi = 0; fi < mesh.getFaceCount(); fi++) {
+            auto fverts = mesh.getFaceVertices(fi);
+            bool allOnRing = true;
+            for (uint32_t v : fverts) {
+                if (ringSet.find(v) == ringSet.end()) {
+                    allOnRing = false;
+                    break;
+                }
+            }
+            if (allOnRing) capFaces.push_back(fi);
+        }
+        return capFaces;
+    };
+
+    auto capFaces1 = findCapFaces(mesh1, ring1);
+    auto capFaces2 = findCapFaces(mesh2, ring2);
+    std::cout << "[Connect CPs] Cap faces: obj1=" << capFaces1.size() << " obj2=" << capFaces2.size() << std::endl;
+
+    // ── 8. Build combined mesh WITHOUT using deleteFaces ──
+    // (deleteFaces rebuilds topology and renumbers everything, invalidating ring indices)
+    // Instead, we skip cap faces during combination and let removeOrphanedVertices clean up.
+
+    glm::mat4 invMat1 = glm::inverse(mat1);
+    // Obj2 transform: apply obj2's model matrix, then alignment (rotation + translation), then into obj1's local space
+    glm::mat4 obj2ToObj1Local = invMat1 * alignTransform * mat2;
+    glm::mat3 normalMat2 = glm::transpose(glm::inverse(glm::mat3(obj2ToObj1Local)));
+
+    // Work directly from the stored HE data (not from EditableMesh which may have been modified)
+    auto& storedVerts1 = obj1->getHEVertices();
+    auto& storedHEs1 = obj1->getHEHalfEdges();
+    auto& storedFaces1 = obj1->getHEFaces();
+
+    auto& storedVerts2 = obj2->getHEVertices();
+    auto& storedHEs2 = obj2->getHEHalfEdges();
+    auto& storedFaces2 = obj2->getHEFaces();
+
+    // Build cap face skip sets
+    std::set<uint32_t> skipFaces1(capFaces1.begin(), capFaces1.end());
+    std::set<uint32_t> skipFaces2(capFaces2.begin(), capFaces2.end());
+
+    // Build face remap (old face index → new face index, UINT32_MAX if skipped)
+    std::vector<uint32_t> faceRemap1(storedFaces1.size(), UINT32_MAX);
+    std::vector<uint32_t> faceRemap2(storedFaces2.size(), UINT32_MAX);
+
+    // Collect kept faces from obj1
+    struct FaceData {
+        std::vector<uint32_t> vertIndices;  // vertex indices for this face
+    };
+    std::vector<FaceData> keptFaces;
+
+    // For obj1: walk each non-cap face and collect vertex indices
+    for (uint32_t fi = 0; fi < storedFaces1.size(); fi++) {
+        if (skipFaces1.count(fi)) continue;
+        auto& f = storedFaces1[fi];
+        FaceData fd;
+        uint32_t heIdx = f.halfEdgeIndex;
+        for (uint32_t k = 0; k < f.vertexCount; k++) {
+            auto& he = storedHEs1[heIdx];
+            fd.vertIndices.push_back(he.vertexIndex);
+            heIdx = he.nextIndex;
+        }
+        faceRemap1[fi] = (uint32_t)keptFaces.size();
+        keptFaces.push_back(fd);
+    }
+    uint32_t faceCountFromObj1 = (uint32_t)keptFaces.size();
+
+    // Build vertex remap for obj2:
+    // ring2 vertices → corresponding ring1 vertex index
+    // other vertices → offset past obj1's vertex count
+    std::unordered_map<uint32_t, uint32_t> ring2ToRing1;
+    for (size_t i = 0; i < ring1.size(); i++) {
+        ring2ToRing1[ring2[i]] = ring1[i];
+    }
+
+    uint32_t vertOffset = (uint32_t)storedVerts1.size();
+    std::vector<uint32_t> vert2Remap(storedVerts2.size());
+    for (uint32_t i = 0; i < storedVerts2.size(); i++) {
+        auto it = ring2ToRing1.find(i);
+        if (it != ring2ToRing1.end()) {
+            vert2Remap[i] = it->second;  // Maps to ring1 vertex
+        } else {
+            vert2Remap[i] = vertOffset + i;  // Append after obj1 verts
+        }
+    }
+
+    // For obj2: walk each non-cap face and collect remapped vertex indices
+    for (uint32_t fi = 0; fi < storedFaces2.size(); fi++) {
+        if (skipFaces2.count(fi)) continue;
+        auto& f = storedFaces2[fi];
+        FaceData fd;
+        uint32_t heIdx = f.halfEdgeIndex;
+        for (uint32_t k = 0; k < f.vertexCount; k++) {
+            auto& he = storedHEs2[heIdx];
+            fd.vertIndices.push_back(vert2Remap[he.vertexIndex]);
+            heIdx = he.nextIndex;
+        }
+        faceRemap2[fi] = (uint32_t)keptFaces.size();
+        keptFaces.push_back(fd);
+    }
+
+    // Build combined vertex array
+    uint32_t totalVerts = vertOffset + (uint32_t)storedVerts2.size();
+    std::vector<eden::HEVertex> combinedVerts(totalVerts);
+
+    // Copy obj1 verts (in obj1 local space — unchanged)
+    for (uint32_t i = 0; i < storedVerts1.size(); i++) {
+        auto& sv = storedVerts1[i];
+        combinedVerts[i] = {sv.position, sv.normal, sv.uv, sv.color,
+                            UINT32_MAX, false, sv.boneIndices, sv.boneWeights};
+    }
+
+    // Set merged positions on ring1 vertices
+    for (size_t i = 0; i < ring1.size(); i++) {
+        glm::vec3 localPos = glm::vec3(invMat1 * glm::vec4(mergedWorldPositions[i], 1.0f));
+        combinedVerts[ring1[i]].position = localPos;
+    }
+
+    // Copy obj2 verts (transformed into obj1 local space)
+    for (uint32_t i = 0; i < storedVerts2.size(); i++) {
+        if (ring2ToRing1.count(i)) continue;  // Ring verts already handled via ring1
+        uint32_t newIdx = vert2Remap[i];
+        auto& sv = storedVerts2[i];
+        glm::vec3 pos = glm::vec3(obj2ToObj1Local * glm::vec4(sv.position, 1.0f));
+        glm::vec3 nrm = glm::normalize(normalMat2 * sv.normal);
+        combinedVerts[newIdx] = {pos, nrm, sv.uv, sv.color,
+                                  UINT32_MAX, false, sv.boneIndices, sv.boneWeights};
+    }
+
+    // ── 9. Build new half-edge structure from face vertex lists ──
+    // This is cleaner than trying to remap old half-edges with offset tricks.
+    std::vector<eden::HalfEdge> combinedHEs;
+    std::vector<eden::HEFace> combinedFaces;
+
+    for (uint32_t fi = 0; fi < keptFaces.size(); fi++) {
+        auto& fd = keptFaces[fi];
+        uint32_t n = (uint32_t)fd.vertIndices.size();
+        uint32_t heStart = (uint32_t)combinedHEs.size();
+
+        eden::HEFace face;
+        face.halfEdgeIndex = heStart;
+        face.vertexCount = n;
+        face.selected = false;
+
+        for (uint32_t k = 0; k < n; k++) {
+            eden::HalfEdge he;
+            he.vertexIndex = fd.vertIndices[(k + 1) % n];  // Points TO next vertex
+            he.faceIndex = fi;
+            he.nextIndex = heStart + (k + 1) % n;
+            he.prevIndex = heStart + (k + n - 1) % n;
+            he.twinIndex = UINT32_MAX;  // Will be linked later
+            combinedHEs.push_back(he);
+
+            // Update vertex → half-edge reference
+            uint32_t vi = fd.vertIndices[k];
+            if (vi < combinedVerts.size() && combinedVerts[vi].halfEdgeIndex == UINT32_MAX) {
+                combinedVerts[vi].halfEdgeIndex = heStart + k;
+            }
+        }
+
+        combinedFaces.push_back(face);
+    }
+
+    std::cout << "[Connect CPs] Combined: " << combinedVerts.size() << " verts, "
+              << combinedFaces.size() << " faces, " << combinedHEs.size() << " half-edges" << std::endl;
+
+    // ── 10. Create EditableMesh, link twins, clean up ──
+    eden::EditableMesh combinedMesh;
+    combinedMesh.setFromData(combinedVerts, combinedHEs, combinedFaces);
+    combinedMesh.linkTwinsByPosition();
+    combinedMesh.removeOrphanedVertices();
+    combinedMesh.recalculateNormals();
+
+    // ── 11. Triangulate and create new SceneObject ──
+    std::vector<ModelVertex> outVerts;
+    std::vector<uint32_t> outIndices;
+    combinedMesh.triangulate(outVerts, outIndices);
+
+    if (outVerts.empty()) {
+        std::cout << "[Connect CPs] Combined mesh has no vertices — aborting" << std::endl;
+        return;
+    }
+
+    std::string newName = obj1->getName() + "+" + obj2->getName();
+    auto combinedObj = std::make_unique<SceneObject>(newName);
+    combinedObj->getTransform() = obj1->getTransform();
+    combinedObj->setEulerRotation(obj1->getEulerRotation());
+
+    uint32_t bufHandle = m_ctx.modelRenderer.createModel(outVerts, outIndices, nullptr, 0, 0);
+    combinedObj->setBufferHandle(bufHandle);
+    combinedObj->setIndexCount((uint32_t)outIndices.size());
+    combinedObj->setVertexCount((uint32_t)outVerts.size());
+    combinedObj->setMeshData(outVerts, outIndices);
+
+    // Store combined HE data
+    {
+        auto& cv = combinedMesh.getVerticesData();
+        auto& ch = combinedMesh.getHalfEdges();
+        auto& cf = combinedMesh.getFacesData();
+        std::vector<SceneObject::StoredHEVertex> sv(cv.size());
+        std::vector<SceneObject::StoredHalfEdge> sh(ch.size());
+        std::vector<SceneObject::StoredHEFace> sf(cf.size());
+        for (size_t i = 0; i < cv.size(); i++) {
+            sv[i] = {cv[i].position, cv[i].normal, cv[i].uv, cv[i].color,
+                      cv[i].halfEdgeIndex, cv[i].selected, cv[i].boneIndices, cv[i].boneWeights};
+        }
+        for (size_t i = 0; i < ch.size(); i++) {
+            sh[i] = {ch[i].vertexIndex, ch[i].faceIndex, ch[i].nextIndex, ch[i].prevIndex, ch[i].twinIndex};
+        }
+        for (size_t i = 0; i < cf.size(); i++) {
+            sf[i] = {cf[i].halfEdgeIndex, cf[i].vertexCount, cf[i].selected};
+        }
+        combinedObj->setEditableMeshData(sv, sh, sf);
+    }
+
+    // Compute bounds
+    AABB bounds;
+    bounds.min = glm::vec3(FLT_MAX);
+    bounds.max = glm::vec3(-FLT_MAX);
+    for (auto& v : outVerts) {
+        bounds.min = glm::min(bounds.min, v.position);
+        bounds.max = glm::max(bounds.max, v.position);
+    }
+    combinedObj->setLocalBounds(bounds);
+
+    // Queue originals for deletion
+    for (SceneObject* obj : m_ctx.selectedObjects) {
+        m_ctx.pendingDeletions.push_back(obj);
+    }
+
+    // Clear selection and mesh state
+    m_ctx.selectedObject = nullptr;
+    m_ctx.selectedObjects.clear();
+    m_ctx.editableMesh.clear();
+    m_ctx.meshDirty = false;
+
+    m_ctx.sceneObjects.push_back(std::move(combinedObj));
+
+    // Mark backup as valid for undo
+    m_connectCPsBackup.combinedName = newName;
+    m_connectCPsBackup.valid = true;
+
+    std::cout << "[Connect CPs] Created '" << newName << "' with "
+              << outVerts.size() << " vertices, " << outIndices.size() / 3 << " triangles"
+              << " (Ctrl+Z to undo)" << std::endl;
+}
+
+void ModelingMode::undoConnectCPs() {
+    if (!m_connectCPsBackup.valid) return;
+
+    // Remove the combined object
+    for (auto it = m_ctx.sceneObjects.begin(); it != m_ctx.sceneObjects.end(); ++it) {
+        if ((*it)->getName() == m_connectCPsBackup.combinedName) {
+            if ((*it)->getBufferHandle() != UINT32_MAX) {
+                m_ctx.modelRenderer.destroyModel((*it)->getBufferHandle());
+            }
+            m_ctx.sceneObjects.erase(it);
+            break;
+        }
+    }
+
+    // Restore original objects
+    for (auto& b : m_connectCPsBackup.originals) {
+        auto obj = std::make_unique<SceneObject>(b.name);
+        obj->getTransform() = b.transform;
+        obj->setEulerRotation(b.eulerRotation);
+        obj->setEditableMeshData(b.heVerts, b.heHalfEdges, b.heFaces);
+        obj->setControlPoints(b.controlPoints);
+
+        const unsigned char* texPtr = b.textureData.empty() ? nullptr : b.textureData.data();
+        int texW = b.texWidth, texH = b.texHeight;
+        uint32_t handle = m_ctx.modelRenderer.createModel(b.meshVerts, b.meshIndices, texPtr, texW, texH);
+        obj->setBufferHandle(handle);
+        obj->setIndexCount((uint32_t)b.meshIndices.size());
+        obj->setVertexCount((uint32_t)b.meshVerts.size());
+        obj->setMeshData(b.meshVerts, b.meshIndices);
+        if (!b.textureData.empty()) {
+            obj->setTextureData(b.textureData, texW, texH);
+        }
+
+        // Compute bounds
+        AABB bounds;
+        bounds.min = glm::vec3(FLT_MAX);
+        bounds.max = glm::vec3(-FLT_MAX);
+        for (auto& v : b.meshVerts) {
+            bounds.min = glm::min(bounds.min, v.position);
+            bounds.max = glm::max(bounds.max, v.position);
+        }
+        obj->setLocalBounds(bounds);
+
+        m_ctx.sceneObjects.push_back(std::move(obj));
+    }
+
+    // Clear selection
+    m_ctx.selectedObject = nullptr;
+    m_ctx.selectedObjects.clear();
+    m_ctx.editableMesh.clear();
+    m_ctx.meshDirty = false;
+
+    m_connectCPsBackup.valid = false;
+    std::cout << "[Connect CPs] Undo — restored original objects" << std::endl;
+}
+
 void ModelingMode::updateMeshFromEditable() {
     if (!m_ctx.selectedObject || !m_ctx.editableMesh.isValid()) return;
 
@@ -6171,6 +7081,15 @@ void ModelingMode::updateMeshFromEditable() {
     }
 
     m_ctx.selectedObject->setEditableMeshData(storedVerts, storedHE, storedFaces);
+
+    // Save control points to SceneObject
+    {
+        std::vector<SceneObject::StoredControlPoint> storedCPs;
+        for (const auto& cp : m_ctx.editableMesh.getControlPoints()) {
+            storedCPs.push_back({cp.vertexIndex, cp.name});
+        }
+        m_ctx.selectedObject->setControlPoints(storedCPs);
+    }
 
     // Build faceToTriangles mapping - only for visible faces (matches triangulated mesh)
     m_ctx.faceToTriangles.clear();
@@ -6769,6 +7688,41 @@ void ModelingMode::saveEditableMeshAsLime() {
     }
 }
 
+void ModelingMode::exportTextureAsPNG() {
+    if (!m_ctx.selectedObject || !m_ctx.selectedObject->hasTextureData()) {
+        std::cerr << "No texture data to export" << std::endl;
+        return;
+    }
+
+    std::string defaultName = "texture.png";
+    if (m_ctx.selectedObject) {
+        defaultName = m_ctx.selectedObject->getName() + "_texture.png";
+    }
+
+    nfdchar_t* outPath = nullptr;
+    nfdfilteritem_t filters[1] = {{"PNG Image", "png"}};
+    nfdresult_t result = NFD_SaveDialog(&outPath, filters, 1, nullptr, defaultName.c_str());
+
+    if (result == NFD_OKAY) {
+        std::string filepath = outPath;
+        NFD_FreePath(outPath);
+
+        if (filepath.size() < 4 || filepath.substr(filepath.size() - 4) != ".png") {
+            filepath += ".png";
+        }
+
+        const auto& texData = m_ctx.selectedObject->getTextureData();
+        int w = m_ctx.selectedObject->getTextureWidth();
+        int h = m_ctx.selectedObject->getTextureHeight();
+
+        if (stbi_write_png(filepath.c_str(), w, h, 4, texData.data(), w * 4)) {
+            std::cout << "Exported texture to: " << filepath << " (" << w << "x" << h << ")" << std::endl;
+        } else {
+            std::cerr << "Failed to export texture: " << filepath << std::endl;
+        }
+    }
+}
+
 void ModelingMode::loadLimeFile() {
     nfdchar_t* outPath = nullptr;
     nfdfilteritem_t filters[1] = {{"LIME Model", "lime"}};
@@ -6949,6 +7903,100 @@ void ModelingMode::quickSave() {
             }
             break;
         }
+        case 4: {  // LIMES (scene)
+            // Scene save doesn't use the single-file quicksave path — call saveLimeScene flow directly
+            // But for quickSave we write to the known path without dialog
+            if (m_ctx.selectedObject && m_ctx.editableMesh.isValid()) {
+                updateMeshFromEditable();
+            }
+
+            std::ofstream sceneFile(filepath);
+            if (!sceneFile.is_open()) break;
+
+            sceneFile << "# LIME Scene Format v1.0\n";
+            sceneFile << "# Multi-object scene file\n";
+            sceneFile << "scene_objects: " << m_ctx.sceneObjects.size() << "\n\n";
+
+            for (size_t oi = 0; oi < m_ctx.sceneObjects.size(); ++oi) {
+                auto& sobj = m_ctx.sceneObjects[oi];
+                sceneFile << "OBJECT_BEGIN \"" << sobj->getName() << "\"\n";
+
+                glm::vec3 p = sobj->getTransform().getPosition();
+                glm::quat r = sobj->getTransform().getRotation();
+                glm::vec3 s = sobj->getTransform().getScale();
+                sceneFile << "transform_pos: " << p.x << " " << p.y << " " << p.z << "\n";
+                sceneFile << "transform_rot: " << r.w << " " << r.x << " " << r.y << " " << r.z << "\n";
+                sceneFile << "transform_scale: " << s.x << " " << s.y << " " << s.z << "\n";
+                if (!sobj->isVisible()) sceneFile << "visible: 0\n";
+
+                if (sobj->hasTextureData()) {
+                    const auto& td = sobj->getTextureData();
+                    int tw = sobj->getTextureWidth(), th = sobj->getTextureHeight();
+                    std::string enc = limes_base64_encode(td.data(), static_cast<size_t>(tw) * th * 4);
+                    sceneFile << "tex_size: " << tw << " " << th << "\n";
+                    sceneFile << "tex_data: " << enc << "\n";
+                }
+
+                if (sobj->hasEditableMeshData()) {
+                    const auto& hv = sobj->getHEVertices();
+                    const auto& hh = sobj->getHEHalfEdges();
+                    const auto& hf = sobj->getHEFaces();
+
+                    sceneFile << "# VERTICES: " << hv.size() << "\n";
+                    for (size_t i = 0; i < hv.size(); ++i) {
+                        const auto& v = hv[i];
+                        sceneFile << "v " << i << ": "
+                             << v.position.x << " " << v.position.y << " " << v.position.z << " | "
+                             << v.normal.x << " " << v.normal.y << " " << v.normal.z << " | "
+                             << v.uv.x << " " << v.uv.y << " | "
+                             << v.color.r << " " << v.color.g << " " << v.color.b << " " << v.color.a << " | "
+                             << v.halfEdgeIndex << " " << (v.selected ? 1 : 0);
+                        if (v.boneIndices != glm::ivec4(0) || v.boneWeights != glm::vec4(0.0f)) {
+                            sceneFile << " | " << v.boneIndices.x << " " << v.boneIndices.y << " " << v.boneIndices.z << " " << v.boneIndices.w
+                                 << " | " << v.boneWeights.x << " " << v.boneWeights.y << " " << v.boneWeights.z << " " << v.boneWeights.w;
+                        }
+                        sceneFile << "\n";
+                    }
+
+                    sceneFile << "# FACES: " << hf.size() << "\n";
+                    for (size_t i = 0; i < hf.size(); ++i) {
+                        const auto& f = hf[i];
+                        sceneFile << "f " << i << ": " << f.halfEdgeIndex << " " << f.vertexCount << " "
+                             << (f.selected ? 1 : 0) << " |";
+                        uint32_t he = f.halfEdgeIndex;
+                        for (uint32_t vi = 0; vi < f.vertexCount; ++vi) {
+                            if (he < hh.size()) {
+                                sceneFile << " " << hh[he].vertexIndex;
+                                he = hh[he].nextIndex;
+                            }
+                        }
+                        sceneFile << "\n";
+                    }
+
+                    sceneFile << "# HALF_EDGES: " << hh.size() << "\n";
+                    for (size_t i = 0; i < hh.size(); ++i) {
+                        const auto& he = hh[i];
+                        sceneFile << "he " << i << ": "
+                             << he.vertexIndex << " " << he.faceIndex << " "
+                             << he.nextIndex << " " << he.prevIndex << " " << he.twinIndex << "\n";
+                    }
+                }
+
+                if (sobj->hasControlPoints()) {
+                    const auto& cps = sobj->getControlPoints();
+                    sceneFile << "# CONTROL_POINTS: " << cps.size() << "\n";
+                    for (size_t i = 0; i < cps.size(); ++i) {
+                        sceneFile << "cp " << i << ": " << cps[i].vertexIndex << " \"" << cps[i].name << "\"\n";
+                    }
+                }
+
+                sceneFile << "OBJECT_END\n\n";
+            }
+
+            sceneFile.close();
+            success = true;
+            break;
+        }
     }
 
     if (success) {
@@ -6957,6 +8005,405 @@ void ModelingMode::quickSave() {
     } else {
         std::cerr << "Failed to save: " << filepath << std::endl;
     }
+}
+
+void ModelingMode::saveLimeScene() {
+    if (m_ctx.sceneObjects.empty()) {
+        std::cout << "No objects in scene to save" << std::endl;
+        return;
+    }
+
+    // Sync current editable mesh to SceneObject before saving
+    if (m_ctx.selectedObject && m_ctx.editableMesh.isValid()) {
+        updateMeshFromEditable();
+    }
+
+    nfdchar_t* outPath = nullptr;
+    nfdfilteritem_t filters[1] = {{"LIME Scene", "limes"}};
+    nfdresult_t result = NFD_SaveDialog(&outPath, filters, 1, nullptr, "scene.limes");
+
+    if (result != NFD_OKAY) return;
+
+    std::string filepath = outPath;
+    NFD_FreePath(outPath);
+
+    if (filepath.size() < 6 || filepath.substr(filepath.size() - 6) != ".limes") {
+        filepath += ".limes";
+    }
+
+    std::ofstream file(filepath);
+    if (!file.is_open()) {
+        std::cerr << "Failed to open " << filepath << " for writing" << std::endl;
+        return;
+    }
+
+    file << "# LIME Scene Format v1.0\n";
+    file << "# Multi-object scene file\n";
+    file << "scene_objects: " << m_ctx.sceneObjects.size() << "\n\n";
+
+    for (size_t objIdx = 0; objIdx < m_ctx.sceneObjects.size(); ++objIdx) {
+        auto& obj = m_ctx.sceneObjects[objIdx];
+
+        file << "OBJECT_BEGIN \"" << obj->getName() << "\"\n";
+
+        // Transform
+        glm::vec3 pos = obj->getTransform().getPosition();
+        glm::quat rot = obj->getTransform().getRotation();
+        glm::vec3 scl = obj->getTransform().getScale();
+        file << "transform_pos: " << pos.x << " " << pos.y << " " << pos.z << "\n";
+        file << "transform_rot: " << rot.w << " " << rot.x << " " << rot.y << " " << rot.z << "\n";
+        file << "transform_scale: " << scl.x << " " << scl.y << " " << scl.z << "\n";
+
+        // Visibility
+        if (!obj->isVisible()) {
+            file << "visible: 0\n";
+        }
+
+        // Texture
+        if (obj->hasTextureData()) {
+            const auto& texData = obj->getTextureData();
+            int texW = obj->getTextureWidth();
+            int texH = obj->getTextureHeight();
+            size_t texSize = static_cast<size_t>(texW) * texH * 4;
+            std::string encoded = limes_base64_encode(texData.data(), texSize);
+            file << "tex_size: " << texW << " " << texH << "\n";
+            file << "tex_data: " << encoded << "\n";
+        }
+
+        // Half-edge mesh data from SceneObject's stored data
+        if (obj->hasEditableMeshData()) {
+            const auto& heVerts = obj->getHEVertices();
+            const auto& heHalfEdges = obj->getHEHalfEdges();
+            const auto& heFaces = obj->getHEFaces();
+
+            // Vertices
+            file << "# VERTICES: " << heVerts.size() << "\n";
+            for (size_t i = 0; i < heVerts.size(); ++i) {
+                const auto& v = heVerts[i];
+                file << "v " << i << ": "
+                     << v.position.x << " " << v.position.y << " " << v.position.z << " | "
+                     << v.normal.x << " " << v.normal.y << " " << v.normal.z << " | "
+                     << v.uv.x << " " << v.uv.y << " | "
+                     << v.color.r << " " << v.color.g << " " << v.color.b << " " << v.color.a << " | "
+                     << v.halfEdgeIndex << " " << (v.selected ? 1 : 0);
+                // Bone data if non-zero
+                if (v.boneIndices != glm::ivec4(0) || v.boneWeights != glm::vec4(0.0f)) {
+                    file << " | " << v.boneIndices.x << " " << v.boneIndices.y << " " << v.boneIndices.z << " " << v.boneIndices.w
+                         << " | " << v.boneWeights.x << " " << v.boneWeights.y << " " << v.boneWeights.z << " " << v.boneWeights.w;
+                }
+                file << "\n";
+            }
+
+            // Faces — need to reconstruct vertex indices from half-edge traversal
+            file << "# FACES: " << heFaces.size() << "\n";
+            for (size_t i = 0; i < heFaces.size(); ++i) {
+                const auto& f = heFaces[i];
+                file << "f " << i << ": " << f.halfEdgeIndex << " " << f.vertexCount << " "
+                     << (f.selected ? 1 : 0) << " |";
+                // Walk the half-edge loop to get vertex indices
+                uint32_t he = f.halfEdgeIndex;
+                for (uint32_t vi = 0; vi < f.vertexCount; ++vi) {
+                    if (he < heHalfEdges.size()) {
+                        file << " " << heHalfEdges[he].vertexIndex;
+                        he = heHalfEdges[he].nextIndex;
+                    }
+                }
+                file << "\n";
+            }
+
+            // Half-edges
+            file << "# HALF_EDGES: " << heHalfEdges.size() << "\n";
+            for (size_t i = 0; i < heHalfEdges.size(); ++i) {
+                const auto& he = heHalfEdges[i];
+                file << "he " << i << ": "
+                     << he.vertexIndex << " "
+                     << he.faceIndex << " "
+                     << he.nextIndex << " "
+                     << he.prevIndex << " "
+                     << he.twinIndex << "\n";
+            }
+        }
+
+        // Control points
+        if (obj->hasControlPoints()) {
+            const auto& cps = obj->getControlPoints();
+            file << "# CONTROL_POINTS: " << cps.size() << "\n";
+            for (size_t i = 0; i < cps.size(); ++i) {
+                file << "cp " << i << ": " << cps[i].vertexIndex << " \"" << cps[i].name << "\"\n";
+            }
+        }
+
+        file << "OBJECT_END\n\n";
+    }
+
+    file.close();
+
+    m_ctx.currentFilePath = filepath;
+    m_ctx.currentFileFormat = 4;  // LIMES
+    m_saveNotificationTimer = 1.0f;
+    std::cout << "Saved scene (" << m_ctx.sceneObjects.size() << " objects) to: " << filepath << std::endl;
+}
+
+void ModelingMode::loadLimeScene() {
+    nfdchar_t* outPath = nullptr;
+    nfdfilteritem_t filters[1] = {{"LIME Scene", "limes"}};
+    nfdresult_t result = NFD_OpenDialog(&outPath, filters, 1, nullptr);
+
+    if (result != NFD_OKAY) return;
+
+    std::string filepath = outPath;
+    NFD_FreePath(outPath);
+
+    std::ifstream file(filepath);
+    if (!file.is_open()) {
+        std::cerr << "Failed to open " << filepath << " for reading" << std::endl;
+        return;
+    }
+
+    // Clear existing scene
+    for (auto& obj : m_ctx.sceneObjects) {
+        uint32_t handle = obj->getBufferHandle();
+        if (handle != UINT32_MAX && handle != 0) {
+            m_ctx.modelRenderer.destroyModel(handle);
+        }
+    }
+    m_ctx.sceneObjects.clear();
+    m_ctx.selectedObject = nullptr;
+    m_ctx.selectedObjects.clear();
+    m_ctx.editableMesh.clear();
+    m_ctx.meshDirty = false;
+
+    // Parse the scene file
+    std::string line;
+    int objectCount = 0;
+
+    while (std::getline(file, line)) {
+        if (line.empty() || line[0] == '#') continue;
+
+        std::istringstream iss(line);
+        std::string type;
+        iss >> type;
+
+        if (type == "scene_objects:") {
+            iss >> objectCount;
+        }
+        else if (type == "OBJECT_BEGIN") {
+            // Parse object name from "OBJECT_BEGIN "name""
+            std::string objName;
+            size_t q1 = line.find('"');
+            size_t q2 = line.rfind('"');
+            if (q1 != std::string::npos && q2 != std::string::npos && q2 > q1) {
+                objName = line.substr(q1 + 1, q2 - q1 - 1);
+            } else {
+                objName = "Object_" + std::to_string(m_ctx.sceneObjects.size());
+            }
+
+            // Parse this object's data until OBJECT_END
+            glm::vec3 pos(0.0f);
+            glm::quat rot(1.0f, 0.0f, 0.0f, 0.0f);
+            glm::vec3 scl(1.0f);
+            bool visible = true;
+            std::vector<unsigned char> textureData;
+            int texW = 0, texH = 0;
+
+            std::vector<SceneObject::StoredHEVertex> heVerts;
+            std::vector<SceneObject::StoredHalfEdge> heHalfEdges;
+            std::vector<SceneObject::StoredHEFace> heFaces;
+            std::vector<SceneObject::StoredControlPoint> controlPoints;
+
+            while (std::getline(file, line)) {
+                if (line == "OBJECT_END") break;
+                if (line.empty() || line[0] == '#') continue;
+
+                std::istringstream objIss(line);
+                std::string objType;
+                objIss >> objType;
+
+                if (objType == "transform_pos:") {
+                    objIss >> pos.x >> pos.y >> pos.z;
+                }
+                else if (objType == "transform_rot:") {
+                    objIss >> rot.w >> rot.x >> rot.y >> rot.z;
+                }
+                else if (objType == "transform_scale:") {
+                    objIss >> scl.x >> scl.y >> scl.z;
+                }
+                else if (objType == "visible:") {
+                    int v; objIss >> v; visible = (v != 0);
+                }
+                else if (objType == "tex_size:") {
+                    objIss >> texW >> texH;
+                }
+                else if (objType == "tex_data:") {
+                    std::string encoded;
+                    objIss >> encoded;
+                    textureData = limes_base64_decode(encoded);
+                }
+                else if (objType == "v") {
+                    uint32_t idx;
+                    char colon, pipe1, pipe2, pipe3, pipe4;
+                    SceneObject::StoredHEVertex v;
+                    int selected;
+
+                    objIss >> idx >> colon
+                           >> v.position.x >> v.position.y >> v.position.z >> pipe1
+                           >> v.normal.x >> v.normal.y >> v.normal.z >> pipe2
+                           >> v.uv.x >> v.uv.y >> pipe3;
+
+                    float r, g, b, a;
+                    if (objIss >> r >> g >> b >> a >> pipe4) {
+                        v.color = glm::vec4(r, g, b, a);
+                        objIss >> v.halfEdgeIndex >> selected;
+                        // Try bone data
+                        char pipe5;
+                        int bi0, bi1, bi2, bi3;
+                        if (objIss >> pipe5 >> bi0 >> bi1 >> bi2 >> bi3) {
+                            v.boneIndices = glm::ivec4(bi0, bi1, bi2, bi3);
+                            char pipe6;
+                            float bw0, bw1, bw2, bw3;
+                            if (objIss >> pipe6 >> bw0 >> bw1 >> bw2 >> bw3) {
+                                v.boneWeights = glm::vec4(bw0, bw1, bw2, bw3);
+                            }
+                        }
+                    } else {
+                        v.color = glm::vec4(1.0f);
+                        std::istringstream iss2(line);
+                        std::string dummy;
+                        iss2 >> dummy >> idx >> colon
+                             >> v.position.x >> v.position.y >> v.position.z >> pipe1
+                             >> v.normal.x >> v.normal.y >> v.normal.z >> pipe2
+                             >> v.uv.x >> v.uv.y >> pipe3
+                             >> v.halfEdgeIndex >> selected;
+                    }
+                    v.selected = (selected != 0);
+
+                    if (idx >= heVerts.size()) heVerts.resize(idx + 1);
+                    heVerts[idx] = v;
+                }
+                else if (objType == "f") {
+                    uint32_t idx, heIdx, vertCount;
+                    int selected;
+                    char colon, pipe;
+                    objIss >> idx >> colon >> heIdx >> vertCount >> selected >> pipe;
+
+                    SceneObject::StoredHEFace f;
+                    f.halfEdgeIndex = heIdx;
+                    f.vertexCount = vertCount;
+                    f.selected = (selected != 0);
+
+                    if (idx >= heFaces.size()) heFaces.resize(idx + 1);
+                    heFaces[idx] = f;
+                }
+                else if (objType == "he") {
+                    uint32_t idx;
+                    char colon;
+                    SceneObject::StoredHalfEdge he;
+                    objIss >> idx >> colon
+                           >> he.vertexIndex >> he.faceIndex >> he.nextIndex >> he.prevIndex >> he.twinIndex;
+
+                    if (idx >= heHalfEdges.size()) heHalfEdges.resize(idx + 1);
+                    heHalfEdges[idx] = he;
+                }
+                else if (objType == "cp") {
+                    uint32_t idx;
+                    char colon;
+                    uint32_t vertIdx;
+                    objIss >> idx >> colon >> vertIdx;
+                    std::string cpName = "CP" + std::to_string(idx);
+                    std::string rest;
+                    std::getline(objIss, rest);
+                    size_t cq1 = rest.find('"');
+                    size_t cq2 = rest.rfind('"');
+                    if (cq1 != std::string::npos && cq2 != std::string::npos && cq2 > cq1) {
+                        cpName = rest.substr(cq1 + 1, cq2 - cq1 - 1);
+                    }
+                    controlPoints.push_back({vertIdx, cpName});
+                }
+            }
+
+            // Reconstruct the SceneObject
+            if (heVerts.empty()) continue;  // Skip empty objects
+
+            auto newObj = std::make_unique<SceneObject>(objName);
+
+            // Store HE data on SceneObject
+            newObj->setEditableMeshData(heVerts, heHalfEdges, heFaces);
+
+            // Store control points
+            if (!controlPoints.empty()) {
+                newObj->setControlPoints(controlPoints);
+            }
+
+            // Triangulate using EditableMesh for GPU mesh creation
+            eden::EditableMesh tempMesh;
+            // Convert stored data to EditableMesh types
+            std::vector<eden::HEVertex> emVerts;
+            emVerts.reserve(heVerts.size());
+            for (const auto& sv : heVerts) {
+                eden::HEVertex ev;
+                ev.position = sv.position;
+                ev.normal = sv.normal;
+                ev.uv = sv.uv;
+                ev.color = sv.color;
+                ev.halfEdgeIndex = sv.halfEdgeIndex;
+                ev.selected = sv.selected;
+                ev.boneIndices = sv.boneIndices;
+                ev.boneWeights = sv.boneWeights;
+                emVerts.push_back(ev);
+            }
+            std::vector<eden::HalfEdge> emHE;
+            emHE.reserve(heHalfEdges.size());
+            for (const auto& she : heHalfEdges) {
+                emHE.push_back({she.vertexIndex, she.faceIndex, she.nextIndex, she.prevIndex, she.twinIndex});
+            }
+            std::vector<eden::HEFace> emFaces;
+            emFaces.reserve(heFaces.size());
+            for (const auto& sf : heFaces) {
+                emFaces.push_back({sf.halfEdgeIndex, sf.vertexCount, sf.selected});
+            }
+            tempMesh.setFromData(emVerts, emHE, emFaces);
+
+            std::vector<ModelVertex> vertices;
+            std::vector<uint32_t> indices;
+            tempMesh.triangulate(vertices, indices);
+
+            // Create GPU model
+            uint32_t handle;
+            if (!textureData.empty() && texW > 0 && texH > 0) {
+                handle = m_ctx.modelRenderer.createModel(vertices, indices, textureData.data(), texW, texH);
+                newObj->setTextureData(textureData, texW, texH);
+            } else {
+                handle = m_ctx.modelRenderer.createModel(vertices, indices, nullptr, 0, 0);
+            }
+
+            newObj->setBufferHandle(handle);
+            newObj->setIndexCount(static_cast<uint32_t>(indices.size()));
+            newObj->setVertexCount(static_cast<uint32_t>(vertices.size()));
+            newObj->setMeshData(vertices, indices);
+
+            // Apply transform
+            newObj->getTransform().setPosition(pos);
+            newObj->getTransform().setRotation(rot);
+            newObj->getTransform().setScale(scl);
+            newObj->setVisible(visible);
+
+            m_ctx.sceneObjects.push_back(std::move(newObj));
+        }
+    }
+
+    file.close();
+
+    // Select first object
+    if (!m_ctx.sceneObjects.empty()) {
+        m_ctx.selectedObject = m_ctx.sceneObjects[0].get();
+        buildEditableMeshFromObject();
+    }
+
+    m_ctx.currentFilePath = filepath;
+    m_ctx.currentFileFormat = 4;  // LIMES
+    invalidateWireframeCache();
+
+    std::cout << "Loaded scene from " << filepath << ": " << m_ctx.sceneObjects.size() << " objects" << std::endl;
 }
 
 void ModelingMode::drawQuadWireframeOverlay(Camera& camera, float vpX, float vpY, float vpW, float vpH) {
@@ -7113,6 +8560,41 @@ void ModelingMode::drawQuadWireframeOverlay(Camera& camera, float vpX, float vpY
 
             drawList->AddCircleFilled(screenPos, radius, color);
             drawList->AddCircle(screenPos, radius, IM_COL32(0, 0, 0, 200), 0, 1.5f);
+        }
+    }
+
+    // Draw control points as magenta diamonds with names (visible in all selection modes)
+    {
+        ImU32 cpColor = IM_COL32(255, 0, 255, 255);
+        ImU32 cpOutline = IM_COL32(0, 0, 0, 220);
+        ImU32 cpTextColor = IM_COL32(255, 200, 255, 255);
+        ImU32 cpTextBg = IM_COL32(0, 0, 0, 180);
+        float cpSize = m_ctx.vertexDisplaySize * 150.0f;
+
+        for (const auto& cp : m_ctx.editableMesh.getControlPoints()) {
+            if (cp.vertexIndex >= m_ctx.editableMesh.getVertexCount()) continue;
+            const auto& v = m_ctx.editableMesh.getVertex(cp.vertexIndex);
+            ImVec2 sp = worldToScreen(v.position);
+            if (sp.x < -500) continue;
+
+            // Diamond shape
+            ImVec2 top(sp.x, sp.y - cpSize);
+            ImVec2 right(sp.x + cpSize, sp.y);
+            ImVec2 bottom(sp.x, sp.y + cpSize);
+            ImVec2 left(sp.x - cpSize, sp.y);
+            drawList->AddQuadFilled(top, right, bottom, left, cpColor);
+            drawList->AddQuad(top, right, bottom, left, cpOutline, 2.0f);
+
+            // Draw name label
+            if (!cp.name.empty()) {
+                ImVec2 textSize = ImGui::CalcTextSize(cp.name.c_str());
+                ImVec2 textPos(sp.x - textSize.x * 0.5f, sp.y - cpSize - textSize.y - 2);
+                drawList->AddRectFilled(
+                    ImVec2(textPos.x - 2, textPos.y - 1),
+                    ImVec2(textPos.x + textSize.x + 2, textPos.y + textSize.y + 1),
+                    cpTextBg, 2.0f);
+                drawList->AddText(textPos, cpTextColor, cp.name.c_str());
+            }
         }
     }
 
