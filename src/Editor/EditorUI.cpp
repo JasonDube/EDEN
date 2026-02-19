@@ -890,13 +890,15 @@ void EditorUI::renderModelsWindow() {
             ImGui::Text("Being Type");
             ImGui::PushItemWidth(-1);
             int currentType = static_cast<int>(selected->getBeingType());
-            const char* beingTypes[] = { "Static", "Human", "Clone", "Robot", "Android", "Cyborg", "Alien", "Eve", "AI Architect", "AlgoBot" };
+            const char* beingTypes[] = { "Static", "Human", "Clone", "Robot", "Android", "Cyborg", "Alien", "Eve", "AI Architect", "AlgoBot", "EDEN Companion" };
             if (ImGui::Combo("##beingtype", &currentType, beingTypes, IM_ARRAYSIZE(beingTypes))) {
                 selected->setBeingType(static_cast<BeingType>(currentType));
             }
             ImGui::PopItemWidth();
             if (selected->getBeingType() == BeingType::ALGOBOT) {
                 ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.3f, 1.0f), "(Algorithmic worker bot)");
+            } else if (selected->getBeingType() == BeingType::EDEN_COMPANION) {
+                ImGui::TextColored(ImVec4(0.9f, 0.5f, 1.0f, 1.0f), "(EDEN companion - Liora etc.)");
             } else if (selected->isSentient()) {
                 ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), "(Can be talked to)");
             }
@@ -1129,6 +1131,35 @@ void EditorUI::renderModelsWindow() {
                 }
                 if (ImGui::IsItemHovered()) {
                     ImGui::SetTooltip("Bake current rotation and scale into mesh vertices,\nthen reset rotation to 0 and scale to 1.\nUseful for fixing collision on pre-rotated models.");
+                }
+
+                // Snap settings
+                ImGui::Spacing();
+                ImGui::Separator();
+                ImGui::Text("Snap Settings");
+                ImGui::Checkbox("Snap Move", &m_snapMove);
+                if (m_snapMove) {
+                    ImGui::SameLine();
+                    ImGui::PushItemWidth(80);
+                    ImGui::InputFloat("Grid Size", &m_snapMoveSize, 0.1f, 0.5f, "%.2f");
+                    if (m_snapMoveSize < 0.01f) m_snapMoveSize = 0.01f;
+                    ImGui::PopItemWidth();
+                }
+                ImGui::Checkbox("Snap Rotate", &m_snapRotate);
+                if (m_snapRotate) {
+                    ImGui::SameLine();
+                    ImGui::PushItemWidth(80);
+                    ImGui::InputFloat("Angle", &m_snapRotateAngle, 1.0f, 5.0f, "%.1f");
+                    if (m_snapRotateAngle < 1.0f) m_snapRotateAngle = 1.0f;
+                    ImGui::PopItemWidth();
+                }
+                ImGui::Checkbox("Snap to Object", &m_snapToObject);
+                if (m_snapToObject) {
+                    ImGui::SameLine();
+                    ImGui::PushItemWidth(80);
+                    ImGui::InputFloat("Snap Dist", &m_snapToObjectDist, 0.1f, 0.5f, "%.1f");
+                    if (m_snapToObjectDist < 0.01f) m_snapToObjectDist = 0.01f;
+                    ImGui::PopItemWidth();
                 }
             }
 
@@ -2632,13 +2663,20 @@ void EditorUI::renderHelpWindow() {
     ImGui::BulletText("Ctrl+S - Save level");
 
     ImGui::Spacing();
+    ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.2f, 1.0f), "Transform Tools");
+    ImGui::Separator();
+    ImGui::BulletText("Q - Select mode");
+    ImGui::BulletText("W - Move mode");
+    ImGui::BulletText("E - Rotate mode");
+    ImGui::BulletText("R - Scale mode");
+
+    ImGui::Spacing();
     ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.2f, 1.0f), "Editor");
     ImGui::Separator();
     ImGui::BulletText("F5 - Toggle play mode");
     ImGui::BulletText("Delete - Delete selected object");
     ImGui::BulletText("Ctrl+D - Duplicate selected object");
     ImGui::BulletText("F - Focus camera on selected object");
-    ImGui::BulletText("E - Start conversation with nearby entity");
     ImGui::BulletText("Enter - Send message (during conversation)");
     ImGui::BulletText("Escape - End conversation / Exit play mode");
 

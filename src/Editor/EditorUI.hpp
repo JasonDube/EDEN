@@ -336,6 +336,12 @@ public:
     bool getShowCollisionHull() const { return m_showCollisionHull; }
 
     float getCharacterSpeed() const { return m_characterSpeed; }
+    bool getSnapMove() const { return m_snapMove; }
+    float getSnapMoveSize() const { return m_snapMoveSize; }
+    bool getSnapRotate() const { return m_snapRotate; }
+    float getSnapRotateAngle() const { return m_snapRotateAngle; }
+    bool getSnapToObject() const { return m_snapToObject; }
+    float getSnapToObjectDist() const { return m_snapToObjectDist; }
     float getCharacterSprintMultiplier() const { return m_characterSprintMultiplier; }
     float getCharacterJumpVelocity() const { return m_characterJumpVelocity; }
     float getCharacterGravity() const { return m_characterGravity; }
@@ -504,6 +510,14 @@ private:
     float m_characterGravity = 20.0f;
     float m_characterHeight = 0.9f;
     float m_characterRadius = 0.15f;
+
+    // Snap settings
+    bool m_snapMove = true;
+    float m_snapMoveSize = 0.5f;
+    bool m_snapRotate = true;
+    float m_snapRotateAngle = 15.0f;
+    bool m_snapToObject = true;
+    float m_snapToObjectDist = 1.0f;
 
     // Ragdoll settings
     bool m_ragdollEnabled = false;

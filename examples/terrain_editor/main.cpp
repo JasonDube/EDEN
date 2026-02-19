@@ -1065,25 +1065,6 @@ protected:
             renderModulePanel();
             renderZoneOverlay();
 
-            // Transform mode indicator (shown when in MoveObject brush mode)
-            if (m_editorUI.getBrushMode() == BrushMode::MoveObject) {
-                ImGui::SetNextWindowPos(ImVec2(static_cast<float>(getWindow().getWidth()) / 2.0f - 150.0f, 8.0f));
-                ImGui::SetNextWindowSize(ImVec2(300.0f, 0.0f));
-                ImGui::Begin("##TransformMode", nullptr,
-                    ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
-                    ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_AlwaysAutoResize |
-                    ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoFocusOnAppearing);
-                auto activeCol = ImVec4(1.0f, 0.7f, 0.0f, 1.0f);
-                auto inactiveCol = ImVec4(0.5f, 0.5f, 0.5f, 1.0f);
-                ImGui::TextColored(m_transformMode == TransformMode::Select ? activeCol : inactiveCol, "[1]Select");
-                ImGui::SameLine();
-                ImGui::TextColored(m_transformMode == TransformMode::Move ? activeCol : inactiveCol, "[2]Move");
-                ImGui::SameLine();
-                ImGui::TextColored(m_transformMode == TransformMode::Rotate ? activeCol : inactiveCol, "[3]Rotate");
-                ImGui::SameLine();
-                ImGui::TextColored(m_transformMode == TransformMode::Scale ? activeCol : inactiveCol, "[4]Scale");
-                ImGui::End();
-            }
         }
 
         // Draw collision hull when in third-person with checkbox on (works in both modes)
@@ -1368,7 +1349,8 @@ protected:
 
             // Transform gizmo (Move/Rotate/Scale modes only)
             if (m_transformMode != TransformMode::Select && m_editorUI.getBrushMode() == BrushMode::MoveObject) {
-                glm::vec3 gizmoPos = selObj->getTransform().getPosition();
+                AABB wb = selObj->getWorldBounds();
+                glm::vec3 gizmoPos((wb.min.x + wb.max.x) * 0.5f, wb.max.y, (wb.min.z + wb.max.z) * 0.5f);
                 float dist = glm::length(m_camera.getPosition() - gizmoPos);
                 float size = dist * 0.08f;  // Scale with camera distance
 
@@ -1376,6 +1358,9 @@ protected:
                 glm::vec3 xColor = (hovered == GizmoAxis::X) ? glm::vec3(1.0f, 1.0f, 0.0f) : glm::vec3(1.0f, 0.2f, 0.2f);
                 glm::vec3 yColor = (hovered == GizmoAxis::Y) ? glm::vec3(1.0f, 1.0f, 0.0f) : glm::vec3(0.2f, 1.0f, 0.2f);
                 glm::vec3 zColor = (hovered == GizmoAxis::Z) ? glm::vec3(1.0f, 1.0f, 0.0f) : glm::vec3(0.2f, 0.2f, 1.0f);
+                glm::vec3 xColorDim = (hovered == GizmoAxis::X) ? glm::vec3(1.0f, 1.0f, 0.0f) : glm::vec3(0.6f, 0.12f, 0.12f);
+                glm::vec3 yColorDim = (hovered == GizmoAxis::Y) ? glm::vec3(1.0f, 1.0f, 0.0f) : glm::vec3(0.12f, 0.6f, 0.12f);
+                glm::vec3 zColorDim = (hovered == GizmoAxis::Z) ? glm::vec3(1.0f, 1.0f, 0.0f) : glm::vec3(0.12f, 0.12f, 0.6f);
 
                 glm::vec3 xAxis(1, 0, 0), yAxis(0, 1, 0), zAxis(0, 0, 1);
 
@@ -1475,6 +1460,55 @@ protected:
                         zLines.push_back(zEnd); zLines.push_back(ab - p2 * (size * 0.1f));
                     }
                     m_modelRenderer->renderLines(cmd, vp, zLines, zColor);
+
+                    // Negative axis arms (dimmer colors)
+                    // -X axis
+                    glm::vec3 nxEnd = gizmoPos - xAxis * size;
+                    std::vector<glm::vec3> nxLines = { gizmoPos, nxEnd };
+                    if (isScale) {
+                        auto cl = makeCubeLines(nxEnd, cubeSize);
+                        nxLines.insert(nxLines.end(), cl.begin(), cl.end());
+                    } else {
+                        auto [p1, p2] = getArrowPerps(xAxis);
+                        glm::vec3 ab = gizmoPos - xAxis * (size * 0.85f);
+                        nxLines.push_back(nxEnd); nxLines.push_back(ab + p1 * (size * 0.1f));
+                        nxLines.push_back(nxEnd); nxLines.push_back(ab - p1 * (size * 0.1f));
+                        nxLines.push_back(nxEnd); nxLines.push_back(ab + p2 * (size * 0.1f));
+                        nxLines.push_back(nxEnd); nxLines.push_back(ab - p2 * (size * 0.1f));
+                    }
+                    m_modelRenderer->renderLines(cmd, vp, nxLines, xColorDim);
+
+                    // -Y axis
+                    glm::vec3 nyEnd = gizmoPos - yAxis * size;
+                    std::vector<glm::vec3> nyLines = { gizmoPos, nyEnd };
+                    if (isScale) {
+                        auto cl = makeCubeLines(nyEnd, cubeSize);
+                        nyLines.insert(nyLines.end(), cl.begin(), cl.end());
+                    } else {
+                        auto [p1, p2] = getArrowPerps(yAxis);
+                        glm::vec3 ab = gizmoPos - yAxis * (size * 0.85f);
+                        nyLines.push_back(nyEnd); nyLines.push_back(ab + p1 * (size * 0.1f));
+                        nyLines.push_back(nyEnd); nyLines.push_back(ab - p1 * (size * 0.1f));
+                        nyLines.push_back(nyEnd); nyLines.push_back(ab + p2 * (size * 0.1f));
+                        nyLines.push_back(nyEnd); nyLines.push_back(ab - p2 * (size * 0.1f));
+                    }
+                    m_modelRenderer->renderLines(cmd, vp, nyLines, yColorDim);
+
+                    // -Z axis
+                    glm::vec3 nzEnd = gizmoPos - zAxis * size;
+                    std::vector<glm::vec3> nzLines = { gizmoPos, nzEnd };
+                    if (isScale) {
+                        auto cl = makeCubeLines(nzEnd, cubeSize);
+                        nzLines.insert(nzLines.end(), cl.begin(), cl.end());
+                    } else {
+                        auto [p1, p2] = getArrowPerps(zAxis);
+                        glm::vec3 ab = gizmoPos - zAxis * (size * 0.85f);
+                        nzLines.push_back(nzEnd); nzLines.push_back(ab + p1 * (size * 0.1f));
+                        nzLines.push_back(nzEnd); nzLines.push_back(ab - p1 * (size * 0.1f));
+                        nzLines.push_back(nzEnd); nzLines.push_back(ab + p2 * (size * 0.1f));
+                        nzLines.push_back(nzEnd); nzLines.push_back(ab - p2 * (size * 0.1f));
+                    }
+                    m_modelRenderer->renderLines(cmd, vp, nzLines, zColorDim);
                 }
             }
         }
@@ -2847,20 +2881,153 @@ private:
                 m_camera.processMouse(mouseDelta.x, -mouseDelta.y);
             }
         } else {
-            bool wantLook = Input::isMouseButtonDown(Input::MOUSE_RIGHT) && !ImGui::GetIO().WantCaptureMouse;
+            // Editor mode: LIME-style orbit/pan/zoom navigation
+            bool mouseOverImGui = ImGui::IsWindowHovered(ImGuiHoveredFlags_AnyWindow) || ImGui::GetIO().WantCaptureMouse;
 
-            if (wantLook) {
-                glm::vec2 mouseDelta = Input::getMouseDelta();
-                m_camera.processMouse(mouseDelta.x, -mouseDelta.y);
+            // F key: frame selected object (move orbit target to object, reposition camera)
+            if (!ImGui::GetIO().WantCaptureKeyboard && Input::isKeyPressed(Input::KEY_F)) {
+                if (m_selectedObjectIndex >= 0 && m_selectedObjectIndex < static_cast<int>(m_sceneObjects.size())) {
+                    SceneObject* obj = m_sceneObjects[m_selectedObjectIndex].get();
+                    AABB bounds = obj->getWorldBounds();
+                    glm::vec3 center = (bounds.min + bounds.max) * 0.5f;
+                    glm::vec3 extents = bounds.max - bounds.min;
+                    float radius = glm::length(extents) * 0.5f;
+                    float frameDist = std::max(radius * 2.5f, 5.0f);  // Back off enough to see it
 
-                if (!m_isLooking) {
-                    m_isLooking = true;
-                    Input::setMouseCaptured(true);
+                    m_orbitTarget = center;
+                    // Keep current look direction, just reposition at proper distance
+                    glm::vec3 camDir = glm::normalize(m_camera.getPosition() - center);
+                    m_camera.setPosition(center + camDir * frameDist);
+
+                    // Update camera to look at target
+                    glm::vec3 lookDir = glm::normalize(center - m_camera.getPosition());
+                    m_camera.setYaw(glm::degrees(atan2(lookDir.z, lookDir.x)));
+                    m_camera.setPitch(glm::degrees(asin(glm::clamp(lookDir.y, -1.0f, 1.0f))));
                 }
-            } else if (m_isLooking) {
-                m_isLooking = false;
+            }
+
+            // Scroll wheel zoom (dolly toward/away from orbit target)
+            float scroll = Input::getScrollDelta();
+            if (scroll != 0 && !mouseOverImGui) {
+                float orbitDistance = glm::length(m_camera.getPosition() - m_orbitTarget);
+                if (orbitDistance < 0.01f) orbitDistance = 5.0f;
+                float dollySpeed = std::max(orbitDistance * 0.08f, 2.0f);
+                glm::vec3 forward = glm::normalize(m_orbitTarget - m_camera.getPosition());
+                glm::vec3 move = forward * scroll * dollySpeed;
+                glm::vec3 newPos = m_camera.getPosition() + move;
+                // Check if we passed through or got too close to the orbit target
+                glm::vec3 newToTarget = m_orbitTarget - newPos;
+                if (glm::dot(newToTarget, forward) < 2.0f) {
+                    // Target is behind us or very close — push it ahead
+                    m_orbitTarget = newPos + forward * 2.0f;
+                }
+                m_camera.setPosition(newPos);
+            }
+
+            if (mouseOverImGui) {
+                m_isTumbling = false;
+                m_isPanning = false;
+            } else {
+                // RMB: start tumble
+                if (Input::isMouseButtonPressed(Input::MOUSE_RIGHT)) {
+                    m_isTumbling = true;
+                }
+                // MMB: start pan
+                if (Input::isMouseButtonPressed(Input::MOUSE_MIDDLE)) {
+                    m_isPanning = true;
+                }
+            }
+
+            // Stop when buttons released
+            if (!Input::isMouseButtonDown(Input::MOUSE_RIGHT)) m_isTumbling = false;
+            if (!Input::isMouseButtonDown(Input::MOUSE_MIDDLE)) m_isPanning = false;
+
+            glm::vec2 mouseDelta = Input::getMouseDelta();
+
+            float orbitDistance = glm::length(m_camera.getPosition() - m_orbitTarget);
+            if (orbitDistance < 0.01f) orbitDistance = 5.0f;
+
+            // RMB Tumble: orbit camera around m_orbitTarget
+            if (m_isTumbling) {
+                if (!m_wasTumbling) {
+                    // First frame of tumble: set up state but don't move camera
+                    // This avoids orientation snap when camera isn't pointing at orbit target
+
+                    // Orbit around a point along the camera's look direction at the
+                    // same distance as the orbit target.  This prevents the camera
+                    // from snapping its orientation to face m_orbitTarget when the
+                    // user isn't already looking at it (e.g. after a gizmo move).
+                    {
+                        float dist = glm::length(m_camera.getPosition() - m_orbitTarget);
+                        if (dist < 0.5f) dist = 10.0f;
+                        glm::vec3 camFront = m_camera.getFront();
+                        m_orbitTarget = m_camera.getPosition() + camFront * dist;
+                    }
+                    m_tumbleOrbitTarget = m_orbitTarget;
+                    m_tumbleOrbitDistance = glm::length(m_camera.getPosition() - m_tumbleOrbitTarget);
+                    if (m_tumbleOrbitDistance < 0.5f) m_tumbleOrbitDistance = 5.0f;
+
+                    // Derive orbit angles from camera position relative to target
+                    glm::vec3 offset = m_camera.getPosition() - m_tumbleOrbitTarget;
+                    m_orbitYaw = glm::degrees(atan2(offset.z, offset.x));
+                    m_orbitPitch = glm::degrees(asin(glm::clamp(offset.y / m_tumbleOrbitDistance, -1.0f, 1.0f)));
+                } else {
+                    // Subsequent frames: apply mouse delta and reposition camera
+                    glm::vec2 mouseDelta2 = Input::getMouseDelta();
+                    float sensitivity = 0.25f;
+                    m_orbitYaw += mouseDelta2.x * sensitivity;
+                    m_orbitPitch += mouseDelta2.y * sensitivity;
+                    m_orbitPitch = std::clamp(m_orbitPitch, -89.0f, 89.0f);
+
+                    float yawRad = glm::radians(m_orbitYaw);
+                    float pitchRad = glm::radians(m_orbitPitch);
+
+                    glm::vec3 offset;
+                    offset.x = m_tumbleOrbitDistance * cos(pitchRad) * cos(yawRad);
+                    offset.y = m_tumbleOrbitDistance * sin(pitchRad);
+                    offset.z = m_tumbleOrbitDistance * cos(pitchRad) * sin(yawRad);
+
+                    m_camera.setPosition(m_tumbleOrbitTarget + offset);
+
+                    // Make camera look at target
+                    glm::vec3 lookDir = glm::normalize(m_tumbleOrbitTarget - m_camera.getPosition());
+                    float camYaw = glm::degrees(atan2(lookDir.z, lookDir.x));
+                    float camPitch = glm::degrees(asin(glm::clamp(lookDir.y, -1.0f, 1.0f)));
+                    m_camera.setYaw(camYaw);
+                    m_camera.setPitch(camPitch);
+                }
+            }
+
+            // MMB Pan: translate camera and orbit target together
+            static bool wasPanningPrev = false;
+            if (m_isPanning) {
+                if (!wasPanningPrev) {
+                    // First frame: suppress accumulated delta to avoid jump
+                    mouseDelta = glm::vec2(0.0f);
+                }
+                // Use distance to orbit target (which tracks selected object during orbit)
+                float panDist = glm::length(m_camera.getPosition() - m_orbitTarget);
+                if (panDist < 1.0f) panDist = 5.0f;
+                bool hasSelection = m_selectedObjectIndex >= 0 && m_selectedObjectIndex < static_cast<int>(m_sceneObjects.size());
+                float panSpeed = std::max(panDist * (hasSelection ? 0.0015f : 0.003f), 0.1f);
+                glm::vec3 right = m_camera.getRight();
+                glm::vec3 up = m_camera.getUp();
+                glm::vec3 panOffset = -right * mouseDelta.x * panSpeed + up * mouseDelta.y * panSpeed;
+                m_camera.setPosition(m_camera.getPosition() + panOffset);
+                m_orbitTarget += panOffset;
+            }
+            wasPanningPrev = m_isPanning;
+
+            m_wasTumbling = m_isTumbling;
+
+            // Capture/release mouse during tumble/pan
+            bool wantCapture = m_isTumbling || m_isPanning;
+            if (wantCapture && !m_isLooking) {
+                Input::setMouseCaptured(true);
+            } else if (!wantCapture && m_isLooking) {
                 Input::setMouseCaptured(false);
             }
+            m_isLooking = wantCapture;
         }
 
         // During conversation: use arrow keys for movement (WASD needed for typing)
@@ -2889,10 +3056,9 @@ private:
             }
         }
 
-        // Handle space key for jump/fly toggle (editor mode only - Jolt handles jumping in play mode)
-        if (!m_isPlayMode && !imguiWantsKeyboard && Input::isKeyPressed(Input::KEY_SPACE)) {
-            m_camera.onSpacePressed(groundHeight);
-        }
+        // Space key fly/walk toggle disabled in editor mode (orbit/pan/zoom navigation)
+        // In play mode without character controller, space still toggles fly mode
+        // (Character controller path handles its own jump via Jolt)
 
         // Update moving platforms BEFORE collision checks
         if (m_isPlayMode) {
@@ -3066,37 +3232,39 @@ private:
                 m_camera.setPosition(m_thirdPersonPlayerPos);
             }
 
-            // Camera handles movement (fly mode or editor mode)
-            // During conversation or quick chat: arrow keys, otherwise WASD
-            // When ImGui wants keyboard: no movement at all
-            if (imguiWantsKeyboard) {
-                m_camera.updateMovement(
-                    deltaTime * speedMult,
-                    false, false, false, false, false, false,
-                    heightQuery
-                );
-            } else if (m_inConversation || m_quickChatMode) {
-                m_camera.updateMovement(
-                    deltaTime * speedMult,
-                    Input::isKeyDown(Input::KEY_UP),
-                    Input::isKeyDown(Input::KEY_DOWN),
-                    Input::isKeyDown(Input::KEY_LEFT),
-                    Input::isKeyDown(Input::KEY_RIGHT),
-                    false,  // No jump during text input
-                    false,  // No crouch during text input
-                    heightQuery
-                );
-            } else {
-                m_camera.updateMovement(
-                    deltaTime * speedMult,
-                    Input::isKeyDown(Input::KEY_W),
-                    Input::isKeyDown(Input::KEY_S),
-                    Input::isKeyDown(Input::KEY_A),
-                    Input::isKeyDown(Input::KEY_D),
-                    Input::isKeyDown(Input::KEY_SPACE),
-                    Input::isKeyDown(Input::KEY_LEFT_SHIFT),
-                    heightQuery
-                );
+            // WASD movement only in play mode (editor mode uses orbit/pan/zoom above)
+            if (m_isPlayMode) {
+                // During conversation or quick chat: arrow keys, otherwise WASD
+                // When ImGui wants keyboard: no movement at all
+                if (imguiWantsKeyboard) {
+                    m_camera.updateMovement(
+                        deltaTime * speedMult,
+                        false, false, false, false, false, false,
+                        heightQuery
+                    );
+                } else if (m_inConversation || m_quickChatMode) {
+                    m_camera.updateMovement(
+                        deltaTime * speedMult,
+                        Input::isKeyDown(Input::KEY_UP),
+                        Input::isKeyDown(Input::KEY_DOWN),
+                        Input::isKeyDown(Input::KEY_LEFT),
+                        Input::isKeyDown(Input::KEY_RIGHT),
+                        false,  // No jump during text input
+                        false,  // No crouch during text input
+                        heightQuery
+                    );
+                } else {
+                    m_camera.updateMovement(
+                        deltaTime * speedMult,
+                        Input::isKeyDown(Input::KEY_W),
+                        Input::isKeyDown(Input::KEY_S),
+                        Input::isKeyDown(Input::KEY_A),
+                        Input::isKeyDown(Input::KEY_D),
+                        Input::isKeyDown(Input::KEY_SPACE),
+                        Input::isKeyDown(Input::KEY_LEFT_SHIFT),
+                        heightQuery
+                    );
+                }
             }
         }
 
@@ -3541,10 +3709,10 @@ private:
         }
         wasDeleteDown = deleteDown;
 
-        // Ctrl+V - duplicate selected object
+        // V - duplicate selected object (editor mode only)
         static bool wasVKeyDown = false;
         bool vKeyDown = Input::isKeyDown(Input::KEY_V);
-        if (ctrlDown && vKeyDown && !wasVKeyDown && !ImGui::GetIO().WantTextInput && !m_isPlayMode) {
+        if (vKeyDown && !wasVKeyDown && !ImGui::GetIO().WantTextInput && !m_isPlayMode) {
             if (m_selectedObjectIndex >= 0) {
                 duplicateObject(m_selectedObjectIndex);
             }
@@ -3558,18 +3726,18 @@ private:
         }
         wasFKeyDown = fKeyDown;
 
-        // Number keys 1-4: switch transform mode (2/3/4 auto-enter MoveObject brush mode)
+        // Q/W/E/R: switch transform mode (W/E/R auto-enter MoveObject brush mode)
         if (!m_isPlayMode && !ImGui::GetIO().WantTextInput) {
-            if (Input::isKeyPressed(Input::KEY_1)) {
+            if (Input::isKeyPressed(Input::KEY_Q)) {
                 m_transformMode = TransformMode::Select;
                 if (m_editorUI.getBrushMode() == BrushMode::MoveObject) {
                     m_editorUI.setBrushMode(m_prevBrushMode);
                 }
             }
-            if (Input::isKeyPressed(Input::KEY_2) || Input::isKeyPressed(Input::KEY_3) || Input::isKeyPressed(Input::KEY_4)) {
-                if (Input::isKeyPressed(Input::KEY_2)) m_transformMode = TransformMode::Move;
-                if (Input::isKeyPressed(Input::KEY_3)) m_transformMode = TransformMode::Rotate;
-                if (Input::isKeyPressed(Input::KEY_4)) m_transformMode = TransformMode::Scale;
+            if (Input::isKeyPressed(Input::KEY_W) || Input::isKeyPressed(Input::KEY_E) || Input::isKeyPressed(Input::KEY_R)) {
+                if (Input::isKeyPressed(Input::KEY_W)) m_transformMode = TransformMode::Move;
+                if (Input::isKeyPressed(Input::KEY_E)) m_transformMode = TransformMode::Rotate;
+                if (Input::isKeyPressed(Input::KEY_R)) m_transformMode = TransformMode::Scale;
                 if (m_editorUI.getBrushMode() != BrushMode::MoveObject) {
                     m_prevBrushMode = m_editorUI.getBrushMode();
                     m_editorUI.setBrushMode(BrushMode::MoveObject);
@@ -6331,10 +6499,13 @@ private:
                 return GizmoAxis::Z;
             }
 
-            // Move/Scale: pick axis lines
-            float dX = rayAxisDist(rayOrigin, rayDir, gizmoPos, glm::vec3(1,0,0), size);
-            float dY = rayAxisDist(rayOrigin, rayDir, gizmoPos, glm::vec3(0,1,0), size);
-            float dZ = rayAxisDist(rayOrigin, rayDir, gizmoPos, glm::vec3(0,0,1), size);
+            // Move/Scale: pick axis lines (positive and negative directions)
+            float dX = std::min(rayAxisDist(rayOrigin, rayDir, gizmoPos, glm::vec3(1,0,0), size),
+                                rayAxisDist(rayOrigin, rayDir, gizmoPos, glm::vec3(-1,0,0), size));
+            float dY = std::min(rayAxisDist(rayOrigin, rayDir, gizmoPos, glm::vec3(0,1,0), size),
+                                rayAxisDist(rayOrigin, rayDir, gizmoPos, glm::vec3(0,-1,0), size));
+            float dZ = std::min(rayAxisDist(rayOrigin, rayDir, gizmoPos, glm::vec3(0,0,1), size),
+                                rayAxisDist(rayOrigin, rayDir, gizmoPos, glm::vec3(0,0,-1), size));
             float minD = std::min({dX, dY, dZ});
             if (minD > threshold) return GizmoAxis::None;
             if (minD == dX) return GizmoAxis::X;
@@ -6345,7 +6516,8 @@ private:
         if (inMoveObjectMode && inTransformMode && hasSelection) {
             SceneObject* selected = m_sceneObjects[m_selectedObjectIndex].get();
             if (selected) {
-                glm::vec3 gizmoPos = selected->getTransform().getPosition();
+                AABB wb2 = selected->getWorldBounds();
+                glm::vec3 gizmoPos((wb2.min.x + wb2.max.x) * 0.5f, wb2.max.y, (wb2.min.z + wb2.max.z) * 0.5f);
                 float dist = glm::length(m_camera.getPosition() - gizmoPos);
                 float gizmoSize = dist * 0.08f;
 
@@ -6379,6 +6551,8 @@ private:
                         m_gizmoDragging = true;
                         m_gizmoActiveAxis = picked;
                         m_lastMousePos = mousePos;
+                        m_gizmoDragRawPos = selected->getTransform().getPosition();
+                        m_gizmoDragRawEuler = selected->getEulerRotation();
                     } else {
                         pickObjectAtMouse();
                     }
@@ -6406,14 +6580,75 @@ private:
                             glm::vec2 normalizedDelta(mouseDelta.x / getWindow().getWidth() * 2.0f,
                                                        -mouseDelta.y / getWindow().getHeight() * 2.0f);
                             float axisDelta = glm::dot(normalizedDelta, screenDir) / screenLen;
-                            selected->getTransform().setPosition(selected->getTransform().getPosition() + axisDir * axisDelta);
+                            m_gizmoDragRawPos += axisDir * axisDelta;
+                            glm::vec3 newPos = m_gizmoDragRawPos;
+                            if (m_editorUI.getSnapMove()) {
+                                float snap = m_editorUI.getSnapMoveSize();
+                                if (m_gizmoActiveAxis == GizmoAxis::X) newPos.x = std::round(newPos.x / snap) * snap;
+                                else if (m_gizmoActiveAxis == GizmoAxis::Y) newPos.y = std::round(newPos.y / snap) * snap;
+                                else if (m_gizmoActiveAxis == GizmoAxis::Z) newPos.z = std::round(newPos.z / snap) * snap;
+                            }
+                            // Snap to nearby object edges (AABB face matching)
+                            if (m_editorUI.getSnapToObject()) {
+                                // Temporarily set position so getWorldBounds() is up to date
+                                glm::vec3 prevPos = selected->getTransform().getPosition();
+                                selected->getTransform().setPosition(newPos);
+                                AABB selBounds = selected->getWorldBounds();
+                                float threshold = m_editorUI.getSnapToObjectDist();
+                                float bestDist = threshold;
+                                float snapOffset = 0.0f;
+                                // Check each face of selected against opposite faces of other objects
+                                for (size_t oi = 0; oi < m_sceneObjects.size(); oi++) {
+                                    if (static_cast<int>(oi) == m_selectedObjectIndex) continue;
+                                    SceneObject* other = m_sceneObjects[oi].get();
+                                    if (!other || !other->isVisible()) continue;
+                                    AABB ob = other->getWorldBounds();
+                                    if (m_gizmoActiveAxis == GizmoAxis::X) {
+                                        // selected +X face vs other -X face
+                                        float d1 = std::abs(selBounds.max.x - ob.min.x);
+                                        if (d1 < bestDist) { bestDist = d1; snapOffset = ob.min.x - selBounds.max.x + SNAP_OVERLAP; }
+                                        // selected -X face vs other +X face
+                                        float d2 = std::abs(selBounds.min.x - ob.max.x);
+                                        if (d2 < bestDist) { bestDist = d2; snapOffset = ob.max.x - selBounds.min.x - SNAP_OVERLAP; }
+                                    } else if (m_gizmoActiveAxis == GizmoAxis::Y) {
+                                        float d1 = std::abs(selBounds.max.y - ob.min.y);
+                                        if (d1 < bestDist) { bestDist = d1; snapOffset = ob.min.y - selBounds.max.y + SNAP_OVERLAP; }
+                                        float d2 = std::abs(selBounds.min.y - ob.max.y);
+                                        if (d2 < bestDist) { bestDist = d2; snapOffset = ob.max.y - selBounds.min.y - SNAP_OVERLAP; }
+                                    } else if (m_gizmoActiveAxis == GizmoAxis::Z) {
+                                        float d1 = std::abs(selBounds.max.z - ob.min.z);
+                                        if (d1 < bestDist) { bestDist = d1; snapOffset = ob.min.z - selBounds.max.z + SNAP_OVERLAP; }
+                                        float d2 = std::abs(selBounds.min.z - ob.max.z);
+                                        if (d2 < bestDist) { bestDist = d2; snapOffset = ob.max.z - selBounds.min.z - SNAP_OVERLAP; }
+                                    }
+                                }
+                                if (bestDist < threshold) {
+                                    if (m_gizmoActiveAxis == GizmoAxis::X) newPos.x += snapOffset;
+                                    else if (m_gizmoActiveAxis == GizmoAxis::Y) newPos.y += snapOffset;
+                                    else if (m_gizmoActiveAxis == GizmoAxis::Z) newPos.z += snapOffset;
+                                }
+                                // Restore position (will be set properly below)
+                                selected->getTransform().setPosition(prevPos);
+                            }
+                            glm::vec3 oldPos = selected->getTransform().getPosition();
+                            glm::vec3 moveDelta = newPos - oldPos;
+                            selected->getTransform().setPosition(newPos);
+                            // Keep orbit target at object center (avoids drift from snap jumps)
+                            AABB wb = selected->getWorldBounds();
+                            m_orbitTarget = (wb.min + wb.max) * 0.5f;
                         }
                     } else if (m_transformMode == TransformMode::Rotate) {
                         float angleDelta = mouseDelta.x * 0.5f;
-                        glm::vec3 euler = selected->getEulerRotation();
-                        if (m_gizmoActiveAxis == GizmoAxis::X) euler.x += angleDelta;
-                        else if (m_gizmoActiveAxis == GizmoAxis::Y) euler.y += angleDelta;
-                        else if (m_gizmoActiveAxis == GizmoAxis::Z) euler.z += angleDelta;
+                        if (m_gizmoActiveAxis == GizmoAxis::X) m_gizmoDragRawEuler.x += angleDelta;
+                        else if (m_gizmoActiveAxis == GizmoAxis::Y) m_gizmoDragRawEuler.y += angleDelta;
+                        else if (m_gizmoActiveAxis == GizmoAxis::Z) m_gizmoDragRawEuler.z += angleDelta;
+                        glm::vec3 euler = m_gizmoDragRawEuler;
+                        if (m_editorUI.getSnapRotate()) {
+                            float snap = m_editorUI.getSnapRotateAngle();
+                            if (m_gizmoActiveAxis == GizmoAxis::X) euler.x = std::round(euler.x / snap) * snap;
+                            else if (m_gizmoActiveAxis == GizmoAxis::Y) euler.y = std::round(euler.y / snap) * snap;
+                            else if (m_gizmoActiveAxis == GizmoAxis::Z) euler.z = std::round(euler.z / snap) * snap;
+                        }
                         selected->setEulerRotation(euler);
                     } else if (m_transformMode == TransformMode::Scale) {
                         float scaleFactor = 1.0f + mouseDelta.x * 0.005f;
@@ -10262,8 +10497,10 @@ private:
         float size = glm::length(bounds.max - bounds.min);
         float distance = std::max(size * 2.0f, 5.0f);
 
-        glm::vec3 camPos = objPos - m_camera.getFront() * distance;
+        glm::vec3 center = (bounds.min + bounds.max) * 0.5f;
+        glm::vec3 camPos = center - m_camera.getFront() * distance;
         m_camera.setPosition(camPos);
+        m_orbitTarget = center;
 
         std::cout << "Focused on: " << obj->getName() << std::endl;
     }
@@ -11200,6 +11437,9 @@ private:
 
         if (m_selectedObjectIndex >= 0 && m_selectedObjectIndex < static_cast<int>(m_sceneObjects.size())) {
             m_sceneObjects[m_selectedObjectIndex]->setSelected(true);
+            // Set orbit target to selected object center for camera orbiting
+            AABB selBounds = m_sceneObjects[m_selectedObjectIndex]->getWorldBounds();
+            m_orbitTarget = (selBounds.min + selBounds.max) * 0.5f;
         }
 
         m_editorUI.setSelectedObjectIndex(m_selectedObjectIndex);
@@ -12730,7 +12970,7 @@ private:
             newObj->setName(generateUniqueName(original->getName()));
 
             glm::vec3 pos = original->getTransform().getPosition();
-            newObj->getTransform().setPosition(pos + glm::vec3(2.0f, 0.0f, 2.0f));
+            newObj->getTransform().setPosition(pos);
             newObj->setEulerRotation(original->getEulerRotation());
             newObj->getTransform().setScale(original->getTransform().getScale());
 
@@ -12761,7 +13001,7 @@ private:
             newObj->setMeshData(verts, inds);
 
             glm::vec3 pos = original->getTransform().getPosition();
-            newObj->getTransform().setPosition(pos + glm::vec3(2.0f, 0.0f, 2.0f));
+            newObj->getTransform().setPosition(pos);
             newObj->setEulerRotation(original->getEulerRotation());
             newObj->getTransform().setScale(original->getTransform().getScale());
 
@@ -12998,6 +13238,15 @@ private:
     std::unique_ptr<ChunkManager> m_chunkManager;
     bool m_wasLeftMouseDown = false;
     bool m_isLooking = false;
+    // Orbit/pan camera state (editor mode - LIME-style navigation)
+    glm::vec3 m_orbitTarget = glm::vec3(0.0f, 50.0f, 0.0f);  // Pivot point
+    float m_orbitYaw = -90.0f;
+    float m_orbitPitch = 20.0f;         // Slight downward angle to start
+    glm::vec3 m_tumbleOrbitTarget = glm::vec3(0.0f);
+    float m_tumbleOrbitDistance = 100.0f;  // Terrain scale — start further out
+    bool m_isTumbling = false;
+    bool m_wasTumbling = false;
+    bool m_isPanning = false;
     bool m_wasGrabbing = false;
     float m_lastGrabMouseY = 0.0f;
 
@@ -13039,6 +13288,8 @@ private:
     BrushMode m_prevBrushMode = BrushMode::Raise;
     GizmoAxis m_gizmoHoveredAxis = GizmoAxis::None;
     GizmoAxis m_gizmoActiveAxis = GizmoAxis::None;
+    glm::vec3 m_gizmoDragRawPos{0};    // Unsnapped accumulator for move snap
+    glm::vec3 m_gizmoDragRawEuler{0};  // Unsnapped accumulator for rotate snap
 
     // Object groups (for organization only) - uses EditorUI::ObjectGroup
     std::vector<EditorUI::ObjectGroup> m_objectGroups;
