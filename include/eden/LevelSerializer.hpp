@@ -107,6 +107,7 @@ struct LevelData {
         std::string doorId;
         std::string targetLevel;
         std::string targetDoorId;
+
     };
     std::vector<ObjectData> objects;
 

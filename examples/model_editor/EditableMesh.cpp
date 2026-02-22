@@ -3091,12 +3091,188 @@ void EditableMesh::deleteFaces(const std::vector<uint32_t>& faceIndices) {
 
     // Relink twins by position (handles duplicate vertices at same position)
     linkTwinsByPosition();
+
+    // Remove orphaned vertices that no longer belong to any face
+    removeOrphanedVertices();
+
     rebuildEdgeMap();
     clearSelection();
 }
 
 void EditableMesh::deleteSelectedFaces() {
     deleteFaces(getSelectedFaces());
+}
+
+void EditableMesh::removeOrphanedVertices() {
+    if (m_vertices.empty()) return;
+
+    // Find which vertices are actually used by half-edges
+    std::vector<bool> used(m_vertices.size(), false);
+    for (const auto& he : m_halfEdges) {
+        if (he.vertexIndex < m_vertices.size()) {
+            used[he.vertexIndex] = true;
+        }
+    }
+    // Also mark vertices referenced as the "from" vertex of each half-edge
+    // (the prev half-edge's vertexIndex is the "from" of current half-edge,
+    //  but we also need to check via face vertex traversal)
+    for (uint32_t fi = 0; fi < m_faces.size(); ++fi) {
+        auto verts = getFaceVertices(fi);
+        for (uint32_t vi : verts) {
+            if (vi < m_vertices.size()) used[vi] = true;
+        }
+    }
+
+    // Build remap table: old index -> new index
+    std::vector<uint32_t> remap(m_vertices.size(), UINT32_MAX);
+    std::vector<HEVertex> compacted;
+    compacted.reserve(m_vertices.size());
+    for (uint32_t i = 0; i < m_vertices.size(); ++i) {
+        if (used[i]) {
+            remap[i] = static_cast<uint32_t>(compacted.size());
+            compacted.push_back(m_vertices[i]);
+        }
+    }
+
+    if (compacted.size() == m_vertices.size()) return; // nothing to remove
+
+    uint32_t removed = static_cast<uint32_t>(m_vertices.size() - compacted.size());
+
+    // Remap all half-edge vertex indices
+    for (auto& he : m_halfEdges) {
+        if (he.vertexIndex < remap.size()) {
+            he.vertexIndex = remap[he.vertexIndex];
+        }
+    }
+
+    // Remap control points
+    std::vector<ControlPoint> newControlPoints;
+    for (auto& cp : m_controlPoints) {
+        if (cp.vertexIndex < remap.size() && remap[cp.vertexIndex] != UINT32_MAX) {
+            newControlPoints.push_back({remap[cp.vertexIndex], cp.name});
+        }
+    }
+    m_controlPoints = std::move(newControlPoints);
+
+    // Remap vertex halfEdgeIndex references (already valid since half-edge array didn't change)
+    m_vertices = std::move(compacted);
+
+    std::cout << "Removed " << removed << " orphaned vertices" << std::endl;
+}
+
+void EditableMesh::addControlPoint(uint32_t vertexIndex, const std::string& name) {
+    if (vertexIndex >= m_vertices.size()) return;
+    if (!isControlPoint(vertexIndex)) {
+        m_controlPoints.push_back({vertexIndex, name});
+        std::cout << "Added control point '" << name << "' at vertex " << vertexIndex << " (total: " << m_controlPoints.size() << ")" << std::endl;
+    }
+}
+
+void EditableMesh::removeControlPoint(uint32_t vertexIndex) {
+    auto it = std::find_if(m_controlPoints.begin(), m_controlPoints.end(),
+        [vertexIndex](const ControlPoint& cp) { return cp.vertexIndex == vertexIndex; });
+    if (it != m_controlPoints.end()) {
+        std::cout << "Removed control point '" << it->name << "' at vertex " << vertexIndex << " (total: " << m_controlPoints.size() - 1 << ")" << std::endl;
+        m_controlPoints.erase(it);
+    }
+}
+
+void EditableMesh::clearControlPoints() {
+    m_controlPoints.clear();
+}
+
+bool EditableMesh::isControlPoint(uint32_t vertexIndex) const {
+    return std::find_if(m_controlPoints.begin(), m_controlPoints.end(),
+        [vertexIndex](const ControlPoint& cp) { return cp.vertexIndex == vertexIndex; }) != m_controlPoints.end();
+}
+
+std::string EditableMesh::getControlPointName(uint32_t vertexIndex) const {
+    auto it = std::find_if(m_controlPoints.begin(), m_controlPoints.end(),
+        [vertexIndex](const ControlPoint& cp) { return cp.vertexIndex == vertexIndex; });
+    return (it != m_controlPoints.end()) ? it->name : "";
+}
+
+void EditableMesh::mirrorMergeX(float weldThreshold) {
+    if (m_vertices.empty() || m_faces.empty()) return;
+
+    uint32_t origVertCount = static_cast<uint32_t>(m_vertices.size());
+    uint32_t origFaceCount = static_cast<uint32_t>(m_faces.size());
+
+    // Step 1: Duplicate all vertices with X flipped
+    std::vector<uint32_t> vertRemap(origVertCount); // old index -> new mirrored index
+    for (uint32_t i = 0; i < origVertCount; ++i) {
+        HEVertex mirrored = m_vertices[i];
+        mirrored.position.x = -mirrored.position.x;
+        mirrored.normal.x = -mirrored.normal.x;
+        mirrored.halfEdgeIndex = UINT32_MAX; // will be set during face creation
+        mirrored.selected = false;
+        vertRemap[i] = static_cast<uint32_t>(m_vertices.size());
+        m_vertices.push_back(mirrored);
+    }
+
+    // Step 2: Duplicate all faces with reversed winding (using mirrored vertices)
+    for (uint32_t fi = 0; fi < origFaceCount; ++fi) {
+        auto verts = getFaceVertices(fi);
+        // Reverse winding for mirrored faces
+        std::reverse(verts.begin(), verts.end());
+
+        uint32_t newFaceIdx = static_cast<uint32_t>(m_faces.size());
+        HEFace face;
+        face.vertexCount = static_cast<uint32_t>(verts.size());
+        face.selected = false;
+        face.halfEdgeIndex = static_cast<uint32_t>(m_halfEdges.size());
+
+        for (size_t i = 0; i < verts.size(); ++i) {
+            HalfEdge he;
+            he.vertexIndex = vertRemap[verts[(i + 1) % verts.size()]];
+            he.faceIndex = newFaceIdx;
+            he.nextIndex = face.halfEdgeIndex + ((i + 1) % verts.size());
+            he.prevIndex = face.halfEdgeIndex + ((i + verts.size() - 1) % verts.size());
+            he.twinIndex = UINT32_MAX;
+            m_halfEdges.push_back(he);
+
+            uint32_t mirroredVert = vertRemap[verts[i]];
+            if (m_vertices[mirroredVert].halfEdgeIndex == UINT32_MAX) {
+                m_vertices[mirroredVert].halfEdgeIndex = face.halfEdgeIndex + i;
+            }
+        }
+
+        m_faces.push_back(face);
+    }
+
+    // Step 3: Weld seam vertices along X=0
+    // For each original vertex near X=0, merge it with its mirrored duplicate
+    float threshold2 = weldThreshold * weldThreshold;
+    std::map<uint32_t, uint32_t> weldMap; // mirrored index -> original index
+    for (uint32_t i = 0; i < origVertCount; ++i) {
+        // Check if vertex is on the seam (X ≈ 0)
+        if (std::abs(m_vertices[i].position.x) <= weldThreshold) {
+            uint32_t mirroredIdx = vertRemap[i];
+            weldMap[mirroredIdx] = i;
+            // Snap original vertex exactly to X=0
+            m_vertices[i].position.x = 0.0f;
+        }
+    }
+
+    if (!weldMap.empty()) {
+        // Remap half-edges from mirrored seam verts to original seam verts
+        for (auto& he : m_halfEdges) {
+            auto it = weldMap.find(he.vertexIndex);
+            if (it != weldMap.end()) {
+                he.vertexIndex = it->second;
+            }
+        }
+    }
+
+    // Step 4: Relink twins and clean up
+    linkTwinsByPosition();
+    removeOrphanedVertices();
+    rebuildEdgeMap();
+    clearSelection();
+
+    std::cout << "Mirror Merge X: " << origVertCount << " -> " << m_vertices.size()
+              << " vertices, " << origFaceCount << " -> " << m_faces.size() << " faces"
+              << " (welded " << weldMap.size() << " seam vertices)" << std::endl;
 }
 
 void EditableMesh::hollow(float thickness) {
@@ -6793,6 +6969,15 @@ bool EditableMesh::saveLime(const std::string& filepath) const {
     }
     file << "\n";
 
+    // Control points
+    if (!m_controlPoints.empty()) {
+        file << "# CONTROL_POINTS: " << m_controlPoints.size() << "\n";
+        for (size_t i = 0; i < m_controlPoints.size(); ++i) {
+            file << "cp " << i << ": " << m_controlPoints[i].vertexIndex << " \"" << m_controlPoints[i].name << "\"\n";
+        }
+        file << "\n";
+    }
+
     // Summary for quick debugging
     file << "# SUMMARY\n";
     file << "# Total vertices: " << m_vertices.size() << "\n";
@@ -6881,6 +7066,15 @@ bool EditableMesh::saveLime(const std::string& filepath, const unsigned char* te
              << he.twinIndex << "\n";
     }
     file << "\n";
+
+    // Control points
+    if (!m_controlPoints.empty()) {
+        file << "# CONTROL_POINTS: " << m_controlPoints.size() << "\n";
+        for (size_t i = 0; i < m_controlPoints.size(); ++i) {
+            file << "cp " << i << ": " << m_controlPoints[i].vertexIndex << " \"" << m_controlPoints[i].name << "\"\n";
+        }
+        file << "\n";
+    }
 
     // Summary
     file << "# SUMMARY\n";
@@ -7006,11 +7200,23 @@ bool EditableMesh::saveLime(const std::string& filepath, const unsigned char* te
     }
     file << "\n";
 
+    // Control points
+    if (!m_controlPoints.empty()) {
+        file << "# CONTROL_POINTS: " << m_controlPoints.size() << "\n";
+        for (size_t i = 0; i < m_controlPoints.size(); ++i) {
+            file << "cp " << i << ": " << m_controlPoints[i].vertexIndex << " \"" << m_controlPoints[i].name << "\"\n";
+        }
+        file << "\n";
+    }
+
     // Summary
     file << "# SUMMARY\n";
     file << "# Total vertices: " << m_vertices.size() << "\n";
     file << "# Total faces: " << m_faces.size() << "\n";
     file << "# Total half-edges: " << m_halfEdges.size() << "\n";
+    if (!m_controlPoints.empty()) {
+        file << "# Control points: " << m_controlPoints.size() << "\n";
+    }
     if (textureData && texWidth > 0 && texHeight > 0) {
         file << "# Texture: " << texWidth << "x" << texHeight << " RGBA\n";
     }
@@ -7047,6 +7253,7 @@ bool EditableMesh::loadLime(const std::string& filepath) {
     m_halfEdges.clear();
     m_edgeMap.clear();
     m_selectedEdges.clear();
+    m_controlPoints.clear();
 
     std::string line;
     while (std::getline(file, line)) {
@@ -7108,6 +7315,22 @@ bool EditableMesh::loadLime(const std::string& filepath) {
             }
             m_halfEdges[idx] = he;
         }
+        else if (type == "cp") {
+            uint32_t idx;
+            char colon;
+            uint32_t vertIdx;
+            iss >> idx >> colon >> vertIdx;
+            // Parse optional quoted name
+            std::string cpName = "CP" + std::to_string(idx);
+            std::string rest;
+            std::getline(iss, rest);
+            size_t q1 = rest.find('"');
+            size_t q2 = rest.rfind('"');
+            if (q1 != std::string::npos && q2 != std::string::npos && q2 > q1) {
+                cpName = rest.substr(q1 + 1, q2 - q1 - 1);
+            }
+            m_controlPoints.push_back({vertIdx, cpName});
+        }
     }
 
     file.close();
@@ -7116,7 +7339,9 @@ bool EditableMesh::loadLime(const std::string& filepath) {
     std::cout << "Loaded mesh from " << filepath << ": "
               << m_vertices.size() << " vertices, "
               << m_faces.size() << " faces, "
-              << m_halfEdges.size() << " half-edges" << std::endl;
+              << m_halfEdges.size() << " half-edges"
+              << (m_controlPoints.empty() ? "" : ", " + std::to_string(m_controlPoints.size()) + " control points")
+              << std::endl;
 
     return true;
 }
@@ -7223,6 +7448,22 @@ bool EditableMesh::loadLime(const std::string& filepath, std::vector<unsigned ch
             }
             m_halfEdges[idx] = he;
         }
+        else if (type == "cp") {
+            uint32_t idx;
+            char colon;
+            uint32_t vertIdx;
+            iss >> idx >> colon >> vertIdx;
+            // Parse optional quoted name
+            std::string cpName = "CP" + std::to_string(idx);
+            std::string rest;
+            std::getline(iss, rest);
+            size_t q1 = rest.find('"');
+            size_t q2 = rest.rfind('"');
+            if (q1 != std::string::npos && q2 != std::string::npos && q2 > q1) {
+                cpName = rest.substr(q1 + 1, q2 - q1 - 1);
+            }
+            m_controlPoints.push_back({vertIdx, cpName});
+        }
     }
 
     file.close();
@@ -7234,6 +7475,9 @@ bool EditableMesh::loadLime(const std::string& filepath, std::vector<unsigned ch
               << m_halfEdges.size() << " half-edges";
     if (outTexWidth > 0 && outTexHeight > 0) {
         std::cout << ", texture " << outTexWidth << "x" << outTexHeight;
+    }
+    if (!m_controlPoints.empty()) {
+        std::cout << ", " << m_controlPoints.size() << " control points";
     }
     std::cout << std::endl;
 
@@ -7414,6 +7658,22 @@ bool EditableMesh::loadLime(const std::string& filepath, std::vector<unsigned ch
             }
             m_halfEdges[idx] = he;
         }
+        else if (type == "cp") {
+            uint32_t idx;
+            char colon;
+            uint32_t vertIdx;
+            iss >> idx >> colon >> vertIdx;
+            // Parse optional quoted name
+            std::string cpName = "CP" + std::to_string(idx);
+            std::string rest;
+            std::getline(iss, rest);
+            size_t q1 = rest.find('"');
+            size_t q2 = rest.rfind('"');
+            if (q1 != std::string::npos && q2 != std::string::npos && q2 > q1) {
+                cpName = rest.substr(q1 + 1, q2 - q1 - 1);
+            }
+            m_controlPoints.push_back({vertIdx, cpName});
+        }
     }
 
     file.close();
@@ -7425,6 +7685,9 @@ bool EditableMesh::loadLime(const std::string& filepath, std::vector<unsigned ch
               << m_halfEdges.size() << " half-edges";
     if (outTexWidth > 0 && outTexHeight > 0) {
         std::cout << ", texture " << outTexWidth << "x" << outTexHeight;
+    }
+    if (!m_controlPoints.empty()) {
+        std::cout << ", " << m_controlPoints.size() << " control points";
     }
     std::cout << ", transform: pos(" << outPosition.x << "," << outPosition.y << "," << outPosition.z << ")"
               << " scale(" << outScale.x << "," << outScale.y << "," << outScale.z << ")";

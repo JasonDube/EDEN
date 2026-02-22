@@ -1,0 +1,6 @@
+[Desktop Entry]
+Name=EDEN OS
+Comment=EDEN Engine as desktop session
+Exec=/home/jasondube/Desktop/EDEN_Feb_6_2026_0846/session/eden-session.sh
+Type=Application
+DesktopNames=EDEN

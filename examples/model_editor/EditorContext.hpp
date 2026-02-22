@@ -144,6 +144,7 @@ struct EditorContext {
     float& paintStrength;
     bool& isPainting;
     bool& squareBrush;  // Square brush with no falloff (pixel art style)
+    bool& fillPaintToFace;  // Click a face to fill it with current color
 
     // Brush modes
     bool& useStamp;

@@ -35,8 +35,9 @@ struct PerceptionData {
     float facingX = 0, facingY = 0, facingZ = 1; // NPC facing direction
     float fov = 120.0f;                        // Field of view (degrees)
     float range = 50.0f;                       // Scan range (world units)
+    float playerX = 0, playerY = 0, playerZ = 0; // Player (camera) position
     std::vector<VisibleObject> visibleObjects;
-    
+
     // Convert to JSON for transmission
     nlohmann::json toJson() const {
         nlohmann::json j;
@@ -44,6 +45,7 @@ struct PerceptionData {
         j["facing"] = {facingX, facingY, facingZ};
         j["fov"] = fov;
         j["range"] = range;
+        j["player_position"] = {playerX, playerY, playerZ};
         
         nlohmann::json objects = nlohmann::json::array();
         for (const auto& obj : visibleObjects) {

@@ -18,6 +18,11 @@ namespace eden {
  */
 class LimeLoader {
 public:
+    struct ControlPoint {
+        uint32_t vertexIndex;
+        std::string name;
+    };
+
     struct LoadedMesh {
         std::string name;
         std::vector<ModelVertex> vertices;
@@ -29,6 +34,7 @@ public:
         glm::vec3 position{0.0f};
         glm::vec3 rotation{0.0f};  // Euler degrees (converted from quaternion)
         glm::vec3 scale{1.0f};
+        std::vector<ControlPoint> controlPoints;
     };
 
     struct LoadResult {

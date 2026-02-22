@@ -230,4 +230,66 @@ PrimitiveMeshBuilder::MeshData PrimitiveMeshBuilder::createSpawnMarker(float siz
     return result;
 }
 
+PrimitiveMeshBuilder::MeshData PrimitiveMeshBuilder::createFoundation(
+    glm::vec2 corner1, glm::vec2 corner2, float floorY, float height, const glm::vec4& color) {
+
+    MeshData result;
+    auto& vertices = result.vertices;
+    auto& indices = result.indices;
+
+    float x1 = std::min(corner1.x, corner2.x);
+    float x2 = std::max(corner1.x, corner2.x);
+    float z1 = std::min(corner1.y, corner2.y);
+    float z2 = std::max(corner1.y, corner2.y);
+    float yBot = floorY;
+    float yTop = floorY + height;
+
+    float widthX = x2 - x1;
+    float widthZ = z2 - z1;
+
+    auto addQuad = [&](glm::vec3 p0, glm::vec3 p1, glm::vec3 p2, glm::vec3 p3,
+                       glm::vec3 normal, float uScale, float vScale) {
+        uint32_t base = static_cast<uint32_t>(vertices.size());
+        ModelVertex v0, v1, v2, v3;
+        v0.position = p0; v0.normal = normal; v0.color = color; v0.texCoord = {0, 0};
+        v1.position = p1; v1.normal = normal; v1.color = color; v1.texCoord = {uScale, 0};
+        v2.position = p2; v2.normal = normal; v2.color = color; v2.texCoord = {uScale, vScale};
+        v3.position = p3; v3.normal = normal; v3.color = color; v3.texCoord = {0, vScale};
+        vertices.push_back(v0);
+        vertices.push_back(v1);
+        vertices.push_back(v2);
+        vertices.push_back(v3);
+        indices.push_back(base + 0);
+        indices.push_back(base + 1);
+        indices.push_back(base + 2);
+        indices.push_back(base + 0);
+        indices.push_back(base + 2);
+        indices.push_back(base + 3);
+    };
+
+    // Top (+Y)
+    addQuad({x1, yTop, z2}, {x2, yTop, z2}, {x2, yTop, z1}, {x1, yTop, z1},
+            {0, 1, 0}, widthX, widthZ);
+    // Bottom (-Y)
+    addQuad({x1, yBot, z1}, {x2, yBot, z1}, {x2, yBot, z2}, {x1, yBot, z2},
+            {0, -1, 0}, widthX, widthZ);
+    // North (-Z)
+    addQuad({x2, yBot, z1}, {x1, yBot, z1}, {x1, yTop, z1}, {x2, yTop, z1},
+            {0, 0, -1}, widthX, height);
+    // South (+Z)
+    addQuad({x1, yBot, z2}, {x2, yBot, z2}, {x2, yTop, z2}, {x1, yTop, z2},
+            {0, 0, 1}, widthX, height);
+    // West (-X)
+    addQuad({x1, yBot, z1}, {x1, yBot, z2}, {x1, yTop, z2}, {x1, yTop, z1},
+            {-1, 0, 0}, widthZ, height);
+    // East (+X)
+    addQuad({x2, yBot, z2}, {x2, yBot, z1}, {x2, yTop, z1}, {x2, yTop, z2},
+            {1, 0, 0}, widthZ, height);
+
+    result.bounds.min = glm::vec3(x1, yBot, z1);
+    result.bounds.max = glm::vec3(x2, yTop, z2);
+
+    return result;
+}
+
 } // namespace eden

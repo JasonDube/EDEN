@@ -1,6 +1,7 @@
 #include "AICompanionModule.hpp"
 #include <imgui.h>
 #include <iostream>
+#include <nlohmann/json.hpp>
 
 namespace eden {
 namespace ai {
@@ -29,6 +30,19 @@ void AICompanionModule::shutdown() {
 void AICompanionModule::update(float deltaTime) {
     if (m_conversationManager) {
         m_conversationManager->update(deltaTime);
+    }
+
+    // Passive perception heartbeat for EDEN companions
+    if (m_config.enableHeartbeat &&
+        m_currentTarget &&
+        m_currentTarget->getBeingType() == BeingType::EDEN_COMPANION &&
+        m_perceptionProvider) {
+
+        m_heartbeatTimer += deltaTime;
+        if (m_heartbeatTimer >= m_config.heartbeatInterval) {
+            m_heartbeatTimer = 0.0f;
+            sendHeartbeat();
+        }
     }
 }
 
@@ -104,6 +118,61 @@ const std::vector<ChatMessage>& AICompanionModule::getConversationHistory() cons
     static std::vector<ChatMessage> empty;
     if (!isInConversation()) return empty;
     return m_conversationManager->getHistory(m_currentSessionId);
+}
+
+void AICompanionModule::sendHeartbeat() {
+    if (!isConnected() || !m_currentTarget || !m_perceptionProvider) return;
+
+    // Gather current perception via the provider callback (returns JSON)
+    nlohmann::json perceptionJson = m_perceptionProvider(m_currentTarget);
+
+    // Build request JSON
+    nlohmann::json request;
+    request["session_id"] = m_currentSessionId;
+    request["npc_name"] = m_currentTarget->getName();
+    request["being_type"] = static_cast<int>(m_currentTarget->getBeingType());
+    request["perception"] = perceptionJson;
+
+    // Post heartbeat asynchronously
+    m_conversationManager->postHeartbeat(request.dump(),
+        [this](const std::string& body, bool success) {
+            if (!success) return;
+
+            try {
+                auto resp = nlohmann::json::parse(body);
+
+                std::string response;
+                if (resp.contains("response") && !resp["response"].is_null()) {
+                    response = resp["response"].get<std::string>();
+                }
+
+                nlohmann::json action = nullptr;
+                if (resp.contains("action") && !resp["action"].is_null()) {
+                    action = resp["action"];
+                }
+
+                bool changesDetected = resp.value("changes_detected", false);
+
+                onHeartbeatResponse(response, action, changesDetected);
+
+            } catch (const std::exception& e) {
+                std::cerr << "[AICompanion] Heartbeat parse error: " << e.what() << std::endl;
+            }
+        });
+}
+
+void AICompanionModule::onHeartbeatResponse(const std::string& response,
+                                             const nlohmann::json& /*action*/,
+                                             bool /*changesDetected*/) {
+    if (response.empty()) return;
+
+    // Add unprompted dialogue to conversation history
+    if (!m_currentSessionId.empty()) {
+        m_conversationManager->addNpcMessage(m_currentSessionId,
+                                              m_currentTarget->getName(),
+                                              response);
+        m_scrollToBottom = true;
+    }
 }
 
 void AICompanionModule::renderConversationUI() {

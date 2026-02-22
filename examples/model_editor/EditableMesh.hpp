@@ -255,8 +255,22 @@ public:
     void insetSelectedFaces(float amount);  // Create inner quad with border quads (amount 0-1)
     void deleteFaces(const std::vector<uint32_t>& faceIndices);
     void deleteSelectedFaces();
+    void removeOrphanedVertices();  // Compact vertex array, removing vertices not used by any face
     void mergeVertices(const std::vector<uint32_t>& vertIndices);
     void mergeSelectedVertices();
+    void mirrorMergeX(float weldThreshold = 0.001f);  // Mirror mesh across X=0, merge seam vertices
+
+    // Named control points for modular part connections
+    struct ControlPoint {
+        uint32_t vertexIndex;
+        std::string name;
+    };
+    void addControlPoint(uint32_t vertexIndex, const std::string& name);
+    void removeControlPoint(uint32_t vertexIndex);
+    void clearControlPoints();
+    const std::vector<ControlPoint>& getControlPoints() const { return m_controlPoints; }
+    bool isControlPoint(uint32_t vertexIndex) const;
+    std::string getControlPointName(uint32_t vertexIndex) const;
 
     // Insert edge loop - cuts perpendicular edges through quads
     // count: number of edge loops to insert (evenly distributed)
@@ -427,6 +441,9 @@ private:
 
     // Track which edges are selected (by half-edge index)
     std::set<uint32_t> m_selectedEdges;
+
+    // Named control points for modular part connections
+    std::vector<ControlPoint> m_controlPoints;
 
     // Undo/Redo stacks
     std::vector<MeshState> m_undoStack;

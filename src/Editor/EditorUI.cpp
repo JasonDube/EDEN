@@ -100,6 +100,21 @@ void EditorUI::render() {
     if (m_showZones) {
         renderZonesWindow();
     }
+
+    if (m_showMindMap) {
+        renderMindMapWindow();
+    }
+
+    // Show building texture window in build modes or when a building part is selected
+    bool inBuildMode = (m_brushMode == BrushMode::WallDraw || m_brushMode == BrushMode::Foundation);
+    bool hasBuildingSelected = false;
+    if (m_selectedObjectIndex >= 0 && m_selectedObjectIndex < static_cast<int>(m_sceneObjects.size())) {
+        const auto& name = m_sceneObjects[m_selectedObjectIndex]->getName();
+        hasBuildingSelected = (name.find("Building_") == 0 || name.find("Foundation_") == 0);
+    }
+    if (m_showBuildingTextures || inBuildMode || hasBuildingSelected) {
+        renderBuildingTextureWindow();
+    }
 }
 
 void EditorUI::renderMenuBar() {
@@ -170,6 +185,9 @@ void EditorUI::renderMenuBar() {
             ImGui::MenuItem("Tech Tree", nullptr, &m_showTechTree);
             ImGui::MenuItem("Grove Script Editor", nullptr, &m_showGroveEditor);
             ImGui::MenuItem("Zones", nullptr, &m_showZones);
+            ImGui::MenuItem("AI Mind Map", nullptr, &m_showMindMap);
+            ImGui::MenuItem("Building Textures", nullptr, &m_showBuildingTextures);
+            ImGui::MenuItem("Terminal", "Ctrl+`", &m_showTerminal);
             ImGui::Separator();
             if (ImGui::MenuItem("Show All")) {
                 m_showTerrainEditor = true;
@@ -183,6 +201,7 @@ void EditorUI::renderMenuBar() {
                 m_showTechTree = true;
                 m_showGroveEditor = true;
                 m_showZones = true;
+                m_showMindMap = true;
             }
             if (ImGui::MenuItem("Hide All")) {
                 m_showTerrainEditor = false;
@@ -195,6 +214,7 @@ void EditorUI::renderMenuBar() {
                 m_showAINodes = false;
                 m_showTechTree = false;
                 m_showGroveEditor = false;
+                m_showMindMap = false;
             }
             ImGui::EndMenu();
         }
@@ -242,9 +262,9 @@ void EditorUI::renderMainWindow() {
     ImGui::Text("Brush Settings");
 
     // Brush mode
-    const char* modeNames[] = { "Raise", "Lower", "Smooth", "Flatten", "Paint", "Crack", "Texture", "Plateau", "Level Min", "Grab", "Select", "Deselect", "Move Object", "Spire", "Ridged", "Trench", "Path", "Terrace", "Flatten to Y" };
+    const char* modeNames[] = { "Raise", "Lower", "Smooth", "Flatten", "Paint", "Crack", "Texture", "Plateau", "Level Min", "Grab", "Select", "Deselect", "Move Object", "Spire", "Ridged", "Trench", "Path", "Terrace", "Flatten to Y", "Wall Draw", "Foundation" };
     int currentMode = static_cast<int>(m_brushMode);
-    if (ImGui::Combo("Mode", &currentMode, modeNames, 19)) {
+    if (ImGui::Combo("Mode", &currentMode, modeNames, 21)) {
         m_brushMode = static_cast<BrushMode>(currentMode);
     }
 
@@ -254,6 +274,16 @@ void EditorUI::renderMainWindow() {
 
     if (m_brushMode == BrushMode::FlattenToY) {
         ImGui::SliderFloat("Target Y", &m_pathElevation, -50.0f, 100.0f, "%.1f m");
+    }
+
+    if (m_brushMode == BrushMode::WallDraw) {
+        ImGui::SliderFloat("Wall Height", &m_wallHeight, 1.0f, 20.0f, "%.1f m");
+        ImGui::TextColored(ImVec4(0.5f, 1.0f, 0.5f, 1.0f), "Click-drag on terrain to draw a building");
+    }
+
+    if (m_brushMode == BrushMode::Foundation) {
+        ImGui::SliderFloat("Foundation Height", &m_foundationHeight, 0.1f, 5.0f, "%.1f m");
+        ImGui::TextColored(ImVec4(0.5f, 1.0f, 0.5f, 1.0f), "Click-drag on terrain to place a foundation");
     }
 
     // Brush shape selector
@@ -769,7 +799,10 @@ void EditorUI::renderModelsWindow() {
                 ImGui::PushID(static_cast<int>(gi) + 10000);
 
                 ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_OpenOnArrow;
-                if (group.expanded) flags |= ImGuiTreeNodeFlags_DefaultOpen;
+                if (group.forceOpenState) {
+                    ImGui::SetNextItemOpen(group.expanded);
+                    group.forceOpenState = false;
+                }
 
                 bool nodeOpen = ImGui::TreeNodeEx(group.name.c_str(), flags);
                 group.expanded = nodeOpen;
@@ -913,8 +946,13 @@ void EditorUI::renderModelsWindow() {
                 ImGui::SetTooltip("Visible to AI perception.\nDescribes what this object is (e.g. \"timber board: 6x6x2m\").");
             }
             static char descBuffer[256];
-            strncpy(descBuffer, selected->getDescription().c_str(), sizeof(descBuffer) - 1);
-            descBuffer[sizeof(descBuffer) - 1] = '\0';
+            static int descBufferObjIndex = -1;
+            // Re-fill buffer when selection changes (not every frame)
+            if (descBufferObjIndex != m_selectedObjectIndex) {
+                descBufferObjIndex = m_selectedObjectIndex;
+                strncpy(descBuffer, selected->getDescription().c_str(), sizeof(descBuffer) - 1);
+                descBuffer[sizeof(descBuffer) - 1] = '\0';
+            }
             ImGui::PushItemWidth(-1);
             if (ImGui::InputTextMultiline("##description", descBuffer, sizeof(descBuffer),
                     ImVec2(0, ImGui::GetTextLineHeight() * 3))) {
@@ -1051,8 +1089,13 @@ void EditorUI::renderModelsWindow() {
                 Transform& transform = selected->getTransform();
 
                 // Position
-                glm::vec3 pos = transform.getPosition();
+                glm::vec3 oldPos = transform.getPosition();
+                glm::vec3 pos = oldPos;
                 ImGui::Text("Position");
+                if (m_selectedObjectIndices.size() > 1) {
+                    ImGui::SameLine();
+                    ImGui::TextColored(ImVec4(0.4f, 0.8f, 0.4f, 1.0f), "(moves %zu objects)", m_selectedObjectIndices.size());
+                }
                 ImGui::PushItemWidth(-1);
                 bool posChanged = false;
                 posChanged |= ImGui::InputFloat("X##pos", &pos.x, 0.5f, 5.0f, "%.2f");
@@ -1060,9 +1103,23 @@ void EditorUI::renderModelsWindow() {
                 posChanged |= ImGui::InputFloat("Z##pos", &pos.z, 0.5f, 5.0f, "%.2f");
                 ImGui::PopItemWidth();
                 if (posChanged) {
+                    glm::vec3 delta = pos - oldPos;
                     transform.setPosition(pos);
                     if (m_onObjectTransformChanged) {
                         m_onObjectTransformChanged(selected);
+                    }
+                    // Move all other selected objects by the same delta
+                    if (m_selectedObjectIndices.size() > 1) {
+                        for (int idx : m_selectedObjectIndices) {
+                            if (idx == m_selectedObjectIndex) continue;
+                            if (idx >= 0 && idx < static_cast<int>(m_sceneObjects.size()) && m_sceneObjects[idx]) {
+                                glm::vec3 otherPos = m_sceneObjects[idx]->getTransform().getPosition();
+                                m_sceneObjects[idx]->getTransform().setPosition(otherPos + delta);
+                                if (m_onObjectTransformChanged) {
+                                    m_onObjectTransformChanged(m_sceneObjects[idx]);
+                                }
+                            }
+                        }
                     }
                 }
 
@@ -3208,6 +3265,335 @@ void EditorUI::renderZonesWindow() {
         }
 
         ImGui::TextWrapped("Left-click on terrain to paint zones");
+    }
+
+    ImGui::End();
+}
+
+void EditorUI::updateSpatialGrid(const nlohmann::json& data) {
+    using json = nlohmann::json;
+
+    m_spatialGrid = SpatialGrid{};
+
+    // Parse grid
+    if (data.contains("grid") && data["grid"].is_object()) {
+        auto& g = data["grid"];
+        m_spatialGrid.cellSize = g.value("cell_size", 2.0f);
+        m_spatialGrid.originX = g.value("origin_x", 0.0f);
+        m_spatialGrid.originZ = g.value("origin_z", 0.0f);
+        m_spatialGrid.width = g.value("width", 0);
+        m_spatialGrid.height = g.value("height", 0);
+
+        if (g.contains("cells") && g["cells"].is_array()) {
+            m_spatialGrid.cells.clear();
+            for (auto& row : g["cells"]) {
+                std::vector<int> r;
+                if (row.is_array()) {
+                    for (auto& cell : row) {
+                        r.push_back(cell.get<int>());
+                    }
+                }
+                m_spatialGrid.cells.push_back(r);
+            }
+        }
+    }
+
+    // Parse structures
+    if (data.contains("structures") && data["structures"].is_array()) {
+        for (auto& s : data["structures"]) {
+            SpatialGrid::StructureInfo info;
+            info.type = s.value("type", "");
+            if (s.contains("bbox")) {
+                info.minX = s["bbox"].value("min_x", 0.0f);
+                info.maxX = s["bbox"].value("max_x", 0.0f);
+                info.minZ = s["bbox"].value("min_z", 0.0f);
+                info.maxZ = s["bbox"].value("max_z", 0.0f);
+            }
+            if (s.contains("dimensions") && s["dimensions"].is_array() && s["dimensions"].size() >= 2) {
+                info.dimX = s["dimensions"][0].get<float>();
+                info.dimZ = s["dimensions"][1].get<float>();
+            }
+            info.npcInside = s.value("npc_inside", false);
+            info.panelCount = s.value("panel_count", 0);
+            info.label = s.value("label", "");
+
+            if (s.contains("doors") && s["doors"].is_array()) {
+                for (auto& d : s["doors"]) {
+                    SpatialGrid::StructureInfo::DoorInfo di;
+                    di.x = d.value("x", 0.0f);
+                    di.z = d.value("z", 0.0f);
+                    di.face = d.value("face", "");
+                    info.doors.push_back(di);
+                }
+            }
+
+            m_spatialGrid.structures.push_back(info);
+        }
+    }
+}
+
+void EditorUI::renderMindMapWindow() {
+    ImGui::SetNextWindowSize(ImVec2(400, 400), ImGuiCond_FirstUseEver);
+    if (!ImGui::Begin("AI Mind Map", &m_showMindMap)) {
+        ImGui::End();
+        return;
+    }
+
+    ImGui::Text("Unit 42's Spatial Model");
+    ImGui::Separator();
+
+    if (m_spatialGrid.width == 0 || m_spatialGrid.height == 0 || m_spatialGrid.cells.empty()) {
+        ImGui::TextWrapped("No spatial data yet. The AI needs to perceive walls/doors/panels to build a spatial model.");
+        ImGui::End();
+        return;
+    }
+
+    // Structure info
+    for (auto& s : m_spatialGrid.structures) {
+        if (s.type == "rectangular_enclosure") {
+            ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.4f, 1.0f),
+                "Enclosure: %.0fm x %.0fm, %d panels%s",
+                s.dimX, s.dimZ, s.panelCount,
+                s.npcInside ? " (NPC inside)" : "");
+            for (auto& d : s.doors) {
+                ImGui::SameLine();
+                ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.8f, 1.0f), "[Door: %s]", d.face.c_str());
+            }
+        } else if (s.type == "wall_line") {
+            ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f), "%s (%d panels)",
+                s.label.c_str(), s.panelCount);
+        }
+    }
+
+    ImGui::Separator();
+
+    // Zoom control
+    ImGui::SliderFloat("Zoom", &m_mindMapZoom, 0.5f, 3.0f, "%.1fx");
+
+    float cellPx = 16.0f * m_mindMapZoom;
+
+    // Draw grid using ImGui draw list
+    ImVec2 canvasPos = ImGui::GetCursorScreenPos();
+    ImVec2 canvasSize(m_spatialGrid.width * cellPx, m_spatialGrid.height * cellPx);
+
+    // Scrollable child region
+    ImGui::BeginChild("MindMapGrid", ImVec2(0, 0), true,
+        ImGuiWindowFlags_HorizontalScrollbar);
+
+    ImVec2 gridPos = ImGui::GetCursorScreenPos();
+    ImDrawList* drawList = ImGui::GetWindowDrawList();
+
+    // Background
+    drawList->AddRectFilled(gridPos,
+        ImVec2(gridPos.x + canvasSize.x, gridPos.y + canvasSize.y),
+        IM_COL32(20, 20, 30, 255));
+
+    // Draw cells
+    for (int z = 0; z < m_spatialGrid.height && z < (int)m_spatialGrid.cells.size(); z++) {
+        for (int x = 0; x < m_spatialGrid.width && x < (int)m_spatialGrid.cells[z].size(); x++) {
+            int val = m_spatialGrid.cells[z][x];
+            if (val == 0) continue;
+
+            ImVec2 pMin(gridPos.x + x * cellPx, gridPos.y + z * cellPx);
+            ImVec2 pMax(pMin.x + cellPx - 1, pMin.y + cellPx - 1);
+
+            ImU32 color;
+            switch (val) {
+                case 1: color = IM_COL32(200, 200, 200, 255); break;  // Wall - white/gray
+                case 2: color = IM_COL32(50, 220, 50, 255); break;    // Door - green
+                case 3: color = IM_COL32(50, 220, 220, 255); break;   // NPC - cyan
+                case 4: color = IM_COL32(255, 220, 50, 255); break;   // Player - yellow
+                default: color = IM_COL32(100, 100, 100, 255); break;
+            }
+
+            if (val == 3 || val == 4) {
+                // NPC and player as circles
+                ImVec2 center((pMin.x + pMax.x) * 0.5f, (pMin.y + pMax.y) * 0.5f);
+                drawList->AddCircleFilled(center, cellPx * 0.35f, color);
+            } else {
+                drawList->AddRectFilled(pMin, pMax, color);
+            }
+        }
+    }
+
+    // Draw structure bounding boxes as outlines
+    for (auto& s : m_spatialGrid.structures) {
+        float bx0 = (s.minX - m_spatialGrid.originX) / m_spatialGrid.cellSize * cellPx;
+        float bz0 = (s.minZ - m_spatialGrid.originZ) / m_spatialGrid.cellSize * cellPx;
+        float bx1 = (s.maxX - m_spatialGrid.originX) / m_spatialGrid.cellSize * cellPx;
+        float bz1 = (s.maxZ - m_spatialGrid.originZ) / m_spatialGrid.cellSize * cellPx;
+
+        ImU32 outlineColor = (s.type == "rectangular_enclosure")
+            ? IM_COL32(100, 255, 100, 120) : IM_COL32(150, 150, 150, 100);
+
+        drawList->AddRect(
+            ImVec2(gridPos.x + bx0, gridPos.y + bz0),
+            ImVec2(gridPos.x + bx1, gridPos.y + bz1),
+            outlineColor, 0.0f, 0, 1.5f);
+
+        // Label
+        std::string label;
+        if (s.type == "rectangular_enclosure") {
+            label = std::to_string((int)s.dimX) + "x" + std::to_string((int)s.dimZ) + "m";
+        } else if (!s.label.empty()) {
+            label = s.label;
+        }
+        if (!label.empty()) {
+            drawList->AddText(
+                ImVec2(gridPos.x + bx0 + 2, gridPos.y + bz0 - 14),
+                IM_COL32(200, 255, 200, 200), label.c_str());
+        }
+    }
+
+    // Grid lines (subtle)
+    for (int x = 0; x <= m_spatialGrid.width; x++) {
+        drawList->AddLine(
+            ImVec2(gridPos.x + x * cellPx, gridPos.y),
+            ImVec2(gridPos.x + x * cellPx, gridPos.y + canvasSize.y),
+            IM_COL32(40, 40, 50, 100));
+    }
+    for (int z = 0; z <= m_spatialGrid.height; z++) {
+        drawList->AddLine(
+            ImVec2(gridPos.x, gridPos.y + z * cellPx),
+            ImVec2(gridPos.x + canvasSize.x, gridPos.y + z * cellPx),
+            IM_COL32(40, 40, 50, 100));
+    }
+
+    // Dummy to make child scrollable to full grid size
+    ImGui::Dummy(canvasSize);
+
+    // Handle scroll-wheel zoom
+    if (ImGui::IsWindowHovered()) {
+        float wheel = ImGui::GetIO().MouseWheel;
+        if (wheel != 0.0f) {
+            m_mindMapZoom = std::clamp(m_mindMapZoom + wheel * 0.15f, 0.5f, 3.0f);
+        }
+    }
+
+    ImGui::EndChild();
+
+    // Legend
+    ImGui::TextColored(ImVec4(0.8f, 0.8f, 0.8f, 1.0f), "Wall");
+    ImGui::SameLine();
+    ImGui::TextColored(ImVec4(0.2f, 0.86f, 0.2f, 1.0f), "Door");
+    ImGui::SameLine();
+    ImGui::TextColored(ImVec4(0.2f, 0.86f, 0.86f, 1.0f), "NPC");
+    ImGui::SameLine();
+    ImGui::TextColored(ImVec4(1.0f, 0.86f, 0.2f, 1.0f), "Player");
+
+    ImGui::End();
+}
+
+void EditorUI::renderBuildingTextureWindow() {
+    ImGui::SetNextWindowSize(ImVec2(280, 350), ImGuiCond_FirstUseEver);
+    if (!ImGui::Begin("Building Textures", &m_showBuildingTextures)) {
+        ImGui::End();
+        return;
+    }
+
+    if (m_buildingTextures.empty()) {
+        ImGui::TextWrapped("No textures found. Place PNG/JPG files in textures/building/");
+        ImGui::End();
+        return;
+    }
+
+    ImGui::Text("Select a texture swatch:");
+    ImGui::Separator();
+
+    // Render texture grid (64x64 thumbnails)
+    const float thumbSize = 64.0f;
+    float windowWidth = ImGui::GetContentRegionAvail().x;
+    int columns = std::max(1, static_cast<int>(windowWidth / (thumbSize + 8.0f)));
+
+    for (int i = 0; i < static_cast<int>(m_buildingTextures.size()); i++) {
+        if (i % columns != 0) ImGui::SameLine();
+
+        ImGui::PushID(i);
+        bool selected = (m_selectedBuildingTexture == i);
+
+        if (selected) {
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.2f, 0.6f, 0.9f, 1.0f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.3f, 0.7f, 1.0f, 1.0f));
+        }
+
+        if (m_buildingTextures[i].descriptor) {
+            if (ImGui::ImageButton("##swatch", (ImTextureID)m_buildingTextures[i].descriptor,
+                                   ImVec2(thumbSize, thumbSize))) {
+                m_selectedBuildingTexture = i;
+            }
+        } else {
+            if (ImGui::Button(m_buildingTextures[i].name.c_str(), ImVec2(thumbSize, thumbSize))) {
+                m_selectedBuildingTexture = i;
+            }
+        }
+
+        if (selected) {
+            ImGui::PopStyleColor(2);
+        }
+
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("%s (%dx%d)", m_buildingTextures[i].name.c_str(),
+                              m_buildingTextures[i].width, m_buildingTextures[i].height);
+        }
+
+        ImGui::PopID();
+    }
+
+    ImGui::Separator();
+
+    // Show selected texture name
+    if (m_selectedBuildingTexture >= 0 && m_selectedBuildingTexture < static_cast<int>(m_buildingTextures.size())) {
+        ImGui::Text("Selected: %s", m_buildingTextures[m_selectedBuildingTexture].name.c_str());
+    } else {
+        ImGui::TextDisabled("No texture selected");
+    }
+
+    // UV scale controls
+    ImGui::Separator();
+    ImGui::Text("Texture Scale:");
+    ImGui::DragFloat("U Scale", &m_buildingTexScaleU, 0.05f, 0.1f, 20.0f, "%.2f");
+    ImGui::DragFloat("V Scale", &m_buildingTexScaleV, 0.05f, 0.1f, 20.0f, "%.2f");
+    if (ImGui::Button("Reset Scale")) {
+        m_buildingTexScaleU = 1.0f;
+        m_buildingTexScaleV = 1.0f;
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Lock UV")) {
+        m_buildingTexScaleV = m_buildingTexScaleU;
+    }
+
+    ImGui::Separator();
+
+    // Apply button — supports face selection (Alt+click) or single object selection
+    bool hasFaceSelection = !m_faceSelectedIndices.empty() && m_selectedBuildingTexture >= 0;
+    bool hasSingleSelection = m_selectedBuildingTexture >= 0 &&
+                              m_selectedObjectIndex >= 0 &&
+                              m_selectedObjectIndex < static_cast<int>(m_sceneObjects.size());
+
+    if (hasFaceSelection) {
+        std::string label = "Apply to " + std::to_string(m_faceSelectedIndices.size()) + " face-selected blocks";
+        if (ImGui::Button(label.c_str(), ImVec2(-1, 0))) {
+            if (m_onApplyFaceTexture) {
+                m_onApplyFaceTexture(m_selectedBuildingTexture,
+                                     m_buildingTexScaleU, m_buildingTexScaleV);
+            }
+        }
+    } else if (hasSingleSelection) {
+        const auto& objName = m_sceneObjects[m_selectedObjectIndex]->getName();
+        bool isBuildingPart = (objName.find("Building_") == 0 || objName.find("Foundation_") == 0);
+        if (isBuildingPart) {
+            if (ImGui::Button("Apply to Selected", ImVec2(-1, 0))) {
+                if (m_onApplyBuildingTexture) {
+                    m_onApplyBuildingTexture(m_sceneObjects[m_selectedObjectIndex],
+                                            m_selectedBuildingTexture,
+                                            m_buildingTexScaleU, m_buildingTexScaleV);
+                }
+            }
+        } else {
+            ImGui::TextDisabled("Select a building part to apply");
+        }
+    } else {
+        ImGui::TextDisabled("Select a building part to apply");
     }
 
     ImGui::End();

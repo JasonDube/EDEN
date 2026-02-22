@@ -47,6 +47,20 @@ public:
      * @return MeshData with vertices, indices, and bounds
      */
     static MeshData createSpawnMarker(float size = 2.0f);
+
+    /**
+     * Generate a solid rectangular foundation block (6 outward-facing faces).
+     * @param corner1 First corner (XZ)
+     * @param corner2 Opposite corner (XZ)
+     * @param floorY Y position of the bottom
+     * @param height Height of the block
+     * @param color Base color for the mesh
+     * @return MeshData with vertices, indices, and bounds
+     */
+    static MeshData createFoundation(glm::vec2 corner1, glm::vec2 corner2,
+                                     float floorY, float height,
+                                     const glm::vec4& color = glm::vec4(0.6f, 0.6f, 0.6f, 1.0f));
+
 };
 
 } // namespace eden

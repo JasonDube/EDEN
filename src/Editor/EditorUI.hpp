@@ -10,6 +10,7 @@
 #include <functional>
 #include <algorithm>
 #include <set>
+#include <nlohmann/json_fwd.hpp>
 
 namespace eden {
 
@@ -43,6 +44,8 @@ using UndoPathPointCallback = std::function<void()>;
 using CreateTubeCallback = std::function<void(float radius, int segments, const glm::vec3& color)>;
 using CreateRoadCallback = std::function<void(float width, const glm::vec3& color, bool useFixedY, float fixedY)>;
 using WaterChangedCallback = std::function<void(float level, float amplitude, float frequency, bool visible)>;
+using ApplyBuildingTextureCallback = std::function<void(SceneObject* target, int textureIndex, float uScale, float vScale)>;
+using ApplyFaceTextureCallback = std::function<void(int textureIndex, float uScale, float vScale)>;
 using FileNewCallback = std::function<void()>;
 using NewTestLevelCallback = std::function<void()>;
 using NewSpaceLevelCallback = std::function<void()>;
@@ -145,6 +148,8 @@ public:
     float getBrushShapeRotation() const { return m_brushShapeRotation; }
     bool getShowBrushRing() const { return m_showBrushRing; }
     int getTriangulationMode() const { return m_triangulationMode; }
+    float getWallHeight() const { return m_wallHeight; }
+    float getFoundationHeight() const { return m_foundationHeight; }
 
     // Getters for fog settings
     glm::vec3 getFogColor() const { return m_fogColor; }
@@ -241,6 +246,30 @@ public:
     bool& showTechTree() { return m_showTechTree; }
     bool& showGroveEditor() { return m_showGroveEditor; }
     bool& showZones() { return m_showZones; }
+    bool& showMindMap() { return m_showMindMap; }
+    bool& showBuildingTextures() { return m_showBuildingTextures; }
+    bool& showTerminal() { return m_showTerminal; }
+
+    // Spatial analysis / mind map
+    struct SpatialGrid {
+        float cellSize = 2.0f;
+        float originX = 0, originZ = 0;
+        int width = 0, height = 0;
+        std::vector<std::vector<int>> cells; // 0=empty, 1=wall, 2=door, 3=npc
+        struct StructureInfo {
+            std::string type;
+            float minX, maxX, minZ, maxZ;
+            float dimX, dimZ;
+            bool npcInside;
+            int panelCount;
+            std::string label;
+            struct DoorInfo { float x, z; std::string face; };
+            std::vector<DoorInfo> doors;
+        };
+        std::vector<StructureInfo> structures;
+    };
+    void updateSpatialGrid(const nlohmann::json& data);
+    void renderMindMapWindow();
 
     // Behavior script loading
     void setLoadBehaviorScriptCallback(LoadBehaviorScriptCallback cb) { m_onLoadBehaviorScript = std::move(cb); }
@@ -314,8 +343,12 @@ public:
         std::string name;
         std::set<int> objectIndices;
         bool expanded = true;
+        bool forceOpenState = false;  // Force ImGui open/closed state once after load
     };
-    void setObjectGroups(const std::vector<ObjectGroup>& groups) { m_objectGroups = groups; }
+    void setObjectGroups(const std::vector<ObjectGroup>& groups) {
+        m_objectGroups = groups;
+        for (auto& g : m_objectGroups) g.forceOpenState = true;
+    }
     const std::vector<ObjectGroup>& getObjectGroups() const { return m_objectGroups; }
     void showGroupNamePopup() { m_showGroupNamePopup = true; }
 
@@ -366,6 +399,17 @@ public:
     bool isAIPlacementMode() const { return m_aiPlacementMode; }
     int getSelectedAINodeType() const { return m_selectedAINodeType; }
 
+    // Building texture swatches
+    struct BuildingTextureInfo {
+        std::string name;
+        void* descriptor = nullptr;  // ImTextureID
+        int width = 0, height = 0;
+    };
+    void setBuildingTextures(const std::vector<BuildingTextureInfo>& textures) { m_buildingTextures = textures; }
+    int getSelectedBuildingTexture() const { return m_selectedBuildingTexture; }
+    void setApplyBuildingTextureCallback(ApplyBuildingTextureCallback cb) { m_onApplyBuildingTexture = std::move(cb); }
+    void setApplyFaceTextureCallback(ApplyFaceTextureCallback cb) { m_onApplyFaceTexture = std::move(cb); }
+    void setFaceSelectedIndices(const std::vector<int>& indices) { m_faceSelectedIndices = indices; }
     // Zone system
     void setZoneSystem(ZoneSystem* zs) { m_zoneSystem = zs; }
     bool isZoneOverlayEnabled() const { return m_showZoneOverlay; }
@@ -395,6 +439,7 @@ private:
     void renderTechTreeWindow();
     void renderGroveEditor();
     void renderZonesWindow();
+    void renderBuildingTextureWindow();
     void handleObjectClick(int objectIndex);  // Multi-select logic
 
     // Display data
@@ -535,6 +580,9 @@ private:
     bool m_showHelp = false;
     bool m_showTechTree = false;
     bool m_showGroveEditor = false;
+    bool m_showMindMap = false;
+    bool m_showBuildingTextures = false;
+    bool m_showTerminal = false;
 
     // Grove script editor state
     char m_groveSource[16384] = "";  // 16KB source buffer
@@ -559,6 +607,10 @@ private:
     glm::vec2 m_techTreePan{0.0f, 0.0f};
     bool m_techTreeDragging = false;
     bool m_techTreeDeathsHeadExpanded = true;  // Collapse state for Death's Head tree
+
+    // Wall draw / foundation tool
+    float m_wallHeight = 4.0f;
+    float m_foundationHeight = 1.0f;
 
     // Path tool state
     BrushMode m_pathBrushMode = BrushMode::FlattenToY;  // Brush to apply along path
@@ -635,6 +687,10 @@ private:
     ScriptAddedCallback m_onScriptAdded;
     ScriptRemovedCallback m_onScriptRemoved;
 
+    // Mind map / spatial analysis
+    SpatialGrid m_spatialGrid;
+    float m_mindMapZoom = 1.0f;
+
     // Zone system
     ZoneSystem* m_zoneSystem = nullptr;
     bool m_showZones = false;
@@ -643,6 +699,15 @@ private:
     int m_zonePaintType = 0;      // ZoneType as int
     int m_zonePaintResource = 0;  // ResourceType as int
     float m_zonePaintDensity = 0.8f;
+
+    // Building texture swatches
+    std::vector<BuildingTextureInfo> m_buildingTextures;
+    int m_selectedBuildingTexture = -1;
+    float m_buildingTexScaleU = 1.0f;
+    float m_buildingTexScaleV = 1.0f;
+    ApplyBuildingTextureCallback m_onApplyBuildingTexture;
+    ApplyFaceTextureCallback m_onApplyFaceTexture;
+    std::vector<int> m_faceSelectedIndices;  // Object indices from Alt+click face selection
 };
 
 } // namespace eden

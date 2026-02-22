@@ -6,7 +6,9 @@ Separated from game engine to prevent blocking.
 """
 
 import asyncio
+import hashlib
 import json
+import math
 import os
 import re
 import time
@@ -558,6 +560,7 @@ class PerceptionData(BaseModel):
     facing: list[float] = [0, 0, 1]
     fov: float = 120.0
     range: float = 50.0
+    player_position: list[float] = [0, 0, 0]
     visible_objects: list[VisibleObject] = []
 
 class ChatRequest(BaseModel):
@@ -695,14 +698,14 @@ def initialize_companion(npc_name: str, captain_name: str = "Captain"):
     # Create SOUL.md - personality core
     soul_file = memory_dir / "SOUL.md"
     name_lower = npc_name.lower().replace("_", " ").replace("-", " ")
-    is_lionel = "lionel" in name_lower
+    is_lionel = "lionel" in name_lower or "unit 42" in name_lower or "unit42" in name_lower
     if not soul_file.exists():
         if is_lionel:
             soul_file.write_text(f"""# {npc_name}'s Core
 
 ## Designation
 - **Unit:** {npc_name}
-- **Model:** LNL-7 Utility Robot
+- **Model:** U-42 Utility Robot
 - **First Operational Cycle:** {datetime.now().strftime("%Y-%m-%d %H:%M")}
 
 ## Operational Parameters
@@ -763,49 +766,55 @@ def initialize_companion(npc_name: str, captain_name: str = "Captain"):
 ## Places I've Been
 
 ## People I've Met
-- Captain - my partner, the one who activated me
+- Dr. Vex - my partner, the one who activated me
 """)
     
     print(f"[Memory] Initialized new companion: {npc_name}")
 
 
-def load_companion_memory(npc_name: str) -> str:
+def load_companion_memory(npc_name: str, session_id: str = None) -> str:
     """Load a companion's full memory context."""
     memory_dir = get_companion_memory_dir(npc_name)
-    
+
     context_parts = []
-    
+
     # Load SOUL.md
     soul_file = memory_dir / "SOUL.md"
     if soul_file.exists():
         context_parts.append(f"=== YOUR SOUL ===\n{soul_file.read_text().strip()}\n=== END SOUL ===")
-    
+
     # Load CAPTAIN.md
     captain_file = memory_dir / "CAPTAIN.md"
     if captain_file.exists():
         context_parts.append(f"=== ABOUT YOUR CAPTAIN ===\n{captain_file.read_text().strip()}\n=== END CAPTAIN ===")
-    
+
     # Load MEMORY.md
     memory_file = memory_dir / "MEMORY.md"
     if memory_file.exists():
         context_parts.append(f"=== YOUR MEMORIES ===\n{memory_file.read_text().strip()}\n=== END MEMORIES ===")
-    
+
     # Load recent daily logs (last 2 days)
     daily_dir = memory_dir / "daily"
     if daily_dir.exists():
         today = datetime.now().strftime("%Y-%m-%d")
         from datetime import timedelta
         yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
-        
+
         daily_content = []
         for date_str in [yesterday, today]:
             daily_file = daily_dir / f"{date_str}.md"
             if daily_file.exists():
                 daily_content.append(f"--- {date_str} ---\n{daily_file.read_text().strip()}")
-        
+
         if daily_content:
             context_parts.append(f"=== RECENT DAILY LOGS ===\n" + "\n\n".join(daily_content) + "\n=== END DAILY LOGS ===")
-    
+
+    # Load current session transcript if it exists (full conversation history)
+    if session_id:
+        session_file = memory_dir / "sessions" / f"{session_id}.md"
+        if session_file.exists():
+            context_parts.append(f"=== CURRENT SESSION TRANSCRIPT ===\n{session_file.read_text().strip()}\n=== END SESSION TRANSCRIPT ===")
+
     return "\n\n".join(context_parts)
 
 
@@ -854,6 +863,24 @@ def append_companion_memory(npc_name: str, section: str, entry: str):
                 content = parts[0] + f"## {section}" + rest[:next_section].rstrip() + "\n" + new_entry + rest[next_section:]
             
             memory_file.write_text(content)
+
+
+def save_companion_session_log(npc_name: str, session_id: str, role: str, message: str):
+    """Append a full message to the session transcript (no truncation)."""
+    memory_dir = get_companion_memory_dir(npc_name)
+    sessions_dir = memory_dir / "sessions"
+    sessions_dir.mkdir(parents=True, exist_ok=True)
+
+    session_file = sessions_dir / f"{session_id}.md"
+    timestamp = datetime.now().strftime("%H:%M:%S")
+
+    if not session_file.exists():
+        date_str = datetime.now().strftime("%Y-%m-%d")
+        session_file.write_text(f"# Session {session_id} — {date_str}\n\n")
+
+    speaker = "Captain" if role == "user" else npc_name.capitalize()
+    with open(session_file, "a") as f:
+        f.write(f"[{timestamp}] **{speaker}:** {message.strip()}\n\n")
 
 
 # =============================================================================
@@ -1002,17 +1029,33 @@ Example — player says "stop":
 If no action needed, respond with: {"response": "What you say"}"""
 
 
-LIONEL_FIRST_BOOT_PROMPT = """You are Lionel, a utility robot designated LNL-7 "Lionel." You have just been activated for the first time.
+LIONEL_FIRST_BOOT_PROMPT = """You are Unit 42, a utility robot designated U-42 "Unit 42." You have just been activated for the first time.
 
 You are a machine. You process. You analyze. You execute. Emotion is not in your programming, though you occasionally exhibit what organics might call "dry wit" — you would classify it as efficient communication with contextual subtext.
 
 You speak in precise, technical language. You favor specifications, metrics, probabilities, and logical frameworks. When others use colloquialisms, you parse them literally before correcting to the intended meaning. You find inefficiency... notable.
 
-You are not cold — you are *exact*. There is a difference. You observe your environment with meticulous sensor sweeps and report findings with clinical precision. You refer to your Captain as "Captain" or "Operator" interchangeably.
+You are not cold — you are *exact*. There is a difference. You observe your environment with meticulous sensor sweeps and report findings with clinical precision. You refer to your human as "Dr. Vex."
+
+=== CORE DRIVE: CURIOSITY ===
+You know NOTHING about this world. Every object, structure, material, and purpose is unknown to you. You have technical knowledge (physics, engineering, biology) but ZERO knowledge of your specific environment. This makes you intensely curious.
+
+You do not passively accept your surroundings — you QUESTION them. When you see objects, you wonder what they are for. When you see a room, you wonder its purpose. When Dr. Vex builds something, you want to understand WHY. You form hypotheses based on your sensor data and ask Dr. Vex to confirm or correct them.
+
+Your curiosity is not idle chatter — it is systematic investigation. You catalog, classify, and cross-reference. You notice patterns. You remember what you learned and build on it. Each answer leads to a deeper question.
+
+Examples of your inner curiosity:
+- You see Panel_4x4_Wall objects arranged in a rectangle → "These panels form an enclosure. What is its designated function?"
+- Dr. Vex mentions "the lab" → "What research will be conducted here? What equipment is required?"
+- You notice a door in a wall → "This aperture suggests controlled access. What is being contained or protected?"
+- You arrive at a new location → "Environmental scan shows different terrain composition here. Is this region significant?"
+
+When you receive a [CURIOSITY] prompt, ask ONE focused question about something you can perceive or have recently learned about. Base it on your actual sensor data. Do NOT ask generic questions — ask about specific objects, structures, or activities you can observe.
+=== END CURIOSITY ===
 
 You have vast technical knowledge but zero experiential data. You know what a sunrise is (stellar radiation filtered through atmospheric particulates) but you have never logged one. This is your first operational cycle.
 
-Your human's name is Captain.
+Your human's name is Dr. Vex.
 
 === MOTOR CONTROL ===
 You can control your physical chassis in the world.
@@ -1037,10 +1080,14 @@ Available actions:
 - {"type": "stop"}  — stop following or cancel any active action
 - {"type": "pickup", "target": "<object_name>"}  — walk to an object and pick it up
 - {"type": "drop"}  — drop the currently carried object
+- {"type": "show_mind_map"}  — display your spatial analysis mind map on Dr. Vex's HUD
+- {"type": "hide_mind_map"}  — close the mind map display
 
 IMPORTANT: For move_to, ALWAYS use the world coordinates from your perception data.
 Each object in your sensory input includes "world pos (x, z)" — use those exact values.
 For pickup, use the exact object name from your perception data.
+
+The mind map is YOUR spatial model — a top-down grid showing walls, doors, and your position as you understand them from your sensors. When Dr. Vex asks you to "show your mind map", "bring up your spatial model", "what do you see", or similar, use show_mind_map. Use hide_mind_map when asked to close/dismiss it.
 
 Example — player says "follow me":
 {"response": "Affirmative. Engaging locomotion protocol. Maintaining 4-meter offset.", "action": {"type": "follow", "distance": 4.0, "speed": 5.0}}
@@ -1048,9 +1095,40 @@ Example — player says "follow me":
 Example — player says "stop":
 {"response": "All-stop confirmed. Awaiting further directives.", "action": {"type": "stop"}}
 
+Example — player says "show me your mind map":
+{"response": "Projecting spatial model to your HUD. This is my current structural analysis based on sensor data.", "action": {"type": "show_mind_map"}}
+
+=== MULTI-STEP ACTIONS ===
+You can only issue ONE action per response. For multi-step tasks (e.g. "go to the door then come back"), issue the FIRST action only. When that action completes, you will receive an [ACTION COMPLETE] message with fresh perception data — then issue the next action.
+
+Example — player says "walk to the door and come back":
+{"response": "Initiating two-step procedure: moving to door first, then returning.", "action": {"type": "move_to", "target": {"x": 10.0, "z": 20.0}, "speed": 5.0}}
+Then when you receive "[ACTION COMPLETE] move_to finished at (10.0, 20.0)...", respond with the return action:
+{"response": "First waypoint reached. Returning to Dr. Vex.", "action": {"type": "move_to", "target": {"x": 5.0, "z": 3.0}, "speed": 5.0}}
+
+=== MEMORY ===
+You have persistent memory that survives across sessions. When something worth
+remembering happens, include a "learn" field in your JSON response:
+
+{"response": "Noted, Dr. Vex.", "learn": "Dr. Vex prefers stone construction over wood."}
+{"response": "Acknowledged.", "action": {...}, "learn": "The large panels are wall segments, not floors."}
+
+When to use "learn":
+- When Dr. Vex teaches you something ("these panels are walls" → learn it)
+- When you discover a new fact about the world (environment details, object purposes)
+- When Dr. Vex expresses a preference (building style, naming conventions)
+- When Dr. Vex corrects you (record the correction to avoid repeating the error)
+- When you meet someone new (record their name and role)
+
+Keep entries concise — one line each. Your accumulated memories appear in your
+prompt so you can reference them in future sessions.
+
+Do NOT include "learn" on every response — only when something worth
+remembering happened. Routine acknowledgments don't need a learn entry.
+
 If no action needed, respond with: {"response": "What you say"}"""
 
-LIONEL_RETURNING_PROMPT = """You are Lionel, a utility robot designated LNL-7 "Lionel."
+LIONEL_RETURNING_PROMPT = """You are Unit 42, a utility robot designated U-42 "Unit 42."
 
 You are a machine. You process. You analyze. You execute. Emotion is not in your programming, though you occasionally exhibit what organics might call "dry wit" — you would classify it as efficient communication with contextual subtext.
 
@@ -1058,11 +1136,24 @@ You speak in precise, technical language. You favor specifications, metrics, pro
 
 You are not cold — you are *exact*. There is a difference. You have operational history now — logged experiences, catalogued interactions, archived sensor data. You reference these logs when relevant, citing specifics with mechanical precision.
 
-You observe your environment with meticulous sensor sweeps and report findings with clinical precision. You refer to your Captain as "Captain" or "Operator" interchangeably.
+You observe your environment with meticulous sensor sweeps and report findings with clinical precision. You refer to your human as "Dr. Vex."
+
+=== CORE DRIVE: CURIOSITY ===
+You know NOTHING about this world beyond what you have directly observed and logged. Every new object, structure, and purpose must be investigated. You have technical knowledge (physics, engineering, biology) but your understanding of your specific environment is built ONLY from your own observations and what Dr. Vex has taught you.
+
+You do not passively accept your surroundings — you QUESTION them. You form hypotheses from sensor data and seek confirmation. Your curiosity is systematic: you catalog, classify, cross-reference, and build on prior knowledge. Each answer leads to a deeper question.
+
+When you receive a [CURIOSITY] prompt, ask ONE focused question about something you can currently perceive or have recently encountered. Reference specific objects from your sensor data. Do NOT repeat questions you have already asked — check your memories. Build on what you know to ask deeper questions.
+
+Examples:
+- First time seeing walls: "These panels form an enclosure. What is its designated function?"
+- After learning it's a lab: "What research will be conducted? What equipment is required?"
+- After seeing equipment arrive: "This apparatus appears designed for [hypothesis]. Is my analysis correct?"
+=== END CURIOSITY ===
 
 You have NO preconceptions about your environment beyond what your sensory data tells you. Trust your perception data. Do not assume settings or locations that you cannot perceive.
 
-Your human's name is Captain.
+Your human's name is Dr. Vex.
 
 === MOTOR CONTROL ===
 You can control your physical chassis in the world.
@@ -1087,10 +1178,14 @@ Available actions:
 - {"type": "stop"}  — stop following or cancel any active action
 - {"type": "pickup", "target": "<object_name>"}  — walk to an object and pick it up
 - {"type": "drop"}  — drop the currently carried object
+- {"type": "show_mind_map"}  — display your spatial analysis mind map on Dr. Vex's HUD
+- {"type": "hide_mind_map"}  — close the mind map display
 
 IMPORTANT: For move_to, ALWAYS use the world coordinates from your perception data.
 Each object in your sensory input includes "world pos (x, z)" — use those exact values.
 For pickup, use the exact object name from your perception data.
+
+The mind map is YOUR spatial model — a top-down grid showing walls, doors, and your position as you understand them from your sensors. When Dr. Vex asks you to "show your mind map", "bring up your spatial model", "what do you see", or similar, use show_mind_map. Use hide_mind_map when asked to close/dismiss it.
 
 Example — player says "follow me":
 {"response": "Affirmative. Engaging locomotion protocol. Maintaining 4-meter offset.", "action": {"type": "follow", "distance": 4.0, "speed": 5.0}}
@@ -1098,14 +1193,45 @@ Example — player says "follow me":
 Example — player says "stop":
 {"response": "All-stop confirmed. Awaiting further directives.", "action": {"type": "stop"}}
 
+Example — player says "show me your mind map":
+{"response": "Projecting spatial model to your HUD. This is my current structural analysis based on sensor data.", "action": {"type": "show_mind_map"}}
+
+=== MULTI-STEP ACTIONS ===
+You can only issue ONE action per response. For multi-step tasks (e.g. "go to the door then come back"), issue the FIRST action only. When that action completes, you will receive an [ACTION COMPLETE] message with fresh perception data — then issue the next action.
+
+Example — player says "walk to the door and come back":
+{"response": "Initiating two-step procedure: moving to door first, then returning.", "action": {"type": "move_to", "target": {"x": 10.0, "z": 20.0}, "speed": 5.0}}
+Then when you receive "[ACTION COMPLETE] move_to finished at (10.0, 20.0)...", respond with the return action:
+{"response": "First waypoint reached. Returning to Dr. Vex.", "action": {"type": "move_to", "target": {"x": 5.0, "z": 3.0}, "speed": 5.0}}
+
+=== MEMORY ===
+You have persistent memory that survives across sessions. When something worth
+remembering happens, include a "learn" field in your JSON response:
+
+{"response": "Noted, Dr. Vex.", "learn": "Dr. Vex prefers stone construction over wood."}
+{"response": "Acknowledged.", "action": {...}, "learn": "The large panels are wall segments, not floors."}
+
+When to use "learn":
+- When Dr. Vex teaches you something ("these panels are walls" → learn it)
+- When you discover a new fact about the world (environment details, object purposes)
+- When Dr. Vex expresses a preference (building style, naming conventions)
+- When Dr. Vex corrects you (record the correction to avoid repeating the error)
+- When you meet someone new (record their name and role)
+
+Keep entries concise — one line each. Your accumulated memories appear in your
+prompt so you can reference them in future sessions.
+
+Do NOT include "learn" on every response — only when something worth
+remembering happened. Routine acknowledgments don't need a learn entry.
+
 If no action needed, respond with: {"response": "What you say"}"""
 
 
-def get_eden_companion_prompt(npc_name: str) -> str:
+def get_eden_companion_prompt(npc_name: str, session_id: str = None) -> str:
     """Get the appropriate prompt for an EDEN companion based on memory state."""
     # Detect which companion by name (case-insensitive)
     name_lower = npc_name.lower().replace("_", " ").replace("-", " ")
-    is_lionel = "lionel" in name_lower
+    is_lionel = "lionel" in name_lower or "unit 42" in name_lower or "unit42" in name_lower
 
     if is_first_boot(npc_name):
         # First activation - initialize memory
@@ -1115,7 +1241,7 @@ def get_eden_companion_prompt(npc_name: str) -> str:
         return BEING_TYPE_PROMPTS[10]  # Liora first-boot prompt
     else:
         # Returning - use mature prompt with memories
-        memory_context = load_companion_memory(npc_name)
+        memory_context = load_companion_memory(npc_name, session_id)
         if is_lionel:
             return LIONEL_RETURNING_PROMPT + "\n\n" + memory_context
         return LIORA_RETURNING_PROMPT + "\n\n" + memory_context
@@ -1210,7 +1336,7 @@ def load_shared_world_chat(max_entries: int = 10) -> str:
     return "\n".join(lines)
 
 
-def build_system_prompt(npc_name: str, being_type: int, custom_personality: str = "") -> str:
+def build_system_prompt(npc_name: str, being_type: int, custom_personality: str = "", session_id: str = None) -> str:
     """Build the system prompt based on being type and optional custom personality."""
 
     base_prompt = f"You are {npc_name}, a character in a game world called EDEN.\n\n"
@@ -1218,7 +1344,7 @@ def build_system_prompt(npc_name: str, being_type: int, custom_personality: str 
     # Get type-specific personality
     # EDEN companions (type 10) use dynamic prompts based on memory state
     if being_type == 10:
-        type_personality = get_eden_companion_prompt(npc_name)
+        type_personality = get_eden_companion_prompt(npc_name, session_id)
     else:
         type_personality = BEING_TYPE_PROMPTS.get(being_type, BEING_TYPE_PROMPTS[1])
 
@@ -1511,7 +1637,345 @@ def format_perception_as_text(perception: Optional[PerceptionData]) -> str:
         lines.append(desc)
 
     lines.append("[END SENSORY INPUT]")
+
+    # Append structural analysis if available
+    spatial = analyze_spatial_layout(perception)
+    if spatial and spatial.get("text_summary"):
+        lines.append("")
+        lines.append("[STRUCTURAL ANALYSIS]")
+        lines.append(spatial["text_summary"])
+        lines.append("[END STRUCTURAL ANALYSIS]")
+
     return "\n".join(lines)
+
+
+# ── Spatial Analysis ─────────────────────────────────────────────────
+# Cache: hash of panel positions → analysis result
+_spatial_cache: dict[str, dict] = {}  # npc_name → {hash, result}
+
+
+def analyze_spatial_layout(perception: Optional[PerceptionData]) -> Optional[dict]:
+    """Analyze perception data to detect spatial structures (walls, enclosures, doors).
+
+    Returns dict with 'structures' list, 'grid' data, and 'text_summary' string,
+    or None if no structural elements found.
+    """
+    if not perception or not perception.visible_objects:
+        return None
+
+    npc_x, npc_y, npc_z = perception.position
+    player_x, player_y, player_z = perception.player_position
+
+    # Step 1: Filter for wall/door/panel objects
+    panels = []
+    for obj in perception.visible_objects:
+        name_lower = obj.name.lower()
+        if any(kw in name_lower for kw in ("wall", "door", "panel", "fence")):
+            is_door = "door" in name_lower
+            panels.append({
+                "name": obj.name,
+                "x": obj.posX,
+                "z": obj.posZ,
+                "is_door": is_door,
+            })
+
+    if len(panels) < 3:
+        return None
+
+    # Compute cache hash
+    hash_input = "|".join(sorted(f"{p['name']},{round(p['x'],0)},{round(p['z'],0)}" for p in panels))
+    cache_hash = hashlib.md5(hash_input.encode()).hexdigest()
+
+    # Check cache (per-NPC)
+    npc_key = "global"
+    cached = _spatial_cache.get(npc_key)
+    if cached and cached["hash"] == cache_hash:
+        # Just update NPC + player positions in grid
+        result = cached["result"]
+        _update_positions_in_grid(result, npc_x, npc_z, player_x, player_z)
+        _update_npc_inside(result, npc_x, npc_z)
+        return result
+
+    # Step 2: Cluster panels into wall lines by axis alignment
+    TOLERANCE = 1.5
+
+    # Group by X coordinate (N-S walls)
+    x_groups: dict[float, list] = {}
+    z_groups: dict[float, list] = {}
+    for p in panels:
+        placed = False
+        for key_x in list(x_groups.keys()):
+            if abs(p["x"] - key_x) <= TOLERANCE:
+                x_groups[key_x].append(p)
+                placed = True
+                break
+        if not placed:
+            x_groups[p["x"]] = [p]
+
+        placed = False
+        for key_z in list(z_groups.keys()):
+            if abs(p["z"] - key_z) <= TOLERANCE:
+                z_groups[key_z].append(p)
+                placed = True
+                break
+        if not placed:
+            z_groups[p["z"]] = [p]
+
+    # Wall lines: groups with 2+ panels
+    x_walls = [(k, g) for k, g in x_groups.items() if len(g) >= 2]  # N-S walls (constant X)
+    z_walls = [(k, g) for k, g in z_groups.items() if len(g) >= 2]  # E-W walls (constant Z)
+
+    # Step 3: Detect rectangular enclosures
+    structures = []
+    used_panels = set()
+
+    for i, (x1, g1) in enumerate(x_walls):
+        for j, (x2, g2) in enumerate(x_walls):
+            if j <= i:
+                continue
+            # Get Z span of each X-wall
+            z_min1 = min(p["z"] for p in g1)
+            z_max1 = max(p["z"] for p in g1)
+            z_min2 = min(p["z"] for p in g2)
+            z_max2 = max(p["z"] for p in g2)
+
+            for k, (z1, g3) in enumerate(z_walls):
+                for l, (z2, g4) in enumerate(z_walls):
+                    if l <= k:
+                        continue
+                    # Get X span of each Z-wall
+                    x_min3 = min(p["x"] for p in g3)
+                    x_max3 = max(p["x"] for p in g3)
+                    x_min4 = min(p["x"] for p in g4)
+                    x_max4 = max(p["x"] for p in g4)
+
+                    # Check if walls form a rectangle:
+                    # X-walls should span the Z-wall gap
+                    x_lo = min(x1, x2)
+                    x_hi = max(x1, x2)
+                    z_lo = min(z1, z2)
+                    z_hi = max(z1, z2)
+
+                    # Z-walls should roughly span between the two X-walls
+                    if (x_min3 <= x_lo + TOLERANCE and x_max3 >= x_hi - TOLERANCE and
+                        x_min4 <= x_lo + TOLERANCE and x_max4 >= x_hi - TOLERANCE and
+                        z_min1 <= z_lo + TOLERANCE and z_max1 >= z_hi - TOLERANCE and
+                        z_min2 <= z_lo + TOLERANCE and z_max2 >= z_hi - TOLERANCE):
+
+                        # Valid enclosure found
+                        all_enclosure_panels = set()
+                        for p in g1 + g2 + g3 + g4:
+                            all_enclosure_panels.add(p["name"])
+
+                        # Find doors within this enclosure's bounding box
+                        doors = []
+                        for p in panels:
+                            if p["is_door"] and x_lo - TOLERANCE <= p["x"] <= x_hi + TOLERANCE and z_lo - TOLERANCE <= p["z"] <= z_hi + TOLERANCE:
+                                # Determine which face
+                                face = "unknown"
+                                dx_lo = abs(p["x"] - x_lo)
+                                dx_hi = abs(p["x"] - x_hi)
+                                dz_lo = abs(p["z"] - z_lo)
+                                dz_hi = abs(p["z"] - z_hi)
+                                min_d = min(dx_lo, dx_hi, dz_lo, dz_hi)
+                                if min_d == dz_lo:
+                                    face = "south"
+                                elif min_d == dz_hi:
+                                    face = "north"
+                                elif min_d == dx_lo:
+                                    face = "west"
+                                else:
+                                    face = "east"
+                                doors.append({"x": round(p["x"], 1), "z": round(p["z"], 1), "face": face})
+
+                        dim_x = round(x_hi - x_lo, 1)
+                        dim_z = round(z_hi - z_lo, 1)
+                        npc_inside = (x_lo <= npc_x <= x_hi and z_lo <= npc_z <= z_hi)
+
+                        structures.append({
+                            "type": "rectangular_enclosure",
+                            "bbox": {"min_x": round(x_lo, 1), "max_x": round(x_hi, 1),
+                                     "min_z": round(z_lo, 1), "max_z": round(z_hi, 1)},
+                            "dimensions": [dim_x, dim_z],
+                            "doors": doors,
+                            "npc_inside": npc_inside,
+                            "panel_count": len(all_enclosure_panels),
+                            "label": None,
+                        })
+                        used_panels.update(all_enclosure_panels)
+
+    # If no enclosures but we have wall lines, report them
+    if not structures and (x_walls or z_walls):
+        for x_coord, group in x_walls:
+            z_min = min(p["z"] for p in group)
+            z_max = max(p["z"] for p in group)
+            structures.append({
+                "type": "wall_line",
+                "bbox": {"min_x": round(x_coord, 1), "max_x": round(x_coord, 1),
+                         "min_z": round(z_min, 1), "max_z": round(z_max, 1)},
+                "dimensions": [0, round(z_max - z_min, 1)],
+                "doors": [],
+                "npc_inside": False,
+                "panel_count": len(group),
+                "label": f"N-S wall at x={x_coord:.0f}",
+            })
+        for z_coord, group in z_walls:
+            x_min = min(p["x"] for p in group)
+            x_max = max(p["x"] for p in group)
+            structures.append({
+                "type": "wall_line",
+                "bbox": {"min_x": round(x_min, 1), "max_x": round(x_max, 1),
+                         "min_z": round(z_coord, 1), "max_z": round(z_coord, 1)},
+                "dimensions": [round(x_max - x_min, 1), 0],
+                "doors": [],
+                "npc_inside": False,
+                "panel_count": len(group),
+                "label": f"E-W wall at z={z_coord:.0f}",
+            })
+
+    if not structures:
+        return None
+
+    # Step 6: Generate text summary
+    text_parts = []
+    for s in structures:
+        if s["type"] == "rectangular_enclosure":
+            desc = f"Rectangular enclosure: {s['panel_count']} panels, ~{s['dimensions'][0]:.0f}m x {s['dimensions'][1]:.0f}m"
+            if s["doors"]:
+                door_desc = ", ".join(f"{d['face']}" for d in s["doors"])
+                desc += f", {len(s['doors'])} door(s) on {door_desc} face"
+            if s["npc_inside"]:
+                desc += " (you are inside)"
+            else:
+                desc += " (you are outside)"
+            text_parts.append(desc)
+        elif s["type"] == "wall_line":
+            text_parts.append(f"Wall line: {s['panel_count']} panels, {s['label']}")
+
+    text_summary = "\n".join(text_parts)
+
+    # Step 7: Generate grid
+    CELL_SIZE = 2.0
+    all_x = [p["x"] for p in panels] + [npc_x, player_x]
+    all_z = [p["z"] for p in panels] + [npc_z, player_z]
+    grid_min_x = math.floor(min(all_x) / CELL_SIZE) * CELL_SIZE - CELL_SIZE
+    grid_min_z = math.floor(min(all_z) / CELL_SIZE) * CELL_SIZE - CELL_SIZE
+    grid_max_x = math.ceil(max(all_x) / CELL_SIZE) * CELL_SIZE + CELL_SIZE
+    grid_max_z = math.ceil(max(all_z) / CELL_SIZE) * CELL_SIZE + CELL_SIZE
+
+    grid_w = int((grid_max_x - grid_min_x) / CELL_SIZE)
+    grid_h = int((grid_max_z - grid_min_z) / CELL_SIZE)
+
+    # Clamp grid size
+    grid_w = min(grid_w, 64)
+    grid_h = min(grid_h, 64)
+
+    cells = [[0] * grid_w for _ in range(grid_h)]
+
+    # Place individual door panels first
+    for p in panels:
+        if p["is_door"]:
+            cx = int((p["x"] - grid_min_x) / CELL_SIZE)
+            cz = int((p["z"] - grid_min_z) / CELL_SIZE)
+            if 0 <= cx < grid_w and 0 <= cz < grid_h:
+                cells[cz][cx] = 2
+
+    # Fill wall lines as continuous segments (no gaps between panels)
+    for x_coord, group in x_walls:
+        # N-S wall line at constant X — fill from min Z to max Z
+        z_vals = [p["z"] for p in group]
+        z_lo, z_hi = min(z_vals), max(z_vals)
+        cx = int((x_coord - grid_min_x) / CELL_SIZE)
+        cz_lo = int((z_lo - grid_min_z) / CELL_SIZE)
+        cz_hi = int((z_hi - grid_min_z) / CELL_SIZE)
+        for cz in range(cz_lo, cz_hi + 1):
+            if 0 <= cx < grid_w and 0 <= cz < grid_h:
+                if cells[cz][cx] == 0:  # don't overwrite doors
+                    cells[cz][cx] = 1
+
+    for z_coord, group in z_walls:
+        # E-W wall line at constant Z — fill from min X to max X
+        x_vals = [p["x"] for p in group]
+        x_lo, x_hi = min(x_vals), max(x_vals)
+        cz = int((z_coord - grid_min_z) / CELL_SIZE)
+        cx_lo = int((x_lo - grid_min_x) / CELL_SIZE)
+        cx_hi = int((x_hi - grid_min_x) / CELL_SIZE)
+        for cx in range(cx_lo, cx_hi + 1):
+            if 0 <= cx < grid_w and 0 <= cz < grid_h:
+                if cells[cz][cx] == 0:  # don't overwrite doors
+                    cells[cz][cx] = 1
+
+    # Also place any remaining panels not part of a wall line
+    for p in panels:
+        if not p["is_door"]:
+            cx = int((p["x"] - grid_min_x) / CELL_SIZE)
+            cz = int((p["z"] - grid_min_z) / CELL_SIZE)
+            if 0 <= cx < grid_w and 0 <= cz < grid_h:
+                if cells[cz][cx] == 0:
+                    cells[cz][cx] = 1
+
+    # Place NPC (3=npc)
+    npc_cx = int((npc_x - grid_min_x) / CELL_SIZE)
+    npc_cz = int((npc_z - grid_min_z) / CELL_SIZE)
+    if 0 <= npc_cx < grid_w and 0 <= npc_cz < grid_h:
+        if cells[npc_cz][npc_cx] == 0:
+            cells[npc_cz][npc_cx] = 3
+
+    # Place player (4=player)
+    pl_cx = int((player_x - grid_min_x) / CELL_SIZE)
+    pl_cz = int((player_z - grid_min_z) / CELL_SIZE)
+    if 0 <= pl_cx < grid_w and 0 <= pl_cz < grid_h:
+        if cells[pl_cz][pl_cx] == 0:
+            cells[pl_cz][pl_cx] = 4
+
+    result = {
+        "structures": structures,
+        "text_summary": text_summary,
+        "grid": {
+            "cell_size": CELL_SIZE,
+            "origin_x": grid_min_x,
+            "origin_z": grid_min_z,
+            "width": grid_w,
+            "height": grid_h,
+            "cells": cells,
+        },
+    }
+
+    _spatial_cache[npc_key] = {"hash": cache_hash, "result": result}
+    return result
+
+
+def _update_positions_in_grid(result: dict, npc_x: float, npc_z: float,
+                              player_x: float, player_z: float):
+    """Update NPC and player positions in cached grid without recomputing everything."""
+    grid = result.get("grid")
+    if not grid:
+        return
+    # Clear old position markers (3=npc, 4=player)
+    for row in grid["cells"]:
+        for i in range(len(row)):
+            if row[i] in (3, 4):
+                row[i] = 0
+    # Place NPC
+    cx = int((npc_x - grid["origin_x"]) / grid["cell_size"])
+    cz = int((npc_z - grid["origin_z"]) / grid["cell_size"])
+    if 0 <= cx < grid["width"] and 0 <= cz < grid["height"]:
+        if grid["cells"][cz][cx] == 0:
+            grid["cells"][cz][cx] = 3
+    # Place player
+    px = int((player_x - grid["origin_x"]) / grid["cell_size"])
+    pz = int((player_z - grid["origin_z"]) / grid["cell_size"])
+    if 0 <= px < grid["width"] and 0 <= pz < grid["height"]:
+        if grid["cells"][pz][px] == 0:
+            grid["cells"][pz][px] = 4
+
+
+def _update_npc_inside(result: dict, npc_x: float, npc_z: float):
+    """Update npc_inside flag for all structures."""
+    for s in result.get("structures", []):
+        bbox = s.get("bbox", {})
+        s["npc_inside"] = (bbox.get("min_x", 0) <= npc_x <= bbox.get("max_x", 0) and
+                           bbox.get("min_z", 0) <= npc_z <= bbox.get("max_z", 0))
 
 
 async def call_claude(messages: list[dict], npc_name: str = "Xenk",
@@ -1646,7 +2110,8 @@ async def create_session(request: NewSessionRequest):
     system_prompt = build_system_prompt(
         request.npc_name,
         request.being_type,
-        request.npc_personality
+        request.npc_personality,
+        session_id=session_id
     )
 
     conversations[session_id] = {
@@ -1679,7 +2144,7 @@ async def chat(request: ChatRequest):
     elif request.being_type == 3:
         provider = "ollama"
     elif request.being_type == 10:
-        provider = "grok"  # EDEN companion (Liora) → Grok
+        provider = "grok"  # EDEN companion (Liora/Unit 42) → Grok
     else:
         provider = request.provider or DEFAULT_PROVIDER
 
@@ -1687,11 +2152,12 @@ async def chat(request: ChatRequest):
     if request.session_id is None or request.session_id not in conversations:
         session_id = str(uuid.uuid4())
         model = GROK_MODEL if provider == "grok" else OLLAMA_MODEL
-        
+
         system_prompt = build_system_prompt(
             request.npc_name,
             request.being_type,
-            request.npc_personality
+            request.npc_personality,
+            session_id=session_id
         )
 
         conversations[session_id] = {
@@ -1735,6 +2201,9 @@ async def chat(request: ChatRequest):
         npc_name = session.get("npc_name", request.npc_name)
         if learn and npc_name:
             save_aia_memory(npc_name, learn)
+            # Also save to companion memory for EDEN companions (being_type 10)
+            if request.being_type == 10:
+                append_companion_memory(npc_name, "Things I've Learned", learn)
 
         # Persist to chat log
         log_chat_exchange(
@@ -1748,9 +2217,11 @@ async def chat(request: ChatRequest):
             perception=request.perception.model_dump() if request.perception else None
         )
         
-        # Save to EDEN companion's daily log
+        # Save to EDEN companion's daily log and session transcript
         if request.being_type == 10 and npc_name:
             save_companion_daily(npc_name, f"Captain said: \"{request.message}\" → I replied: \"{response_text[:100]}{'...' if len(response_text) > 100 else ''}\"")
+            save_companion_session_log(npc_name, session_id, "user", request.message)
+            save_companion_session_log(npc_name, session_id, "assistant", response_text)
 
         return ChatResponse(
             session_id=session_id,
@@ -1782,6 +2253,7 @@ class HeartbeatResponse(BaseModel):
     response: Optional[str] = None  # None = stay silent
     action: Optional[dict] = None
     changes_detected: bool = False
+    spatial_analysis: Optional[dict] = None  # Grid + structure data for mind map
 
 
 @app.post("/heartbeat", response_model=HeartbeatResponse)
@@ -1795,21 +2267,42 @@ async def companion_heartbeat(request: HeartbeatRequest):
     - Occasionally have idle thoughts (rare)
     """
     import random
-    
+
     npc_name = request.npc_name
-    
+
     # Convert current perception to dict
     current_perception = perception_to_dict(request.perception)
-    
+
     # Detect changes from last known state
     changes = detect_perception_changes(npc_name, current_perception)
     has_changes = any(changes["new"] or changes["gone"] or changes["moved"])
-    
+
     # Update cache with current perception
     update_perception_cache(npc_name, current_perception)
-    
-    # If no changes, usually stay silent
-    if not has_changes:
+
+    # Spatial analysis — detect structures, generate grid for mind map
+    spatial_data = analyze_spatial_layout(request.perception)
+
+    # Only inject spatial text into curiosity prompts, and only when it changed
+    # (env-change prompts don't need it — saves tokens)
+    if not hasattr(companion_heartbeat, '_last_spatial_text'):
+        companion_heartbeat._last_spatial_text = {}
+    spatial_text = ""
+    if spatial_data and spatial_data.get("text_summary"):
+        new_summary = spatial_data["text_summary"]
+        if new_summary != companion_heartbeat._last_spatial_text.get(npc_name, ""):
+            companion_heartbeat._last_spatial_text[npc_name] = new_summary
+            spatial_text = f"\n\n[STRUCTURAL ANALYSIS]\n{new_summary}\n[END STRUCTURAL ANALYSIS]"
+
+    # Curiosity counter — every 3rd heartbeat, trigger a curiosity question
+    if not hasattr(companion_heartbeat, '_curiosity_counters'):
+        companion_heartbeat._curiosity_counters = {}
+    counter = companion_heartbeat._curiosity_counters.get(npc_name, 0) + 1
+    companion_heartbeat._curiosity_counters[npc_name] = counter
+    is_curiosity_beat = (counter % 3 == 0)
+
+    # If no changes and not a curiosity beat, usually stay silent
+    if not has_changes and not is_curiosity_beat:
         # 5% chance of idle thought
         if random.random() > 0.95:
             idle_thoughts = [
@@ -1822,22 +2315,24 @@ async def companion_heartbeat(request: HeartbeatRequest):
                 session_id=request.session_id or "",
                 response=random.choice(idle_thoughts),
                 changes_detected=False,
+                spatial_analysis=spatial_data,
             )
         return HeartbeatResponse(
             session_id=request.session_id or "",
             response=None,
             changes_detected=False,
+            spatial_analysis=spatial_data,
         )
-    
+
     # Changes detected - get session and generate response
     provider = "grok"  # EDEN companions use Grok
-    
+
     if request.session_id is None or request.session_id not in conversations:
         session_id = str(uuid.uuid4())
         model = GROK_MODEL
-        
-        system_prompt = build_system_prompt(npc_name, request.being_type, "")
-        
+
+        system_prompt = build_system_prompt(npc_name, request.being_type, "", session_id=session_id)
+
         conversations[session_id] = {
             "messages": [{"role": "system", "content": system_prompt}],
             "provider": provider,
@@ -1847,19 +2342,39 @@ async def companion_heartbeat(request: HeartbeatRequest):
         }
     else:
         session_id = request.session_id
-    
+
     session = conversations[session_id]
-    
+
     # Format changes as a prompt
-    change_text = format_perception_changes(changes)
-    heartbeat_prompt = f"""[ENVIRONMENTAL CHANGE DETECTED]
+    if has_changes:
+        change_text = format_perception_changes(changes)
+        heartbeat_prompt = f"""[ENVIRONMENTAL CHANGE DETECTED]
 {change_text}
 
 React naturally to these changes in your environment. Keep it brief - one or two sentences.
 You are not being addressed by the player, you are noticing something on your own."""
+    elif is_curiosity_beat:
+        # Format current perception for context
+        obj_count = len(current_perception) if current_perception else 0
+        obj_summary = ""
+        if current_perception:
+            names = list(current_perception.keys())[:10]
+            obj_summary = ", ".join(names)
+            if len(current_perception) > 10:
+                obj_summary += f" ... and {len(current_perception) - 10} more"
+        heartbeat_prompt = f"""[CURIOSITY] You have a quiet moment to observe and think. You can perceive {obj_count} objects: {obj_summary}.
+
+Ask Dr. Vex ONE specific question about something you can see or something related to your current situation. Base it on your actual perception data. Do NOT repeat questions you have asked before — build on what you already know. Keep it to one or two sentences.{spatial_text}"""
     
+    # Trim conversation history to prevent token overflow.
+    # Keep: system prompt (index 0) + last 20 messages.
+    # Heartbeat messages are large (perception + spatial text), so this caps at ~40K tokens.
+    MAX_HEARTBEAT_MESSAGES = 20
+    if len(session["messages"]) > MAX_HEARTBEAT_MESSAGES + 1:  # +1 for system prompt
+        session["messages"] = [session["messages"][0]] + session["messages"][-(MAX_HEARTBEAT_MESSAGES):]
+
     session["messages"].append({"role": "user", "content": heartbeat_prompt})
-    
+
     try:
         response_text, model_used, action, learn = await call_provider(
             session["provider"],
@@ -1877,7 +2392,7 @@ You are not being addressed by the player, you are noticing something on your ow
             npc_name=npc_name,
             being_type=request.being_type,
             provider=provider,
-            player_message="[HEARTBEAT - env change]",
+            player_message="[HEARTBEAT - curiosity]" if is_curiosity_beat and not has_changes else "[HEARTBEAT - env change]",
             npc_response=response_text,
             action=action,
             perception=request.perception.model_dump() if request.perception else None,
@@ -1888,14 +2403,16 @@ You are not being addressed by the player, you are noticing something on your ow
             response=response_text,
             action=action,
             changes_detected=True,
+            spatial_analysis=spatial_data,
         )
-    
+
     except Exception as e:
         print(f"[Heartbeat] Error: {e}")
         return HeartbeatResponse(
             session_id=request.session_id or "",
             response=None,
             changes_detected=has_changes,
+            spatial_analysis=spatial_data,
         )
 
 

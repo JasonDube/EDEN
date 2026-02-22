@@ -38,6 +38,11 @@ public:
     // Check if a loop is playing
     bool isLoopPlaying(int loopId) const;
 
+    // Microphone recording (push-to-talk)
+    bool startRecording();
+    bool stopRecording(const std::string& outputPath);  // saves WAV to outputPath
+    bool isRecording() const { return m_recording; }
+
     // Check if initialized
     bool isInitialized() const { return m_initialized; }
 
@@ -50,6 +55,7 @@ private:
     struct Impl;
     std::unique_ptr<Impl> m_impl;
     bool m_initialized = false;
+    bool m_recording = false;
 
     std::unordered_map<std::string, int> m_soundCache;
     int m_nextHandle = 1;

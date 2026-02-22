@@ -40,6 +40,9 @@ public:
         BeingType beingType;
         std::string customPersonality;
         ResponseCallback callback;
+        bool isHeartbeat = false;       // If true, POST to /heartbeat instead of /chat
+        std::string rawJsonBody;        // Used for heartbeat requests
+        std::function<void(const std::string&, bool)> heartbeatCallback;
     };
     
     struct Response {
@@ -47,6 +50,8 @@ public:
         std::string response;
         bool success;
         ResponseCallback callback;
+        bool isHeartbeat = false;
+        std::function<void(const std::string&, bool)> heartbeatCallback;
     };
     
     std::queue<Request> requestQueue;
@@ -89,39 +94,62 @@ public:
             }
             
             if (hasRequest) {
-                Response response;
-                response.sessionId = request.sessionId;
-                response.callback = request.callback;
-                
-                try {
-                    nlohmann::json reqJson;
-                    reqJson["session_id"] = request.sessionId.empty() ? nullptr : nlohmann::json(request.sessionId);
-                    reqJson["message"] = request.message;
-                    reqJson["npc_name"] = request.npcName;
-                    reqJson["being_type"] = static_cast<int>(request.beingType);
-                    if (!request.customPersonality.empty()) {
-                        reqJson["npc_personality"] = request.customPersonality;
+                if (request.isHeartbeat) {
+                    // Heartbeat request — POST to /heartbeat, use heartbeat callback
+                    try {
+                        auto result = client->Post("/heartbeat", request.rawJsonBody, "application/json");
+                        if (result && result->status >= 200 && result->status < 300) {
+                            if (request.heartbeatCallback) {
+                                // Queue callback to main thread via response queue
+                                Response response;
+                                response.sessionId = request.sessionId;
+                                response.response = result->body;
+                                response.success = true;
+                                response.isHeartbeat = true;
+                                response.heartbeatCallback = request.heartbeatCallback;
+                                std::lock_guard<std::mutex> lock(responseMutex);
+                                responseQueue.push(std::move(response));
+                            }
+                        }
+                    } catch (...) {
+                        // Heartbeat failures are silent
                     }
-                    
-                    auto result = client->Post("/chat", reqJson.dump(), "application/json");
-                    
-                    if (result && result->status >= 200 && result->status < 300) {
-                        auto respJson = nlohmann::json::parse(result->body);
-                        response.response = respJson.value("response", "...");
-                        response.sessionId = respJson.value("session_id", request.sessionId);
-                        response.success = true;
-                    } else {
-                        response.response = "(Connection error)";
+                } else {
+                    // Normal chat request
+                    Response response;
+                    response.sessionId = request.sessionId;
+                    response.callback = request.callback;
+
+                    try {
+                        nlohmann::json reqJson;
+                        reqJson["session_id"] = request.sessionId.empty() ? nullptr : nlohmann::json(request.sessionId);
+                        reqJson["message"] = request.message;
+                        reqJson["npc_name"] = request.npcName;
+                        reqJson["being_type"] = static_cast<int>(request.beingType);
+                        if (!request.customPersonality.empty()) {
+                            reqJson["npc_personality"] = request.customPersonality;
+                        }
+
+                        auto result = client->Post("/chat", reqJson.dump(), "application/json");
+
+                        if (result && result->status >= 200 && result->status < 300) {
+                            auto respJson = nlohmann::json::parse(result->body);
+                            response.response = respJson.value("response", "...");
+                            response.sessionId = respJson.value("session_id", request.sessionId);
+                            response.success = true;
+                        } else {
+                            response.response = "(Connection error)";
+                            response.success = false;
+                        }
+                    } catch (const std::exception& e) {
+                        response.response = "(Error: " + std::string(e.what()) + ")";
                         response.success = false;
                     }
-                } catch (const std::exception& e) {
-                    response.response = "(Error: " + std::string(e.what()) + ")";
-                    response.success = false;
-                }
-                
-                {
-                    std::lock_guard<std::mutex> lock(responseMutex);
-                    responseQueue.push(std::move(response));
+
+                    {
+                        std::lock_guard<std::mutex> lock(responseMutex);
+                        responseQueue.push(std::move(response));
+                    }
                 }
             } else {
                 std::this_thread::sleep_for(std::chrono::milliseconds(10));
@@ -178,25 +206,31 @@ void ConversationManager::update(float /*deltaTime*/) {
     while (!m_impl->responseQueue.empty()) {
         auto response = std::move(m_impl->responseQueue.front());
         m_impl->responseQueue.pop();
-        
-        // Update session
-        {
-            std::lock_guard<std::mutex> sessionLock(m_impl->sessionMutex);
-            auto it = m_impl->sessions.find(response.sessionId);
-            if (it != m_impl->sessions.end()) {
-                it->second.waitingForResponse = false;
-                it->second.history.push_back({
-                    it->second.npcName,
-                    response.response,
-                    false,
-                    0.0f // TODO: track time
-                });
+
+        if (response.isHeartbeat) {
+            // Heartbeat response — invoke heartbeat callback on main thread
+            if (response.heartbeatCallback) {
+                response.heartbeatCallback(response.response, response.success);
             }
-        }
-        
-        // Invoke callback
-        if (response.callback) {
-            response.callback(response.response, response.success);
+        } else {
+            // Normal chat response — update session history
+            {
+                std::lock_guard<std::mutex> sessionLock(m_impl->sessionMutex);
+                auto it = m_impl->sessions.find(response.sessionId);
+                if (it != m_impl->sessions.end()) {
+                    it->second.waitingForResponse = false;
+                    it->second.history.push_back({
+                        it->second.npcName,
+                        response.response,
+                        false,
+                        0.0f // TODO: track time
+                    });
+                }
+            }
+
+            if (response.callback) {
+                response.callback(response.response, response.success);
+            }
         }
     }
 }
@@ -287,6 +321,27 @@ ConversationSession* ConversationManager::getActiveSession() {
 
 const ConversationSession* ConversationManager::getActiveSession() const {
     return const_cast<ConversationManager*>(this)->getActiveSession();
+}
+
+void ConversationManager::postHeartbeat(const std::string& jsonBody,
+                                         std::function<void(const std::string&, bool)> callback) {
+    Impl::Request request;
+    request.isHeartbeat = true;
+    request.rawJsonBody = jsonBody;
+    request.heartbeatCallback = callback;
+
+    std::lock_guard<std::mutex> lock(m_impl->requestMutex);
+    m_impl->requestQueue.push(std::move(request));
+}
+
+void ConversationManager::addNpcMessage(const std::string& sessionId,
+                                         const std::string& npcName,
+                                         const std::string& message) {
+    std::lock_guard<std::mutex> lock(m_impl->sessionMutex);
+    auto it = m_impl->sessions.find(sessionId);
+    if (it != m_impl->sessions.end()) {
+        it->second.history.push_back({npcName, message, false, 0.0f});
+    }
 }
 
 void ConversationManager::setConnectionCallback(ConnectionCallback callback) {

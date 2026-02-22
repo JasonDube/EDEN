@@ -3360,7 +3360,15 @@ void ModelingMode::renderModelingEditorUI() {
             if (ImGui::IsItemHovered()) {
                 ImGui::SetTooltip("Square brush with no falloff for pixel art style.\nUnchecked = circular brush with soft edges.");
             }
-            ImGui::TextDisabled("Shift+Click: draw line");
+
+            ImGui::Checkbox("Fill Paint to Face", &m_ctx.fillPaintToFace);
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Click a face to fill it entirely with the current color.\nDisables brush painting while active.");
+            }
+
+            if (!m_ctx.fillPaintToFace) {
+                ImGui::TextDisabled("Shift+Click: draw line");
+            }
 
             // Edge Stroke button - paint along selected edges
             auto selectedEdges = m_ctx.editableMesh.getSelectedEdges();
@@ -4717,9 +4725,75 @@ void ModelingMode::processModelingInput(float deltaTime, bool gizmoActive) {
                 paintedThisFrame = true;
             }
         }
+        // Fill Paint to Face mode: click a face to fill it with current color
+        else if (m_ctx.fillPaintToFace && !m_ctx.useSmear && !altHeld &&
+                 Input::isMouseButtonPressed(Input::MOUSE_LEFT) && !mouseOverImGui && !gizmoActive) {
+            glm::vec3 rayOrigin, rayDir;
+            m_ctx.getMouseRay(rayOrigin, rayDir);
+
+            // Raycast against EditableMesh to find face
+            glm::mat4 invModel = glm::inverse(m_ctx.selectedObject->getTransform().getMatrix());
+            glm::vec3 localRayOrigin = glm::vec3(invModel * glm::vec4(rayOrigin, 1.0f));
+            glm::vec3 localRayDir = glm::normalize(glm::vec3(invModel * glm::vec4(rayDir, 0.0f)));
+
+            auto meshHit = m_ctx.editableMesh.raycast(localRayOrigin, localRayDir, ModelingSelectionMode::Face);
+            if (meshHit.hit && meshHit.faceIndex != UINT32_MAX) {
+                m_ctx.selectedObject->saveTextureState();
+
+                int texWidth = m_ctx.selectedObject->getTextureWidth();
+                int texHeight = m_ctx.selectedObject->getTextureHeight();
+                auto& texData = m_ctx.selectedObject->getTextureData();
+
+                auto faceVerts = m_ctx.editableMesh.getFaceVertices(meshHit.faceIndex);
+                std::vector<glm::vec2> uvPoly;
+                glm::vec2 uvMin(1e9f), uvMax(-1e9f);
+
+                for (uint32_t vi : faceVerts) {
+                    glm::vec2 uv = m_ctx.editableMesh.getVertex(vi).uv;
+                    uvPoly.push_back(uv);
+                    uvMin = glm::min(uvMin, uv);
+                    uvMax = glm::max(uvMax, uv);
+                }
+
+                // Point-in-polygon test
+                auto pointInPoly = [](const glm::vec2& p, const std::vector<glm::vec2>& poly) {
+                    int n = poly.size(), crossings = 0;
+                    for (int i = 0; i < n; i++) {
+                        int j = (i + 1) % n;
+                        if ((poly[i].y <= p.y && poly[j].y > p.y) || (poly[j].y <= p.y && poly[i].y > p.y)) {
+                            float t = (p.y - poly[i].y) / (poly[j].y - poly[i].y);
+                            if (p.x < poly[i].x + t * (poly[j].x - poly[i].x)) crossings++;
+                        }
+                    }
+                    return (crossings % 2) == 1;
+                };
+
+                int minPX = std::max(0, static_cast<int>(uvMin.x * texWidth) - 1);
+                int maxPX = std::min(texWidth - 1, static_cast<int>(uvMax.x * texWidth) + 1);
+                int minPY = std::max(0, static_cast<int>(uvMin.y * texHeight) - 1);
+                int maxPY = std::min(texHeight - 1, static_cast<int>(uvMax.y * texHeight) + 1);
+
+                for (int py = minPY; py <= maxPY; py++) {
+                    for (int px = minPX; px <= maxPX; px++) {
+                        glm::vec2 pixelUV((px + 0.5f) / texWidth, (py + 0.5f) / texHeight);
+                        if (pointInPoly(pixelUV, uvPoly)) {
+                            size_t idx = (py * texWidth + px) * 4;
+                            if (idx + 3 < texData.size()) {
+                                texData[idx] = static_cast<unsigned char>(m_ctx.paintColor.r * 255);
+                                texData[idx + 1] = static_cast<unsigned char>(m_ctx.paintColor.g * 255);
+                                texData[idx + 2] = static_cast<unsigned char>(m_ctx.paintColor.b * 255);
+                            }
+                        }
+                    }
+                }
+
+                m_ctx.selectedObject->markTextureModified();
+                paintedThisFrame = true;
+            }
+        }
         // Brush mode: continuous painting while dragging
         // Skip painting when Alt is held (Alt+click is for color sampling)
-        else if (!m_ctx.useSmear && !altHeld && Input::isMouseButtonDown(Input::MOUSE_LEFT) && !mouseOverImGui && !gizmoActive) {
+        else if (!m_ctx.useSmear && !m_ctx.fillPaintToFace && !altHeld && Input::isMouseButtonDown(Input::MOUSE_LEFT) && !mouseOverImGui && !gizmoActive) {
             // Get mouse ray
             glm::vec3 rayOrigin, rayDir;
             m_ctx.getMouseRay(rayOrigin, rayDir);

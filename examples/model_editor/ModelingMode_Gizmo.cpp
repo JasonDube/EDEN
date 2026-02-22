@@ -676,8 +676,9 @@ bool ModelingMode::processGizmoInput() {
         }
     }
 
-    // Return true if dragging (to block other input) or if hovering over gizmo
-    return m_ctx.gizmoDragging || m_ctx.gizmoHoveredAxis != GizmoAxis::None;
+    // Return true only if actively dragging (to block other input)
+    // Hovering over gizmo highlights the axis but doesn't block point selection
+    return m_ctx.gizmoDragging;
 }
 
 void ModelingMode::renderGizmo(VkCommandBuffer cmd, const glm::mat4& viewProj) {

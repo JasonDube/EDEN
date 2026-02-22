@@ -152,6 +152,25 @@ LimeLoader::LoadResult LimeLoader::load(const std::string& filepath) {
             }
             limeFaces[idx] = f;
         }
+        else if (type == "cp") {
+            // Parse control point: cp idx: vertexIndex "name"
+            uint32_t idx, vertIdx;
+            char colon;
+            iss >> idx >> colon >> vertIdx;
+            // Read quoted name
+            std::string cpName;
+            std::getline(iss, cpName);
+            // Strip leading whitespace and quotes
+            size_t start = cpName.find('"');
+            size_t end = cpName.rfind('"');
+            if (start != std::string::npos && end != std::string::npos && end > start) {
+                cpName = cpName.substr(start + 1, end - start - 1);
+            } else {
+                // No quotes — trim whitespace
+                while (!cpName.empty() && cpName[0] == ' ') cpName.erase(0, 1);
+            }
+            result.mesh.controlPoints.push_back({vertIdx, cpName});
+        }
         // We don't need half-edge data for rendering, skip "he" lines
     }
 
@@ -188,6 +207,9 @@ LimeLoader::LoadResult LimeLoader::load(const std::string& filepath) {
               << result.mesh.indices.size() / 3 << " triangles)";
     if (result.mesh.hasTexture) {
         std::cout << " with " << result.mesh.textureWidth << "x" << result.mesh.textureHeight << " texture";
+    }
+    if (!result.mesh.controlPoints.empty()) {
+        std::cout << ", " << result.mesh.controlPoints.size() << " control points";
     }
     std::cout << std::endl;
 
@@ -235,6 +257,15 @@ std::unique_ptr<SceneObject> LimeLoader::createSceneObject(
     // Apply saved transform (scale is critical for preserving model dimensions)
     obj->getTransform().setScale(mesh.scale);
     obj->setEulerRotation(mesh.rotation);
+
+    // Transfer control points
+    if (!mesh.controlPoints.empty()) {
+        std::vector<SceneObject::StoredControlPoint> storedCPs;
+        for (const auto& cp : mesh.controlPoints) {
+            storedCPs.push_back({cp.vertexIndex, cp.name});
+        }
+        obj->setControlPoints(storedCPs);
+    }
 
     return obj;
 }

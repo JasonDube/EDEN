@@ -68,6 +68,7 @@
 
 #include "grove_host.hpp"
 #include "MCPServer.hpp"
+#include "Terminal/EdenTerminal.hpp"
 #include <httplib.h>
 
 #include <dirent.h>
@@ -82,6 +83,8 @@
 #include <cmath>
 #include <set>
 #include <unordered_map>
+#include <unordered_set>
+#include <queue>
 #include <map>
 #include <glm/gtc/matrix_transform.hpp>
 
@@ -99,6 +102,8 @@ enum class TransformMode { Select, Move, Rotate, Scale };
 class TerrainEditor : public VulkanApplicationBase {
 public:
     TerrainEditor() : VulkanApplicationBase(1280, 720, "EDEN - Terrain Editor") {}
+
+    void setSessionMode(bool enabled) { m_sessionMode = enabled; }
 
 protected:
     void onInit() override {
@@ -165,8 +170,35 @@ protected:
         m_editorUI.setTerrainInfo(terrainInfo);
 
         initImGui();
+
+        // Load monospace font for terminal
+        {
+            ImGuiIO& io = ImGui::GetIO();
+            // Try common monospace font paths
+            const char* fontPaths[] = {
+                "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
+                "/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf",
+                "/usr/share/fonts/truetype/ubuntu/UbuntuMono-R.ttf",
+                "/usr/share/fonts/TTF/DejaVuSansMono.ttf",
+                nullptr
+            };
+            for (const char** p = fontPaths; *p; ++p) {
+                if (std::filesystem::exists(*p)) {
+                    m_monoFont = io.Fonts->AddFontFromFileTTF(*p, 16.0f);
+                    if (m_monoFont) {
+                        std::cout << "[EdenTerminal] Loaded mono font: " << *p << std::endl;
+                        break;
+                    }
+                }
+            }
+            if (!m_monoFont) {
+                std::cout << "[EdenTerminal] No mono font found, using default" << std::endl;
+            }
+        }
+
         loadSplashTexture();
         loadGroveLogoTexture();
+        loadBuildingTextures();
 
         // Create scripts directory
         {
@@ -223,6 +255,17 @@ protected:
         std::cout << "  Double-tap Space - Toggle fly mode\n";
         std::cout << "  Ctrl - Speed boost\n";
         std::cout << "  Left-click - Paint with brush\n";
+
+        // Session mode: auto-open terminal with claude
+        if (m_sessionMode) {
+            m_editorUI.showTerminal() = true;
+            m_terminal.init(120, 40);
+            m_terminalInitialized = true;
+            // Give shell a moment to start, then launch claude
+            // (sendCommand will queue it — shell processes it when ready)
+            m_terminal.sendCommand("claude");
+            std::cout << "[EDEN OS] Session mode: terminal + claude auto-launched" << std::endl;
+        }
     }
 
     void initializeEconomySystems() {
@@ -884,6 +927,12 @@ protected:
     }
 
     void onCleanup() override {
+        // Shutdown terminal before Vulkan cleanup
+        m_terminalScreenObject = nullptr;
+        m_terminalPixelsDirty = false;
+        m_terminalScreenBound = false;
+        m_terminal.shutdown();
+
         getContext().waitIdle();
 
         saveEditorConfig();
@@ -891,6 +940,7 @@ protected:
         NFD_Quit();
         cleanupSplashTexture();
         cleanupGroveLogoTexture();
+        cleanupBuildingTextures();
         if (m_groveVm) { grove_destroy(m_groveVm); m_groveVm = nullptr; }
 
         if (m_mcpServer) {
@@ -908,6 +958,38 @@ protected:
     }
 
     void update(float deltaTime) override {
+        // Lazy-bind terminal to "terminal_screen" scene object
+        if (!m_terminalScreenBound) {
+            for (auto& obj : m_sceneObjects) {
+                if (obj->getName().find("terminal_screen") == 0) {
+                    m_terminalScreenObject = obj.get();
+                    std::cout << "[EdenTerminal] Bound to: " << obj->getName() << std::endl;
+                    break;
+                }
+            }
+            if (m_terminalScreenObject) {
+                if (!m_terminalInitialized) {
+                    m_terminal.init(82, 41);  // Full-face UV at 3x scale with small padding
+                    m_terminalInitialized = true;
+                }
+                m_terminal.setLockSize(true);  // Don't let ImGui window resize the terminal
+                m_terminalScreenBound = true;
+            }
+        }
+
+        // Update terminal emulator (data only — texture upload happens in render)
+        if (m_terminal.isAlive()) {
+            m_terminal.update();
+
+            // Render terminal to pixel buffer (CPU side, variant 2 = vertical flip)
+            if (m_terminalScreenObject) {
+                if (m_terminal.renderToPixels(m_terminalPixelBuffer, 2048, 2048, 2)) {
+                    m_terminalPixelsDirty = true;
+                }
+            }
+            m_terminal.clearDirty();
+        }
+
         // Update level transition fade (runs even during transitions)
         updateFade(deltaTime);
 
@@ -1007,6 +1089,11 @@ protected:
                                     }
                                 }
 
+                                // Parse spatial analysis for mind map
+                                if (json.contains("spatial_analysis") && !json["spatial_analysis"].is_null()) {
+                                    m_editorUI.updateSpatialGrid(json["spatial_analysis"]);
+                                }
+
                             } catch (const std::exception& e) {
                                 std::cerr << "[Heartbeat] Parse error: " << e.what() << std::endl;
                             }
@@ -1065,6 +1152,67 @@ protected:
             renderModulePanel();
             renderZoneOverlay();
 
+            // Terminal emulator window (lazy-init on first show)
+            if (m_editorUI.showTerminal()) {
+                if (!m_terminalInitialized) {
+                    m_terminal.init(120, 40);
+                    m_terminalInitialized = true;
+                }
+                if (m_terminal.isAlive()) {
+                    m_terminal.renderImGui(&m_editorUI.showTerminal(), m_monoFont);
+                }
+            }
+
+            // Wall draw / foundation preview (green wireframe box)
+            if (m_wallDrawing) {
+                float wallH = (m_editorUI.getBrushMode() == BrushMode::Foundation)
+                    ? m_editorUI.getFoundationHeight() : m_editorUI.getWallHeight();
+                float x1 = std::min(m_wallCorner1.x, m_wallCorner2.x);
+                float x2 = std::max(m_wallCorner1.x, m_wallCorner2.x);
+                float z1 = std::min(m_wallCorner1.z, m_wallCorner2.z);
+                float z2 = std::max(m_wallCorner1.z, m_wallCorner2.z);
+                float yBot = std::min(m_wallCorner1.y, m_wallCorner2.y);
+                float yTop = yBot + wallH;
+
+                glm::vec3 corners[8] = {
+                    {x1, yBot, z1}, {x2, yBot, z1}, {x2, yBot, z2}, {x1, yBot, z2},
+                    {x1, yTop, z1}, {x2, yTop, z1}, {x2, yTop, z2}, {x1, yTop, z2}
+                };
+
+                float wAspect = static_cast<float>(getWindow().getWidth()) / getWindow().getHeight();
+                glm::mat4 wVP = m_camera.getProjectionMatrix(wAspect, 0.1f, 5000.0f) * m_camera.getViewMatrix();
+                float sw = static_cast<float>(getWindow().getWidth());
+                float sh = static_cast<float>(getWindow().getHeight());
+
+                auto projectW = [&](const glm::vec3& world) -> ImVec2 {
+                    glm::vec4 clip = wVP * glm::vec4(world, 1.0f);
+                    if (clip.w <= 0.001f) return ImVec2(-1, -1);
+                    glm::vec3 ndc = glm::vec3(clip) / clip.w;
+                    return ImVec2((ndc.x * 0.5f + 0.5f) * sw, (ndc.y * -0.5f + 0.5f) * sh);
+                };
+
+                ImVec2 sp[8];
+                for (int i = 0; i < 8; i++) sp[i] = projectW(corners[i]);
+
+                auto* drawList = ImGui::GetForegroundDrawList();
+                ImU32 green = IM_COL32(0, 255, 0, 200);
+
+                // Bottom edges
+                drawList->AddLine(sp[0], sp[1], green, 2.0f);
+                drawList->AddLine(sp[1], sp[2], green, 2.0f);
+                drawList->AddLine(sp[2], sp[3], green, 2.0f);
+                drawList->AddLine(sp[3], sp[0], green, 2.0f);
+                // Top edges
+                drawList->AddLine(sp[4], sp[5], green, 2.0f);
+                drawList->AddLine(sp[5], sp[6], green, 2.0f);
+                drawList->AddLine(sp[6], sp[7], green, 2.0f);
+                drawList->AddLine(sp[7], sp[4], green, 2.0f);
+                // Vertical pillars
+                drawList->AddLine(sp[0], sp[4], green, 2.0f);
+                drawList->AddLine(sp[1], sp[5], green, 2.0f);
+                drawList->AddLine(sp[2], sp[6], green, 2.0f);
+                drawList->AddLine(sp[3], sp[7], green, 2.0f);
+            }
         }
 
         // Draw collision hull when in third-person with checkbox on (works in both modes)
@@ -1276,6 +1424,14 @@ protected:
                     vkCmdDraw(cmd, buffers->vertexCount, 1, 0, 0);
                 }
             }
+        }
+
+        // Upload terminal texture to GPU before rendering objects
+        if (m_terminalScreenObject && m_terminalPixelsDirty && !m_terminalPixelBuffer.empty()) {
+            m_terminalPixelsDirty = false;
+            m_modelRenderer->updateTexture(
+                m_terminalScreenObject->getBufferHandle(),
+                m_terminalPixelBuffer.data(), 2048, 2048);
         }
 
         for (size_t i = 0; i < m_sceneObjects.size(); i++) {
@@ -1513,6 +1669,64 @@ protected:
             }
         }
 
+        // Draw yellow outlines for Alt+click face selection
+        if (!m_selectedFaces.empty() && !m_isPlayMode) {
+            std::vector<glm::vec3> faceLines;
+            for (const auto& sf : m_selectedFaces) {
+                if (sf.objectIndex < 0 || sf.objectIndex >= static_cast<int>(m_sceneObjects.size())) continue;
+                auto& obj = m_sceneObjects[sf.objectIndex];
+                if (!obj) continue;
+                glm::vec3 P = obj->getTransform().getPosition();
+                glm::vec3 q0, q1, q2, q3;
+                if (sf.normal.x == 1) {       // +X face
+                    float x = P.x + 0.5f;
+                    q0 = {x, P.y,     P.z - 0.5f};
+                    q1 = {x, P.y,     P.z + 0.5f};
+                    q2 = {x, P.y + 1, P.z + 0.5f};
+                    q3 = {x, P.y + 1, P.z - 0.5f};
+                } else if (sf.normal.x == -1) { // -X face
+                    float x = P.x - 0.5f;
+                    q0 = {x, P.y,     P.z - 0.5f};
+                    q1 = {x, P.y,     P.z + 0.5f};
+                    q2 = {x, P.y + 1, P.z + 0.5f};
+                    q3 = {x, P.y + 1, P.z - 0.5f};
+                } else if (sf.normal.y == 1) {  // +Y face (top)
+                    float y = P.y + 1.0f;
+                    q0 = {P.x - 0.5f, y, P.z - 0.5f};
+                    q1 = {P.x + 0.5f, y, P.z - 0.5f};
+                    q2 = {P.x + 0.5f, y, P.z + 0.5f};
+                    q3 = {P.x - 0.5f, y, P.z + 0.5f};
+                } else if (sf.normal.y == -1) { // -Y face (bottom)
+                    float y = P.y;
+                    q0 = {P.x - 0.5f, y, P.z - 0.5f};
+                    q1 = {P.x + 0.5f, y, P.z - 0.5f};
+                    q2 = {P.x + 0.5f, y, P.z + 0.5f};
+                    q3 = {P.x - 0.5f, y, P.z + 0.5f};
+                } else if (sf.normal.z == 1) {  // +Z face
+                    float z = P.z + 0.5f;
+                    q0 = {P.x - 0.5f, P.y,     z};
+                    q1 = {P.x + 0.5f, P.y,     z};
+                    q2 = {P.x + 0.5f, P.y + 1, z};
+                    q3 = {P.x - 0.5f, P.y + 1, z};
+                } else if (sf.normal.z == -1) { // -Z face
+                    float z = P.z - 0.5f;
+                    q0 = {P.x - 0.5f, P.y,     z};
+                    q1 = {P.x + 0.5f, P.y,     z};
+                    q2 = {P.x + 0.5f, P.y + 1, z};
+                    q3 = {P.x - 0.5f, P.y + 1, z};
+                } else {
+                    continue;
+                }
+                faceLines.push_back(q0); faceLines.push_back(q1);
+                faceLines.push_back(q1); faceLines.push_back(q2);
+                faceLines.push_back(q2); faceLines.push_back(q3);
+                faceLines.push_back(q3); faceLines.push_back(q0);
+            }
+            if (!faceLines.empty()) {
+                m_modelRenderer->renderLines(cmd, vp, faceLines, glm::vec3(1.0f, 0.7f, 0.0f));
+            }
+        }
+
         if (m_splineRenderer && m_splineRenderer->isVisible()) {
             m_splineRenderer->render(cmd, vp);
         }
@@ -1579,6 +1793,60 @@ private:
 
         m_editorUI.setImportModelCallback([this](const std::string& path) {
             importModel(path);
+        });
+
+        m_editorUI.setApplyBuildingTextureCallback([this](SceneObject* target, int textureIndex, float uScale, float vScale) {
+            if (!target || textureIndex < 0 || textureIndex >= static_cast<int>(m_buildingTextures.size())) return;
+            auto& tex = m_buildingTextures[textureIndex];
+            target->setTextureData(tex.pixels, tex.width, tex.height);
+            m_modelRenderer->updateTexture(target->getBufferHandle(), tex.pixels.data(), tex.width, tex.height);
+
+            // Rescale UVs on the mesh vertices
+            if (target->hasMeshData() && (std::abs(uScale - 1.0f) > 0.001f || std::abs(vScale - 1.0f) > 0.001f)) {
+                auto vertices = target->getVertices();  // copy
+                for (auto& v : vertices) {
+                    v.texCoord.x *= uScale;
+                    v.texCoord.y *= vScale;
+                }
+                target->setMeshData(vertices, target->getIndices());
+                m_modelRenderer->updateVertices(target->getBufferHandle(), vertices);
+            }
+        });
+
+        // Face-aware texture application (Alt+click face selection → apply to all selected blocks)
+        m_editorUI.setApplyFaceTextureCallback([this](int textureIndex, float uScale, float vScale) {
+            if (textureIndex < 0 || textureIndex >= static_cast<int>(m_buildingTextures.size())) return;
+            if (m_selectedFaces.empty()) return;
+
+            auto& tex = m_buildingTextures[textureIndex];
+
+            // Collect unique object indices
+            std::set<int> uniqueIndices;
+            for (const auto& sf : m_selectedFaces) {
+                uniqueIndices.insert(sf.objectIndex);
+            }
+
+            for (int idx : uniqueIndices) {
+                if (idx < 0 || idx >= static_cast<int>(m_sceneObjects.size())) continue;
+                auto* obj = m_sceneObjects[idx].get();
+                if (!obj) continue;
+
+                // Apply texture to the whole block
+                obj->setTextureData(tex.pixels, tex.width, tex.height);
+                m_modelRenderer->updateTexture(obj->getBufferHandle(), tex.pixels.data(), tex.width, tex.height);
+
+                // Set vertex colors to white so texture shows through
+                if (obj->hasMeshData()) {
+                    auto vertices = obj->getVertices();
+                    for (auto& v : vertices) {
+                        v.color = glm::vec4(1.0f, 1.0f, 1.0f, 1.0f);
+                        v.texCoord.x *= uScale;
+                        v.texCoord.y *= vScale;
+                    }
+                    obj->setMeshData(vertices, obj->getIndices());
+                    m_modelRenderer->updateVertices(obj->getBufferHandle(), vertices);
+                }
+            }
         });
 
         m_editorUI.setBrowseModelCallback([this]() {
@@ -2754,6 +3022,168 @@ private:
         m_groveLogoLoaded = false;
     }
 
+    void loadBuildingTextures() {
+        // Try multiple paths: CWD, then project source dir
+        std::string dir = "textures/building";
+        if (!std::filesystem::exists(dir)) {
+            // Try the source directory (for running from build/ directly)
+            dir = std::string(CMAKE_SOURCE_DIR) + "/textures/building";
+        }
+        if (!std::filesystem::exists(dir)) {
+            std::cout << "Building textures directory not found" << std::endl;
+            return;
+        }
+        std::cout << "Loading building textures from: " << dir << std::endl;
+
+        VkDevice device = getContext().getDevice();
+        std::vector<EditorUI::BuildingTextureInfo> uiTextures;
+
+        for (const auto& entry : std::filesystem::directory_iterator(dir)) {
+            if (!entry.is_regular_file()) continue;
+            std::string ext = entry.path().extension().string();
+            std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+            if (ext != ".png" && ext != ".jpg" && ext != ".jpeg") continue;
+
+            int w, h, channels;
+            unsigned char* pixels = stbi_load(entry.path().c_str(), &w, &h, &channels, STBI_rgb_alpha);
+            if (!pixels) continue;
+
+            BuildingTexture tex;
+            tex.name = entry.path().stem().string();
+            tex.width = w;
+            tex.height = h;
+            tex.pixels.assign(pixels, pixels + w * h * 4);
+
+            // Create Vulkan image for ImGui preview (thumbnail)
+            VkDeviceSize imageSize = w * h * 4;
+
+            // Staging buffer
+            VkBuffer stagingBuffer;
+            VkDeviceMemory stagingMemory;
+            VkBufferCreateInfo bufferInfo{};
+            bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+            bufferInfo.size = imageSize;
+            bufferInfo.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+            bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+            vkCreateBuffer(device, &bufferInfo, nullptr, &stagingBuffer);
+
+            VkMemoryRequirements memReq;
+            vkGetBufferMemoryRequirements(device, stagingBuffer, &memReq);
+            VkMemoryAllocateInfo allocInfo{};
+            allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+            allocInfo.allocationSize = memReq.size;
+            allocInfo.memoryTypeIndex = getContext().findMemoryType(memReq.memoryTypeBits,
+                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+            vkAllocateMemory(device, &allocInfo, nullptr, &stagingMemory);
+            vkBindBufferMemory(device, stagingBuffer, stagingMemory, 0);
+
+            void* data;
+            vkMapMemory(device, stagingMemory, 0, imageSize, 0, &data);
+            memcpy(data, pixels, imageSize);
+            vkUnmapMemory(device, stagingMemory);
+            stbi_image_free(pixels);
+
+            // Create image
+            VkImageCreateInfo imageInfo{};
+            imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+            imageInfo.imageType = VK_IMAGE_TYPE_2D;
+            imageInfo.format = VK_FORMAT_R8G8B8A8_SRGB;
+            imageInfo.extent = {static_cast<uint32_t>(w), static_cast<uint32_t>(h), 1};
+            imageInfo.mipLevels = 1;
+            imageInfo.arrayLayers = 1;
+            imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+            imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
+            imageInfo.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+            imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+            vkCreateImage(device, &imageInfo, nullptr, &tex.image);
+
+            vkGetImageMemoryRequirements(device, tex.image, &memReq);
+            allocInfo.allocationSize = memReq.size;
+            allocInfo.memoryTypeIndex = getContext().findMemoryType(memReq.memoryTypeBits,
+                VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+            vkAllocateMemory(device, &allocInfo, nullptr, &tex.memory);
+            vkBindImageMemory(device, tex.image, tex.memory, 0);
+
+            // Transition + copy
+            VkCommandBuffer cmd = getContext().beginSingleTimeCommands();
+
+            VkImageMemoryBarrier barrier{};
+            barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+            barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+            barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+            barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            barrier.image = tex.image;
+            barrier.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+            barrier.srcAccessMask = 0;
+            barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+            vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &barrier);
+
+            VkBufferImageCopy region{};
+            region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+            region.imageExtent = {static_cast<uint32_t>(w), static_cast<uint32_t>(h), 1};
+            vkCmdCopyBufferToImage(cmd, stagingBuffer, tex.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+
+            barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+            barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+            barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+            vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr, 0, nullptr, 1, &barrier);
+
+            getContext().endSingleTimeCommands(cmd);
+            vkDestroyBuffer(device, stagingBuffer, nullptr);
+            vkFreeMemory(device, stagingMemory, nullptr);
+
+            // Create view + sampler
+            VkImageViewCreateInfo viewInfo{};
+            viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+            viewInfo.image = tex.image;
+            viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+            viewInfo.format = VK_FORMAT_R8G8B8A8_SRGB;
+            viewInfo.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+            vkCreateImageView(device, &viewInfo, nullptr, &tex.view);
+
+            VkSamplerCreateInfo samplerInfo{};
+            samplerInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+            samplerInfo.magFilter = VK_FILTER_LINEAR;
+            samplerInfo.minFilter = VK_FILTER_LINEAR;
+            samplerInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+            samplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+            samplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+            vkCreateSampler(device, &samplerInfo, nullptr, &tex.sampler);
+
+            tex.descriptor = ImGui_ImplVulkan_AddTexture(tex.sampler, tex.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+
+            EditorUI::BuildingTextureInfo uiTex;
+            uiTex.name = tex.name;
+            uiTex.descriptor = tex.descriptor;
+            uiTex.width = tex.width;
+            uiTex.height = tex.height;
+            uiTextures.push_back(uiTex);
+
+            m_buildingTextures.push_back(std::move(tex));
+            std::cout << "Loaded building texture: " << entry.path().filename().string()
+                      << " (" << w << "x" << h << ")" << std::endl;
+        }
+
+        m_editorUI.setBuildingTextures(uiTextures);
+        std::cout << "Loaded " << m_buildingTextures.size() << " building textures" << std::endl;
+    }
+
+    void cleanupBuildingTextures() {
+        VkDevice device = getContext().getDevice();
+        for (auto& tex : m_buildingTextures) {
+            if (tex.descriptor) ImGui_ImplVulkan_RemoveTexture(tex.descriptor);
+            if (tex.sampler) vkDestroySampler(device, tex.sampler, nullptr);
+            if (tex.view) vkDestroyImageView(device, tex.view, nullptr);
+            if (tex.image) vkDestroyImage(device, tex.image, nullptr);
+            if (tex.memory) vkFreeMemory(device, tex.memory, nullptr);
+        }
+        m_buildingTextures.clear();
+    }
+
     void renderLoadingScreen() {
         uint32_t imageIndex;
         if (!beginFrame(imageIndex)) return;
@@ -3452,6 +3882,22 @@ private:
     }
 
     void handleKeyboardShortcuts(float deltaTime) {
+        // Ctrl+` (backtick) — toggle terminal
+        {
+            static bool wasBacktick = false;
+            bool backtick = Input::isKeyDown(96); // GLFW_KEY_GRAVE_ACCENT = 96
+            bool ctrl = Input::isKeyDown(Input::KEY_LEFT_CONTROL) || Input::isKeyDown(Input::KEY_RIGHT_CONTROL);
+            if (backtick && ctrl && !wasBacktick) {
+                m_editorUI.showTerminal() = !m_editorUI.showTerminal();
+                // Lazy-init terminal on first open
+                if (m_editorUI.showTerminal() && !m_terminalInitialized) {
+                    m_terminal.init(120, 40);
+                    m_terminalInitialized = true;
+                }
+            }
+            wasBacktick = backtick;
+        }
+
         // Escape key handling
         static bool wasEscapeDown = false;
         bool escapeDown = Input::isKeyDown(Input::KEY_ESCAPE);
@@ -3709,11 +4155,31 @@ private:
         }
         wasDeleteDown = deleteDown;
 
-        // V - duplicate selected object (editor mode only)
+        // V - duplicate selected object(s) (editor mode only)
         static bool wasVKeyDown = false;
         bool vKeyDown = Input::isKeyDown(Input::KEY_V);
         if (vKeyDown && !wasVKeyDown && !ImGui::GetIO().WantTextInput && !m_isPlayMode) {
-            if (m_selectedObjectIndex >= 0) {
+            if (m_selectedObjectIndices.size() > 1) {
+                // Multi-duplicate: duplicate all selected objects, then select the new ones
+                std::vector<int> toClone(m_selectedObjectIndices.begin(), m_selectedObjectIndices.end());
+                std::sort(toClone.begin(), toClone.end());
+                std::set<int> newIndices;
+                for (int idx : toClone) {
+                    int newIdx = duplicateObjectSilent(idx);
+                    if (newIdx >= 0) {
+                        newIndices.insert(newIdx);
+                    }
+                }
+                if (!newIndices.empty()) {
+                    // Select all the new duplicates
+                    m_selectedObjectIndices = newIndices;
+                    m_selectedObjectIndex = *newIndices.begin();
+                    m_editorUI.setSelectedObjectIndices(m_selectedObjectIndices);
+                    m_editorUI.setSelectedObjectIndex(m_selectedObjectIndex);
+                    updateSceneObjectsList();
+                    std::cout << "Duplicated " << newIndices.size() << " objects" << std::endl;
+                }
+            } else if (m_selectedObjectIndex >= 0) {
                 duplicateObject(m_selectedObjectIndex);
             }
         }
@@ -3778,6 +4244,7 @@ private:
             }
         }
         wasGKeyDown = gKeyDown;
+
     }
 
     void trackFPS(float deltaTime) {
@@ -6452,6 +6919,180 @@ private:
             }
         }
 
+        // === Wall Draw / Foundation Tool (preview drawn in recordCommandBuffer after ImGui::NewFrame) ===
+        bool inBuildTool = (m_editorUI.getBrushMode() == BrushMode::WallDraw ||
+                            m_editorUI.getBrushMode() == BrushMode::Foundation);
+        if (inBuildTool && !ImGui::GetIO().WantCaptureMouse) {
+            glm::vec2 mpos = Input::getMousePosition();
+            float nx = mpos.x / getWindow().getWidth();
+            float ny = mpos.y / getWindow().getHeight();
+            float aspect = static_cast<float>(getWindow().getWidth()) / getWindow().getHeight();
+            glm::vec3 rayOrig = m_camera.getPosition();
+            glm::vec3 rayDir = m_camera.screenToWorldRay(nx, ny, aspect);
+
+            float t = 0.0f;
+            bool hit = false;
+            glm::vec3 hitPos;
+            for (int step = 0; step < 500; step++) {
+                t += 2.0f;
+                glm::vec3 p = rayOrig + rayDir * t;
+                float h = m_terrain.getHeightAt(p.x, p.z);
+                if (p.y <= h) {
+                    hitPos = p;
+                    hitPos.y = h;
+                    hit = true;
+                    break;
+                }
+            }
+
+            if (hit) {
+                // Snap hit position to 1m grid for clean block alignment
+                glm::vec3 snapped = hitPos;
+                snapped.x = std::round(hitPos.x);
+                snapped.z = std::round(hitPos.z);
+
+                if (Input::isMouseButtonPressed(Input::MOUSE_LEFT)) {
+                    m_wallCorner1 = snapped;
+                    m_wallCorner1.y = hitPos.y;  // keep raw Y for floor height
+                    m_wallCorner2 = m_wallCorner1;
+                    m_wallDrawing = true;
+                }
+                if (m_wallDrawing) {
+                    m_wallCorner2 = snapped;
+                    m_wallCorner2.y = hitPos.y;
+                }
+            }
+
+            if (m_wallDrawing && !Input::isMouseButtonDown(Input::MOUSE_LEFT)) {
+                m_wallDrawing = false;
+                float dx = std::abs(m_wallCorner2.x - m_wallCorner1.x);
+                float dz = std::abs(m_wallCorner2.z - m_wallCorner1.z);
+                if (dx > 0.5f && dz > 0.5f) {
+                    float floorY = std::min(m_wallCorner1.y, m_wallCorner2.y);
+                    glm::vec2 c1(m_wallCorner1.x, m_wallCorner1.z);
+                    glm::vec2 c2(m_wallCorner2.x, m_wallCorner2.z);
+
+                    // Helper to create a SceneObject from MeshData
+                    auto createBuildingObj = [&](const std::string& objName, const PrimitiveMeshBuilder::MeshData& md) {
+                        auto obj = std::make_unique<SceneObject>(objName);
+                        uint32_t handle = m_modelRenderer->createModel(md.vertices, md.indices);
+                        obj->setBufferHandle(handle);
+                        obj->setIndexCount(static_cast<uint32_t>(md.indices.size()));
+                        obj->setVertexCount(static_cast<uint32_t>(md.vertices.size()));
+                        obj->setLocalBounds(md.bounds);
+                        obj->setModelPath("");
+                        obj->setMeshData(md.vertices, md.indices);
+                        m_sceneObjects.push_back(std::move(obj));
+                    };
+
+                    if (m_editorUI.getBrushMode() == BrushMode::WallDraw) {
+                        glm::vec4 wallColor(0.75f, 0.72f, 0.68f, 1.0f);
+                        float wallH = m_editorUI.getWallHeight();
+
+                        std::string prefix = "Building_" + std::to_string(m_buildingCounter++);
+
+                        // Track all object indices for auto-grouping
+                        std::set<int> groupIndices;
+
+                        // Pre-build the shared cube mesh once (all blocks are 1x1x1)
+                        auto cubeMesh = PrimitiveMeshBuilder::createCube(1.0f, wallColor);
+
+                        // Helper to spawn a 1x1x1 block at a position
+                        auto spawnBlock = [&](const std::string& name, glm::vec3 pos) {
+                            auto obj = std::make_unique<SceneObject>(name);
+                            uint32_t handle = m_modelRenderer->createModel(cubeMesh.vertices, cubeMesh.indices);
+                            obj->setBufferHandle(handle);
+                            obj->setIndexCount(static_cast<uint32_t>(cubeMesh.indices.size()));
+                            obj->setVertexCount(static_cast<uint32_t>(cubeMesh.vertices.size()));
+                            obj->setLocalBounds(cubeMesh.bounds);
+                            obj->setModelPath("");
+                            obj->setMeshData(cubeMesh.vertices, cubeMesh.indices);
+                            obj->setPrimitiveType(PrimitiveType::Cube);
+                            obj->setPrimitiveSize(1.0f);
+                            obj->setPrimitiveColor(wallColor);
+                            obj->getTransform().setPosition(pos);
+                            int idx = static_cast<int>(m_sceneObjects.size());
+                            groupIndices.insert(idx);
+                            m_sceneObjects.push_back(std::move(obj));
+                        };
+
+                        // Corners are already snapped to 1m grid
+                        float x1s = std::min(c1.x, c2.x);
+                        float x2s = std::max(c1.x, c2.x);
+                        float z1s = std::min(c1.y, c2.y);
+                        float z2s = std::max(c1.y, c2.y);
+                        float snappedFloorY = std::round(floorY);
+
+                        int countX = std::max(1, static_cast<int>(std::round(x2s - x1s)));
+                        int countZ = std::max(1, static_cast<int>(std::round(z2s - z1s)));
+                        int countH = std::max(1, static_cast<int>(std::round(wallH)));
+
+                        int blockNum = 0;
+
+                        // Walls: place 1x1x1 blocks along perimeter, stacked vertically
+                        for (int row = 0; row < countH; row++) {
+                            float cy = snappedFloorY + row;
+
+                            // North wall (z = z1s)
+                            for (int i = 0; i < countX; i++) {
+                                spawnBlock(prefix + "_Block_" + std::to_string(blockNum++),
+                                           glm::vec3(x1s + i + 0.5f, cy, z1s + 0.5f));
+                            }
+                            // South wall (z = z2s)
+                            for (int i = 0; i < countX; i++) {
+                                spawnBlock(prefix + "_Block_" + std::to_string(blockNum++),
+                                           glm::vec3(x1s + i + 0.5f, cy, z2s - 0.5f));
+                            }
+                            // West wall (x = x1s), skip corners
+                            for (int i = 1; i < countZ - 1; i++) {
+                                spawnBlock(prefix + "_Block_" + std::to_string(blockNum++),
+                                           glm::vec3(x1s + 0.5f, cy, z1s + i + 0.5f));
+                            }
+                            // East wall (x = x2s), skip corners
+                            for (int i = 1; i < countZ - 1; i++) {
+                                spawnBlock(prefix + "_Block_" + std::to_string(blockNum++),
+                                           glm::vec3(x2s - 0.5f, cy, z1s + i + 0.5f));
+                            }
+                        }
+
+                        // Floor: 1x1x1 blocks spanning full rectangle
+                        for (int ix = 0; ix < countX; ix++) {
+                            for (int iz = 0; iz < countZ; iz++) {
+                                spawnBlock(prefix + "_Floor_" + std::to_string(blockNum++),
+                                           glm::vec3(x1s + ix + 0.5f, snappedFloorY - 1.0f, z1s + iz + 0.5f));
+                            }
+                        }
+
+                        // Ceiling: 1x1x1 blocks spanning full rectangle
+                        float ceilingY = snappedFloorY + countH;
+                        for (int ix = 0; ix < countX; ix++) {
+                            for (int iz = 0; iz < countZ; iz++) {
+                                spawnBlock(prefix + "_Ceil_" + std::to_string(blockNum++),
+                                           glm::vec3(x1s + ix + 0.5f, ceilingY, z1s + iz + 0.5f));
+                            }
+                        }
+
+                        // Auto-group all blocks
+                        EditorUI::ObjectGroup group;
+                        group.name = prefix;
+                        group.objectIndices = groupIndices;
+                        group.expanded = true;
+                        m_objectGroups.push_back(group);
+                        m_editorUI.setObjectGroups(m_objectGroups);
+                    } else {
+                        auto meshData = PrimitiveMeshBuilder::createFoundation(
+                            c1, c2, floorY, m_editorUI.getFoundationHeight(),
+                            glm::vec4(0.6f, 0.6f, 0.6f, 1.0f));
+                        createBuildingObj("Foundation_" + std::to_string(m_sceneObjects.size()), meshData);
+                    }
+
+                    m_selectedObjectIndex = static_cast<int>(m_sceneObjects.size()) - 1;
+                }
+            }
+        } else if (!Input::isMouseButtonDown(Input::MOUSE_LEFT)) {
+            m_wallDrawing = false;
+        }
+
         bool inMoveObjectMode = m_editorUI.getBrushMode() == BrushMode::MoveObject;
         bool inTransformMode = inMoveObjectMode && m_transformMode != TransformMode::Select;
         bool hasSelection = m_selectedObjectIndex >= 0 && m_selectedObjectIndex < static_cast<int>(m_sceneObjects.size());
@@ -6554,7 +7195,11 @@ private:
                         m_gizmoDragRawPos = selected->getTransform().getPosition();
                         m_gizmoDragRawEuler = selected->getEulerRotation();
                     } else {
-                        pickObjectAtMouse();
+                        if (Input::isKeyDown(Input::KEY_LEFT_ALT)) {
+                            pickFaceAtMouse();
+                        } else {
+                            pickObjectAtMouse();
+                        }
                     }
                 } else if (m_gizmoDragging && Input::isMouseButtonDown(Input::MOUSE_LEFT)) {
                     glm::vec2 mouseDelta = mousePos - m_lastMousePos;
@@ -6633,6 +7278,16 @@ private:
                             glm::vec3 oldPos = selected->getTransform().getPosition();
                             glm::vec3 moveDelta = newPos - oldPos;
                             selected->getTransform().setPosition(newPos);
+                            // Move all other selected objects by the same delta
+                            if (m_selectedObjectIndices.size() > 1) {
+                                for (int idx : m_selectedObjectIndices) {
+                                    if (idx == m_selectedObjectIndex) continue;
+                                    if (idx >= 0 && idx < static_cast<int>(m_sceneObjects.size()) && m_sceneObjects[idx]) {
+                                        glm::vec3 p = m_sceneObjects[idx]->getTransform().getPosition();
+                                        m_sceneObjects[idx]->getTransform().setPosition(p + moveDelta);
+                                    }
+                                }
+                            }
                             // Keep orbit target at object center (avoids drift from snap jumps)
                             AABB wb = selected->getWorldBounds();
                             m_orbitTarget = (wb.min + wb.max) * 0.5f;
@@ -6672,7 +7327,11 @@ private:
 
             bool leftMousePressed = Input::isMouseButtonPressed(Input::MOUSE_LEFT) && !ImGui::GetIO().WantCaptureMouse;
             if (leftMousePressed) {
-                pickObjectAtMouse();
+                if (Input::isKeyDown(Input::KEY_LEFT_ALT)) {
+                    pickFaceAtMouse();
+                } else {
+                    pickObjectAtMouse();
+                }
             }
         } else {
             m_gizmoDragging = false;
@@ -7030,7 +7689,7 @@ private:
         if (npcName == "Eve") voice = "en-GB-SoniaNeural";
         else if (npcName == "Xenk") voice = "en-US-GuyNeural";
         else if (npcName.find("Robot") != std::string::npos) voice = "en-US-GuyNeural";
-        else if ([&]() { std::string lower = npcName; std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower); return lower.find("lionel") != std::string::npos; }()) {
+        else if ([&]() { std::string lower = npcName; std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower); return lower.find("lionel") != std::string::npos || lower.find("unit") != std::string::npos; }()) {
             useRobotVoice = true;
         }
 
@@ -7324,6 +7983,7 @@ private:
         // Parse command prefix: /eve or /xenk to target a specific NPC
         BeingType targetType = BeingType::STATIC;  // STATIC = no specific target
         bool hasTargetPrefix = false;
+        bool targetTerminal = false;
 
         // Case-insensitive prefix check
         std::string lowerMsg = message;
@@ -7349,6 +8009,27 @@ private:
             hasTargetPrefix = true;
             size_t spacePos = message.find(' ');
             message = message.substr(spacePos + 1);
+        } else if (lowerMsg.rfind("/terminal ", 0) == 0 || lowerMsg.rfind("terminal ", 0) == 0 ||
+                   lowerMsg.rfind("/console ", 0) == 0 || lowerMsg.rfind("console ", 0) == 0) {
+            targetTerminal = true;
+            size_t spacePos = message.find(' ');
+            message = message.substr(spacePos + 1);
+        }
+
+        // Send directly to terminal if /terminal prefix or proximity to terminal_screen
+        if (targetTerminal) {
+            if (m_terminal.isAlive()) {
+                addChatMessage("You → Terminal", message);
+                m_terminal.sendCommand(message + "\n");
+                m_quickChatMode = false;
+                m_quickChatBuffer[0] = '\0';
+                return;
+            } else {
+                addChatMessage("System", "Terminal is not running");
+                m_quickChatMode = false;
+                m_quickChatBuffer[0] = '\0';
+                return;
+            }
         }
 
         SceneObject* closestSentient = nullptr;
@@ -7364,9 +8045,23 @@ private:
                 }
             }
         } else {
-            // Proximity-based search (existing behavior)
+            // Proximity-based search — check NPCs and terminal screen
             const float quickChatRadius = 100.0f;
             float closestDist = quickChatRadius;
+
+            // Check if terminal_screen is closest
+            if (m_terminalScreenObject && m_terminal.isAlive()) {
+                glm::vec3 termPos = m_terminalScreenObject->getTransform().getPosition();
+                float termDist = glm::length(termPos - playerPos);
+                if (termDist < closestDist) {
+                    // Terminal is closest — send command to it
+                    addChatMessage("You → Terminal", message);
+                    m_terminal.sendCommand(message + "\n");
+                    m_quickChatMode = false;
+                    m_quickChatBuffer[0] = '\0';
+                    return;
+                }
+            }
 
             for (auto& obj : m_sceneObjects) {
                 if (!obj || !obj->isVisible()) continue;
@@ -7626,6 +8321,11 @@ private:
             float width = static_cast<float>(getWindow().getWidth());
             float height = static_cast<float>(getWindow().getHeight());
             m_gameModule->renderUI(width, height);
+        }
+
+        // Render AI mind map in play mode (toggled by Unit 42's show_mind_map action)
+        if (m_editorUI.showMindMap()) {
+            m_editorUI.renderMindMapWindow();
         }
     }
 
@@ -8481,19 +9181,43 @@ private:
         );
 
         if (success) {
-            // Append zone data to the saved JSON file
-            if (m_zoneSystem) {
-                try {
-                    std::ifstream inFile(filepath);
-                    nlohmann::json root = nlohmann::json::parse(inFile);
-                    inFile.close();
+            // Append zone data and group data to the saved JSON file
+            try {
+                std::ifstream inFile(filepath);
+                nlohmann::json root = nlohmann::json::parse(inFile);
+                inFile.close();
+
+                if (m_zoneSystem) {
                     m_zoneSystem->save(root);
-                    std::ofstream outFile(filepath);
-                    outFile << root.dump(2);
-                    outFile.close();
-                } catch (const std::exception& e) {
-                    std::cerr << "Failed to save zone data: " << e.what() << std::endl;
                 }
+
+                // Sync group state from EditorUI (it tracks expanded/collapsed)
+                m_objectGroups = m_editorUI.getObjectGroups();
+
+                // Save object groups (map indices to object names for stability across reloads)
+                if (!m_objectGroups.empty()) {
+                    nlohmann::json groupsJson = nlohmann::json::array();
+                    for (const auto& group : m_objectGroups) {
+                        nlohmann::json g;
+                        g["name"] = group.name;
+                        g["expanded"] = group.expanded;
+                        nlohmann::json members = nlohmann::json::array();
+                        for (int idx : group.objectIndices) {
+                            if (idx >= 0 && idx < static_cast<int>(m_sceneObjects.size())) {
+                                members.push_back(m_sceneObjects[idx]->getName());
+                            }
+                        }
+                        g["objects"] = members;
+                        groupsJson.push_back(g);
+                    }
+                    root["objectGroups"] = groupsJson;
+                }
+
+                std::ofstream outFile(filepath);
+                outFile << root.dump(2);
+                outFile.close();
+            } catch (const std::exception& e) {
+                std::cerr << "Failed to save extra data: " << e.what() << std::endl;
             }
 
             m_currentLevelPath = filepath;
@@ -8861,6 +9585,8 @@ private:
         }
 
         m_sceneObjects.clear();
+        m_terminalScreenObject = nullptr;  // Will re-bind after load
+        m_terminalScreenBound = false;
 
         // Try binary loading first for fast load
         if (tryLoadBinaryObjects(filepath, levelData)) {
@@ -9192,16 +9918,49 @@ private:
         updateAINodeList();
         updateAINodeRenderer();
 
-        // Load zone data
-        if (m_zoneSystem && levelData.zoneData.hasData) {
-            // Re-read the raw JSON to pass to ZoneSystem::load
+        // Load zone data and object groups from raw JSON
+        {
             try {
                 std::ifstream zfile(filepath);
                 nlohmann::json zroot = nlohmann::json::parse(zfile);
                 zfile.close();
-                m_zoneSystem->load(zroot);
+
+                if (m_zoneSystem && levelData.zoneData.hasData) {
+                    m_zoneSystem->load(zroot);
+                }
+
+                // Load object groups (rebuild indices from object names)
+                m_objectGroups.clear();
+                if (zroot.contains("objectGroups") && zroot["objectGroups"].is_array()) {
+                    // Build name→index map
+                    std::map<std::string, int> nameToIndex;
+                    for (int i = 0; i < static_cast<int>(m_sceneObjects.size()); i++) {
+                        nameToIndex[m_sceneObjects[i]->getName()] = i;
+                    }
+
+                    for (const auto& gj : zroot["objectGroups"]) {
+                        EditorUI::ObjectGroup group;
+                        group.name = gj.value("name", "Group");
+                        group.expanded = gj.value("expanded", true);
+                        if (gj.contains("objects") && gj["objects"].is_array()) {
+                            for (const auto& objName : gj["objects"]) {
+                                auto it = nameToIndex.find(objName.get<std::string>());
+                                if (it != nameToIndex.end()) {
+                                    group.objectIndices.insert(it->second);
+                                }
+                            }
+                        }
+                        if (!group.objectIndices.empty()) {
+                            m_objectGroups.push_back(group);
+                        }
+                    }
+                    m_editorUI.setObjectGroups(m_objectGroups);
+                    if (!m_objectGroups.empty()) {
+                        std::cout << "Loaded " << m_objectGroups.size() << " object groups" << std::endl;
+                    }
+                }
             } catch (const std::exception& e) {
-                std::cerr << "Failed to load zone data: " << e.what() << std::endl;
+                std::cerr << "Failed to load extra data: " << e.what() << std::endl;
             }
         }
 
@@ -9787,6 +10546,7 @@ private:
         m_isPlayMode = true;
         m_playModeCursorVisible = false;  // Start with cursor hidden (mouse look active)
         m_playModeDebug = false;          // Debug visuals off by default
+        m_selectedFaces.clear();
         Input::setMouseCaptured(true);
 
         // Disable noclip for play mode (terrain collision enabled)
@@ -11882,6 +12642,12 @@ private:
         perception.posZ = npcPos.z;
         perception.fov = fovDegrees;
         perception.range = range;
+
+        // Include player (camera) position so spatial analysis can show it
+        glm::vec3 camPos = m_camera.getPosition();
+        perception.playerX = camPos.x;
+        perception.playerY = camPos.y;
+        perception.playerZ = camPos.z;
         
         // Get NPC facing direction from Y rotation (euler angles)
         glm::vec3 euler = npc->getEulerRotation();
@@ -11953,6 +12719,20 @@ private:
             }
             visObj.description = obj->getDescription();
 
+            // Append control point info so AI knows about connectable parts
+            if (obj->hasControlPoints()) {
+                std::string cpInfo = "CPs: ";
+                for (size_t ci = 0; ci < obj->getControlPoints().size(); ci++) {
+                    if (ci > 0) cpInfo += ", ";
+                    cpInfo += obj->getControlPoints()[ci].name;
+                }
+                if (visObj.description.empty()) {
+                    visObj.description = cpInfo;
+                } else {
+                    visObj.description += " | " + cpInfo;
+                }
+            }
+
             perception.visibleObjects.push_back(visObj);
         }
         
@@ -11968,6 +12748,53 @@ private:
     /**
      * Execute an AI motor control action (look_around, turn_to, move_to, etc.)
      */
+    // Send a completion message to the AI after a move_to finishes,
+    // so it can issue the next action in a multi-step sequence.
+    void sendActionCompleteCallback(SceneObject* npc, const std::string& actionType,
+                                     float x, float z) {
+        if (!npc || !m_httpClient) return;
+
+        std::string npcName = npc->getName();
+        int beingType = static_cast<int>(npc->getBeingType());
+
+        std::string sessionId;
+        auto it = m_quickChatSessionIds.find(npcName);
+        if (it != m_quickChatSessionIds.end()) sessionId = it->second;
+        if (sessionId.empty()) return;  // No active session, nothing to callback
+
+        // Fresh perception from the arrival location
+        PerceptionData perception = performScanCone(npc, 360.0f, 50.0f);
+
+        std::string msg = "[ACTION COMPLETE] " + actionType + " finished at ("
+                        + std::to_string(x) + ", " + std::to_string(z)
+                        + "). If you have a pending task (e.g. a return trip), "
+                          "issue the next action now. If not, simply acknowledge.";
+
+        m_httpClient->sendChatMessageWithPerception(sessionId, msg,
+            npcName, "", beingType, perception,
+            [this, npcName, npc](const AsyncHttpClient::Response& resp) {
+                if (!resp.success) return;
+                try {
+                    auto json = nlohmann::json::parse(resp.body);
+                    if (json.contains("session_id")) {
+                        m_quickChatSessionIds[npcName] = json["session_id"].get<std::string>();
+                    }
+                    std::string response = json.value("response", "");
+                    if (!response.empty()) {
+                        addChatMessage(npcName, response);
+                        speakTTS(response, npcName);
+                    }
+                    // Execute follow-up action if the AI issued one
+                    if (json.contains("action") && !json["action"].is_null()) {
+                        m_currentInteractObject = npc;
+                        executeAIAction(json["action"]);
+                    }
+                } catch (const std::exception& e) {
+                    std::cerr << "[ActionComplete] Parse error: " << e.what() << std::endl;
+                }
+            });
+    }
+
     void executeAIAction(const nlohmann::json& action) {
         if (!m_currentInteractObject) return;
         
@@ -12322,6 +13149,14 @@ private:
                 }
             }
         }
+        else if (actionType == "show_mind_map") {
+            m_editorUI.showMindMap() = true;
+            std::cout << "[AI Action] Mind map opened by " << m_currentInteractObject->getName() << std::endl;
+        }
+        else if (actionType == "hide_mind_map") {
+            m_editorUI.showMindMap() = false;
+            std::cout << "[AI Action] Mind map closed by " << m_currentInteractObject->getName() << std::endl;
+        }
         else {
             std::cout << "[AI Action] Unknown action type: '" << actionType << "'" << std::endl;
         }
@@ -12470,6 +13305,11 @@ private:
                 m_aiActionActive = false;
                 std::cout << "[AI Action] move_to complete at ("
                           << m_aiActionTargetPos.x << ", " << m_aiActionTargetPos.z << ")" << std::endl;
+
+                // Send completion callback so the AI can issue the next action
+                // in a multi-step sequence (e.g. "go to door then come back")
+                sendActionCompleteCallback(m_currentInteractObject, "move_to",
+                    m_aiActionTargetPos.x, m_aiActionTargetPos.z);
             }
         }
         else if (m_aiActionType == "pickup") {
@@ -12930,6 +13770,74 @@ private:
         return base + "_" + std::to_string(maxNum + 1);
     }
 
+    // Duplicate without selecting or printing — returns new object index, or -1 on failure
+    int duplicateObjectSilent(int index) {
+        if (index < 0 || index >= static_cast<int>(m_sceneObjects.size())) return -1;
+
+        SceneObject* original = m_sceneObjects[index].get();
+        if (index == m_spawnObjectIndex) return -1;
+
+        if (!original->getModelPath().empty()) {
+            std::unique_ptr<SceneObject> newObj;
+            std::string modelPath = original->getModelPath();
+            std::string ext = modelPath.substr(modelPath.find_last_of('.') + 1);
+
+            if (ext == "lime") {
+                auto result = LimeLoader::load(modelPath);
+                if (!result.success) return -1;
+                newObj = LimeLoader::createSceneObject(result.mesh, *m_modelRenderer);
+            } else {
+                auto result = GLBLoader::load(modelPath);
+                if (!result.success || result.meshes.empty()) return -1;
+                newObj = GLBLoader::createSceneObject(result.meshes[0], *m_modelRenderer);
+            }
+            if (!newObj) return -1;
+
+            newObj->setModelPath(modelPath);
+            newObj->setName(generateUniqueName(original->getName()));
+            newObj->getTransform().setPosition(original->getTransform().getPosition());
+            newObj->setEulerRotation(original->getEulerRotation());
+            newObj->getTransform().setScale(original->getTransform().getScale());
+            newObj->setHueShift(original->getHueShift());
+            newObj->setSaturation(original->getSaturation());
+            newObj->setBrightness(original->getBrightness());
+            newObj->setBeingType(original->getBeingType());
+            newObj->setDailySchedule(original->hasDailySchedule());
+            newObj->setPatrolSpeed(original->getPatrolSpeed());
+            for (const auto& behavior : original->getBehaviors()) {
+                newObj->addBehavior(behavior);
+            }
+            m_sceneObjects.push_back(std::move(newObj));
+        } else if (original->hasMeshData()) {
+            const auto& verts = original->getVertices();
+            const auto& inds = original->getIndices();
+            uint32_t handle = m_modelRenderer->createModel(verts, inds);
+            auto newObj = std::make_unique<SceneObject>(generateUniqueName(original->getName()));
+            newObj->setBufferHandle(handle);
+            newObj->setVertexCount(static_cast<uint32_t>(verts.size()));
+            newObj->setIndexCount(static_cast<uint32_t>(inds.size()));
+            newObj->setLocalBounds(original->getLocalBounds());
+            newObj->setModelPath("");
+            newObj->setMeshData(verts, inds);
+            newObj->getTransform().setPosition(original->getTransform().getPosition());
+            newObj->setEulerRotation(original->getEulerRotation());
+            newObj->getTransform().setScale(original->getTransform().getScale());
+            newObj->setHueShift(original->getHueShift());
+            newObj->setSaturation(original->getSaturation());
+            newObj->setBrightness(original->getBrightness());
+            newObj->setBeingType(original->getBeingType());
+            newObj->setDailySchedule(original->hasDailySchedule());
+            newObj->setPatrolSpeed(original->getPatrolSpeed());
+            for (const auto& behavior : original->getBehaviors()) {
+                newObj->addBehavior(behavior);
+            }
+            m_sceneObjects.push_back(std::move(newObj));
+        } else {
+            return -1;
+        }
+        return static_cast<int>(m_sceneObjects.size()) - 1;
+    }
+
     void duplicateObject(int index) {
         if (index < 0 || index >= static_cast<int>(m_sceneObjects.size())) return;
 
@@ -13026,7 +13934,142 @@ private:
         std::cout << "Object duplicated" << std::endl;
     }
 
+    void pickFaceAtMouse() {
+        float aspect = static_cast<float>(getWindow().getWidth()) / getWindow().getHeight();
+        glm::vec2 mousePos = Input::getMousePosition();
+        float normalizedX = (mousePos.x / getWindow().getWidth()) * 2.0f - 1.0f;
+        float normalizedY = 1.0f - (mousePos.y / getWindow().getHeight()) * 2.0f;
+
+        glm::mat4 proj = m_camera.getProjectionMatrix(aspect, 0.1f, 5000.0f);
+        glm::mat4 view = m_camera.getViewMatrix();
+        glm::mat4 invVP = glm::inverse(proj * view);
+
+        glm::vec4 nearPoint = invVP * glm::vec4(normalizedX, normalizedY, -1.0f, 1.0f);
+        glm::vec4 farPoint = invVP * glm::vec4(normalizedX, normalizedY, 1.0f, 1.0f);
+        nearPoint /= nearPoint.w;
+        farPoint /= farPoint.w;
+
+        glm::vec3 rayOrigin = glm::vec3(nearPoint);
+        glm::vec3 rayDir = glm::normalize(glm::vec3(farPoint - nearPoint));
+
+        // Find closest cube-primitive hit with triangle-level raycast
+        int closestIndex = -1;
+        float closestDist = std::numeric_limits<float>::max();
+        glm::vec3 hitNormal(0);
+
+        for (size_t i = 0; i < m_sceneObjects.size(); i++) {
+            auto& obj = m_sceneObjects[i];
+            if (!obj || !obj->isVisible()) continue;
+            if (obj->getPrimitiveType() != PrimitiveType::Cube) continue;
+
+            // Quick AABB pre-check
+            AABB worldBounds = obj->getWorldBounds();
+            float aabbDist = worldBounds.intersect(rayOrigin, rayDir);
+            if (aabbDist < 0 || aabbDist >= closestDist) continue;
+
+            auto hit = obj->raycast(rayOrigin, rayDir);
+            if (hit.hit && hit.distance < closestDist) {
+                closestDist = hit.distance;
+                closestIndex = static_cast<int>(i);
+                hitNormal = hit.normal;
+            }
+        }
+
+        if (closestIndex < 0) return;
+
+        // Quantize normal to nearest axis
+        glm::ivec3 qNormal(0);
+        float ax = std::abs(hitNormal.x), ay = std::abs(hitNormal.y), az = std::abs(hitNormal.z);
+        if (ax >= ay && ax >= az) {
+            qNormal.x = (hitNormal.x > 0) ? 1 : -1;
+        } else if (ay >= ax && ay >= az) {
+            qNormal.y = (hitNormal.y > 0) ? 1 : -1;
+        } else {
+            qNormal.z = (hitNormal.z > 0) ? 1 : -1;
+        }
+
+        // Build spatial index of all cube-primitive objects: grid pos → object index
+        // Use doubled coordinates (multiply by 2 and round) to avoid .5 ambiguity
+        // Blocks at positions like 10.5, 11.5 become grid keys 21, 23 — stable and unique
+        struct IVec3Hash {
+            size_t operator()(const glm::ivec3& v) const {
+                size_t h = std::hash<int>()(v.x);
+                h ^= std::hash<int>()(v.y) + 0x9e3779b9 + (h << 6) + (h >> 2);
+                h ^= std::hash<int>()(v.z) + 0x9e3779b9 + (h << 6) + (h >> 2);
+                return h;
+            }
+        };
+        auto toGrid = [](const glm::vec3& pos) -> glm::ivec3 {
+            return glm::ivec3(
+                static_cast<int>(std::floor(pos.x * 2.0f + 0.5f)),
+                static_cast<int>(std::floor(pos.y * 2.0f + 0.5f)),
+                static_cast<int>(std::floor(pos.z * 2.0f + 0.5f))
+            );
+        };
+        std::unordered_map<glm::ivec3, int, IVec3Hash> grid;
+        for (size_t i = 0; i < m_sceneObjects.size(); i++) {
+            auto& obj = m_sceneObjects[i];
+            if (!obj || !obj->isVisible()) continue;
+            if (obj->getPrimitiveType() != PrimitiveType::Cube) continue;
+            glm::vec3 pos = obj->getTransform().getPosition();
+            grid[toGrid(pos)] = static_cast<int>(i);
+        }
+
+        // Get starting block grid position
+        glm::vec3 startPos = m_sceneObjects[closestIndex]->getTransform().getPosition();
+        glm::ivec3 startGP = toGrid(startPos);
+
+        // Determine which 2 axes to flood-fill in (perpendicular to normal)
+        int normalAxis = (qNormal.x != 0) ? 0 : (qNormal.y != 0) ? 1 : 2;
+
+        // BFS flood fill
+        m_selectedFaces.clear();
+        std::unordered_set<glm::ivec3, IVec3Hash> visited;
+        std::queue<glm::ivec3> bfsQueue;
+        bfsQueue.push(startGP);
+        visited.insert(startGP);
+
+        // The two perpendicular axis directions for BFS neighbors
+        // Step size is 2 in doubled-coordinate grid (1.0 world unit = 2 grid units)
+        glm::ivec3 dirs[4];
+        int dirCount = 0;
+        if (normalAxis != 0) { dirs[dirCount++] = {2,0,0}; dirs[dirCount++] = {-2,0,0}; }
+        if (normalAxis != 1) { dirs[dirCount++] = {0,2,0}; dirs[dirCount++] = {0,-2,0}; }
+        if (normalAxis != 2) { dirs[dirCount++] = {0,0,2}; dirs[dirCount++] = {0,0,-2}; }
+
+        while (!bfsQueue.empty()) {
+            glm::ivec3 cur = bfsQueue.front();
+            bfsQueue.pop();
+
+            // Check that this block is on the same face plane as the start
+            if (cur[normalAxis] != startGP[normalAxis]) continue;
+
+            m_selectedFaces.push_back({grid[cur], qNormal});
+
+            for (int d = 0; d < dirCount; d++) {
+                glm::ivec3 neighbor = cur + dirs[d];
+                if (visited.count(neighbor)) continue;
+                visited.insert(neighbor);
+                if (grid.count(neighbor) && neighbor[normalAxis] == startGP[normalAxis]) {
+                    bfsQueue.push(neighbor);
+                }
+            }
+        }
+        syncFaceSelectionToUI();
+    }
+
+    void syncFaceSelectionToUI() {
+        // Deduplicate object indices and pass to EditorUI
+        std::set<int> uniqueIndices;
+        for (const auto& sf : m_selectedFaces) {
+            uniqueIndices.insert(sf.objectIndex);
+        }
+        m_editorUI.setFaceSelectedIndices(std::vector<int>(uniqueIndices.begin(), uniqueIndices.end()));
+    }
+
     void pickObjectAtMouse() {
+        m_selectedFaces.clear();
+        syncFaceSelectionToUI();
         float aspect = static_cast<float>(getWindow().getWidth()) / getWindow().getHeight();
         glm::vec2 mousePos = Input::getMousePosition();
         float normalizedX = (mousePos.x / getWindow().getWidth()) * 2.0f - 1.0f;
@@ -13231,6 +14274,17 @@ private:
         .wrapWorld = true
     }};
 
+    // Terminal emulator
+    eden::EdenTerminal m_terminal;
+    ImFont* m_monoFont = nullptr;
+    bool m_sessionMode = false;
+    bool m_terminalInitialized = false;
+    // 3D terminal screen
+    SceneObject* m_terminalScreenObject = nullptr;
+    std::vector<unsigned char> m_terminalPixelBuffer;
+    bool m_terminalPixelsDirty = false;
+    bool m_terminalScreenBound = false;
+
     // Editor subsystems
     EditorUI m_editorUI;
     std::unique_ptr<TerrainBrushTool> m_brushTool;
@@ -13282,6 +14336,13 @@ private:
     std::vector<std::unique_ptr<SceneObject>> m_sceneObjects;
     int m_selectedObjectIndex = -1;
     std::set<int> m_selectedObjectIndices;  // For multi-select
+
+    // Alt+click face selection for block walls
+    struct SelectedFace {
+        int objectIndex;
+        glm::ivec3 normal;  // quantized axis: e.g. (1,0,0), (0,-1,0)
+    };
+    std::vector<SelectedFace> m_selectedFaces;
     bool m_gizmoDragging = false;
     TransformMode m_transformMode = TransformMode::Select;
     glm::vec2 m_lastMousePos{0};
@@ -13290,6 +14351,26 @@ private:
     GizmoAxis m_gizmoActiveAxis = GizmoAxis::None;
     glm::vec3 m_gizmoDragRawPos{0};    // Unsnapped accumulator for move snap
     glm::vec3 m_gizmoDragRawEuler{0};  // Unsnapped accumulator for rotate snap
+
+    // Wall draw tool state
+    bool m_wallDrawing = false;
+    glm::vec3 m_wallCorner1{0};
+    glm::vec3 m_wallCorner2{0};
+    int m_buildingCounter = 0;  // For naming Building_N_Walls etc.
+
+    // Building texture swatches (loaded from textures/building/)
+    struct BuildingTexture {
+        std::string name;
+        std::vector<unsigned char> pixels;
+        int width = 0, height = 0;
+        // Vulkan resources for ImGui preview
+        VkImage image = VK_NULL_HANDLE;
+        VkDeviceMemory memory = VK_NULL_HANDLE;
+        VkImageView view = VK_NULL_HANDLE;
+        VkSampler sampler = VK_NULL_HANDLE;
+        VkDescriptorSet descriptor = VK_NULL_HANDLE;
+    };
+    std::vector<BuildingTexture> m_buildingTextures;
 
     // Object groups (for organization only) - uses EditorUI::ObjectGroup
     std::vector<EditorUI::ObjectGroup> m_objectGroups;
@@ -13471,12 +14552,23 @@ static void crashHandler(int sig) {
     _exit(1);
 }
 
-int main() {
+int main(int argc, char* argv[]) {
     signal(SIGSEGV, crashHandler);
     signal(SIGABRT, crashHandler);
     signal(SIGFPE, crashHandler);
+
+    bool sessionMode = false;
+    for (int i = 1; i < argc; ++i) {
+        if (std::string(argv[i]) == "--session-mode") {
+            sessionMode = true;
+        }
+    }
+
     try {
         TerrainEditor editor;
+        if (sessionMode) {
+            editor.setSessionMode(true);
+        }
         editor.run();
     } catch (const std::exception& e) {
         std::cerr << "\n=== EXCEPTION: " << e.what() << " ===" << std::endl;

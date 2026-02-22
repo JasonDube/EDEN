@@ -3,6 +3,7 @@
 #include "BeingTypes.hpp"
 #include "ConversationManager.hpp"
 #include <glm/glm.hpp>
+#include <nlohmann/json.hpp>
 #include <string>
 #include <memory>
 #include <functional>
@@ -13,11 +14,20 @@ namespace ai {
 /**
  * Configuration for the AI Companion module.
  */
+/**
+ * Callback type for gathering perception data from the scene.
+ * The terrain editor sets this so the module can access performScanCone().
+ * Returns perception as JSON (from PerceptionData::toJson()).
+ */
+using PerceptionProvider = std::function<nlohmann::json(const class IConversable*)>;
+
 struct AICompanionConfig {
     std::string backendUrl = "http://localhost:8080";
     float interactionRange = 3.0f;        // Max distance to interact with NPCs
     bool autoGreet = true;                 // NPCs greet player on conversation start
     bool showDialogueBubbles = true;       // Show 3D dialogue bubbles above NPCs
+    float heartbeatInterval = 5.0f;       // Seconds between heartbeat polls
+    bool enableHeartbeat = true;          // Toggle passive perception
 };
 
 /**
@@ -164,7 +174,14 @@ public:
      * Access the underlying conversation manager.
      */
     ConversationManager& getConversationManager() { return *m_conversationManager; }
-    
+
+    /**
+     * Set the perception provider callback.
+     * Must be called before heartbeat can function.
+     * @param provider Function that gathers PerceptionData for a given NPC
+     */
+    void setPerceptionProvider(PerceptionProvider provider) { m_perceptionProvider = std::move(provider); }
+
 protected:
     // Override this if your container uses different pointer types
     virtual const IConversable* getConversable(const IConversable* obj) const { return obj; }
@@ -176,6 +193,14 @@ private:
     const IConversable* m_currentTarget = nullptr;
     std::string m_currentSessionId;
     
+    // Heartbeat (passive perception)
+    float m_heartbeatTimer = 0.0f;
+    PerceptionProvider m_perceptionProvider;
+    void sendHeartbeat();
+    void onHeartbeatResponse(const std::string& response,
+                              const nlohmann::json& action,
+                              bool changesDetected);
+
     // UI state
     char m_inputBuffer[512] = {0};
     bool m_scrollToBottom = false;

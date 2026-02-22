@@ -22,7 +22,7 @@ struct Vertex3D {
     glm::vec3 texHSB;      // Per-vertex texture color adjustment (hue, saturation, brightness)
 };
 
-enum class BrushMode { Raise, Lower, Smooth, Flatten, Paint, Crack, Texture, Plateau, LevelMin, Grab, Select, Deselect, MoveObject, Spire, Ridged, Trench, PathMode, Terrace, FlattenToY };
+enum class BrushMode { Raise, Lower, Smooth, Flatten, Paint, Crack, Texture, Plateau, LevelMin, Grab, Select, Deselect, MoveObject, Spire, Ridged, Trench, PathMode, Terrace, FlattenToY, WallDraw, Foundation };
 
 enum class BrushShape { Circle, Ellipse, Square };
 

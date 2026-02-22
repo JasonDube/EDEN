@@ -1,6 +1,11 @@
-add_executable(terrain_editor main.cpp grove_host.cpp MCPServer.cpp)
+add_executable(terrain_editor main.cpp grove_host.cpp MCPServer.cpp
+    ${CMAKE_SOURCE_DIR}/src/Terminal/EdenTerminal.cpp)
 
-target_link_libraries(terrain_editor PRIVATE eden)
+# libvterm for terminal emulation
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(VTERM REQUIRED vterm)
+
+target_link_libraries(terrain_editor PRIVATE eden ${VTERM_LIBRARIES} util)
 
 # Grove scripting language (Rust static library)
 add_library(grove STATIC IMPORTED)
@@ -8,11 +13,13 @@ set_target_properties(grove PROPERTIES
     IMPORTED_LOCATION ${CMAKE_SOURCE_DIR}/modules/eden_script/grove/target/release/libgrove.a
 )
 target_link_libraries(terrain_editor PRIVATE grove dl m)
+target_compile_definitions(terrain_editor PRIVATE CMAKE_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
 
 # Need access to internal headers for TerrainPipeline
 target_include_directories(terrain_editor PRIVATE
     ${CMAKE_SOURCE_DIR}/src
     ${CMAKE_SOURCE_DIR}/modules/eden_script/grove/include
+    ${VTERM_INCLUDE_DIRS}
 )
 
 # Copy shaders to example build directory
@@ -66,6 +73,18 @@ add_custom_command(TARGET terrain_editor POST_BUILD
         ${CMAKE_CURRENT_SOURCE_DIR}/assets/textures
         $<TARGET_FILE_DIR:terrain_editor>/textures
 )
+
+# Copy building textures to build directory (if they exist)
+add_custom_command(TARGET terrain_editor POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E make_directory $<TARGET_FILE_DIR:terrain_editor>/textures/building
+)
+if(EXISTS "${CMAKE_SOURCE_DIR}/textures/building")
+    add_custom_command(TARGET terrain_editor POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+            ${CMAKE_SOURCE_DIR}/textures/building
+            $<TARGET_FILE_DIR:terrain_editor>/textures/building
+    )
+endif()
 
 # Copy Grove logo to build directory
 add_custom_command(TARGET terrain_editor POST_BUILD

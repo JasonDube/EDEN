@@ -1232,6 +1232,7 @@ private:
             .paintStrength = m_paintStrength,
             .isPainting = m_isPainting,
             .squareBrush = m_squareBrush,
+            .fillPaintToFace = m_fillPaintToFace,
             .useStamp = m_useStamp,
             .useSmear = m_useSmear,
             .useEyedropper = m_useEyedropper,
@@ -4504,6 +4505,7 @@ private:
     float m_paintStrength = 0.5f;
     bool m_isPainting = false;
     bool m_squareBrush = false;  // Square brush (pixel art style)
+    bool m_fillPaintToFace = false;  // Click face to fill with color
 
     // Brush modes
     bool m_useStamp = false;

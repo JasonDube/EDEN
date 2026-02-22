@@ -118,6 +118,22 @@ public:
     const ConversationSession* getActiveSession() const;
     
     /**
+     * Send a heartbeat (passive perception) request.
+     * Called periodically for EDEN companions to detect environmental changes.
+     * @param jsonBody The JSON request body as string
+     * @param callback Called with response body and success flag
+     */
+    void postHeartbeat(const std::string& jsonBody,
+                       std::function<void(const std::string&, bool)> callback);
+
+    /**
+     * Add an NPC message to a session's history (e.g., from heartbeat responses).
+     */
+    void addNpcMessage(const std::string& sessionId,
+                       const std::string& npcName,
+                       const std::string& message);
+
+    /**
      * Set callback for connection status changes.
      */
     void setConnectionCallback(ConnectionCallback callback);
