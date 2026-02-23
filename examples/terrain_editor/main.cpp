@@ -42,6 +42,9 @@
 // Game Modules
 #include "GameModules/GameModule.hpp"
 
+// OS / Filesystem
+#include "OS/FilesystemBrowser.hpp"
+
 #include <eden/Window.hpp>
 #include <eden/Camera.hpp>
 #include <eden/Input.hpp>
@@ -89,6 +92,16 @@
 #include <glm/gtc/matrix_transform.hpp>
 
 using namespace eden;
+
+static std::string shellEscapeFS(const std::string& s) {
+    std::string result = "'";
+    for (char c : s) {
+        if (c == '\'') result += "'\\''";
+        else result += c;
+    }
+    result += "'";
+    return result;
+}
 
 struct TerrainPushConstants {
     glm::mat4 mvp;
@@ -145,6 +158,8 @@ protected:
 
         m_modelRenderer = std::make_unique<ModelRenderer>(
             getContext(), getSwapchain().getRenderPass(), getSwapchain().getExtent());
+
+        m_filesystemBrowser.init(m_modelRenderer.get(), &m_sceneObjects, &m_terrain);
 
         m_skinnedModelRenderer = std::make_unique<SkinnedModelRenderer>(
             getContext(), getSwapchain().getRenderPass(), getSwapchain().getExtent());
@@ -990,6 +1005,10 @@ protected:
             m_terminal.clearDirty();
         }
 
+        // Process pending filesystem navigation
+        m_filesystemBrowser.processNavigation();
+        m_filesystemBrowser.updateAnimations(deltaTime);
+
         // Update level transition fade (runs even during transitions)
         updateFade(deltaTime);
 
@@ -1439,7 +1458,8 @@ protected:
             if (!objPtr || !objPtr->isVisible()) continue;
 
             // Hide door trigger zones in play mode (they're invisible interaction areas)
-            if (m_isPlayMode && objPtr->isDoor()) continue;
+            // But keep filesystem doors visible — they represent folder entries
+            if (m_isPlayMode && objPtr->isDoor() && objPtr->getBuildingType() != "filesystem") continue;
 
             glm::mat4 modelMatrix = const_cast<SceneObject*>(objPtr.get())->getTransform().getMatrix();
 
@@ -1467,6 +1487,35 @@ protected:
             } else {
                 m_modelRenderer->render(cmd, vp, objPtr->getBufferHandle(), modelMatrix,
                                         hue, sat, bright);
+            }
+        }
+
+        // Draw wireframe outlines for selected/drag-hovered filesystem objects
+        for (auto& obj : m_sceneObjects) {
+            if (!obj || !obj->isSelected()) continue;
+            const auto& bt = obj->getBuildingType();
+            if (bt != "filesystem" && bt != "filesystem_wall") continue;
+            // Green for drag-hover target, yellow for normal selection
+            bool isDragHover = (m_fsDragActive && obj.get() == m_fsDragHoverWall);
+            glm::vec3 wireColor = isDragHover ? glm::vec3(0.0f, 1.0f, 0.3f) : glm::vec3(1.0f, 0.7f, 0.0f);
+            const AABB& lb = obj->getLocalBounds();
+            if (lb.getSize().x > 0.001f || lb.getSize().y > 0.001f || lb.getSize().z > 0.001f) {
+                glm::mat4 m = obj->getTransform().getMatrix();
+                glm::vec3 c[8];
+                c[0] = glm::vec3(m * glm::vec4(lb.min.x, lb.min.y, lb.min.z, 1.0f));
+                c[1] = glm::vec3(m * glm::vec4(lb.max.x, lb.min.y, lb.min.z, 1.0f));
+                c[2] = glm::vec3(m * glm::vec4(lb.max.x, lb.min.y, lb.max.z, 1.0f));
+                c[3] = glm::vec3(m * glm::vec4(lb.min.x, lb.min.y, lb.max.z, 1.0f));
+                c[4] = glm::vec3(m * glm::vec4(lb.min.x, lb.max.y, lb.min.z, 1.0f));
+                c[5] = glm::vec3(m * glm::vec4(lb.max.x, lb.max.y, lb.min.z, 1.0f));
+                c[6] = glm::vec3(m * glm::vec4(lb.max.x, lb.max.y, lb.max.z, 1.0f));
+                c[7] = glm::vec3(m * glm::vec4(lb.min.x, lb.max.y, lb.max.z, 1.0f));
+                std::vector<glm::vec3> boxLines = {
+                    c[0],c[1], c[1],c[2], c[2],c[3], c[3],c[0],
+                    c[4],c[5], c[5],c[6], c[6],c[7], c[7],c[4],
+                    c[0],c[4], c[1],c[5], c[2],c[6], c[3],c[7]
+                };
+                m_modelRenderer->renderLines(cmd, vp, boxLines, wireColor);
             }
         }
 
@@ -3276,12 +3325,19 @@ private:
     void handleCameraInput(float deltaTime) {
         // Play mode: right-click toggles cursor visibility for UI interaction
         if (m_isPlayMode && !m_inConversation) {
-            // Check for right-click to toggle cursor
+            // Check for right-click to toggle cursor (and open filesystem context menu)
             static bool wasRightClickDown = false;
             bool rightClickDown = Input::isMouseButtonDown(Input::MOUSE_RIGHT);
             if (rightClickDown && !wasRightClickDown) {
-                m_playModeCursorVisible = !m_playModeCursorVisible;
-                Input::setMouseCaptured(!m_playModeCursorVisible);
+                if (m_filesystemBrowser.isActive()) {
+                    // In filesystem mode: show cursor and open context menu
+                    m_playModeCursorVisible = true;
+                    Input::setMouseCaptured(false);
+                    m_fsContextMenuOpen = true;
+                } else {
+                    m_playModeCursorVisible = !m_playModeCursorVisible;
+                    Input::setMouseCaptured(!m_playModeCursorVisible);
+                }
             }
             wasRightClickDown = rightClickDown;
 
@@ -3563,9 +3619,18 @@ private:
 
         glm::vec3 oldCameraPos = m_camera.getPosition();
 
-        // Use character controller for play mode walk
+        // Double-tap space toggles fly/walk mode
+        if (m_isPlayMode && !imguiWantsKeyboard && !m_inConversation && !m_quickChatMode) {
+            if (Input::isKeyPressed(Input::KEY_SPACE)) {
+                float groundHeight = heightQuery(m_camera.getPosition().x, m_camera.getPosition().z);
+                m_camera.onSpacePressed(groundHeight);
+            }
+        }
+
+        // Use character controller for play mode walk (skip in filesystem browser — camera handles movement directly)
         bool useCharacterController = m_isPlayMode && m_characterController &&
-                                m_camera.getMovementMode() == MovementMode::Walk;
+                                m_camera.getMovementMode() == MovementMode::Walk &&
+                                !m_filesystemBrowser.isActive();
 
         if (useCharacterController) {
             // Calculate desired velocity from input
@@ -3856,22 +3921,8 @@ private:
             }
         }
 
-        // Engine hum when flying (play mode only)
-        MovementMode currentMode = m_camera.getMovementMode();
-        if (currentMode != m_lastMovementMode) {
-            if (currentMode == MovementMode::Fly) {
-                // Only play engine hum in play mode
-                if (m_isPlayMode && m_engineHumLoopId < 0) {
-                    m_engineHumLoopId = Audio::getInstance().startLoop("sounds/enginehum.wav", 0.5f);
-                }
-            } else if (currentMode == MovementMode::Walk) {
-                if (m_engineHumLoopId >= 0) {
-                    Audio::getInstance().stopLoop(m_engineHumLoopId);
-                    m_engineHumLoopId = -1;
-                }
-            }
-            m_lastMovementMode = currentMode;
-        }
+        // Track movement mode changes (engine hum disabled for now)
+        m_lastMovementMode = m_camera.getMovementMode();
 
         if (m_terrain.getConfig().wrapWorld) {
             glm::vec3 wrapped = m_terrain.wrapWorldPosition(m_camera.getPosition());
@@ -3940,6 +3991,35 @@ private:
                 }
             }
             wasF6 = f6;
+        }
+
+        // F9 — toggle filesystem browser (spawn ~/  or clear)
+        {
+            static bool wasF9 = false;
+            bool f9 = Input::isKeyDown(298); // GLFW_KEY_F9 = 298
+            if (f9 && !wasF9 && m_isPlayMode) {
+                if (m_filesystemBrowser.isActive()) {
+                    m_filesystemBrowser.clearFilesystemObjects();
+                    m_camera.setNoClip(false); // Restore terrain collision
+                    std::cout << "[F9] Filesystem browser dismissed" << std::endl;
+                } else {
+                    const char* home = getenv("HOME");
+                    std::string homePath = home ? home : "/";
+                    glm::vec3 spawnPos = m_camera.getPosition() + m_camera.getFront() * 8.0f;
+                    m_filesystemBrowser.setSpawnOrigin(spawnPos);
+                    m_filesystemBrowser.navigate(homePath);
+                    // Teleport to center of new gallery
+                    glm::vec3 galleryCam = spawnPos;
+                    galleryCam.y += 2.0f;
+                    m_camera.setPosition(galleryCam);
+                    if (m_characterController) {
+                        m_characterController->setPosition(galleryCam);
+                    }
+                    m_camera.setNoClip(true); // Disable terrain collision in filesystem silo
+                    std::cout << "[F9] Filesystem browser opened: " << homePath << std::endl;
+                }
+            }
+            wasF9 = f9;
         }
 
         // V key: push-to-talk (hold to record, release to transcribe + send to nearest NPC)
@@ -4399,16 +4479,288 @@ private:
         // Update economy and trading systems
         updateEconomySystems(deltaTime);
 
-        // Shooting - left mouse click to shoot (weapon type selected by 1-4 keys)
+        // Left click — crosshair raycast to interact with filesystem objects + drag-and-drop
         m_shootCooldown -= deltaTime;
-        bool leftClickDown = Input::isMouseButtonDown(Input::MOUSE_LEFT) && !ImGui::GetIO().WantCaptureMouse;
-        if (leftClickDown && m_shootCooldown <= 0.0f && !m_inConversation) {
-            shootProjectile();
-            Audio::getInstance().playSound("sounds/tir.mp3", 0.15f);
-            m_shootCooldown = 0.2f;  // Fire rate limit
-        }
+        bool leftDown = Input::isMouseButtonDown(Input::MOUSE_LEFT) && !ImGui::GetIO().WantCaptureMouse;
+        bool leftPressed = Input::isMouseButtonPressed(Input::MOUSE_LEFT) && !ImGui::GetIO().WantCaptureMouse;
+        bool leftReleased = m_fsLeftWasDown && !leftDown;
 
-        // Update projectiles
+        if (m_filesystemBrowser.isActive() && !m_inConversation) {
+            // Helper: crosshair raycast
+            auto doCrosshairRay = [&](glm::vec3& rayO, glm::vec3& rayD) {
+                float aspect = static_cast<float>(getWindow().getWidth()) / getWindow().getHeight();
+                glm::mat4 proj = m_camera.getProjectionMatrix(aspect, 0.1f, 5000.0f);
+                glm::mat4 view = m_camera.getViewMatrix();
+                glm::mat4 invVP = glm::inverse(proj * view);
+                glm::vec4 nearPt = invVP * glm::vec4(0, 0, -1, 1); nearPt /= nearPt.w;
+                glm::vec4 farPt  = invVP * glm::vec4(0, 0,  1, 1); farPt  /= farPt.w;
+                rayO = glm::vec3(nearPt);
+                rayD = glm::normalize(glm::vec3(farPt - nearPt));
+            };
+
+            auto raycastFS = [&](const glm::vec3& rayO, const glm::vec3& rayD) -> SceneObject* {
+                float closestDist = std::numeric_limits<float>::max();
+                SceneObject* closestHit = nullptr;
+                for (auto& obj : m_sceneObjects) {
+                    if (!obj) continue;
+                    const auto& bt = obj->getBuildingType();
+                    if (bt != "filesystem" && bt != "filesystem_wall") continue;
+                    float dist = obj->getWorldBounds().intersect(rayO, rayD);
+                    if (dist < 0 || dist >= 200.0f) continue;
+                    // Walls' rotated AABBs inflate and can shadow doors behind them.
+                    // Penalize wall hits so doors/files at similar distances always win.
+                    float effectiveDist = dist;
+                    if (bt == "filesystem_wall") effectiveDist += 3.0f;
+                    if (effectiveDist < closestDist) {
+                        closestDist = effectiveDist;
+                        closestHit = obj.get();
+                    }
+                }
+                return closestHit;
+            };
+
+            // Mouse just pressed — start potential drag or immediate action
+            if (leftPressed && m_shootCooldown <= 0.0f) {
+                glm::vec3 rayO, rayD;
+                doCrosshairRay(rayO, rayD);
+                SceneObject* hit = raycastFS(rayO, rayD);
+
+                if (hit && hit->isDoor()) {
+                    // Door — navigate immediately
+                    std::string target = hit->getTargetLevel();
+                    if (target.rfind("fs://", 0) == 0) {
+                        glm::vec3 doorPos = hit->getTransform().getPosition();
+                        m_filesystemBrowser.setSpawnOrigin(doorPos);
+                        m_filesystemBrowser.navigate(target.substr(5));
+                        glm::vec3 camPos = doorPos;
+                        camPos.y += 2.0f;
+                        m_camera.setPosition(camPos);
+                        if (m_characterController) {
+                            m_characterController->setPosition(camPos);
+                        }
+                    }
+                    m_shootCooldown = 0.2f;
+                } else if (hit && hit->getBuildingType() == "filesystem" && !hit->isDoor()) {
+                    // Non-door file — start drag candidate
+                    m_fsDragObject = hit;
+                    m_fsDragHoldTime = 0.0f;
+                    m_fsDragActive = false;
+                    m_fsDragHoverWall = nullptr;
+                } else if (hit && hit->getBuildingType() == "filesystem_wall") {
+                    // Wall click — select it, and start drag if wall has an item on it
+                    bool ctrlHeld = Input::isKeyDown(Input::KEY_LEFT_CONTROL) || Input::isKeyDown(Input::KEY_RIGHT_CONTROL);
+                    if (!ctrlHeld) {
+                        for (auto& obj : m_sceneObjects) {
+                            if (!obj) continue;
+                            const auto& bt = obj->getBuildingType();
+                            if (bt == "filesystem" || bt == "filesystem_wall")
+                                obj->setSelected(false);
+                        }
+                    }
+                    hit->setSelected(!hit->isSelected());
+                    // If wall has an item, allow drag (for moving files/folders)
+                    std::string wt = hit->getTargetLevel();
+                    if (wt.rfind("fs://", 0) == 0 && wt.size() > 5) {
+                        m_fsDragObject = hit;
+                        m_fsDragHoldTime = 0.0f;
+                        m_fsDragActive = false;
+                        m_fsDragHoverWall = nullptr;
+                    } else {
+                        m_shootCooldown = 0.2f;
+                    }
+                } else {
+                    // Nothing hit — clear all selections
+                    for (auto& obj : m_sceneObjects) {
+                        if (!obj) continue;
+                        const auto& bt = obj->getBuildingType();
+                        if (bt == "filesystem" || bt == "filesystem_wall")
+                            obj->setSelected(false);
+                    }
+                    m_shootCooldown = 0.2f;
+                }
+            }
+
+            // Mouse held — update drag state
+            if (leftDown && m_fsDragObject) {
+                m_fsDragHoldTime += deltaTime;
+                static constexpr float DRAG_THRESHOLD = 0.35f;
+
+                if (m_fsDragHoldTime >= DRAG_THRESHOLD) {
+                    m_fsDragActive = true;
+
+                    // Continuous raycast to find hovered wall
+                    glm::vec3 rayO, rayD;
+                    doCrosshairRay(rayO, rayD);
+
+                    // Clear previous hover highlight
+                    if (m_fsDragHoverWall) {
+                        m_fsDragHoverWall->setSelected(false);
+                        m_fsDragHoverWall = nullptr;
+                    }
+
+                    // Find drop target under crosshair (skip the dragged object itself)
+                    // Includes walls, folders, and files — walls are penalized so
+                    // objects mounted in front of them always win the raycast.
+                    float closestDist = std::numeric_limits<float>::max();
+                    SceneObject* hoverHit = nullptr;
+                    for (auto& obj : m_sceneObjects) {
+                        if (!obj || obj.get() == m_fsDragObject) continue;
+                        const auto& bt = obj->getBuildingType();
+                        if (bt != "filesystem" && bt != "filesystem_wall") continue;
+                        float dist = obj->getWorldBounds().intersect(rayO, rayD);
+                        if (dist < 0 || dist >= 200.0f) continue;
+                        float effectiveDist = dist;
+                        if (bt == "filesystem_wall") effectiveDist += 3.0f;
+                        if (effectiveDist < closestDist) {
+                            closestDist = effectiveDist;
+                            hoverHit = obj.get();
+                        }
+                    }
+
+                    if (hoverHit) {
+                        bool isFolder = (hoverHit->getBuildingType() == "filesystem" && hoverHit->isDoor());
+                        bool isWall = (hoverHit->getBuildingType() == "filesystem_wall");
+                        // Only highlight valid drop targets (folders and empty walls, not other files)
+                        if (isFolder || isWall) {
+                            hoverHit->setSelected(true);
+                            m_fsDragHoverWall = hoverHit;
+                        }
+                        // If hovering another file, block the drop (no highlight, no target)
+                    }
+                }
+            }
+
+            // Mouse released — complete drag or fall back to click-select
+            if (leftReleased && m_fsDragObject) {
+                if (m_fsDragActive && m_fsDragHoverWall) {
+                    // Get source path — works for both file objects and occupied walls
+                    std::string srcPath;
+                    std::string target = m_fsDragObject->getTargetLevel();
+                    if (target.rfind("fs://", 0) == 0) {
+                        srcPath = target.substr(5);
+                    }
+                    bool dragFromWall = (m_fsDragObject->getBuildingType() == "filesystem_wall");
+
+                    bool droppedOnFolder = (m_fsDragHoverWall->getBuildingType() == "filesystem" && m_fsDragHoverWall->isDoor());
+
+                    // Helper: remove the file/folder scene object for the given path
+                    auto removeSceneObjectByPath = [&](const std::string& fsPath) {
+                        std::string tgt = "fs://" + fsPath;
+                        for (auto it = m_sceneObjects.begin(); it != m_sceneObjects.end(); ++it) {
+                            if (*it && (*it)->getBuildingType() == "filesystem" &&
+                                (*it)->getTargetLevel() == tgt) {
+                                uint32_t handle = (*it)->getBufferHandle();
+                                if (handle != 0) m_modelRenderer->destroyModel(handle);
+                                m_sceneObjects.erase(it);
+                                break;
+                            }
+                        }
+                    };
+
+                    if (!srcPath.empty() && droppedOnFolder) {
+                        // Drop onto folder — move file/folder into that directory
+                        std::string folderTarget = m_fsDragHoverWall->getTargetLevel();
+                        if (folderTarget.rfind("fs://", 0) == 0) {
+                            namespace fs = std::filesystem;
+                            fs::path src(srcPath);
+                            fs::path destDir(folderTarget.substr(5));
+                            fs::path dst = destDir / src.filename();
+                            if (fs::exists(dst)) {
+                                std::string stem = dst.stem().string();
+                                std::string ext = dst.extension().string();
+                                int n = 1;
+                                do {
+                                    dst = destDir / (stem + "_" + std::to_string(n) + ext);
+                                    n++;
+                                } while (fs::exists(dst));
+                            }
+                            std::error_code ec;
+                            fs::rename(src, dst, ec);
+                            if (ec) {
+                                std::cerr << "[FS] Drag-to-folder failed: " << ec.message() << std::endl;
+                            } else {
+                                // Remove the visible file/folder object
+                                removeSceneObjectByPath(srcPath);
+                                // Clear the source wall's item reference
+                                if (dragFromWall) {
+                                    m_fsDragObject->setTargetLevel("");
+                                }
+                            }
+                        }
+                    } else if (!srcPath.empty() && !droppedOnFolder) {
+                        // Drop onto wall — move the file object to this wall slot
+                        glm::vec3 wallPos = m_fsDragHoverWall->getTransform().getPosition();
+                        glm::vec3 wallScale = m_fsDragHoverWall->getTransform().getScale();
+                        float wallYaw = m_fsDragHoverWall->getEulerRotation().y;
+
+                        // Remove the visible file/folder object
+                        removeSceneObjectByPath(srcPath);
+                        // Clear source wall's item reference if dragged from a wall
+                        if (dragFromWall) {
+                            m_fsDragObject->setTargetLevel("");
+                        }
+
+                        // Update destination wall's item reference
+                        m_fsDragHoverWall->setTargetLevel("fs://" + srcPath);
+
+                        // Spawn at new wall position
+                        m_filesystemBrowser.spawnFileAtWall(srcPath, wallPos, wallScale, wallYaw);
+                    }
+
+                    m_fsDragHoverWall->setSelected(false);
+                } else if (!m_fsDragActive) {
+                    // Short click — select the object
+                    bool ctrlHeld = Input::isKeyDown(Input::KEY_LEFT_CONTROL) || Input::isKeyDown(Input::KEY_RIGHT_CONTROL);
+                    if (!ctrlHeld) {
+                        for (auto& obj : m_sceneObjects) {
+                            if (!obj) continue;
+                            const auto& bt = obj->getBuildingType();
+                            if (bt == "filesystem" || bt == "filesystem_wall")
+                                obj->setSelected(false);
+                        }
+                    }
+                    if (m_fsDragObject) m_fsDragObject->setSelected(!m_fsDragObject->isSelected());
+                }
+
+                // Clear drag state
+                if (m_fsDragHoverWall) m_fsDragHoverWall->setSelected(false);
+                m_fsDragObject = nullptr;
+                m_fsDragHoverWall = nullptr;
+                m_fsDragActive = false;
+                m_fsDragHoldTime = 0.0f;
+                m_shootCooldown = 0.2f;
+            }
+
+            // Cancel drag if object disappeared (e.g. navigation happened)
+            if (!leftDown && m_fsDragObject) {
+                if (m_fsDragHoverWall) m_fsDragHoverWall->setSelected(false);
+                m_fsDragObject = nullptr;
+                m_fsDragHoverWall = nullptr;
+                m_fsDragActive = false;
+            }
+            // Per-frame hover raycast for filename preview under crosshair
+            if (!m_fsDragActive && !m_playModeCursorVisible) {
+                glm::vec3 rayO, rayD;
+                doCrosshairRay(rayO, rayD);
+                SceneObject* hover = raycastFS(rayO, rayD);
+                if (hover && hover->getBuildingType() == "filesystem") {
+                    m_fsHoverName = hover->getDescription();
+                } else {
+                    m_fsHoverName.clear();
+                }
+            } else {
+                m_fsHoverName.clear();
+            }
+        } else {
+            m_fsHoverName.clear();
+            if (leftDown && m_shootCooldown <= 0.0f && !m_inConversation) {
+                // Non-filesystem left click (existing shoot cooldown behavior)
+                m_shootCooldown = 0.2f;
+            }
+        }
+        m_fsLeftWasDown = leftDown;
+
+        // Update projectiles (for any still in flight)
         updateProjectiles(deltaTime);
 
         // Update pirate AI (scans for targets, sets up attacks)
@@ -8256,44 +8608,67 @@ private:
     }
 
     void renderPlayModeUI() {
-        ImGui::SetNextWindowPos(ImVec2(10, 10));
-        ImGui::SetNextWindowBgAlpha(0.3f);
-        if (ImGui::Begin("##PlayModeHint", nullptr,
-            ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
-            ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoMove |
-            ImGuiWindowFlags_NoSavedSettings)) {
-            ImGui::Text("PLAY MODE - Press Escape or F5 to exit");
-            if (m_playModeCursorVisible) {
-                ImGui::TextColored(ImVec4(0.5f, 1.0f, 0.5f, 1.0f), "Right-click to resume mouse look");
-            } else {
-                ImGui::Text("Right-click to show cursor for UI");
+        if (m_filesystemBrowser.isActive()) {
+            // Filesystem mode: show current directory path centered at top
+            std::string dirPath = m_filesystemBrowser.getCurrentPath();
+            if (m_monoFont) ImGui::PushFont(m_monoFont);
+            ImVec2 textSize = ImGui::CalcTextSize(dirPath.c_str());
+            float windowW = static_cast<float>(getWindow().getWidth());
+            float padX = 20.0f;
+            float winW = textSize.x + padX * 2.0f;
+            if (m_monoFont) ImGui::PopFont();
+            ImGui::SetNextWindowPos(ImVec2((windowW - winW) * 0.5f, 10));
+            ImGui::SetNextWindowBgAlpha(0.6f);
+            if (ImGui::Begin("##FSPath", nullptr,
+                ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+                ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoMove |
+                ImGuiWindowFlags_NoSavedSettings)) {
+                if (m_monoFont) ImGui::PushFont(m_monoFont);
+                ImGui::TextColored(ImVec4(1.0f, 0.9f, 0.4f, 1.0f), "%s", dirPath.c_str());
+                if (m_monoFont) ImGui::PopFont();
             }
-        }
-        ImGui::End();
+            ImGui::End();
+        } else {
+            // Normal play mode: show hint + HUD
+            ImGui::SetNextWindowPos(ImVec2(10, 10));
+            ImGui::SetNextWindowBgAlpha(0.3f);
+            if (ImGui::Begin("##PlayModeHint", nullptr,
+                ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+                ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoMove |
+                ImGuiWindowFlags_NoSavedSettings)) {
+                ImGui::Text("PLAY MODE - Press Escape or F5 to exit");
+                if (m_playModeCursorVisible) {
+                    ImGui::TextColored(ImVec4(0.5f, 1.0f, 0.5f, 1.0f), "Right-click to resume mouse look");
+                } else {
+                    ImGui::Text("Right-click to show cursor for UI");
+                }
+            }
+            ImGui::End();
 
-        // Credits + City Credits + Game time display (upper right corner)
-        std::string timeStr = formatGameTimeDisplay(m_gameTimeMinutes);
-        char creditsStr[64];
-        snprintf(creditsStr, sizeof(creditsStr), "%d CR", static_cast<int>(m_playerCredits));
-        char cityCreditsStr[64];
-        snprintf(cityCreditsStr, sizeof(cityCreditsStr), "City: %d CR", static_cast<int>(m_cityCredits));
-        ImVec2 timeSize = ImGui::CalcTextSize(timeStr.c_str());
-        ImVec2 creditsSize = ImGui::CalcTextSize(creditsStr);
-        ImVec2 cityCreditsSize = ImGui::CalcTextSize(cityCreditsStr);
-        float hudWindowWidth = creditsSize.x + 20.0f + cityCreditsSize.x + 20.0f + timeSize.x + 20.0f;
-        ImGui::SetNextWindowPos(ImVec2(getWindow().getWidth() - hudWindowWidth - 10, 10));
-        ImGui::SetNextWindowBgAlpha(0.5f);
-        if (ImGui::Begin("##GameHUD", nullptr,
-            ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
-            ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoMove |
-            ImGuiWindowFlags_NoSavedSettings)) {
-            ImGui::TextColored(ImVec4(0.3f, 1.0f, 0.5f, 1.0f), "%s", creditsStr);
-            ImGui::SameLine(0, 20.0f);
-            ImGui::TextColored(ImVec4(0.4f, 0.7f, 1.0f, 1.0f), "%s", cityCreditsStr);
-            ImGui::SameLine(0, 20.0f);
-            ImGui::TextColored(ImVec4(1.0f, 1.0f, 0.5f, 1.0f), "%s", timeStr.c_str());
+            // Credits + City Credits + Game time display (upper right corner)
+            std::string timeStr = formatGameTimeDisplay(m_gameTimeMinutes);
+            char creditsStr[64];
+            snprintf(creditsStr, sizeof(creditsStr), "%d CR", static_cast<int>(m_playerCredits));
+            char cityCreditsStr[64];
+            snprintf(cityCreditsStr, sizeof(cityCreditsStr), "City: %d CR", static_cast<int>(m_cityCredits));
+            ImVec2 timeSize = ImGui::CalcTextSize(timeStr.c_str());
+            ImVec2 creditsSize = ImGui::CalcTextSize(creditsStr);
+            ImVec2 cityCreditsSize = ImGui::CalcTextSize(cityCreditsStr);
+            float hudWindowWidth = creditsSize.x + 20.0f + cityCreditsSize.x + 20.0f + timeSize.x + 20.0f;
+            ImGui::SetNextWindowPos(ImVec2(getWindow().getWidth() - hudWindowWidth - 10, 10));
+            ImGui::SetNextWindowBgAlpha(0.5f);
+            if (ImGui::Begin("##GameHUD", nullptr,
+                ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+                ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoMove |
+                ImGuiWindowFlags_NoSavedSettings)) {
+                ImGui::TextColored(ImVec4(0.3f, 1.0f, 0.5f, 1.0f), "%s", creditsStr);
+                ImGui::SameLine(0, 20.0f);
+                ImGui::TextColored(ImVec4(0.4f, 0.7f, 1.0f, 1.0f), "%s", cityCreditsStr);
+                ImGui::SameLine(0, 20.0f);
+                ImGui::TextColored(ImVec4(1.0f, 1.0f, 0.5f, 1.0f), "%s", timeStr.c_str());
+            }
+            ImGui::End();
         }
-        ImGui::End();
 
         ImDrawList* drawList = ImGui::GetForegroundDrawList();
         float cx = getWindow().getWidth() * 0.5f;
@@ -8304,6 +8679,19 @@ private:
 
         drawList->AddLine(ImVec2(cx - size, cy), ImVec2(cx + size, cy), color, thickness);
         drawList->AddLine(ImVec2(cx, cy - size), ImVec2(cx, cy + size), color, thickness);
+
+        // Filename preview under crosshair when hovering a filesystem object
+        if (!m_fsHoverName.empty()) {
+            if (m_monoFont) ImGui::PushFont(m_monoFont);
+            ImVec2 labelSize = ImGui::CalcTextSize(m_fsHoverName.c_str());
+            float labelX = cx - labelSize.x * 0.5f;
+            float labelY = cy + size + 6.0f;
+            // Shadow
+            drawList->AddText(ImVec2(labelX + 1, labelY + 1), IM_COL32(0, 0, 0, 180), m_fsHoverName.c_str());
+            // Text
+            drawList->AddText(ImVec2(labelX, labelY), IM_COL32(255, 255, 255, 230), m_fsHoverName.c_str());
+            if (m_monoFont) ImGui::PopFont();
+        }
 
         // (collision hull drawing moved to common render path below)
 
@@ -8326,6 +8714,415 @@ private:
         // Render AI mind map in play mode (toggled by Unit 42's show_mind_map action)
         if (m_editorUI.showMindMap()) {
             m_editorUI.renderMindMapWindow();
+        }
+
+        // Filesystem right-click context menu
+        if (m_fsContextMenuOpen) {
+            // Position popup at screen center (crosshair)
+            float cx = getWindow().getWidth() * 0.5f;
+            float cy = getWindow().getHeight() * 0.5f;
+            ImGui::SetNextWindowPos(ImVec2(cx, cy));
+            ImGui::OpenPopup("##FSContextMenu");
+            m_fsContextMenuOpen = false;
+        }
+        bool fsPopupOpen = ImGui::BeginPopup("##FSContextMenu");
+        bool fsNewFolderModalOpen = ImGui::IsPopupOpen("New Folder##FSNewFolder");
+        bool fsRenameModalOpen = ImGui::IsPopupOpen("Rename##FSRename");
+        if (!fsPopupOpen && m_fsContextMenuWasOpen && !m_fsNewFolderPopup && !fsNewFolderModalOpen && !m_fsRenamePopup && !fsRenameModalOpen) {
+            // Popup just closed — return to mouse look (unless opening New Folder dialog)
+            m_playModeCursorVisible = false;
+            Input::setMouseCaptured(true);
+        }
+        m_fsContextMenuWasOpen = fsPopupOpen;
+        if (fsPopupOpen) {
+            // Separate selected file objects from selected wall (blank slate) objects
+            std::vector<SceneObject*> selectedFiles;
+            SceneObject* selectedWall = nullptr;
+            for (auto& obj : m_sceneObjects) {
+                if (!obj || !obj->isSelected()) continue;
+                if (obj->getBuildingType() == "filesystem" && !obj->isDoor()) {
+                    selectedFiles.push_back(obj.get());
+                } else if (obj->getBuildingType() == "filesystem_wall") {
+                    selectedWall = obj.get(); // use last selected wall
+                }
+            }
+
+            bool hasClipboard = !m_fsClipboard.empty();
+
+            if (!selectedFiles.empty()) {
+                // File(s) selected — offer Copy, Cut, Delete
+                ImGui::TextColored(ImVec4(1.0f, 0.7f, 0.0f, 1.0f), "%zu file(s) selected", selectedFiles.size());
+                ImGui::Separator();
+                if (ImGui::MenuItem("Copy")) {
+                    m_fsClipboard.clear();
+                    m_fsClipboardIsCut = false;
+                    for (auto* obj : selectedFiles) {
+                        std::string target = obj->getTargetLevel();
+                        if (target.rfind("fs://", 0) == 0) {
+                            m_fsClipboard.push_back(target.substr(5));
+                        }
+                    }
+                }
+                if (ImGui::MenuItem("Cut")) {
+                    m_fsClipboard.clear();
+                    m_fsClipboardIsCut = true;
+                    for (auto* obj : selectedFiles) {
+                        std::string target = obj->getTargetLevel();
+                        if (target.rfind("fs://", 0) == 0) {
+                            m_fsClipboard.push_back(target.substr(5));
+                        }
+                    }
+                }
+                ImGui::Separator();
+                if (selectedFiles.size() == 1) {
+                    if (ImGui::MenuItem("Rename")) {
+                        std::string target = selectedFiles[0]->getTargetLevel();
+                        if (target.rfind("fs://", 0) == 0) {
+                            m_fsRenameOldPath = target.substr(5);
+                            std::string filename = std::filesystem::path(m_fsRenameOldPath).filename().string();
+                            snprintf(m_fsRenameName, sizeof(m_fsRenameName), "%s", filename.c_str());
+                            m_fsRenamePopup = true;
+                        }
+                    }
+                }
+                if (ImGui::MenuItem("Delete (Trash)")) {
+                    std::string destDir = m_filesystemBrowser.getCurrentPath();
+                    for (auto* obj : selectedFiles) {
+                        std::string target = obj->getTargetLevel();
+                        if (target.rfind("fs://", 0) == 0) {
+                            std::string path = target.substr(5);
+                            std::string cmd = "gio trash " + shellEscapeFS(path);
+                            int ret = system(cmd.c_str());
+                            if (ret != 0) {
+                                std::cerr << "[FS] Trash failed: " << path << std::endl;
+                            }
+                        }
+                    }
+                    // Refresh view
+                    m_filesystemBrowser.navigate(destDir);
+                }
+            } else if (selectedWall) {
+                const std::string& wallDesc = selectedWall->getDescription();
+                std::string wallTarget = selectedWall->getTargetLevel();
+                bool wallHasItem = (wallTarget.rfind("fs://", 0) == 0 && wallTarget.size() > 5);
+                std::string wallItemPath = wallHasItem ? wallTarget.substr(5) : "";
+                std::string wallItemName = wallHasItem ? std::filesystem::path(wallItemPath).filename().string() : "";
+
+                std::string wallType;
+                if (wallDesc == "wall_image")      wallType = "image";
+                else if (wallDesc == "wall_video")  wallType = "video";
+                else if (wallDesc == "wall_folder") wallType = "folder";
+                else                                wallType = "other";
+
+                if (wallHasItem) {
+                    ImGui::TextColored(ImVec4(1.0f, 0.7f, 0.0f, 1.0f), "%s", wallItemName.c_str());
+                    ImGui::Separator();
+                    if (ImGui::MenuItem("Copy")) {
+                        m_fsClipboard.clear();
+                        m_fsClipboardIsCut = false;
+                        m_fsClipboard.push_back(wallItemPath);
+                    }
+                    if (ImGui::MenuItem("Cut")) {
+                        m_fsClipboard.clear();
+                        m_fsClipboardIsCut = true;
+                        m_fsClipboard.push_back(wallItemPath);
+                    }
+                    ImGui::Separator();
+                    if (ImGui::MenuItem("Rename")) {
+                        m_fsRenameOldPath = wallItemPath;
+                        snprintf(m_fsRenameName, sizeof(m_fsRenameName), "%s", wallItemName.c_str());
+                        m_fsRenamePopup = true;
+                    }
+                    if (ImGui::MenuItem("Delete (Trash)")) {
+                        std::string cmd = "gio trash " + shellEscapeFS(wallItemPath);
+                        int ret = system(cmd.c_str());
+                        if (ret != 0) {
+                            std::cerr << "[FS] Trash failed: " << wallItemPath << std::endl;
+                        }
+                        m_filesystemBrowser.navigate(m_filesystemBrowser.getCurrentPath());
+                    }
+                    // If this is a folder and clipboard has content, offer paste-into
+                    if (wallDesc == "wall_folder" && hasClipboard) {
+                        ImGui::Separator();
+                        const char* pasteLabel = m_fsClipboardIsCut ? "Move into folder" : "Paste into folder";
+                        if (ImGui::MenuItem(pasteLabel)) {
+                            namespace fs = std::filesystem;
+                            fs::path destDir(wallItemPath);
+                            for (const auto& srcPath : m_fsClipboard) {
+                                fs::path src(srcPath);
+                                fs::path dst = destDir / src.filename();
+                                if (fs::exists(dst)) {
+                                    std::string stem = dst.stem().string();
+                                    std::string ext = dst.extension().string();
+                                    int n = 1;
+                                    do {
+                                        dst = destDir / (stem + "_" + std::to_string(n) + ext);
+                                        n++;
+                                    } while (fs::exists(dst));
+                                }
+                                std::error_code ec;
+                                if (m_fsClipboardIsCut) {
+                                    fs::rename(src, dst, ec);
+                                } else if (fs::is_directory(src)) {
+                                    fs::copy(src, dst, fs::copy_options::recursive, ec);
+                                } else {
+                                    fs::copy_file(src, dst, ec);
+                                }
+                                if (ec) {
+                                    std::cerr << "[FS] Paste into folder failed: " << ec.message() << std::endl;
+                                }
+                            }
+                            if (m_fsClipboardIsCut) {
+                                m_fsClipboard.clear();
+                                // Refresh to remove moved items from view
+                                m_filesystemBrowser.navigate(m_filesystemBrowser.getCurrentPath());
+                            }
+                            selectedWall->setSelected(false);
+                        }
+                    }
+                } else {
+                    ImGui::TextColored(ImVec4(0.5f, 1.0f, 0.5f, 1.0f), "%s slot", wallType.c_str());
+                }
+                ImGui::Separator();
+
+                // Paste option if clipboard has content
+                if (hasClipboard) {
+                    const char* pasteLabel = m_fsClipboardIsCut ? "Move here" : "Paste";
+                    ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f), "%zu file(s) %s", m_fsClipboard.size(),
+                                       m_fsClipboardIsCut ? "to move" : "in clipboard");
+                    if (ImGui::MenuItem(pasteLabel)) {
+                        std::string destDir = m_filesystemBrowser.getCurrentPath();
+                        glm::vec3 wallPos = selectedWall->getTransform().getPosition();
+                        glm::vec3 wallScale = selectedWall->getTransform().getScale();
+                        float wallYaw = selectedWall->getEulerRotation().y;
+
+                        // Helper to remove an old scene object by its filesystem path
+                        auto removeOldFsObject = [&](const std::string& fsPath) {
+                            std::string targetLevel = "fs://" + fsPath;
+                            for (auto it = m_sceneObjects.begin(); it != m_sceneObjects.end(); ++it) {
+                                if (*it && (*it)->getBuildingType() == "filesystem" &&
+                                    (*it)->getTargetLevel() == targetLevel) {
+                                    uint32_t handle = (*it)->getBufferHandle();
+                                    if (handle != 0) m_modelRenderer->destroyModel(handle);
+                                    m_sceneObjects.erase(it);
+                                    break;
+                                }
+                            }
+                        };
+
+                        for (const auto& srcPath : m_fsClipboard) {
+                            namespace fs = std::filesystem;
+                            fs::path src(srcPath);
+                            fs::path dst = fs::path(destDir) / src.filename();
+
+                            // Check if source is already in the destination directory
+                            bool sameDir = fs::equivalent(src.parent_path(), fs::path(destDir));
+
+                            if (sameDir && m_fsClipboardIsCut) {
+                                // Cut within same directory — remove old object, spawn at new wall
+                                removeOldFsObject(srcPath);
+                                m_filesystemBrowser.spawnFileAtWall(srcPath, wallPos, wallScale, wallYaw);
+                                selectedWall->setTargetLevel("fs://" + srcPath);
+                            } else {
+                                if (fs::exists(dst) && !sameDir) {
+                                    std::string stem = dst.stem().string();
+                                    std::string ext = dst.extension().string();
+                                    fs::path parent = dst.parent_path();
+                                    int n = 1;
+                                    do {
+                                        dst = parent / (stem + "_" + std::to_string(n) + ext);
+                                        n++;
+                                    } while (fs::exists(dst));
+                                } else if (fs::exists(dst) && sameDir) {
+                                    // Copy within same dir — always auto-rename
+                                    std::string stem = dst.stem().string();
+                                    std::string ext = dst.extension().string();
+                                    fs::path parent = dst.parent_path();
+                                    int n = 1;
+                                    do {
+                                        dst = parent / (stem + "_" + std::to_string(n) + ext);
+                                        n++;
+                                    } while (fs::exists(dst));
+                                }
+                                std::error_code ec;
+                                if (m_fsClipboardIsCut) {
+                                    fs::rename(src, dst, ec);
+                                } else if (fs::is_directory(src)) {
+                                    fs::copy(src, dst, fs::copy_options::recursive, ec);
+                                } else {
+                                    fs::copy_file(src, dst, ec);
+                                }
+                                if (ec) {
+                                    std::cerr << "[FS] " << (m_fsClipboardIsCut ? "Move" : "Copy") << " failed: " << srcPath << " -> " << dst.string() << ": " << ec.message() << std::endl;
+                                } else {
+                                    m_filesystemBrowser.spawnFileAtWall(dst.string(), wallPos, wallScale, wallYaw);
+                                    selectedWall->setTargetLevel("fs://" + dst.string());
+                                }
+                            }
+                        }
+                        if (m_fsClipboardIsCut) m_fsClipboard.clear();
+                        selectedWall->setSelected(false);
+                    }
+                }
+
+                // New Folder on folder-type wall
+                if (wallDesc == "wall_folder") {
+                    if (ImGui::MenuItem("New Folder")) {
+                        snprintf(m_fsNewFolderName, sizeof(m_fsNewFolderName), "New Folder");
+                        m_fsNewFolderOnWall = true;
+                        m_fsNewFolderWallPos = selectedWall->getTransform().getPosition();
+                        m_fsNewFolderWallScale = selectedWall->getTransform().getScale();
+                        m_fsNewFolderWallYaw = selectedWall->getEulerRotation().y;
+                        selectedWall->setSelected(false);
+                        m_fsNewFolderPopup = true;
+                    }
+                }
+            } else {
+                // Nothing selected
+                if (hasClipboard) {
+                    const char* pasteLabel = m_fsClipboardIsCut ? "Move here" : "Paste here";
+                    ImGui::TextColored(ImVec4(0.5f, 1.0f, 0.5f, 1.0f), "%zu file(s) %s", m_fsClipboard.size(),
+                                       m_fsClipboardIsCut ? "to move" : "in clipboard");
+                    if (ImGui::MenuItem(pasteLabel)) {
+                        std::string destDir = m_filesystemBrowser.getCurrentPath();
+                        bool anyChanged = false;
+                        for (const auto& srcPath : m_fsClipboard) {
+                            namespace fs = std::filesystem;
+                            fs::path src(srcPath);
+                            bool sameDir = fs::equivalent(src.parent_path(), fs::path(destDir));
+
+                            if (sameDir && m_fsClipboardIsCut) {
+                                // Cut within same directory — nothing to do on disk
+                                continue;
+                            }
+
+                            fs::path dst = fs::path(destDir) / src.filename();
+                            if (fs::exists(dst)) {
+                                std::string stem = dst.stem().string();
+                                std::string ext = dst.extension().string();
+                                fs::path parent = dst.parent_path();
+                                int n = 1;
+                                do {
+                                    dst = parent / (stem + "_" + std::to_string(n) + ext);
+                                    n++;
+                                } while (fs::exists(dst));
+                            }
+                            std::error_code ec;
+                            if (m_fsClipboardIsCut) {
+                                fs::rename(src, dst, ec);
+                            } else if (fs::is_directory(src)) {
+                                fs::copy(src, dst, fs::copy_options::recursive, ec);
+                            } else {
+                                fs::copy_file(src, dst, ec);
+                            }
+                            if (ec) {
+                                std::cerr << "[FS] " << (m_fsClipboardIsCut ? "Move" : "Copy") << " failed: " << srcPath << " -> " << dst.string() << ": " << ec.message() << std::endl;
+                            } else {
+                                anyChanged = true;
+                            }
+                        }
+                        if (m_fsClipboardIsCut) m_fsClipboard.clear();
+                        if (anyChanged) m_filesystemBrowser.navigate(destDir);
+                    }
+                    ImGui::Separator();
+                }
+                if (ImGui::MenuItem("New Folder")) {
+                    snprintf(m_fsNewFolderName, sizeof(m_fsNewFolderName), "New Folder");
+                    m_fsNewFolderOnWall = false;
+                    m_fsNewFolderPopup = true;
+                }
+            }
+            ImGui::EndPopup();
+        }
+
+        // "New Folder" naming modal
+        if (m_fsNewFolderPopup) {
+            ImGui::OpenPopup("New Folder##FSNewFolder");
+            m_fsNewFolderPopup = false;
+        }
+        if (ImGui::BeginPopupModal("New Folder##FSNewFolder", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+            // Keep cursor visible while modal is open
+            if (!m_playModeCursorVisible) {
+                m_playModeCursorVisible = true;
+                Input::setMouseCaptured(false);
+            }
+            ImGui::Text("Folder name:");
+            bool enter = ImGui::InputText("##foldername", m_fsNewFolderName, sizeof(m_fsNewFolderName),
+                                          ImGuiInputTextFlags_EnterReturnsTrue);
+            if (enter || ImGui::Button("Create", ImVec2(120, 0))) {
+                std::string destDir = m_filesystemBrowser.getCurrentPath();
+                namespace fs = std::filesystem;
+                fs::path newDir = fs::path(destDir) / m_fsNewFolderName;
+                // Auto-rename if exists
+                if (fs::exists(newDir)) {
+                    std::string base = m_fsNewFolderName;
+                    int n = 1;
+                    do {
+                        newDir = fs::path(destDir) / (base + "_" + std::to_string(n));
+                        n++;
+                    } while (fs::exists(newDir));
+                }
+                std::error_code ec;
+                fs::create_directory(newDir, ec);
+                if (ec) {
+                    std::cerr << "[FS] Failed to create folder: " << newDir.string() << ": " << ec.message() << std::endl;
+                } else {
+                    if (m_fsNewFolderOnWall) {
+                        m_filesystemBrowser.spawnFileAtWall(newDir.string(), m_fsNewFolderWallPos, m_fsNewFolderWallScale, m_fsNewFolderWallYaw);
+                    } else {
+                        m_filesystemBrowser.navigate(destDir);
+                    }
+                }
+                ImGui::CloseCurrentPopup();
+                m_playModeCursorVisible = false;
+                Input::setMouseCaptured(true);
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Cancel", ImVec2(120, 0))) {
+                ImGui::CloseCurrentPopup();
+                m_playModeCursorVisible = false;
+                Input::setMouseCaptured(true);
+            }
+            ImGui::EndPopup();
+        }
+
+        // "Rename" modal
+        if (m_fsRenamePopup) {
+            ImGui::OpenPopup("Rename##FSRename");
+            m_fsRenamePopup = false;
+        }
+        if (ImGui::BeginPopupModal("Rename##FSRename", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+            if (!m_playModeCursorVisible) {
+                m_playModeCursorVisible = true;
+                Input::setMouseCaptured(false);
+            }
+            ImGui::Text("New name:");
+            bool enter = ImGui::InputText("##renamefield", m_fsRenameName, sizeof(m_fsRenameName),
+                                          ImGuiInputTextFlags_EnterReturnsTrue);
+            if (enter || ImGui::Button("Rename", ImVec2(120, 0))) {
+                namespace fs = std::filesystem;
+                fs::path oldPath(m_fsRenameOldPath);
+                fs::path newPath = oldPath.parent_path() / m_fsRenameName;
+                if (newPath != oldPath) {
+                    std::error_code ec;
+                    fs::rename(oldPath, newPath, ec);
+                    if (ec) {
+                        std::cerr << "[FS] Rename failed: " << ec.message() << std::endl;
+                    } else {
+                        m_filesystemBrowser.navigate(m_filesystemBrowser.getCurrentPath());
+                    }
+                }
+                ImGui::CloseCurrentPopup();
+                m_playModeCursorVisible = false;
+                Input::setMouseCaptured(true);
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Cancel", ImVec2(120, 0))) {
+                ImGui::CloseCurrentPopup();
+                m_playModeCursorVisible = false;
+                Input::setMouseCaptured(true);
+            }
+            ImGui::EndPopup();
         }
     }
 
@@ -9144,6 +9941,9 @@ private:
     }
 
     void saveLevel(const std::string& filepath) {
+        // Remove runtime-only filesystem objects before saving
+        m_filesystemBrowser.clearFilesystemObjects();
+
         // Remove player avatar before saving so it doesn't persist in the level file
         if (m_playerAvatar) {
             for (auto it = m_sceneObjects.begin(); it != m_sceneObjects.end(); ++it) {
@@ -11071,7 +11871,12 @@ private:
                 std::string targetLevel = closestObj->getTargetLevel();
                 std::string targetDoorId = closestObj->getTargetDoorId();
 
-                if (!targetLevel.empty()) {
+                if (!targetLevel.empty() && targetLevel.rfind("fs://", 0) == 0) {
+                    // Filesystem navigation — extract path after fs://
+                    std::string fsPath = targetLevel.substr(5);
+                    m_filesystemBrowser.setSpawnOrigin(closestObj->getTransform().getPosition());
+                    m_filesystemBrowser.navigate(fsPath);
+                } else if (!targetLevel.empty()) {
                     // Level transition - load new level
                     transitionToLevel(targetLevel, targetDoorId);
                 } else if (!targetDoorId.empty()) {
@@ -14274,6 +15079,9 @@ private:
         .wrapWorld = true
     }};
 
+    // Filesystem browser (3D file/folder objects)
+    eden::FilesystemBrowser m_filesystemBrowser;
+
     // Terminal emulator
     eden::EdenTerminal m_terminal;
     ImFont* m_monoFont = nullptr;
@@ -14416,6 +15224,28 @@ private:
     // Play mode state
     bool m_isPlayMode = false;
     bool m_playModeCursorVisible = false;  // Toggle with right-click to interact with UI
+    bool m_fsContextMenuOpen = false;      // Filesystem right-click context menu
+    bool m_fsContextMenuWasOpen = false;   // Track popup close to restore mouse look
+    std::vector<std::string> m_fsClipboard; // Paths of copied/cut files
+    bool m_fsClipboardIsCut = false;       // True if clipboard is from Cut (move on paste)
+    bool m_fsNewFolderPopup = false;       // Open "New Folder" naming dialog
+    char m_fsNewFolderName[256] = "New Folder"; // Name buffer for new folder
+    // Wall info saved when "New Folder" is triggered from a wall slot
+    bool m_fsNewFolderOnWall = false;
+    glm::vec3 m_fsNewFolderWallPos{0.0f};
+    glm::vec3 m_fsNewFolderWallScale{0.0f};
+    float m_fsNewFolderWallYaw = 0.0f;
+    // Rename state
+    bool m_fsRenamePopup = false;
+    char m_fsRenameName[256] = {};
+    std::string m_fsRenameOldPath;             // Full path of file being renamed
+    // Drag-and-drop state
+    SceneObject* m_fsDragObject = nullptr;     // Object being dragged
+    SceneObject* m_fsDragHoverWall = nullptr;  // Wall currently hovered during drag
+    float m_fsDragHoldTime = 0.0f;             // How long mouse has been held
+    bool m_fsDragActive = false;               // True once hold threshold passed
+    bool m_fsLeftWasDown = false;              // Track mouse release
+    std::string m_fsHoverName;                 // Filename under crosshair
     bool m_playModeDebug = false;          // F3 toggles debug visuals (waypoints, etc.)
 
     // Game module (loaded for play mode UI)
