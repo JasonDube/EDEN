@@ -76,6 +76,9 @@ public:
     // Destroy a model's GPU resources
     void destroyModel(uint32_t handle);
 
+    // Batch destroy — single waitIdle then free all handles
+    void destroyModels(const std::vector<uint32_t>& handles);
+
     // Update vertex buffer with new vertex data (for freeze transform)
     void updateModelBuffer(uint32_t handle, const std::vector<ModelVertex>& vertices);
 
@@ -103,6 +106,8 @@ public:
     // lines: pairs of points (line0_start, line0_end, line1_start, line1_end, ...)
     void renderLines(VkCommandBuffer commandBuffer, const glm::mat4& viewProj,
                      const std::vector<glm::vec3>& lines, const glm::vec3& color);
+    void renderLines(VkCommandBuffer commandBuffer, const glm::mat4& viewProj,
+                     const std::vector<glm::vec3>& lines, const glm::vec4& color);
 
     // Render points with depth testing (for vertices)
     void renderPoints(VkCommandBuffer commandBuffer, const glm::mat4& viewProj,

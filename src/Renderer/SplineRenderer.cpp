@@ -1,5 +1,6 @@
 #include "SplineRenderer.hpp"
 #include "VulkanContext.hpp"
+#include "Buffer.hpp"
 #include <eden/Terrain.hpp>
 #include <stdexcept>
 #include <cstring>
@@ -40,6 +41,7 @@ SplineRenderer::~SplineRenderer() {
         vkDestroyBuffer(device, m_curveBuffer, nullptr);
     }
     if (m_curveMemory != VK_NULL_HANDLE) {
+        Buffer::trackVramFreeHandle(m_curveMemory);
         vkFreeMemory(device, m_curveMemory, nullptr);
     }
     if (m_pointsMappedMemory) {
@@ -49,6 +51,7 @@ SplineRenderer::~SplineRenderer() {
         vkDestroyBuffer(device, m_pointsBuffer, nullptr);
     }
     if (m_pointsMemory != VK_NULL_HANDLE) {
+        Buffer::trackVramFreeHandle(m_pointsMemory);
         vkFreeMemory(device, m_pointsMemory, nullptr);
     }
 }
@@ -84,6 +87,7 @@ void SplineRenderer::createBuffers() {
         if (vkAllocateMemory(device, &allocInfo, nullptr, &m_curveMemory) != VK_SUCCESS) {
             throw std::runtime_error("Failed to allocate spline curve vertex buffer memory");
         }
+        Buffer::trackVramAllocHandle(m_curveMemory, static_cast<int64_t>(memReqs.size));
 
         vkBindBufferMemory(device, m_curveBuffer, m_curveMemory, 0);
         vkMapMemory(device, m_curveMemory, 0, bufferSize, 0, &m_curveMappedMemory);
@@ -117,6 +121,7 @@ void SplineRenderer::createBuffers() {
         if (vkAllocateMemory(device, &allocInfo, nullptr, &m_pointsMemory) != VK_SUCCESS) {
             throw std::runtime_error("Failed to allocate spline points vertex buffer memory");
         }
+        Buffer::trackVramAllocHandle(m_pointsMemory, static_cast<int64_t>(memReqs.size));
 
         vkBindBufferMemory(device, m_pointsBuffer, m_pointsMemory, 0);
         vkMapMemory(device, m_pointsMemory, 0, bufferSize, 0, &m_pointsMappedMemory);

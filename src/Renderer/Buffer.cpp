@@ -5,6 +5,25 @@
 
 namespace eden {
 
+std::atomic<int64_t> Buffer::s_vramUsedBytes{0};
+std::unordered_map<VkDeviceMemory, int64_t> Buffer::s_vramAllocSizes;
+std::mutex Buffer::s_vramMutex;
+
+void Buffer::trackVramAllocHandle(VkDeviceMemory mem, int64_t bytes) {
+    s_vramUsedBytes += bytes;
+    std::lock_guard<std::mutex> lock(s_vramMutex);
+    s_vramAllocSizes[mem] = bytes;
+}
+
+void Buffer::trackVramFreeHandle(VkDeviceMemory mem) {
+    std::lock_guard<std::mutex> lock(s_vramMutex);
+    auto it = s_vramAllocSizes.find(mem);
+    if (it != s_vramAllocSizes.end()) {
+        s_vramUsedBytes -= it->second;
+        s_vramAllocSizes.erase(it);
+    }
+}
+
 Buffer::Buffer(VulkanContext& context, VkDeviceSize size, VkBufferUsageFlags usage,
                VkMemoryPropertyFlags properties)
     : m_context(context), m_size(size)
@@ -30,6 +49,7 @@ Buffer::Buffer(VulkanContext& context, VkDeviceSize size, VkBufferUsageFlags usa
     if (vkAllocateMemory(context.getDevice(), &allocInfo, nullptr, &m_memory) != VK_SUCCESS) {
         throw std::runtime_error("Failed to allocate buffer memory");
     }
+    trackVramAllocHandle(m_memory, static_cast<int64_t>(memRequirements.size));
 
     vkBindBufferMemory(context.getDevice(), m_buffer, m_memory, 0);
 }
@@ -42,6 +62,7 @@ Buffer::~Buffer() {
         vkDestroyBuffer(m_context.getDevice(), m_buffer, nullptr);
     }
     if (m_memory != VK_NULL_HANDLE) {
+        trackVramFreeHandle(m_memory);
         vkFreeMemory(m_context.getDevice(), m_memory, nullptr);
     }
 }

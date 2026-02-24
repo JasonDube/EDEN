@@ -1,5 +1,6 @@
 #include "TextureManager.hpp"
 #include "VulkanContext.hpp"
+#include "Buffer.hpp"
 
 #define STB_IMAGE_IMPLEMENTATION
 #include <stb_image.h>
@@ -59,7 +60,10 @@ TextureManager::~TextureManager() {
 
     if (m_textureArrayView) vkDestroyImageView(device, m_textureArrayView, nullptr);
     if (m_textureArray) vkDestroyImage(device, m_textureArray, nullptr);
-    if (m_textureMemory) vkFreeMemory(device, m_textureMemory, nullptr);
+    if (m_textureMemory) {
+        Buffer::trackVramFreeHandle(m_textureMemory);
+        vkFreeMemory(device, m_textureMemory, nullptr);
+    }
 
     if (m_sampler) vkDestroySampler(device, m_sampler, nullptr);
     if (m_descriptorPool) vkDestroyDescriptorPool(device, m_descriptorPool, nullptr);
@@ -238,6 +242,7 @@ void TextureManager::loadTerrainTexturesFromFolder(const std::string& folderPath
         m_textureArray = VK_NULL_HANDLE;
     }
     if (m_textureMemory) {
+        Buffer::trackVramFreeHandle(m_textureMemory);
         vkFreeMemory(device, m_textureMemory, nullptr);
         m_textureMemory = VK_NULL_HANDLE;
     }
@@ -358,6 +363,7 @@ void TextureManager::createTextureArray(const std::vector<std::vector<unsigned c
         VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
 
     vkAllocateMemory(device, &allocInfo, nullptr, &stagingMemory);
+    Buffer::trackVramAllocHandle(stagingMemory, static_cast<int64_t>(memReqs.size));
     vkBindBufferMemory(device, stagingBuffer, stagingMemory, 0);
 
     // Copy all texture data to staging buffer
@@ -393,6 +399,7 @@ void TextureManager::createTextureArray(const std::vector<std::vector<unsigned c
         VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
 
     vkAllocateMemory(device, &allocInfo, nullptr, &m_textureMemory);
+    Buffer::trackVramAllocHandle(m_textureMemory, static_cast<int64_t>(memReqs.size));
     vkBindImageMemory(device, m_textureArray, m_textureMemory, 0);
 
     // Transition and copy
@@ -402,6 +409,7 @@ void TextureManager::createTextureArray(const std::vector<std::vector<unsigned c
 
     // Cleanup staging
     vkDestroyBuffer(device, stagingBuffer, nullptr);
+    Buffer::trackVramFreeHandle(stagingMemory);
     vkFreeMemory(device, stagingMemory, nullptr);
 
     // Create image view for 2D array

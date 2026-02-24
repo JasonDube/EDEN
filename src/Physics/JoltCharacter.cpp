@@ -417,7 +417,7 @@ void JoltCharacter::createCharacter(const glm::vec3& position, float height, flo
 
     m_character->SetListener(m_contactListener.get());
 
-    std::cout << "Created Jolt character at " << position.x << ", " << position.y << ", " << position.z << std::endl;
+    // std::cout << "Created Jolt character at " << position.x << ", " << position.y << ", " << position.z << std::endl;
 }
 
 glm::vec3 JoltCharacter::update(float deltaTime, const glm::vec3& desiredVelocity, bool jump, float jumpVelocity) {

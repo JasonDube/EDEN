@@ -1,5 +1,6 @@
 #include "Skybox.hpp"
 #include "VulkanContext.hpp"
+#include "Buffer.hpp"
 #include <stdexcept>
 #include <array>
 #include <cstring>
@@ -43,6 +44,7 @@ Skybox::~Skybox() {
         vkDestroyImage(device, m_cubemapImage, nullptr);
     }
     if (m_cubemapMemory != VK_NULL_HANDLE) {
+        Buffer::trackVramFreeHandle(m_cubemapMemory);
         vkFreeMemory(device, m_cubemapMemory, nullptr);
     }
     if (m_descriptorPool != VK_NULL_HANDLE) {
@@ -55,12 +57,14 @@ Skybox::~Skybox() {
         vkDestroyBuffer(device, m_indexBuffer, nullptr);
     }
     if (m_indexMemory != VK_NULL_HANDLE) {
+        Buffer::trackVramFreeHandle(m_indexMemory);
         vkFreeMemory(device, m_indexMemory, nullptr);
     }
     if (m_vertexBuffer != VK_NULL_HANDLE) {
         vkDestroyBuffer(device, m_vertexBuffer, nullptr);
     }
     if (m_vertexMemory != VK_NULL_HANDLE) {
+        Buffer::trackVramFreeHandle(m_vertexMemory);
         vkFreeMemory(device, m_vertexMemory, nullptr);
     }
 }
@@ -140,6 +144,7 @@ void Skybox::createCubeGeometry() {
     if (vkAllocateMemory(device, &vertexAllocInfo, nullptr, &m_vertexMemory) != VK_SUCCESS) {
         throw std::runtime_error("Failed to allocate skybox vertex buffer memory");
     }
+    Buffer::trackVramAllocHandle(m_vertexMemory, static_cast<int64_t>(vertexMemReqs.size));
 
     vkBindBufferMemory(device, m_vertexBuffer, m_vertexMemory, 0);
 
@@ -174,6 +179,7 @@ void Skybox::createCubeGeometry() {
     if (vkAllocateMemory(device, &indexAllocInfo, nullptr, &m_indexMemory) != VK_SUCCESS) {
         throw std::runtime_error("Failed to allocate skybox index buffer memory");
     }
+    Buffer::trackVramAllocHandle(m_indexMemory, static_cast<int64_t>(indexMemReqs.size));
 
     vkBindBufferMemory(device, m_indexBuffer, m_indexMemory, 0);
 
@@ -241,6 +247,7 @@ bool Skybox::loadFromHorizontalCross(const std::string& path) {
         stbi_image_free(pixels);
         return false;
     }
+    Buffer::trackVramAllocHandle(m_cubemapMemory, static_cast<int64_t>(memReqs.size));
 
     vkBindImageMemory(device, m_cubemapImage, m_cubemapMemory, 0);
 
@@ -271,6 +278,7 @@ bool Skybox::loadFromHorizontalCross(const std::string& path) {
     );
 
     vkAllocateMemory(device, &stagingAllocInfo, nullptr, &stagingMemory);
+    Buffer::trackVramAllocHandle(stagingMemory, static_cast<int64_t>(stagingMemReqs.size));
     vkBindBufferMemory(device, stagingBuffer, stagingMemory, 0);
 
     // Copy face data to staging buffer
@@ -318,6 +326,7 @@ bool Skybox::loadFromHorizontalCross(const std::string& path) {
     transitionImageLayout(m_cubemapImage, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 
     vkDestroyBuffer(device, stagingBuffer, nullptr);
+    Buffer::trackVramFreeHandle(stagingMemory);
     vkFreeMemory(device, stagingMemory, nullptr);
 
     // Create image view

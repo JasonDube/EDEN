@@ -1,5 +1,6 @@
 #include "BrushRing.hpp"
 #include "VulkanContext.hpp"
+#include "Buffer.hpp"
 #include "PipelineBuilder.hpp"
 #include <eden/Terrain.hpp>
 #include <stdexcept>
@@ -37,6 +38,7 @@ BrushRing::~BrushRing() {
         vkDestroyBuffer(device, m_vertexBuffer, nullptr);
     }
     if (m_vertexMemory != VK_NULL_HANDLE) {
+        Buffer::trackVramFreeHandle(m_vertexMemory);
         vkFreeMemory(device, m_vertexMemory, nullptr);
     }
 }
@@ -69,6 +71,7 @@ void BrushRing::createVertexBuffer() {
     if (vkAllocateMemory(device, &allocInfo, nullptr, &m_vertexMemory) != VK_SUCCESS) {
         throw std::runtime_error("Failed to allocate brush ring vertex buffer memory");
     }
+    Buffer::trackVramAllocHandle(m_vertexMemory, static_cast<int64_t>(memReqs.size));
 
     vkBindBufferMemory(device, m_vertexBuffer, m_vertexMemory, 0);
 

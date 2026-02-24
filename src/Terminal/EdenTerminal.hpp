@@ -59,6 +59,21 @@ public:
     // Shutdown the terminal
     void shutdown();
 
+    // Process keyboard input from ImGui IO (public for 3D focus mode)
+    void handleKeyInput();
+
+    // Write data to the PTY (public for clipboard paste from caller)
+    void writeToPty(const char* data, size_t len);
+
+    // Copy mode (vim-style text selection from 3D terminal)
+    void startCopyMode();
+    void moveCopyCursor(int dRow, int dCol);
+    void startVisualSelect();
+    std::string yankSelection();
+    void cancelCopyMode();
+    bool isInCopyMode() const { return m_copyModeActive; }
+    bool isInVisualMode() const { return m_selection.active; }
+
 private:
     // PTY
     int m_masterFd = -1;
@@ -88,11 +103,19 @@ private:
     // When true, ImGui window resize won't change terminal cols/rows
     bool m_lockSize = false;
 
+    // Copy mode state
+    bool m_copyModeActive = false;
+    int m_copyCursorRow = 0, m_copyCursorCol = 0;
+    struct Selection {
+        int anchorRow = 0, anchorCol = 0;
+        int cursorRow = 0, cursorCol = 0;
+        bool active = false;
+    } m_selection;
+    bool isCellSelected(int row, int col) const;
+
     // Internal
     void syncCells();
-    void handleKeyInput();
     void handleResize(int newCols, int newRows);
-    void writeToPty(const char* data, size_t len);
     static ImU32 vtermColorToImU32(VTermColor color);
 
 public:

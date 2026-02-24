@@ -4,6 +4,9 @@
 #include <vector>
 #include <memory>
 #include <cstdint>
+#include <atomic>
+#include <unordered_map>
+#include <mutex>
 
 namespace eden {
 
@@ -26,6 +29,19 @@ public:
     void upload(const void* data, VkDeviceSize size);
 
     static void copy(VulkanContext& context, Buffer& src, Buffer& dst, VkDeviceSize size);
+
+    // VRAM usage tracking (across all Vulkan allocations)
+    static std::atomic<int64_t> s_vramUsedBytes;
+    static std::unordered_map<VkDeviceMemory, int64_t> s_vramAllocSizes;
+    static std::mutex s_vramMutex;
+
+    static void trackVramAlloc(int64_t bytes) { s_vramUsedBytes += bytes; }
+    static void trackVramFree(int64_t bytes)  { s_vramUsedBytes -= bytes; }
+    static int64_t getVramUsedBytes() { return s_vramUsedBytes.load(); }
+
+    // Track by handle — records size on alloc, looks it up on free
+    static void trackVramAllocHandle(VkDeviceMemory mem, int64_t bytes);
+    static void trackVramFreeHandle(VkDeviceMemory mem);
 
 private:
     VulkanContext& m_context;

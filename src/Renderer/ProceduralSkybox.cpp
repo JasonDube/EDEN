@@ -1,5 +1,6 @@
 #include "ProceduralSkybox.hpp"
 #include "VulkanContext.hpp"
+#include "Buffer.hpp"
 #include <stdexcept>
 #include <array>
 #include <cstring>
@@ -40,6 +41,7 @@ ProceduralSkybox::~ProceduralSkybox() {
         vkDestroyBuffer(device, m_uniformBuffer, nullptr);
     }
     if (m_uniformMemory != VK_NULL_HANDLE) {
+        Buffer::trackVramFreeHandle(m_uniformMemory);
         vkFreeMemory(device, m_uniformMemory, nullptr);
     }
     if (m_descriptorPool != VK_NULL_HANDLE) {
@@ -52,12 +54,14 @@ ProceduralSkybox::~ProceduralSkybox() {
         vkDestroyBuffer(device, m_indexBuffer, nullptr);
     }
     if (m_indexMemory != VK_NULL_HANDLE) {
+        Buffer::trackVramFreeHandle(m_indexMemory);
         vkFreeMemory(device, m_indexMemory, nullptr);
     }
     if (m_vertexBuffer != VK_NULL_HANDLE) {
         vkDestroyBuffer(device, m_vertexBuffer, nullptr);
     }
     if (m_vertexMemory != VK_NULL_HANDLE) {
+        Buffer::trackVramFreeHandle(m_vertexMemory);
         vkFreeMemory(device, m_vertexMemory, nullptr);
     }
 }
@@ -130,6 +134,7 @@ void ProceduralSkybox::createCubeGeometry() {
     if (vkAllocateMemory(device, &vertexAllocInfo, nullptr, &m_vertexMemory) != VK_SUCCESS) {
         throw std::runtime_error("Failed to allocate skybox vertex buffer memory");
     }
+    Buffer::trackVramAllocHandle(m_vertexMemory, static_cast<int64_t>(vertexMemReqs.size));
 
     vkBindBufferMemory(device, m_vertexBuffer, m_vertexMemory, 0);
 
@@ -164,6 +169,7 @@ void ProceduralSkybox::createCubeGeometry() {
     if (vkAllocateMemory(device, &indexAllocInfo, nullptr, &m_indexMemory) != VK_SUCCESS) {
         throw std::runtime_error("Failed to allocate skybox index buffer memory");
     }
+    Buffer::trackVramAllocHandle(m_indexMemory, static_cast<int64_t>(indexMemReqs.size));
 
     vkBindBufferMemory(device, m_indexBuffer, m_indexMemory, 0);
 
@@ -201,6 +207,7 @@ void ProceduralSkybox::createUniformBuffer() {
     if (vkAllocateMemory(device, &allocInfo, nullptr, &m_uniformMemory) != VK_SUCCESS) {
         throw std::runtime_error("Failed to allocate skybox uniform buffer memory");
     }
+    Buffer::trackVramAllocHandle(m_uniformMemory, static_cast<int64_t>(memReqs.size));
 
     vkBindBufferMemory(device, m_uniformBuffer, m_uniformMemory, 0);
 

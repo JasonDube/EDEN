@@ -123,6 +123,9 @@ void EditorUI::renderMenuBar() {
             if (ImGui::MenuItem("New", "Ctrl+N")) {
                 if (m_onFileNew) m_onFileNew();
             }
+            if (ImGui::MenuItem("New EDEN OS Level")) {
+                if (m_onNewEdenOSLevel) m_onNewEdenOSLevel();
+            }
             if (ImGui::MenuItem("Open...", "Ctrl+O")) {
                 if (m_onFileOpen) m_onFileOpen();
             }

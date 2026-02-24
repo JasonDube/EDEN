@@ -49,6 +49,7 @@ using ApplyFaceTextureCallback = std::function<void(int textureIndex, float uSca
 using FileNewCallback = std::function<void()>;
 using NewTestLevelCallback = std::function<void()>;
 using NewSpaceLevelCallback = std::function<void()>;
+using NewEdenOSLevelCallback = std::function<void()>;
 using FileOpenCallback = std::function<void()>;
 using FileSaveCallback = std::function<void()>;
 using FileExitCallback = std::function<void()>;
@@ -186,6 +187,7 @@ public:
     void setFileNewCallback(FileNewCallback callback) { m_onFileNew = callback; }
     void setNewTestLevelCallback(NewTestLevelCallback callback) { m_onNewTestLevel = callback; }
     void setNewSpaceLevelCallback(NewSpaceLevelCallback callback) { m_onNewSpaceLevel = callback; }
+    void setNewEdenOSLevelCallback(NewEdenOSLevelCallback callback) { m_onNewEdenOSLevel = callback; }
     void setFileOpenCallback(FileOpenCallback callback) { m_onFileOpen = callback; }
     void setFileSaveCallback(FileSaveCallback callback) { m_onFileSave = callback; }
     void setFileExitCallback(FileExitCallback callback) { m_onFileExit = callback; }
@@ -508,6 +510,7 @@ private:
     FileNewCallback m_onFileNew;
     NewTestLevelCallback m_onNewTestLevel;
     NewSpaceLevelCallback m_onNewSpaceLevel;
+    NewEdenOSLevelCallback m_onNewEdenOSLevel;
     FileOpenCallback m_onFileOpen;
     FileSaveCallback m_onFileSave;
     FileExitCallback m_onFileExit;

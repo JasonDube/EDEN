@@ -11,11 +11,19 @@
 #include <thread>
 #include <mutex>
 #include <atomic>
+#include "../AI/CleanerBot.hpp"
+#include "../AI/ImageBot.hpp"
+#include "../Forge/ForgeRoom.hpp"
 
 namespace eden {
 
 class FilesystemBrowser {
 public:
+    struct SiloConfig {
+        glm::vec4 wallColor{0.15f, 0.15f, 0.18f, 1.0f};
+        glm::vec4 columnColor{1.0f, 1.0f, 1.0f, 1.0f};
+    };
+
     FilesystemBrowser() = default;
     ~FilesystemBrowser();
 
@@ -39,6 +47,23 @@ public:
     const std::string& getCurrentPath() const { return m_currentPath; }
     void setSpawnOrigin(const glm::vec3& origin) { m_spawnOrigin = origin; }
     const glm::vec3& getSpawnOrigin() const { return m_spawnOrigin; }
+    SiloConfig& siloConfig() { return m_siloConfig; }
+    CleanerBot* getCleanerBot() { return m_cleanerBot.isSpawned() ? &m_cleanerBot : nullptr; }
+    ImageBot* getImageBot() { return m_imageBot.isSpawned() ? &m_imageBot : nullptr; }
+    ForgeRoom* getForgeRoom() { return m_forgeRoom.isSpawned() ? &m_forgeRoom : nullptr; }
+
+    // Emanation rendering — call from render loop after scene objects
+    // Returns line pairs and color (with alpha) for each batch
+    struct EmanationBatch {
+        std::vector<glm::vec3> lines;
+        glm::vec4 color;  // RGBA with alpha for fade
+    };
+    std::vector<EmanationBatch> getEmanationRenderData() const;
+
+    // Image focus: reload at full resolution with correct aspect ratio
+    void focusImage(SceneObject* panel);
+    void unfocusImage();
+    bool isImageFocused() const { return m_imageFocus.active; }
 
     // Spawn a file object directly onto a wall slot (for paste-in-place)
     // wallPos/wallScale/wallYawDeg come from the selected wall's transform
@@ -55,6 +80,7 @@ private:
         Text,
         Executable,
         SourceCode,
+        Model3D,
         Other
     };
 
@@ -116,6 +142,7 @@ private:
     bool m_spawnFailed = false;
 
     glm::vec3 m_spawnOrigin{0.0f};
+    SiloConfig m_siloConfig;
 
     // Video animation state
     struct VideoAnimation {
@@ -130,13 +157,82 @@ private:
         bool loaded = false;
     };
     std::vector<VideoAnimation> m_videoAnimations;
+    size_t m_videoUpdateIndex = 0;  // round-robin index for staggered updates
     static constexpr float VIDEO_FRAME_INTERVAL = 0.5f; // seconds between frames
+    static constexpr int MAX_CONCURRENT_EXTRACTIONS = 4;
 
     // Track background threads so we can cancel on clear
     std::shared_ptr<std::atomic<bool>> m_cancelExtraction;
     std::vector<std::thread> m_extractionThreads;
 
+    // Queued videos waiting for an extraction slot
+    struct PendingExtraction {
+        std::string filePath;
+        std::string cachePath;
+        std::shared_ptr<std::vector<std::vector<unsigned char>>> outFrames;
+        std::shared_ptr<std::atomic<bool>> ready;
+    };
+    std::vector<PendingExtraction> m_pendingExtractions;
+
     void cancelAllExtractions();
+
+    // Model turntable animation state
+    struct ModelSpin {
+        SceneObject* obj = nullptr;
+        float baseYaw = 0.0f;   // original yaw from gallery wall
+        float angle = 0.0f;     // current spin angle (degrees)
+    };
+    std::vector<ModelSpin> m_modelSpins;
+    static constexpr float MODEL_SPIN_SPEED = 30.0f; // degrees per second
+
+    // Image focus state
+    static constexpr int FOCUS_MAX_SIZE = 2048;
+
+    struct ImageFocusState {
+        SceneObject* panel = nullptr;
+        uint32_t bufferHandle = 0;
+        glm::vec3 originalScale{1.0f};
+        bool active = false;
+    };
+    ImageFocusState m_imageFocus;
+
+    // Cleaner Bot NPC
+    CleanerBot m_cleanerBot;
+
+    // Image Bot NPC
+    ImageBot m_imageBot;
+
+    // Forge Room (for assets/models/ directory)
+    ForgeRoom m_forgeRoom;
+
+    // Folder visit tracking (attention system)
+    std::unordered_map<std::string, int> m_folderVisits;
+    void loadFolderVisits();
+    void saveFolderVisits();
+    void recordVisit(const std::string& path);
+    float getVisitGlow(const std::string& path) const;  // 0.0 to 1.0
+
+    // Emanation: wireframe squares expanding outward from hot folders
+    struct Emanation {
+        glm::vec3 center;       // folder object center
+        glm::vec3 halfExtent;   // half-size of the folder cube face
+        glm::vec3 forward;      // outward direction (away from gallery wall)
+        glm::vec3 up;           // up axis of the face
+        glm::vec3 right;        // right axis of the face
+        float intensity;        // 0..1 based on visit frequency
+        float timer = 0.0f;     // time accumulator for spawning rings
+    };
+    std::vector<Emanation> m_emanations;
+
+    struct EmanationRing {
+        size_t emanationIdx;    // which emanation source
+        float age = 0.0f;       // seconds since spawn
+    };
+    std::vector<EmanationRing> m_emanationRings;
+
+    static constexpr float EMANATION_MAX_DIST = 4.0f;   // meters before fade-out
+    static constexpr float EMANATION_SPEED = 2.5f;       // meters per second
+    static constexpr float EMANATION_SPAWN_INTERVAL = 0.6f; // seconds between rings
 
     static constexpr int MAX_ENTRIES = 200;
     static constexpr int MAX_VIDEO_FRAMES = 20;
@@ -149,6 +245,11 @@ private:
     static constexpr float GALLERY_RADIUS = 20.0f;
     static constexpr float GALLERY_RING_GAP = 12.0f; // radius decrease per ring
     static constexpr float GALLERY_WALL_HEIGHT = 4.0f;
+
+    // Basement foundation
+    static constexpr float BASEMENT_HEIGHT = 16.0f;
+    static constexpr float BASEMENT_SIZE = 44.0f;  // side length (wider than silo for a massive foundation)
+    void spawnBasement(const glm::vec3& center, float baseY);
 };
 
 } // namespace eden

@@ -1,11 +1,14 @@
 #include "OS/FilesystemBrowser.hpp"
 #include "Editor/PrimitiveMeshBuilder.hpp"
+#include "Editor/GLBLoader.hpp"
+#include "Editor/LimeLoader.hpp"
 #include "Terminal/EdenTerminalFont.inc"
 
 #include <stb_image.h>
 #include <algorithm>
 #include <iostream>
 #include <fstream>
+#include <sstream>
 #include <cstring>
 #include <cstdio>
 #include <cmath>
@@ -23,6 +26,76 @@ static std::string shellEscape(const std::string& s) {
     }
     result += "'";
     return result;
+}
+
+// ── Standalone OBJ loader ──────────────────────────────────────────────
+
+static bool loadOBJ(const std::string& filepath,
+                    std::vector<ModelVertex>& outVertices,
+                    std::vector<uint32_t>& outIndices) {
+    std::ifstream file(filepath);
+    if (!file.is_open()) return false;
+
+    std::vector<glm::vec3> positions;
+    std::vector<glm::vec3> normals;
+    std::string line;
+
+    while (std::getline(file, line)) {
+        std::istringstream iss(line);
+        std::string token;
+        iss >> token;
+
+        if (token == "v") {
+            glm::vec3 p;
+            iss >> p.x >> p.y >> p.z;
+            positions.push_back(p);
+        } else if (token == "vn") {
+            glm::vec3 n;
+            iss >> n.x >> n.y >> n.z;
+            normals.push_back(n);
+        } else if (token == "f") {
+            // Collect face vertex indices
+            std::vector<uint32_t> faceVerts;
+            std::string vertStr;
+            while (iss >> vertStr) {
+                // Format: v, v/vt, v/vt/vn, v//vn
+                int vi = 0, ni = 0;
+                if (auto slash1 = vertStr.find('/'); slash1 != std::string::npos) {
+                    vi = std::stoi(vertStr.substr(0, slash1));
+                    auto slash2 = vertStr.find('/', slash1 + 1);
+                    if (slash2 != std::string::npos && slash2 + 1 < vertStr.size()) {
+                        ni = std::stoi(vertStr.substr(slash2 + 1));
+                    }
+                } else {
+                    vi = std::stoi(vertStr);
+                }
+
+                // OBJ indices are 1-based
+                if (vi < 0) vi = static_cast<int>(positions.size()) + vi + 1;
+
+                ModelVertex mv{};
+                if (vi > 0 && vi <= static_cast<int>(positions.size()))
+                    mv.position = positions[vi - 1];
+                if (ni > 0 && ni <= static_cast<int>(normals.size()))
+                    mv.normal = normals[ni - 1];
+                mv.color = {0.8f, 0.8f, 0.8f, 1.0f};
+                mv.texCoord = {0.0f, 0.0f};
+
+                uint32_t idx = static_cast<uint32_t>(outVertices.size());
+                outVertices.push_back(mv);
+                faceVerts.push_back(idx);
+            }
+
+            // Fan-triangulate n-gon
+            for (size_t i = 2; i < faceVerts.size(); ++i) {
+                outIndices.push_back(faceVerts[0]);
+                outIndices.push_back(faceVerts[i - 1]);
+                outIndices.push_back(faceVerts[i]);
+            }
+        }
+    }
+
+    return !outVertices.empty() && !outIndices.empty();
 }
 
 // ── Disk cache ─────────────────────────────────────────────────────────
@@ -148,7 +221,101 @@ void FilesystemBrowser::cancelAllExtractions() {
         if (t.joinable()) t.join();
     }
     m_extractionThreads.clear();
+    m_pendingExtractions.clear();
     m_cancelExtraction.reset();
+}
+
+// ── Folder visit tracking (attention system) ───────────────────────────
+
+void FilesystemBrowser::loadFolderVisits() {
+    m_folderVisits.clear();
+    const char* home = getenv("HOME");
+    if (!home) return;
+
+    std::string path = std::string(home) + "/.config/eden/folder_visits.json";
+    std::ifstream f(path);
+    if (!f.is_open()) return;
+
+    // Minimal JSON parser for {"path": count, ...} format
+    std::string content((std::istreambuf_iterator<char>(f)),
+                         std::istreambuf_iterator<char>());
+
+    // Parse key-value pairs from the JSON object
+    size_t pos = 0;
+    while ((pos = content.find('"', pos)) != std::string::npos) {
+        size_t keyStart = pos + 1;
+        size_t keyEnd = content.find('"', keyStart);
+        if (keyEnd == std::string::npos) break;
+
+        std::string key = content.substr(keyStart, keyEnd - keyStart);
+
+        // Find the colon then the number
+        size_t colon = content.find(':', keyEnd);
+        if (colon == std::string::npos) break;
+
+        // Skip whitespace after colon
+        size_t numStart = colon + 1;
+        while (numStart < content.size() && (content[numStart] == ' ' || content[numStart] == '\t'))
+            numStart++;
+
+        // Read the integer
+        size_t numEnd = numStart;
+        while (numEnd < content.size() && (content[numEnd] >= '0' && content[numEnd] <= '9'))
+            numEnd++;
+
+        if (numEnd > numStart) {
+            int count = std::stoi(content.substr(numStart, numEnd - numStart));
+            m_folderVisits[key] = count;
+        }
+
+        pos = numEnd;
+    }
+}
+
+void FilesystemBrowser::saveFolderVisits() {
+    const char* home = getenv("HOME");
+    if (!home) return;
+
+    std::string dir = std::string(home) + "/.config/eden";
+    std::filesystem::create_directories(dir);
+
+    std::string path = dir + "/folder_visits.json";
+    std::ofstream f(path);
+    if (!f.is_open()) return;
+
+    f << "{\n";
+    bool first = true;
+    for (const auto& [folder, count] : m_folderVisits) {
+        if (!first) f << ",\n";
+        // Escape backslashes and quotes in path
+        std::string escaped;
+        for (char c : folder) {
+            if (c == '"' || c == '\\') escaped += '\\';
+            escaped += c;
+        }
+        f << "  \"" << escaped << "\": " << count;
+        first = false;
+    }
+    f << "\n}\n";
+}
+
+void FilesystemBrowser::recordVisit(const std::string& path) {
+    m_folderVisits[path]++;
+    saveFolderVisits();
+}
+
+float FilesystemBrowser::getVisitGlow(const std::string& path) const {
+    auto it = m_folderVisits.find(path);
+    if (it == m_folderVisits.end() || it->second == 0) return 0.0f;
+
+    // Find max visit count
+    int maxVisits = 0;
+    for (const auto& [_, count] : m_folderVisits) {
+        if (count > maxVisits) maxVisits = count;
+    }
+
+    if (maxVisits == 0) return 0.0f;
+    return static_cast<float>(it->second) / static_cast<float>(maxVisits);
 }
 
 // ── Init / Navigate / Clear ────────────────────────────────────────────
@@ -163,6 +330,7 @@ void FilesystemBrowser::init(ModelRenderer* modelRenderer,
     m_modelRenderer = modelRenderer;
     m_sceneObjects = sceneObjects;
     m_terrain = terrain;
+    loadFolderVisits();
 }
 
 void FilesystemBrowser::navigate(const std::string& path) {
@@ -189,13 +357,36 @@ void FilesystemBrowser::processNavigation() {
         m_currentPath = oldPath;
     } else {
         m_currentPath = m_pendingPath;
-        std::cout << "[FilesystemBrowser] Navigated to: " << m_currentPath << std::endl;
+        recordVisit(m_currentPath);
+        // std::cout << "[FilesystemBrowser] Navigated to: " << m_currentPath << std::endl;
     }
     m_active = true;
 }
 
 void FilesystemBrowser::updateAnimations(float deltaTime) {
     if (!m_modelRenderer) return;
+
+    // Drain finished threads and launch queued extractions
+    {
+        auto it = m_extractionThreads.begin();
+        while (it != m_extractionThreads.end()) {
+            // Check if thread is done by trying to join with no wait isn't possible,
+            // so we track via the ready flags in the animations instead.
+            // Just clean up joinable finished threads.
+            ++it;
+        }
+        // Launch pending extractions as slots free up
+        while (!m_pendingExtractions.empty() &&
+               static_cast<int>(m_extractionThreads.size()) < MAX_CONCURRENT_EXTRACTIONS) {
+            auto& pe = m_pendingExtractions.front();
+            m_extractionThreads.emplace_back(
+                extractionWorker,
+                pe.filePath, pe.cachePath,
+                LABEL_SIZE, MAX_VIDEO_FRAMES,
+                pe.outFrames, pe.ready, m_cancelExtraction);
+            m_pendingExtractions.erase(m_pendingExtractions.begin());
+        }
+    }
 
     for (auto& anim : m_videoAnimations) {
         if (!anim.loaded && anim.ready && anim.ready->load()) {
@@ -207,47 +398,101 @@ void FilesystemBrowser::updateAnimations(float deltaTime) {
                     anim.bufferHandle,
                     anim.frames[0].data(),
                     LABEL_SIZE, LABEL_SIZE);
-                std::cout << "[FilesystemBrowser] Video loaded: " << anim.frames.size() << " frames" << std::endl;
             }
             anim.loaded = true;
             anim.pendingFrames.reset();
             anim.ready.reset();
         }
+    }
 
-        if (anim.frames.size() <= 1) continue;
+    // Staggered texture updates — only update one video per frame (round-robin)
+    if (!m_videoAnimations.empty()) {
+        size_t count = m_videoAnimations.size();
+        for (size_t i = 0; i < count; i++) {
+            size_t idx = (m_videoUpdateIndex + i) % count;
+            auto& anim = m_videoAnimations[idx];
+            if (anim.frames.size() <= 1) continue;
 
-        anim.timer += deltaTime;
-        if (anim.timer >= VIDEO_FRAME_INTERVAL) {
-            anim.timer -= VIDEO_FRAME_INTERVAL;
-            anim.currentFrame = (anim.currentFrame + 1) % static_cast<int>(anim.frames.size());
-
-            m_modelRenderer->updateTexture(
-                anim.bufferHandle,
-                anim.frames[anim.currentFrame].data(),
-                LABEL_SIZE, LABEL_SIZE);
+            anim.timer += deltaTime;
+            if (anim.timer >= VIDEO_FRAME_INTERVAL) {
+                anim.timer -= VIDEO_FRAME_INTERVAL;
+                anim.currentFrame = (anim.currentFrame + 1) % static_cast<int>(anim.frames.size());
+                m_modelRenderer->updateTexture(
+                    anim.bufferHandle,
+                    anim.frames[anim.currentFrame].data(),
+                    LABEL_SIZE, LABEL_SIZE);
+                m_videoUpdateIndex = (idx + 1) % count;
+                break;  // Only one texture upload per frame
+            }
         }
     }
+
+    // Update cleaner bot state machine
+    m_cleanerBot.update(deltaTime);
+
+    // Update image bot state machine
+    m_imageBot.update(deltaTime);
+
+    // Spin 3D model objects on their turntable
+    for (auto& spin : m_modelSpins) {
+        if (!spin.obj) continue;
+        spin.angle += MODEL_SPIN_SPEED * deltaTime;
+        if (spin.angle >= 360.0f) spin.angle -= 360.0f;
+        spin.obj->setEulerRotation({0.0f, spin.baseYaw + spin.angle, 0.0f});
+    }
+
+    // Emanation system: spawn expanding wireframe rings from hot folders
+    for (auto& em : m_emanations) {
+        em.timer += deltaTime;
+        // Spawn rate scales with intensity (hot folders emit faster)
+        float interval = EMANATION_SPAWN_INTERVAL / em.intensity;
+        while (em.timer >= interval) {
+            em.timer -= interval;
+            size_t idx = static_cast<size_t>(&em - &m_emanations[0]);
+            m_emanationRings.push_back({idx, 0.0f});
+        }
+    }
+
+    // Age rings and remove expired ones
+    float maxAge = EMANATION_MAX_DIST / EMANATION_SPEED;
+    for (auto& ring : m_emanationRings) {
+        ring.age += deltaTime;
+    }
+    m_emanationRings.erase(
+        std::remove_if(m_emanationRings.begin(), m_emanationRings.end(),
+            [maxAge](const EmanationRing& r) { return r.age >= maxAge; }),
+        m_emanationRings.end());
 }
 
 void FilesystemBrowser::clearFilesystemObjects() {
     if (!m_sceneObjects || !m_modelRenderer) return;
 
+    m_cleanerBot.despawn();
+    m_imageBot.despawn();
+    m_forgeRoom.despawn();
+
     cancelAllExtractions();
     m_videoAnimations.clear();
+    m_modelSpins.clear();
+    m_emanations.clear();
+    m_emanationRings.clear();
 
+    // Collect all handles first, then batch destroy (single waitIdle)
+    std::vector<uint32_t> handles;
     auto it = m_sceneObjects->begin();
     while (it != m_sceneObjects->end()) {
         const auto& bt = (*it) ? (*it)->getBuildingType() : "";
-        if (*it && (bt == "filesystem" || bt == "filesystem_wall")) {
+        if (*it && (bt == "filesystem" || bt == "filesystem_wall" || bt == "image_desc")) {
             uint32_t handle = (*it)->getBufferHandle();
             if (handle != 0) {
-                m_modelRenderer->destroyModel(handle);
+                handles.push_back(handle);
             }
             it = m_sceneObjects->erase(it);
         } else {
             ++it;
         }
     }
+    m_modelRenderer->destroyModels(handles);
 }
 
 // ── Categorize ─────────────────────────────────────────────────────────
@@ -266,6 +511,9 @@ FilesystemBrowser::FileCategory FilesystemBrowser::categorize(
     if (ext == ".mp4" || ext == ".avi" || ext == ".mkv" || ext == ".webm" ||
         ext == ".mov" || ext == ".flv" || ext == ".wmv")
         return FileCategory::Video;
+
+    if (ext == ".lime" || ext == ".obj" || ext == ".glb" || ext == ".gltf")
+        return FileCategory::Model3D;
 
     if (ext == ".txt" || ext == ".md" || ext == ".json" || ext == ".yaml" ||
         ext == ".yml" || ext == ".toml" || ext == ".cfg" || ext == ".ini")
@@ -293,6 +541,7 @@ glm::vec4 FilesystemBrowser::colorForCategory(FileCategory cat) {
         case FileCategory::Text:       return {0.9f, 0.85f, 0.7f, 1.0f};
         case FileCategory::Executable: return {0.3f, 0.9f, 0.3f, 1.0f};
         case FileCategory::SourceCode: return {1.0f, 0.8f, 0.2f, 1.0f};
+        case FileCategory::Model3D:   return {0.2f, 0.9f, 0.9f, 1.0f};
         default:                       return {0.6f, 0.6f, 0.6f, 1.0f};
     }
 }
@@ -306,6 +555,119 @@ void FilesystemBrowser::spawnOneObject(const EntryInfo& entry, size_t index,
 
     PrimitiveMeshBuilder::MeshData meshData;
     PrimitiveType primType;
+    bool loadedModel = false;
+
+    if (entry.category == FileCategory::Model3D) {
+        // Try to load actual 3D model geometry
+        std::string ext = std::filesystem::path(entry.fullPath).extension().string();
+        std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+
+        std::vector<ModelVertex> modelVerts;
+        std::vector<uint32_t> modelIndices;
+        bool hasModelTex = false;
+        std::vector<unsigned char> modelTexData;
+        int modelTexW = 0, modelTexH = 0;
+
+        if (ext == ".glb" || ext == ".gltf") {
+            auto result = GLBLoader::load(entry.fullPath);
+            if (result.success && !result.meshes.empty()) {
+                // Merge all meshes
+                for (auto& m : result.meshes) {
+                    uint32_t baseIdx = static_cast<uint32_t>(modelVerts.size());
+                    modelVerts.insert(modelVerts.end(), m.vertices.begin(), m.vertices.end());
+                    for (auto idx : m.indices) modelIndices.push_back(baseIdx + idx);
+                    if (!hasModelTex && m.hasTexture) {
+                        modelTexData = m.texture.data;
+                        modelTexW = m.texture.width;
+                        modelTexH = m.texture.height;
+                        hasModelTex = true;
+                    }
+                }
+            }
+        } else if (ext == ".lime") {
+            auto result = LimeLoader::load(entry.fullPath);
+            if (result.success) {
+                modelVerts = std::move(result.mesh.vertices);
+                modelIndices = std::move(result.mesh.indices);
+                if (result.mesh.hasTexture) {
+                    modelTexData = std::move(result.mesh.textureData);
+                    modelTexW = result.mesh.textureWidth;
+                    modelTexH = result.mesh.textureHeight;
+                    hasModelTex = true;
+                }
+            }
+        } else if (ext == ".obj") {
+            loadOBJ(entry.fullPath, modelVerts, modelIndices);
+        }
+
+        if (!modelVerts.empty() && !modelIndices.empty()) {
+            // Normalize: compute AABB, center at origin, scale to fit 1.5 units
+            glm::vec3 bmin(FLT_MAX), bmax(-FLT_MAX);
+            for (auto& v : modelVerts) {
+                bmin = glm::min(bmin, v.position);
+                bmax = glm::max(bmax, v.position);
+            }
+            glm::vec3 center = (bmin + bmax) * 0.5f;
+            for (auto& v : modelVerts) v.position -= center;
+            bmin -= center; bmax -= center;
+
+            float maxExtent = std::max({bmax.x - bmin.x, bmax.y - bmin.y, bmax.z - bmin.z});
+            if (maxExtent > 0.0f) {
+                float scaleFactor = 1.5f / maxExtent;
+                for (auto& v : modelVerts) v.position *= scaleFactor;
+                bmin *= scaleFactor; bmax *= scaleFactor;
+            }
+
+            meshData.vertices = std::move(modelVerts);
+            meshData.indices = std::move(modelIndices);
+            meshData.bounds = {bmin, bmax};
+            primType = PrimitiveType::Cube;
+            loadedModel = true;
+
+            // Upload with model's own texture or no texture
+            uint32_t handle;
+            if (hasModelTex && !modelTexData.empty()) {
+                handle = m_modelRenderer->createModel(
+                    meshData.vertices, meshData.indices,
+                    modelTexData.data(), modelTexW, modelTexH);
+            } else {
+                handle = m_modelRenderer->createModel(
+                    meshData.vertices, meshData.indices, nullptr, 0, 0);
+            }
+
+            auto obj = std::make_unique<SceneObject>(
+                "FSFile_" + entry.name);
+
+            obj->setBufferHandle(handle);
+            obj->setIndexCount(static_cast<uint32_t>(meshData.indices.size()));
+            obj->setVertexCount(static_cast<uint32_t>(meshData.vertices.size()));
+            obj->setLocalBounds(meshData.bounds);
+            obj->setModelPath("");
+            obj->setMeshData(meshData.vertices, meshData.indices);
+
+            obj->setPrimitiveType(primType);
+            obj->setPrimitiveSize(1.5f);
+            obj->setPrimitiveColor(color);
+
+            obj->setBuildingType("filesystem");
+            obj->setDescription(entry.name);
+            obj->setTargetLevel("fs://" + entry.fullPath);
+
+            obj->getTransform().setPosition(pos);
+            obj->getTransform().setScale(scale);
+
+            if (yawDegrees != 0.0f) {
+                obj->setEulerRotation({0.0f, yawDegrees, 0.0f});
+            }
+
+            // Register turntable spin animation
+            SceneObject* rawPtr = obj.get();
+            m_sceneObjects->push_back(std::move(obj));
+            m_modelSpins.push_back({rawPtr, yawDegrees, 0.0f});
+            return; // Done — model loaded successfully
+        }
+        // If loading failed, fall through to colored cube with label
+    }
 
     if (entry.category == FileCategory::Folder) {
         meshData = PrimitiveMeshBuilder::createCube(2.0f, color);
@@ -386,6 +748,36 @@ void FilesystemBrowser::spawnOneObject(const EntryInfo& entry, size_t index,
         obj->setEulerRotation({0.0f, yawDegrees, 0.0f});
     }
 
+    // Register emanation source for frequently-visited folders
+    if (entry.category == FileCategory::Folder) {
+        float glow = getVisitGlow(entry.fullPath);
+        if (glow > 0.1f) {
+            // Subtle brightness boost on the folder itself
+            obj->setBrightness(1.0f + glow * 0.3f);
+
+            // Compute inward direction toward gallery center (toward the player)
+            glm::vec3 outward = m_spawnOrigin - pos;
+            outward.y = 0.0f;
+            float len = glm::length(outward);
+            if (len > 0.01f) outward /= len;
+            else outward = glm::vec3(0.0f, 0.0f, 1.0f);
+
+            // Face axes: right is perpendicular to outward on XZ, up is Y
+            glm::vec3 up(0.0f, 1.0f, 0.0f);
+            glm::vec3 right = glm::cross(up, outward);
+
+            Emanation em;
+            em.center = pos + glm::vec3(0.0f, scale.y, 0.0f);  // visual center of folder
+            em.halfExtent = scale;  // scale already represents half-extents of the cube
+            em.forward = outward;
+            em.up = up;
+            em.right = right;
+            em.intensity = glow;
+            em.timer = static_cast<float>(rand() % 100) / 100.0f * EMANATION_SPAWN_INTERVAL;
+            m_emanations.push_back(em);
+        }
+    }
+
     // Register video animation
     if (entry.category == FileCategory::Video) {
         std::string cachePath = getCachePath(entry.fullPath);
@@ -402,11 +794,17 @@ void FilesystemBrowser::spawnOneObject(const EntryInfo& entry, size_t index,
             anim.ready = std::make_shared<std::atomic<bool>>(false);
             anim.loaded = false;
 
-            m_extractionThreads.emplace_back(
-                extractionWorker,
-                entry.fullPath, cachePath,
-                LABEL_SIZE, MAX_VIDEO_FRAMES,
-                anim.pendingFrames, anim.ready, m_cancelExtraction);
+            // Throttle concurrent ffmpeg threads
+            if (static_cast<int>(m_extractionThreads.size()) < MAX_CONCURRENT_EXTRACTIONS) {
+                m_extractionThreads.emplace_back(
+                    extractionWorker,
+                    entry.fullPath, cachePath,
+                    LABEL_SIZE, MAX_VIDEO_FRAMES,
+                    anim.pendingFrames, anim.ready, m_cancelExtraction);
+            } else {
+                m_pendingExtractions.push_back({entry.fullPath, cachePath,
+                                                anim.pendingFrames, anim.ready});
+            }
         }
 
         m_videoAnimations.push_back(std::move(anim));
@@ -443,7 +841,7 @@ int FilesystemBrowser::spawnGalleryRing(const std::vector<EntryInfo>& items,
             float yawDeg = -angle * 180.0f / M_PI + 90.0f;
 
             // Spawn dark wall segment
-            glm::vec4 wallColor(0.15f, 0.15f, 0.18f, 1.0f);
+            glm::vec4 wallColor = m_siloConfig.wallColor;
             auto wallMesh = PrimitiveMeshBuilder::createCube(1.0f, wallColor);
 
             uint32_t wallHandle = m_modelRenderer->createModel(
@@ -465,6 +863,7 @@ int FilesystemBrowser::spawnGalleryRing(const std::vector<EntryInfo>& items,
                 case FileCategory::Folder:     wallObj->setDescription("wall_folder"); break;
                 case FileCategory::Image:      wallObj->setDescription("wall_image"); break;
                 case FileCategory::Video:      wallObj->setDescription("wall_video"); break;
+                case FileCategory::Model3D:   wallObj->setDescription("wall_model"); break;
                 default:                       wallObj->setDescription("wall_other"); break;
             }
 
@@ -487,12 +886,16 @@ int FilesystemBrowser::spawnGalleryRing(const std::vector<EntryInfo>& items,
                 float inset = 0.6f;
                 float itemX = center.x + (radius - inset) * cosf(angle);
                 float itemZ = center.z + (radius - inset) * sinf(angle);
-                float itemY = levelY + 0.5f;
-
+                bool isModel = (cat == FileCategory::Model3D);
+                float itemY = isModel ? levelY + GALLERY_WALL_HEIGHT / 2.0f : levelY + 0.5f;
                 glm::vec3 scale;
                 if (isDoorType) {
                     // Doors: tall slab shape, fitting within wall
                     scale = {segmentWidth * 0.5f / 2.0f, (GALLERY_WALL_HEIGHT - 1.0f) / 2.0f, 0.15f};
+                } else if (isModel) {
+                    // 3D models: uniform scale so they keep their shape
+                    float uniformSize = std::min(segmentWidth * 0.7f, GALLERY_WALL_HEIGHT - 1.0f) / 1.5f;
+                    scale = glm::vec3(uniformSize);
                 } else {
                     // Images/videos: wide panel on the wall
                     // Cube mesh is 1.5 units, so scale = desired / 1.5
@@ -560,6 +963,79 @@ void FilesystemBrowser::spawnFileAtWall(const std::string& filePath,
     std::cout << "[FilesystemBrowser] Pasted " << name << " at wall slot" << std::endl;
 }
 
+// ── Basement Room ──────────────────────────────────────────────────────
+
+void FilesystemBrowser::spawnBasement(const glm::vec3& center, float baseY) {
+    if (!m_modelRenderer || !m_sceneObjects) return;
+
+    // Don't spawn if basement already exists (it persists across navigations)
+    for (const auto& obj : *m_sceneObjects) {
+        if (obj && obj->getBuildingType() == "eden_basement") return;
+    }
+
+    float halfSize = BASEMENT_SIZE / 2.0f;
+    float floorY = baseY - BASEMENT_HEIGHT;
+    glm::vec4 wallColor = m_siloConfig.wallColor;
+
+    auto cubeMesh = PrimitiveMeshBuilder::createCube(1.0f, wallColor);
+    int panelNum = 0;
+
+    auto spawnPanel = [&](const glm::vec3& pos, const glm::vec3& scale) {
+        auto obj = std::make_unique<SceneObject>(
+            "FSBasement_" + std::to_string(panelNum++));
+        uint32_t handle = m_modelRenderer->createModel(
+            cubeMesh.vertices, cubeMesh.indices);
+        obj->setBufferHandle(handle);
+        obj->setIndexCount(static_cast<uint32_t>(cubeMesh.indices.size()));
+        obj->setVertexCount(static_cast<uint32_t>(cubeMesh.vertices.size()));
+        obj->setLocalBounds(cubeMesh.bounds);
+        obj->setMeshData(cubeMesh.vertices, cubeMesh.indices);
+        obj->setPrimitiveType(PrimitiveType::Cube);
+        obj->setPrimitiveSize(1.0f);
+        obj->setPrimitiveColor(wallColor);
+        obj->setBuildingType("eden_basement");
+        obj->getTransform().setPosition(pos);
+        obj->getTransform().setScale(scale);
+        m_sceneObjects->push_back(std::move(obj));
+    };
+
+    // Cube mesh Y goes from 0 to size, so position.y = bottom edge.
+    // Floor slab: bottom at floorY - 1, top at floorY
+    // Ceiling slab: bottom at baseY, top at baseY + 1
+    // Walls: bottom at floorY - 1 (flush with floor bottom), top at baseY + 1 (flush with ceiling top)
+    float wallBottom = floorY - 1.0f;
+    float wallHeight = (baseY + 1.0f) - wallBottom;
+
+    // 4 walls
+    spawnPanel({center.x, wallBottom, center.z + halfSize},
+               {BASEMENT_SIZE, wallHeight, 1.0f});
+    spawnPanel({center.x, wallBottom, center.z - halfSize},
+               {BASEMENT_SIZE, wallHeight, 1.0f});
+    spawnPanel({center.x + halfSize, wallBottom, center.z},
+               {1.0f, wallHeight, BASEMENT_SIZE});
+    spawnPanel({center.x - halfSize, wallBottom, center.z},
+               {1.0f, wallHeight, BASEMENT_SIZE});
+
+    // Floor — bottom at floorY - 1, top at floorY
+    spawnPanel({center.x, floorY - 1.0f, center.z},
+               {BASEMENT_SIZE, 1.0f, BASEMENT_SIZE});
+
+    // Ceiling with central hole — 4 strips around an 8m gap
+    // Bottom at baseY, top at baseY + 1
+    float gapHalf = 4.0f;
+    float stripDepth = halfSize - gapHalf;
+    float stripOffset = gapHalf + stripDepth / 2.0f;
+
+    spawnPanel({center.x, baseY, center.z + stripOffset},
+               {BASEMENT_SIZE, 1.0f, stripDepth});
+    spawnPanel({center.x, baseY, center.z - stripOffset},
+               {BASEMENT_SIZE, 1.0f, stripDepth});
+    spawnPanel({center.x + stripOffset, baseY, center.z},
+               {stripDepth, 1.0f, gapHalf * 2.0f});
+    spawnPanel({center.x - stripOffset, baseY, center.z},
+               {stripDepth, 1.0f, gapHalf * 2.0f});
+}
+
 // ── Spawn Objects ──────────────────────────────────────────────────────
 
 void FilesystemBrowser::spawnObjects(const std::string& dirPath) {
@@ -587,6 +1063,8 @@ void FilesystemBrowser::spawnObjects(const std::string& dirPath) {
         for (const auto& entry : fs::directory_iterator(dir, fs::directory_options::skip_permission_denied)) {
             if (entries.size() >= MAX_ENTRIES) break;
             std::string name = entry.path().filename().string();
+            // Skip ImageBot sidecar description files
+            if (name.size() > 9 && name.substr(name.size() - 9) == ".desc.txt") continue;
             FileCategory cat = categorize(entry);
             std::string full = entry.path().string();
             entries.push_back({name, full, cat});
@@ -599,6 +1077,7 @@ void FilesystemBrowser::spawnObjects(const std::string& dirPath) {
     std::vector<EntryInfo> folders;
     std::vector<EntryInfo> images;
     std::vector<EntryInfo> videos;
+    std::vector<EntryInfo> models;
     std::vector<EntryInfo> others; // text, source, exe, other
 
     for (auto& e : entries) {
@@ -606,6 +1085,7 @@ void FilesystemBrowser::spawnObjects(const std::string& dirPath) {
             case FileCategory::Folder:  folders.push_back(std::move(e)); break;
             case FileCategory::Image:   images.push_back(std::move(e));  break;
             case FileCategory::Video:   videos.push_back(std::move(e));  break;
+            case FileCategory::Model3D: models.push_back(std::move(e));  break;
             default:                    others.push_back(std::move(e));   break;
         }
     }
@@ -621,21 +1101,65 @@ void FilesystemBrowser::spawnObjects(const std::string& dirPath) {
     sortAlpha(folders);
     sortAlpha(images);
     sortAlpha(videos);
+    sortAlpha(models);
     std::sort(others.begin(), others.end(), [](const EntryInfo& a, const EntryInfo& b) {
         return a.name < b.name;
     });
 
-    float baseY = m_terrain->getHeightAt(m_spawnOrigin.x, m_spawnOrigin.z);
+    float terrainY = m_terrain->getHeightAt(m_spawnOrigin.x, m_spawnOrigin.z);
+    // Lift everything up so the basement floor sits just above the terrain (avoid z-fighting)
+    float baseY = terrainY + BASEMENT_HEIGHT + 0.1f;
     glm::vec3 center = m_spawnOrigin;
     center.y = baseY;
 
-    bool hasRing = !folders.empty() || !images.empty() || !videos.empty();
+    bool hasRing = !folders.empty() || !images.empty() || !videos.empty() || !models.empty();
 
-    // Stack types on the gallery ring: folders (bottom), images, videos
+    // Stack types on the gallery ring: folders (bottom), images, videos, 3D models
     int nextLevel = 0;
     nextLevel = spawnGalleryRing(folders, center, baseY, nextLevel);
     nextLevel = spawnGalleryRing(images,  center, baseY, nextLevel);
     nextLevel = spawnGalleryRing(videos,  center, baseY, nextLevel);
+    nextLevel = spawnGalleryRing(models,  center, baseY, nextLevel);
+
+    // Spawn basement room beneath the silo
+    if (nextLevel > 0) {
+        spawnBasement(center, baseY);
+    }
+
+    // Spawn vertical columns between panel sections (extended down through basement)
+    if (nextLevel > 0) {
+        float totalHeight = nextLevel * GALLERY_WALL_HEIGHT + BASEMENT_HEIGHT;
+        float radius = GALLERY_RADIUS;
+        float segmentAngle = 2.0f * M_PI / GALLERY_SIDES;
+        glm::vec4 colColor = m_siloConfig.columnColor;
+
+        for (int s = 0; s < GALLERY_SIDES; ++s) {
+            float angle = (s + 0.5f) * segmentAngle;
+            float colX = center.x + radius * cosf(angle);
+            float colZ = center.z + radius * sinf(angle);
+            float yawDeg = -angle * 180.0f / M_PI + 90.0f;
+
+            auto mesh = PrimitiveMeshBuilder::createCube(1.0f, colColor);
+            uint32_t handle = m_modelRenderer->createModel(mesh.vertices, mesh.indices, nullptr, 0, 0);
+
+            auto obj = std::make_unique<SceneObject>("FSColumn_" + std::to_string(s));
+            obj->setBufferHandle(handle);
+            obj->setIndexCount(mesh.indices.size());
+            obj->setVertexCount(mesh.vertices.size());
+            obj->setLocalBounds(mesh.bounds);
+            obj->setMeshData(mesh.vertices, mesh.indices);
+            obj->setPrimitiveType(PrimitiveType::Cube);
+            obj->setPrimitiveSize(1.0f);
+            obj->setPrimitiveColor(colColor);
+            obj->setBuildingType("filesystem_wall");
+
+            obj->getTransform().setPosition({colX, baseY - BASEMENT_HEIGHT, colZ});
+            obj->getTransform().setScale({0.3f, totalHeight, 0.3f});
+            obj->setEulerRotation({0.0f, yawDeg, 0.0f});
+
+            m_sceneObjects->push_back(std::move(obj));
+        }
+    }
 
     // Place remaining "other" entries in a grid in the center of the room
     if (!others.empty()) {
@@ -660,9 +1184,51 @@ void FilesystemBrowser::spawnObjects(const std::string& dirPath) {
         }
     }
 
-    size_t total = folders.size() + images.size() + videos.size() + others.size();
-    std::cout << "[FilesystemBrowser] Spawned " << total
-              << " objects for " << dirPath << std::endl;
+    size_t total = folders.size() + images.size() + videos.size() + models.size() + others.size();
+    // std::cout << "[FilesystemBrowser] Spawned " << total
+    //           << " objects for " << dirPath << std::endl;
+
+    // Spawn forge room in assets/models/ directory
+    if (dirPath.find("assets/models") != std::string::npos) {
+        m_forgeRoom.init(m_sceneObjects, m_modelRenderer);
+        m_forgeRoom.spawn(center, baseY);
+    }
+
+    // Always load the deployed bots registry (so deployed bots work in any directory)
+    m_forgeRoom.loadRegistry();
+
+    // Check if there are deployed bots for this territory
+    auto deployedBots = m_forgeRoom.getDeployedBotsForTerritory(dirPath);
+    bool spawnedDeployedBot = false;
+    bool spawnedImageBot = false;
+    for (auto& bot : deployedBots) {
+        if (bot.job == "CleanerBot" && !spawnedDeployedBot) {
+            m_cleanerBot.init(m_sceneObjects, m_modelRenderer);
+            glm::vec3 botPos = center;
+            botPos.y = baseY;
+            m_cleanerBot.spawn(botPos, m_modelRenderer, bot.modelPath);
+            spawnedDeployedBot = true;
+        }
+        if (bot.job == "ImageBot" && !spawnedImageBot) {
+            m_imageBot.init(m_sceneObjects, m_modelRenderer);
+            glm::vec3 botPos = center;
+            botPos.y = baseY;
+            botPos.x += 2.0f; // offset so it doesn't overlap CleanerBot
+            m_imageBot.spawn(botPos, m_modelRenderer, bot.modelPath);
+            spawnedImageBot = true;
+        }
+    }
+
+    // Spawn default cleaner bot in home directory (only if no deployed bot took the slot)
+    if (!spawnedDeployedBot) {
+        const char* homeEnv = getenv("HOME");
+        if (homeEnv && dirPath == std::string(homeEnv)) {
+            m_cleanerBot.init(m_sceneObjects, m_modelRenderer);
+            glm::vec3 botPos = center;
+            botPos.y = baseY;
+            m_cleanerBot.spawn(botPos, m_modelRenderer);
+        }
+    }
 }
 
 // ── Label Rendering ────────────────────────────────────────────────────
@@ -699,6 +1265,7 @@ void FilesystemBrowser::renderLabel(std::vector<unsigned char>& pixels,
         case FileCategory::Text:       catLabel = "[TXT]"; break;
         case FileCategory::Executable: catLabel = "[EXE]"; break;
         case FileCategory::SourceCode: catLabel = "[SRC]"; break;
+        case FileCategory::Model3D:   catLabel = "[3D]"; break;
         default:                       catLabel = "[---]"; break;
     }
 
@@ -769,6 +1336,147 @@ void FilesystemBrowser::renderLabel(std::vector<unsigned char>& pixels,
                 std::swap(pixels[ti + c], pixels[bi + c]);
         }
     }
+}
+
+// ── Image Focus Mode ────────────────────────────────────────────────────
+
+void FilesystemBrowser::focusImage(SceneObject* panel) {
+    if (!panel || !m_modelRenderer || m_imageFocus.active) return;
+
+    // Get source file path from targetLevel ("fs://..." prefix)
+    std::string target = panel->getTargetLevel();
+    if (target.size() <= 5 || target.substr(0, 5) != "fs://") return;
+    std::string path = target.substr(5);
+
+    // Load full-res image
+    int imgW, imgH, imgChannels;
+    unsigned char* data = stbi_load(path.c_str(), &imgW, &imgH, &imgChannels, 4);
+    if (!data) return;
+
+    // Cap to FOCUS_MAX_SIZE preserving aspect ratio
+    int capW = imgW, capH = imgH;
+    int maxDim = std::max(imgW, imgH);
+    if (maxDim > FOCUS_MAX_SIZE) {
+        float scale = static_cast<float>(FOCUS_MAX_SIZE) / maxDim;
+        capW = static_cast<int>(imgW * scale);
+        capH = static_cast<int>(imgH * scale);
+        if (capW < 1) capW = 1;
+        if (capH < 1) capH = 1;
+    }
+
+    // Resample into RGBA buffer at capped size (flipped vertically for GPU)
+    std::vector<unsigned char> hiRes(capW * capH * 4);
+    for (int py = 0; py < capH; ++py) {
+        int srcY = (capH - 1 - py) * imgH / capH;
+        for (int px = 0; px < capW; ++px) {
+            int srcX = px * imgW / capW;
+            int srcIdx = (srcY * imgW + srcX) * 4;
+            int dstIdx = (py * capW + px) * 4;
+            hiRes[dstIdx + 0] = data[srcIdx + 0];
+            hiRes[dstIdx + 1] = data[srcIdx + 1];
+            hiRes[dstIdx + 2] = data[srcIdx + 2];
+            hiRes[dstIdx + 3] = data[srcIdx + 3];
+        }
+    }
+    stbi_image_free(data);
+
+    // Save state for unfocus
+    m_imageFocus.panel = panel;
+    m_imageFocus.bufferHandle = panel->getBufferHandle();
+    m_imageFocus.originalScale = panel->getTransform().getScale();
+
+    // Upload hi-res texture
+    m_modelRenderer->updateTexture(m_imageFocus.bufferHandle, hiRes.data(), capW, capH);
+
+    // Adjust panel scale to match image aspect ratio
+    // Keep Y scale, adjust X = Y * aspect, keep Z
+    float aspect = static_cast<float>(capW) / capH;
+    glm::vec3 s = m_imageFocus.originalScale;
+    panel->getTransform().setScale({s.y * aspect, s.y, s.z});
+
+    m_imageFocus.active = true;
+}
+
+void FilesystemBrowser::unfocusImage() {
+    if (!m_imageFocus.active || !m_imageFocus.panel || !m_modelRenderer) return;
+
+    // Get source path and reload as 256x256 thumbnail
+    std::string target = m_imageFocus.panel->getTargetLevel();
+    std::string path = target.substr(5);
+
+    int imgW, imgH, imgChannels;
+    unsigned char* data = stbi_load(path.c_str(), &imgW, &imgH, &imgChannels, 4);
+    if (data) {
+        std::vector<unsigned char> thumb(LABEL_SIZE * LABEL_SIZE * 4);
+        for (int py = 0; py < LABEL_SIZE; ++py) {
+            int srcY = (LABEL_SIZE - 1 - py) * imgH / LABEL_SIZE;
+            for (int px = 0; px < LABEL_SIZE; ++px) {
+                int srcX = px * imgW / LABEL_SIZE;
+                int srcIdx = (srcY * imgW + srcX) * 4;
+                int dstIdx = (py * LABEL_SIZE + px) * 4;
+                thumb[dstIdx + 0] = data[srcIdx + 0];
+                thumb[dstIdx + 1] = data[srcIdx + 1];
+                thumb[dstIdx + 2] = data[srcIdx + 2];
+                thumb[dstIdx + 3] = data[srcIdx + 3];
+            }
+        }
+        stbi_image_free(data);
+        m_modelRenderer->updateTexture(m_imageFocus.bufferHandle, thumb.data(), LABEL_SIZE, LABEL_SIZE);
+    }
+
+    // Restore original scale
+    m_imageFocus.panel->getTransform().setScale(m_imageFocus.originalScale);
+
+    m_imageFocus.active = false;
+    m_imageFocus.panel = nullptr;
+    m_imageFocus.bufferHandle = 0;
+}
+
+// ── Emanation Render Data ───────────────────────────────────────────────
+
+std::vector<FilesystemBrowser::EmanationBatch>
+FilesystemBrowser::getEmanationRenderData() const {
+    std::vector<EmanationBatch> batches;
+    if (m_emanationRings.empty()) return batches;
+
+    float maxAge = EMANATION_MAX_DIST / EMANATION_SPEED;
+
+    for (const auto& ring : m_emanationRings) {
+        if (ring.emanationIdx >= m_emanations.size()) continue;
+        const auto& em = m_emanations[ring.emanationIdx];
+
+        float t = ring.age / maxAge;  // 0..1 normalized lifetime
+        float dist = ring.age * EMANATION_SPEED;
+
+        // Alpha fades out over distance
+        float alpha = (1.0f - t) * em.intensity;
+        if (alpha < 0.01f) continue;
+
+        // Scale up slightly as it travels outward (1x to 1.3x)
+        float scaleMult = 1.0f + t * 0.3f;
+
+        // Compute the 4 corners of the wireframe square
+        glm::vec3 center = em.center + em.forward * dist;
+        glm::vec3 r = em.right * em.halfExtent.x * scaleMult;
+        glm::vec3 u = em.up * em.halfExtent.y * scaleMult;
+
+        glm::vec3 c0 = center - r - u;
+        glm::vec3 c1 = center + r - u;
+        glm::vec3 c2 = center + r + u;
+        glm::vec3 c3 = center - r + u;
+
+        // 4 line segments forming the square (8 vec3 points = 4 line pairs)
+        EmanationBatch batch;
+        batch.lines = {c0, c1, c1, c2, c2, c3, c3, c0};
+        // White-blue color tinted by intensity
+        batch.color = glm::vec4(0.6f + 0.4f * em.intensity,
+                                0.7f + 0.3f * em.intensity,
+                                1.0f,
+                                alpha);
+        batches.push_back(std::move(batch));
+    }
+
+    return batches;
 }
 
 } // namespace eden

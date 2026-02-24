@@ -1,5 +1,6 @@
 #include "Swapchain.hpp"
 #include "VulkanContext.hpp"
+#include "Buffer.hpp"
 #include <stdexcept>
 #include <algorithm>
 #include <limits>
@@ -95,6 +96,7 @@ void Swapchain::cleanup() {
         m_depthImage = VK_NULL_HANDLE;
     }
     if (m_depthImageMemory != VK_NULL_HANDLE) {
+        Buffer::trackVramFreeHandle(m_depthImageMemory);
         vkFreeMemory(device, m_depthImageMemory, nullptr);
         m_depthImageMemory = VK_NULL_HANDLE;
     }
@@ -207,6 +209,7 @@ void Swapchain::createDepthResources() {
     if (vkAllocateMemory(device, &allocInfo, nullptr, &m_depthImageMemory) != VK_SUCCESS) {
         throw std::runtime_error("Failed to allocate depth image memory");
     }
+    Buffer::trackVramAllocHandle(m_depthImageMemory, static_cast<int64_t>(memRequirements.size));
 
     vkBindImageMemory(device, m_depthImage, m_depthImageMemory, 0);
 

@@ -1,5 +1,6 @@
 #include "GizmoRenderer.hpp"
 #include "VulkanContext.hpp"
+#include "Buffer.hpp"
 #include <stdexcept>
 #include <cstring>
 #include <array>
@@ -38,12 +39,14 @@ GizmoRenderer::~GizmoRenderer() {
         vkDestroyBuffer(device, m_vertexBuffer, nullptr);
     }
     if (m_vertexMemory != VK_NULL_HANDLE) {
+        Buffer::trackVramFreeHandle(m_vertexMemory);
         vkFreeMemory(device, m_vertexMemory, nullptr);
     }
     if (m_indexBuffer != VK_NULL_HANDLE) {
         vkDestroyBuffer(device, m_indexBuffer, nullptr);
     }
     if (m_indexMemory != VK_NULL_HANDLE) {
+        Buffer::trackVramFreeHandle(m_indexMemory);
         vkFreeMemory(device, m_indexMemory, nullptr);
     }
 }
@@ -78,6 +81,7 @@ void GizmoRenderer::createBuffers() {
     if (vkAllocateMemory(device, &vertexAllocInfo, nullptr, &m_vertexMemory) != VK_SUCCESS) {
         throw std::runtime_error("Failed to allocate gizmo vertex buffer memory");
     }
+    Buffer::trackVramAllocHandle(m_vertexMemory, static_cast<int64_t>(vertexMemReqs.size));
 
     vkBindBufferMemory(device, m_vertexBuffer, m_vertexMemory, 0);
     vkMapMemory(device, m_vertexMemory, 0, vertexBufferSize, 0, &m_mappedVertexMemory);
@@ -109,6 +113,7 @@ void GizmoRenderer::createBuffers() {
     if (vkAllocateMemory(device, &indexAllocInfo, nullptr, &m_indexMemory) != VK_SUCCESS) {
         throw std::runtime_error("Failed to allocate gizmo index buffer memory");
     }
+    Buffer::trackVramAllocHandle(m_indexMemory, static_cast<int64_t>(indexMemReqs.size));
 
     vkBindBufferMemory(device, m_indexBuffer, m_indexMemory, 0);
     vkMapMemory(device, m_indexMemory, 0, indexBufferSize, 0, &m_mappedIndexMemory);

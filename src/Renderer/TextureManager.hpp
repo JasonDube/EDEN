@@ -56,6 +56,7 @@ private:
     VkImageView m_textureArrayView = VK_NULL_HANDLE;
 
     int m_textureCount = 0;
+    VkDeviceSize m_textureMemorySize = 0;  // For VRAM tracking
 };
 
 } // namespace eden

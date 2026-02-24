@@ -4,6 +4,7 @@
 #include <stdexcept>
 #include <cstring>
 #include <iostream>
+#include "Buffer.hpp"
 
 namespace eden {
 
@@ -72,21 +73,21 @@ SkinnedModelRenderer::~SkinnedModelRenderer() {
     // Destroy all models
     for (auto& [handle, data] : m_models) {
         if (data.vertexBuffer) vkDestroyBuffer(device, data.vertexBuffer, nullptr);
-        if (data.vertexMemory) vkFreeMemory(device, data.vertexMemory, nullptr);
+        if (data.vertexMemory) { Buffer::trackVramFreeHandle(data.vertexMemory); vkFreeMemory(device, data.vertexMemory, nullptr); }
         if (data.indexBuffer) vkDestroyBuffer(device, data.indexBuffer, nullptr);
-        if (data.indexMemory) vkFreeMemory(device, data.indexMemory, nullptr);
+        if (data.indexMemory) { Buffer::trackVramFreeHandle(data.indexMemory); vkFreeMemory(device, data.indexMemory, nullptr); }
         if (data.textureView) vkDestroyImageView(device, data.textureView, nullptr);
         if (data.textureImage) vkDestroyImage(device, data.textureImage, nullptr);
-        if (data.textureMemory) vkFreeMemory(device, data.textureMemory, nullptr);
+        if (data.textureMemory) { Buffer::trackVramFreeHandle(data.textureMemory); vkFreeMemory(device, data.textureMemory, nullptr); }
         if (data.textureSampler) vkDestroySampler(device, data.textureSampler, nullptr);
         if (data.boneBuffer) vkDestroyBuffer(device, data.boneBuffer, nullptr);
-        if (data.boneMemory) vkFreeMemory(device, data.boneMemory, nullptr);
+        if (data.boneMemory) { Buffer::trackVramFreeHandle(data.boneMemory); vkFreeMemory(device, data.boneMemory, nullptr); }
     }
 
     // Destroy default texture
     if (m_defaultTextureView) vkDestroyImageView(device, m_defaultTextureView, nullptr);
     if (m_defaultTexture) vkDestroyImage(device, m_defaultTexture, nullptr);
-    if (m_defaultTextureMemory) vkFreeMemory(device, m_defaultTextureMemory, nullptr);
+    if (m_defaultTextureMemory) { Buffer::trackVramFreeHandle(m_defaultTextureMemory); vkFreeMemory(device, m_defaultTextureMemory, nullptr); }
     if (m_defaultSampler) vkDestroySampler(device, m_defaultSampler, nullptr);
 
     if (m_descriptorPool) vkDestroyDescriptorPool(device, m_descriptorPool, nullptr);
@@ -283,6 +284,7 @@ void SkinnedModelRenderer::createDefaultTexture() {
                           VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 
     vkDestroyBuffer(m_context.getDevice(), stagingBuffer, nullptr);
+    Buffer::trackVramFreeHandle(stagingMemory);
     vkFreeMemory(m_context.getDevice(), stagingMemory, nullptr);
 
     VkImageViewCreateInfo viewInfo{};
@@ -388,6 +390,7 @@ uint32_t SkinnedModelRenderer::createModel(const std::vector<SkinnedVertex>& ver
                               VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 
         vkDestroyBuffer(m_context.getDevice(), stagingBuffer, nullptr);
+        Buffer::trackVramFreeHandle(stagingMemory);
         vkFreeMemory(m_context.getDevice(), stagingMemory, nullptr);
 
         VkImageViewCreateInfo viewInfo{};
@@ -475,15 +478,15 @@ void SkinnedModelRenderer::destroyModel(uint32_t handle) {
     }
 
     if (data.vertexBuffer) vkDestroyBuffer(device, data.vertexBuffer, nullptr);
-    if (data.vertexMemory) vkFreeMemory(device, data.vertexMemory, nullptr);
+    if (data.vertexMemory) { Buffer::trackVramFreeHandle(data.vertexMemory); vkFreeMemory(device, data.vertexMemory, nullptr); }
     if (data.indexBuffer) vkDestroyBuffer(device, data.indexBuffer, nullptr);
-    if (data.indexMemory) vkFreeMemory(device, data.indexMemory, nullptr);
+    if (data.indexMemory) { Buffer::trackVramFreeHandle(data.indexMemory); vkFreeMemory(device, data.indexMemory, nullptr); }
     if (data.textureView) vkDestroyImageView(device, data.textureView, nullptr);
     if (data.textureImage) vkDestroyImage(device, data.textureImage, nullptr);
-    if (data.textureMemory) vkFreeMemory(device, data.textureMemory, nullptr);
+    if (data.textureMemory) { Buffer::trackVramFreeHandle(data.textureMemory); vkFreeMemory(device, data.textureMemory, nullptr); }
     if (data.textureSampler) vkDestroySampler(device, data.textureSampler, nullptr);
     if (data.boneBuffer) vkDestroyBuffer(device, data.boneBuffer, nullptr);
-    if (data.boneMemory) vkFreeMemory(device, data.boneMemory, nullptr);
+    if (data.boneMemory) { Buffer::trackVramFreeHandle(data.boneMemory); vkFreeMemory(device, data.boneMemory, nullptr); }
     if (data.descriptorSet) vkFreeDescriptorSets(device, m_descriptorPool, 1, &data.descriptorSet);
 
     m_models.erase(it);
@@ -654,6 +657,7 @@ void SkinnedModelRenderer::createImage(uint32_t width, uint32_t height, VkFormat
     allocInfo.memoryTypeIndex = m_context.findMemoryType(memReqs.memoryTypeBits, properties);
 
     vkAllocateMemory(m_context.getDevice(), &allocInfo, nullptr, &memory);
+    Buffer::trackVramAllocHandle(memory, static_cast<int64_t>(memReqs.size));
     vkBindImageMemory(m_context.getDevice(), image, memory, 0);
 }
 

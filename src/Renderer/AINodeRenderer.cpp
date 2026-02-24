@@ -1,5 +1,6 @@
 #include "AINodeRenderer.hpp"
 #include "VulkanContext.hpp"
+#include "Buffer.hpp"
 #include "PipelineBuilder.hpp"
 #include "../Editor/AINode.hpp"
 #include "../AI/TraderAI.hpp"
@@ -55,6 +56,7 @@ AINodeRenderer::~AINodeRenderer() {
         vkDestroyBuffer(device, m_nodesBuffer, nullptr);
     }
     if (m_nodesMemory != VK_NULL_HANDLE) {
+        Buffer::trackVramFreeHandle(m_nodesMemory);
         vkFreeMemory(device, m_nodesMemory, nullptr);
     }
 
@@ -65,6 +67,7 @@ AINodeRenderer::~AINodeRenderer() {
         vkDestroyBuffer(device, m_connectionsBuffer, nullptr);
     }
     if (m_connectionsMemory != VK_NULL_HANDLE) {
+        Buffer::trackVramFreeHandle(m_connectionsMemory);
         vkFreeMemory(device, m_connectionsMemory, nullptr);
     }
 
@@ -75,6 +78,7 @@ AINodeRenderer::~AINodeRenderer() {
         vkDestroyBuffer(device, m_arrowsBuffer, nullptr);
     }
     if (m_arrowsMemory != VK_NULL_HANDLE) {
+        Buffer::trackVramFreeHandle(m_arrowsMemory);
         vkFreeMemory(device, m_arrowsMemory, nullptr);
     }
 
@@ -85,6 +89,7 @@ AINodeRenderer::~AINodeRenderer() {
         vkDestroyBuffer(device, m_collisionBuffer, nullptr);
     }
     if (m_collisionMemory != VK_NULL_HANDLE) {
+        Buffer::trackVramFreeHandle(m_collisionMemory);
         vkFreeMemory(device, m_collisionMemory, nullptr);
     }
 }
@@ -118,6 +123,7 @@ void AINodeRenderer::createBuffers() {
         if (vkAllocateMemory(device, &allocInfo, nullptr, &memory) != VK_SUCCESS) {
             throw std::runtime_error("Failed to allocate AI node buffer memory");
         }
+        Buffer::trackVramAllocHandle(memory, static_cast<int64_t>(memReqs.size));
 
         vkBindBufferMemory(device, buffer, memory, 0);
         vkMapMemory(device, memory, 0, bufferSize, 0, &mapped);

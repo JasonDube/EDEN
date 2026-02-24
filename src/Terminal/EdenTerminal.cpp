@@ -89,8 +89,8 @@ bool EdenTerminal::init(int cols, int rows, const std::string& shell) {
     int flags = fcntl(m_masterFd, F_GETFL, 0);
     fcntl(m_masterFd, F_SETFL, flags | O_NONBLOCK);
 
-    std::cout << "[EdenTerminal] Started shell (pid=" << m_childPid
-              << ", fd=" << m_masterFd << ", " << m_cols << "x" << m_rows << ")" << std::endl;
+    // std::cout << "[EdenTerminal] Started shell (pid=" << m_childPid
+    //           << ", fd=" << m_masterFd << ", " << m_cols << "x" << m_rows << ")" << std::endl;
 
     return true;
 }
@@ -117,13 +117,21 @@ void EdenTerminal::update() {
         int status;
         pid_t result = waitpid(m_childPid, &status, WNOHANG);
         if (result == m_childPid) {
-            std::cout << "[EdenTerminal] Shell exited" << std::endl;
+            // std::cout << "[EdenTerminal] Shell exited" << std::endl;
             m_childPid = -1;
         }
     }
 
     // Sync cell buffer from vterm screen
     syncCells();
+
+    // Tick cursor blink timer (needed for 3D texture rendering)
+    m_cursorBlinkTimer += ImGui::GetIO().DeltaTime;
+    if (m_cursorBlinkTimer > 1.0f) m_cursorBlinkTimer -= 1.0f;
+    // Mark dirty on blink transition so texture updates
+    bool cursorOn = m_cursorBlinkTimer < 0.5f;
+    static bool lastCursorOn = true;
+    if (cursorOn != lastCursorOn) { m_dirty = true; lastCursorOn = cursorOn; }
 }
 
 // ── syncCells ──────────────────────────────────────────────────────────
@@ -314,6 +322,8 @@ void EdenTerminal::handleKeyInput() {
     if (!io.InputQueueCharacters.empty()) {
         for (int i = 0; i < io.InputQueueCharacters.Size; ++i) {
             ImWchar wc = io.InputQueueCharacters[i];
+            // Skip Enter/Tab/Backspace/Escape — handled as special keys below
+            if (wc == '\r' || wc == '\n' || wc == '\t' || wc == 127 || wc == 27) continue;
             if (wc < 128) {
                 char c = (char)wc;
                 // Handle Ctrl+key combos
@@ -474,21 +484,20 @@ bool EdenTerminal::renderToPixels(std::vector<unsigned char>& pixelBuffer, int t
     // Here we just check if content changed or buffer is uninitialized.
     if (!m_dirty && !pixelBuffer.empty()) return false;
 
-    // 3x scale for readability on 3D surfaces
-    const int scale = 3;
-    const int cellW = 8 * scale;   // 24px per char
-    const int cellH = 16 * scale;  // 48px per char
-
-    // Margins to place content within the screen face UV region.
-    // UV map: screen face occupies ~X(100..1948), Y(310..1990) of the 2048x2048 texture.
-    // Variant 2 flips vertically, so pre-flip Y positions are inverted:
-    //   pre-flip Y=58  → post-flip Y=2048-58=1990  (bottom edge of screen face)
-    //   pre-flip Y=1738 → post-flip Y=2048-1738=310 (top edge, below small faces)
-    // Screen face now fills full 0-1 UV space — just small padding for aesthetics
+    // Margins for aesthetics
     const int marginLeft = 40;
     const int marginRight = 40;
     const int marginTop = 40;
     const int marginBottom = 40;
+
+    // Compute scale dynamically to fit all terminal rows/cols in the texture
+    int availW = texWidth - marginLeft - marginRight;
+    int availH = texHeight - marginTop - marginBottom;
+    int scaleByRows = (m_rows > 0) ? (availH / (16 * m_rows)) : 3;
+    int scaleByCols = (m_cols > 0) ? (availW / (8 * m_cols)) : 3;
+    int scale = std::max(1, std::min(scaleByRows, scaleByCols));
+    const int cellW = 8 * scale;
+    const int cellH = 16 * scale;
 
     // Ensure buffer is correct size
     size_t bufSize = texWidth * texHeight * 4;
@@ -505,8 +514,6 @@ bool EdenTerminal::renderToPixels(std::vector<unsigned char>& pixelBuffer, int t
     }
 
     // Clamp rendering to available area within margins
-    int availW = texWidth - marginLeft - marginRight;
-    int availH = texHeight - marginTop - marginBottom;
     int maxCols = availW / cellW;
     int maxRows = availH / cellH;
     int renderCols = std::min(m_cols, maxCols);
@@ -569,8 +576,98 @@ bool EdenTerminal::renderToPixels(std::vector<unsigned char>& pixelBuffer, int t
         }
     }
 
-    // Cursor
-    if (m_cursorVisible && m_cursorRow >= 0 && m_cursorRow < renderRows && m_cursorCol >= 0 && m_cursorCol < renderCols) {
+    // Visual selection highlight (blue-tinted background)
+    if (m_selection.active) {
+        for (int row = 0; row < renderRows; ++row) {
+            for (int col = 0; col < renderCols; ++col) {
+                if (isCellSelected(row, col)) {
+                    int px0 = marginLeft + col * cellW;
+                    int py0 = marginTop + row * cellH;
+                    for (int y = 0; y < cellH; ++y)
+                        for (int x = 0; x < cellW; ++x)
+                            setPixel(px0 + x, py0 + y, 60, 80, 140);
+                }
+            }
+        }
+        // Re-render text on top of selection highlight
+        for (int row = 0; row < renderRows; ++row) {
+            for (int col = 0; col < renderCols; ++col) {
+                if (!isCellSelected(row, col)) continue;
+                const TermCell& tc = m_cells[row][col];
+                char32_t ch = tc.ch;
+                if (ch >= 32 && ch <= 126) {
+                    int px0 = marginLeft + col * cellW;
+                    int py0 = marginTop + row * cellH;
+                    const unsigned char* glyph = &kTermFont8x16[(ch - 32) * 16];
+                    for (int y = 0; y < 16; ++y) {
+                        unsigned char bits = glyph[y];
+                        for (int x = 0; x < 8; ++x) {
+                            if (bits & (0x80 >> x)) {
+                                for (int sy = 0; sy < scale; ++sy)
+                                    for (int sx = 0; sx < scale; ++sx)
+                                        setPixel(px0 + x * scale + sx, py0 + y * scale + sy, 220, 220, 255);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Copy mode cursor (bright white block)
+    if (m_copyModeActive && m_copyCursorRow >= 0 && m_copyCursorRow < renderRows &&
+        m_copyCursorCol >= 0 && m_copyCursorCol < renderCols) {
+        int cx0 = marginLeft + m_copyCursorCol * cellW;
+        int cy0 = marginTop + m_copyCursorRow * cellH;
+        for (int y = 0; y < cellH; ++y)
+            for (int x = 0; x < cellW; ++x)
+                setPixel(cx0 + x, cy0 + y, 255, 255, 255);
+        // Re-render the character under the copy cursor with dark color
+        const TermCell& cc = m_cells[m_copyCursorRow][m_copyCursorCol];
+        if (cc.ch >= 32 && cc.ch <= 126) {
+            const unsigned char* glyph = &kTermFont8x16[(cc.ch - 32) * 16];
+            for (int y = 0; y < 16; ++y) {
+                unsigned char bits = glyph[y];
+                for (int x = 0; x < 8; ++x) {
+                    if (bits & (0x80 >> x)) {
+                        for (int sy = 0; sy < scale; ++sy)
+                            for (int sx = 0; sx < scale; ++sx)
+                                setPixel(cx0 + x * scale + sx, cy0 + y * scale + sy, 30, 30, 30);
+                    }
+                }
+            }
+        }
+    }
+
+    // Copy mode indicator text
+    if (m_copyModeActive) {
+        const char* indicator = m_selection.active ? "-- VISUAL --" : "-- COPY --";
+        int indicatorLen = (int)strlen(indicator);
+        // Render at bottom of terminal area, centered
+        int indicatorY = marginTop + renderRows * cellH + 4;
+        int indicatorX = marginLeft + (renderCols * cellW - indicatorLen * 8 * scale) / 2;
+        for (int i = 0; i < indicatorLen; ++i) {
+            char ch = indicator[i];
+            if (ch >= 32 && ch <= 126) {
+                const unsigned char* glyph = &kTermFont8x16[(ch - 32) * 16];
+                for (int y = 0; y < 16; ++y) {
+                    unsigned char bits = glyph[y];
+                    for (int x = 0; x < 8; ++x) {
+                        if (bits & (0x80 >> x)) {
+                            for (int sy = 0; sy < scale; ++sy)
+                                for (int sx = 0; sx < scale; ++sx)
+                                    setPixel(indicatorX + i * 8 * scale + x * scale + sx,
+                                             indicatorY + y * scale + sy, 180, 180, 50);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Cursor (blink using same timer as ImGui render) — hide when copy mode active
+    bool cursorOn = m_cursorBlinkTimer < 0.5f;
+    if (!m_copyModeActive && m_cursorVisible && cursorOn && m_cursorRow >= 0 && m_cursorRow < renderRows && m_cursorCol >= 0 && m_cursorCol < renderCols) {
         int cx0 = marginLeft + m_cursorCol * cellW;
         int cy0 = marginTop + m_cursorRow * cellH;
         for (int y = 0; y < cellH; ++y)
@@ -602,6 +699,99 @@ bool EdenTerminal::renderToPixels(std::vector<unsigned char>& pixelBuffer, int t
         }
     }
 
+    return true;
+}
+
+// ── Copy mode methods ──────────────────────────────────────────────────
+
+void EdenTerminal::startCopyMode() {
+    m_copyModeActive = true;
+    m_copyCursorRow = m_cursorRow;
+    m_copyCursorCol = m_cursorCol;
+    m_selection.active = false;
+    m_dirty = true;
+}
+
+void EdenTerminal::moveCopyCursor(int dRow, int dCol) {
+    m_copyCursorRow = std::clamp(m_copyCursorRow + dRow, 0, m_rows - 1);
+    m_copyCursorCol = std::clamp(m_copyCursorCol + dCol, 0, m_cols - 1);
+    if (m_selection.active) {
+        m_selection.cursorRow = m_copyCursorRow;
+        m_selection.cursorCol = m_copyCursorCol;
+    }
+    m_dirty = true;
+}
+
+void EdenTerminal::startVisualSelect() {
+    m_selection.active = true;
+    m_selection.anchorRow = m_copyCursorRow;
+    m_selection.anchorCol = m_copyCursorCol;
+    m_selection.cursorRow = m_copyCursorRow;
+    m_selection.cursorCol = m_copyCursorCol;
+    m_dirty = true;
+}
+
+std::string EdenTerminal::yankSelection() {
+    if (!m_selection.active) {
+        // No visual selection — yank current line at copy cursor
+        std::string line;
+        for (int col = 0; col < m_cols; ++col) {
+            char32_t ch = m_cells[m_copyCursorRow][col].ch;
+            if (ch < 128) line += (char)ch;
+            else line += '?';
+        }
+        // Trim trailing spaces
+        while (!line.empty() && line.back() == ' ') line.pop_back();
+        cancelCopyMode();
+        return line;
+    }
+
+    // Determine start/end positions
+    int startRow = m_selection.anchorRow, startCol = m_selection.anchorCol;
+    int endRow = m_selection.cursorRow, endCol = m_selection.cursorCol;
+    if (startRow > endRow || (startRow == endRow && startCol > endCol)) {
+        std::swap(startRow, endRow);
+        std::swap(startCol, endCol);
+    }
+
+    std::string result;
+    for (int row = startRow; row <= endRow; ++row) {
+        int colStart = (row == startRow) ? startCol : 0;
+        int colEnd = (row == endRow) ? endCol : (m_cols - 1);
+        std::string line;
+        for (int col = colStart; col <= colEnd; ++col) {
+            char32_t ch = m_cells[row][col].ch;
+            if (ch < 128) line += (char)ch;
+            else line += '?';
+        }
+        // Trim trailing spaces on each line
+        while (!line.empty() && line.back() == ' ') line.pop_back();
+        if (row > startRow) result += '\n';
+        result += line;
+    }
+
+    cancelCopyMode();
+    return result;
+}
+
+void EdenTerminal::cancelCopyMode() {
+    m_copyModeActive = false;
+    m_selection.active = false;
+    m_dirty = true;
+}
+
+bool EdenTerminal::isCellSelected(int row, int col) const {
+    if (!m_selection.active) return false;
+    int startRow = m_selection.anchorRow, startCol = m_selection.anchorCol;
+    int endRow = m_selection.cursorRow, endCol = m_selection.cursorCol;
+    if (startRow > endRow || (startRow == endRow && startCol > endCol)) {
+        std::swap(startRow, endRow);
+        std::swap(startCol, endCol);
+    }
+    if (row < startRow || row > endRow) return false;
+    if (row == startRow && row == endRow) return col >= startCol && col <= endCol;
+    if (row == startRow) return col >= startCol;
+    if (row == endRow) return col <= endCol;
     return true;
 }
 

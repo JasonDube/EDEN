@@ -1,5 +1,6 @@
 #include "ModelRenderer.hpp"
 #include "VulkanContext.hpp"
+#include "Buffer.hpp"
 #include <fstream>
 #include <stdexcept>
 #include <cstring>
@@ -95,19 +96,19 @@ ModelRenderer::~ModelRenderer() {
     // Destroy all models
     for (auto& [handle, data] : m_models) {
         if (data.vertexBuffer) vkDestroyBuffer(device, data.vertexBuffer, nullptr);
-        if (data.vertexMemory) vkFreeMemory(device, data.vertexMemory, nullptr);
+        if (data.vertexMemory) { Buffer::trackVramFreeHandle(data.vertexMemory); vkFreeMemory(device, data.vertexMemory, nullptr); }
         if (data.indexBuffer) vkDestroyBuffer(device, data.indexBuffer, nullptr);
-        if (data.indexMemory) vkFreeMemory(device, data.indexMemory, nullptr);
+        if (data.indexMemory) { Buffer::trackVramFreeHandle(data.indexMemory); vkFreeMemory(device, data.indexMemory, nullptr); }
         if (data.textureView) vkDestroyImageView(device, data.textureView, nullptr);
         if (data.textureImage) vkDestroyImage(device, data.textureImage, nullptr);
-        if (data.textureMemory) vkFreeMemory(device, data.textureMemory, nullptr);
+        if (data.textureMemory) { Buffer::trackVramFreeHandle(data.textureMemory); vkFreeMemory(device, data.textureMemory, nullptr); }
         if (data.textureSampler) vkDestroySampler(device, data.textureSampler, nullptr);
     }
 
     // Destroy default texture
     if (m_defaultTextureView) vkDestroyImageView(device, m_defaultTextureView, nullptr);
     if (m_defaultTexture) vkDestroyImage(device, m_defaultTexture, nullptr);
-    if (m_defaultTextureMemory) vkFreeMemory(device, m_defaultTextureMemory, nullptr);
+    if (m_defaultTextureMemory) { Buffer::trackVramFreeHandle(m_defaultTextureMemory); vkFreeMemory(device, m_defaultTextureMemory, nullptr); }
     if (m_defaultSampler) vkDestroySampler(device, m_defaultSampler, nullptr);
 
     if (m_descriptorPool) vkDestroyDescriptorPool(device, m_descriptorPool, nullptr);
@@ -126,21 +127,21 @@ ModelRenderer::~ModelRenderer() {
     for (size_t i = 0; i < NUM_LINE_BUFFERS; i++) {
         if (m_lineMappedMemories[i]) vkUnmapMemory(device, m_lineMemories[i]);
         if (m_lineBuffers[i]) vkDestroyBuffer(device, m_lineBuffers[i], nullptr);
-        if (m_lineMemories[i]) vkFreeMemory(device, m_lineMemories[i], nullptr);
+        if (m_lineMemories[i]) { Buffer::trackVramFreeHandle(m_lineMemories[i]); vkFreeMemory(device, m_lineMemories[i], nullptr); }
     }
 
     // Destroy all point buffers
     for (size_t i = 0; i < NUM_POINT_BUFFERS; i++) {
         if (m_pointMappedMemories[i]) vkUnmapMemory(device, m_pointMemories[i]);
         if (m_pointBuffers[i]) vkDestroyBuffer(device, m_pointBuffers[i], nullptr);
-        if (m_pointMemories[i]) vkFreeMemory(device, m_pointMemories[i], nullptr);
+        if (m_pointMemories[i]) { Buffer::trackVramFreeHandle(m_pointMemories[i]); vkFreeMemory(device, m_pointMemories[i], nullptr); }
     }
 
     // Destroy selection index buffers
     for (size_t i = 0; i < NUM_SELECTION_BUFFERS; i++) {
         if (m_selectionIndexMapped[i]) vkUnmapMemory(device, m_selectionIndexMemories[i]);
         if (m_selectionIndexBuffers[i]) vkDestroyBuffer(device, m_selectionIndexBuffers[i], nullptr);
-        if (m_selectionIndexMemories[i]) vkFreeMemory(device, m_selectionIndexMemories[i], nullptr);
+        if (m_selectionIndexMemories[i]) { Buffer::trackVramFreeHandle(m_selectionIndexMemories[i]); vkFreeMemory(device, m_selectionIndexMemories[i], nullptr); }
     }
 }
 
@@ -634,6 +635,7 @@ void ModelRenderer::createDefaultTexture() {
                           VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 
     vkDestroyBuffer(m_context.getDevice(), stagingBuffer, nullptr);
+    Buffer::trackVramFreeHandle(stagingMemory);
     vkFreeMemory(m_context.getDevice(), stagingMemory, nullptr);
 
     // Create image view
@@ -745,6 +747,7 @@ uint32_t ModelRenderer::createModel(const std::vector<ModelVertex>& vertices,
                               VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 
         vkDestroyBuffer(m_context.getDevice(), stagingBuffer, nullptr);
+        Buffer::trackVramFreeHandle(stagingMemory);
         vkFreeMemory(m_context.getDevice(), stagingMemory, nullptr);
 
         // Create image view
@@ -813,16 +816,40 @@ void ModelRenderer::destroyModel(uint32_t handle) {
     m_context.waitIdle();
 
     if (data.vertexBuffer) vkDestroyBuffer(device, data.vertexBuffer, nullptr);
-    if (data.vertexMemory) vkFreeMemory(device, data.vertexMemory, nullptr);
+    if (data.vertexMemory) { Buffer::trackVramFreeHandle(data.vertexMemory); vkFreeMemory(device, data.vertexMemory, nullptr); }
     if (data.indexBuffer) vkDestroyBuffer(device, data.indexBuffer, nullptr);
-    if (data.indexMemory) vkFreeMemory(device, data.indexMemory, nullptr);
+    if (data.indexMemory) { Buffer::trackVramFreeHandle(data.indexMemory); vkFreeMemory(device, data.indexMemory, nullptr); }
     if (data.textureView) vkDestroyImageView(device, data.textureView, nullptr);
     if (data.textureImage) vkDestroyImage(device, data.textureImage, nullptr);
-    if (data.textureMemory) vkFreeMemory(device, data.textureMemory, nullptr);
+    if (data.textureMemory) { Buffer::trackVramFreeHandle(data.textureMemory); vkFreeMemory(device, data.textureMemory, nullptr); }
     if (data.textureSampler) vkDestroySampler(device, data.textureSampler, nullptr);
     if (data.descriptorSet) vkFreeDescriptorSets(device, m_descriptorPool, 1, &data.descriptorSet);
 
     m_models.erase(it);
+}
+
+void ModelRenderer::destroyModels(const std::vector<uint32_t>& handles) {
+    if (handles.empty()) return;
+
+    VkDevice device = m_context.getDevice();
+    m_context.waitIdle();  // Once for all
+
+    for (uint32_t handle : handles) {
+        auto it = m_models.find(handle);
+        if (it == m_models.end()) continue;
+
+        ModelGPUData& data = it->second;
+        if (data.vertexBuffer) vkDestroyBuffer(device, data.vertexBuffer, nullptr);
+        if (data.vertexMemory) { Buffer::trackVramFreeHandle(data.vertexMemory); vkFreeMemory(device, data.vertexMemory, nullptr); }
+        if (data.indexBuffer) vkDestroyBuffer(device, data.indexBuffer, nullptr);
+        if (data.indexMemory) { Buffer::trackVramFreeHandle(data.indexMemory); vkFreeMemory(device, data.indexMemory, nullptr); }
+        if (data.textureView) vkDestroyImageView(device, data.textureView, nullptr);
+        if (data.textureImage) vkDestroyImage(device, data.textureImage, nullptr);
+        if (data.textureMemory) { Buffer::trackVramFreeHandle(data.textureMemory); vkFreeMemory(device, data.textureMemory, nullptr); }
+        if (data.textureSampler) vkDestroySampler(device, data.textureSampler, nullptr);
+        if (data.descriptorSet) vkFreeDescriptorSets(device, m_descriptorPool, 1, &data.descriptorSet);
+        m_models.erase(it);
+    }
 }
 
 void ModelRenderer::updateModelBuffer(uint32_t handle, const std::vector<ModelVertex>& vertices) {
@@ -867,6 +894,7 @@ void ModelRenderer::updateModelBuffer(uint32_t handle, const std::vector<ModelVe
     m_context.endSingleTimeCommands(cmdBuffer);
 
     vkDestroyBuffer(device, stagingBuffer, nullptr);
+    Buffer::trackVramFreeHandle(stagingMemory);
     vkFreeMemory(device, stagingMemory, nullptr);
 }
 
@@ -960,6 +988,47 @@ void ModelRenderer::renderLines(VkCommandBuffer commandBuffer, const glm::mat4& 
         m_currentLineBuffer = (m_currentLineBuffer + 1) % NUM_LINE_BUFFERS;
 
         // Convert to ModelVertex format
+        ModelVertex* dst = static_cast<ModelVertex*>(m_lineMappedMemories[bufferIdx]);
+        for (size_t i = 0; i < count; ++i) {
+            dst[i].position = lines[offset + i];
+            dst[i].normal = glm::vec3(0, 1, 0);
+            dst[i].texCoord = glm::vec2(0);
+            dst[i].color = glm::vec4(1);
+        }
+
+        VkBuffer vertexBuffers[] = {m_lineBuffers[bufferIdx]};
+        VkDeviceSize vbOffsets[] = {0};
+        vkCmdBindVertexBuffers(commandBuffer, 0, 1, vertexBuffers, vbOffsets);
+        vkCmdDraw(commandBuffer, static_cast<uint32_t>(count), 1, 0, 0);
+
+        offset += count;
+    }
+}
+
+void ModelRenderer::renderLines(VkCommandBuffer commandBuffer, const glm::mat4& viewProj,
+                                 const std::vector<glm::vec3>& lines, const glm::vec4& color) {
+    if (lines.empty()) return;
+
+    vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_linePipeline);
+
+    WireframePushConstants pc{};
+    pc.mvp = viewProj;
+    pc.wireColor = color;
+    vkCmdPushConstants(commandBuffer, m_wireframePipelineLayout,
+                       VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                       0, sizeof(WireframePushConstants), &pc);
+
+    size_t chunkSize = MAX_LINE_VERTICES & ~1u;
+    size_t offset = 0;
+
+    while (offset < lines.size()) {
+        size_t count = std::min(chunkSize, lines.size() - offset);
+        count &= ~1u;
+        if (count == 0) break;
+
+        size_t bufferIdx = m_currentLineBuffer;
+        m_currentLineBuffer = (m_currentLineBuffer + 1) % NUM_LINE_BUFFERS;
+
         ModelVertex* dst = static_cast<ModelVertex*>(m_lineMappedMemories[bufferIdx]);
         for (size_t i = 0; i < count; ++i) {
             dst[i].position = lines[offset + i];
@@ -1150,6 +1219,7 @@ void ModelRenderer::updateTexture(uint32_t handle, const unsigned char* data, in
             modelData.textureImage = VK_NULL_HANDLE;
         }
         if (modelData.textureMemory) {
+            Buffer::trackVramFreeHandle(modelData.textureMemory);
             vkFreeMemory(device, modelData.textureMemory, nullptr);
             modelData.textureMemory = VK_NULL_HANDLE;
         }
@@ -1191,6 +1261,7 @@ void ModelRenderer::updateTexture(uint32_t handle, const unsigned char* data, in
         if (result != VK_SUCCESS) {
             std::cerr << "Failed to create texture image view: " << result << std::endl;
             vkDestroyImage(device, modelData.textureImage, nullptr);
+            Buffer::trackVramFreeHandle(modelData.textureMemory);
             vkFreeMemory(device, modelData.textureMemory, nullptr);
             modelData.textureImage = VK_NULL_HANDLE;
             modelData.textureMemory = VK_NULL_HANDLE;
@@ -1213,6 +1284,7 @@ void ModelRenderer::updateTexture(uint32_t handle, const unsigned char* data, in
             std::cerr << "Failed to create texture sampler: " << result << std::endl;
             vkDestroyImageView(device, modelData.textureView, nullptr);
             vkDestroyImage(device, modelData.textureImage, nullptr);
+            Buffer::trackVramFreeHandle(modelData.textureMemory);
             vkFreeMemory(device, modelData.textureMemory, nullptr);
             modelData.textureView = VK_NULL_HANDLE;
             modelData.textureImage = VK_NULL_HANDLE;
@@ -1233,6 +1305,7 @@ void ModelRenderer::updateTexture(uint32_t handle, const unsigned char* data, in
             vkDestroySampler(device, modelData.textureSampler, nullptr);
             vkDestroyImageView(device, modelData.textureView, nullptr);
             vkDestroyImage(device, modelData.textureImage, nullptr);
+            Buffer::trackVramFreeHandle(modelData.textureMemory);
             vkFreeMemory(device, modelData.textureMemory, nullptr);
             modelData.textureSampler = VK_NULL_HANDLE;
             modelData.textureView = VK_NULL_HANDLE;
@@ -1288,6 +1361,7 @@ void ModelRenderer::updateTexture(uint32_t handle, const unsigned char* data, in
                           VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 
     vkDestroyBuffer(m_context.getDevice(), stagingBuffer, nullptr);
+    Buffer::trackVramFreeHandle(stagingMemory);
     vkFreeMemory(m_context.getDevice(), stagingMemory, nullptr);
 }
 
@@ -1311,6 +1385,7 @@ void ModelRenderer::destroyTexture(uint32_t handle) {
         modelData.textureImage = VK_NULL_HANDLE;
     }
     if (modelData.textureMemory) {
+        Buffer::trackVramFreeHandle(modelData.textureMemory);
         vkFreeMemory(device, modelData.textureMemory, nullptr);
         modelData.textureMemory = VK_NULL_HANDLE;
     }
@@ -1425,6 +1500,7 @@ void ModelRenderer::createImage(uint32_t width, uint32_t height, VkFormat format
     allocInfo.memoryTypeIndex = m_context.findMemoryType(memReqs.memoryTypeBits, properties);
 
     vkAllocateMemory(m_context.getDevice(), &allocInfo, nullptr, &memory);
+    Buffer::trackVramAllocHandle(memory, static_cast<int64_t>(memReqs.size));
     vkBindImageMemory(m_context.getDevice(), image, memory, 0);
 }
 

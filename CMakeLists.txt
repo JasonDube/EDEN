@@ -170,6 +170,9 @@ set(EDEN_SOURCES
     src/AI/AStarPathfinder.cpp
     src/AI/TraderAI.cpp
     src/AI/DogfightAI.cpp
+    src/AI/CleanerBot.cpp
+    src/AI/ImageBot.cpp
+    src/Forge/ForgeRoom.cpp
     src/Renderer/DialogueBubbleRenderer.cpp
     src/Game/SentientBeing.cpp
     src/Game/Human.cpp

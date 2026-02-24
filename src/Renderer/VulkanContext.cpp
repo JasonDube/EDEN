@@ -1,4 +1,5 @@
 #include "VulkanContext.hpp"
+#include "Buffer.hpp"
 #include <GLFW/glfw3.h>
 #include <stdexcept>
 #include <iostream>
@@ -394,6 +395,7 @@ void VulkanContext::createBuffer(VkDeviceSize size, VkBufferUsageFlags usage,
     if (vkAllocateMemory(m_device, &allocInfo, nullptr, &memory) != VK_SUCCESS) {
         throw std::runtime_error("Failed to allocate buffer memory");
     }
+    Buffer::trackVramAllocHandle(memory, static_cast<int64_t>(memRequirements.size));
 
     vkBindBufferMemory(m_device, buffer, memory, 0);
 }
