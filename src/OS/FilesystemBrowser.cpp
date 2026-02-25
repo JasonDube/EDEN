@@ -858,6 +858,7 @@ int FilesystemBrowser::spawnGalleryRing(const std::vector<EntryInfo>& items,
             wallObj->setPrimitiveSize(1.0f);
             wallObj->setPrimitiveColor(wallColor);
             wallObj->setBuildingType("filesystem_wall");
+            wallObj->setAABBCollision(true);
             // Tag wall with its ring category for paste-type matching
             switch (cat) {
                 case FileCategory::Folder:     wallObj->setDescription("wall_folder"); break;
@@ -980,7 +981,7 @@ void FilesystemBrowser::spawnBasement(const glm::vec3& center, float baseY) {
     auto cubeMesh = PrimitiveMeshBuilder::createCube(1.0f, wallColor);
     int panelNum = 0;
 
-    auto spawnPanel = [&](const glm::vec3& pos, const glm::vec3& scale) {
+    auto spawnPanel = [&](const glm::vec3& pos, const glm::vec3& scale, const std::string& tag = "eden_basement") {
         auto obj = std::make_unique<SceneObject>(
             "FSBasement_" + std::to_string(panelNum++));
         uint32_t handle = m_modelRenderer->createModel(
@@ -993,7 +994,8 @@ void FilesystemBrowser::spawnBasement(const glm::vec3& center, float baseY) {
         obj->setPrimitiveType(PrimitiveType::Cube);
         obj->setPrimitiveSize(1.0f);
         obj->setPrimitiveColor(wallColor);
-        obj->setBuildingType("eden_basement");
+        obj->setBuildingType(tag);
+        obj->setAABBCollision(true);
         obj->getTransform().setPosition(pos);
         obj->getTransform().setScale(scale);
         m_sceneObjects->push_back(std::move(obj));
@@ -1006,15 +1008,47 @@ void FilesystemBrowser::spawnBasement(const glm::vec3& center, float baseY) {
     float wallBottom = floorY - 1.0f;
     float wallHeight = (baseY + 1.0f) - wallBottom;
 
-    // 4 walls
-    spawnPanel({center.x, wallBottom, center.z + halfSize},
-               {BASEMENT_SIZE, wallHeight, 1.0f});
-    spawnPanel({center.x, wallBottom, center.z - halfSize},
-               {BASEMENT_SIZE, wallHeight, 1.0f});
-    spawnPanel({center.x + halfSize, wallBottom, center.z},
-               {1.0f, wallHeight, BASEMENT_SIZE});
-    spawnPanel({center.x - halfSize, wallBottom, center.z},
-               {1.0f, wallHeight, BASEMENT_SIZE});
+    // 4 walls — each split into 3 panels around a centered door opening
+    // Door opening: 4 units wide, 3.5 units tall from floor
+    const float doorWidth  = 4.0f;
+    const float doorHeight = 3.5f;
+    const float doorHalfW  = doorWidth / 2.0f;
+    // Each side segment: (BASEMENT_SIZE - doorWidth) / 2 = 20
+    const float segWidth   = (BASEMENT_SIZE - doorWidth) / 2.0f;
+    const float lintelBottom = floorY - 1.0f + doorHeight; // wallBottom + doorHeight
+    const float lintelHeight = wallHeight - doorHeight;
+
+    // North wall (positive Z face, stretches along X)
+    spawnPanel({center.x - doorHalfW - segWidth / 2.0f, wallBottom, center.z + halfSize},
+               {segWidth, wallHeight, 1.0f}, "eden_basement_wall");
+    spawnPanel({center.x + doorHalfW + segWidth / 2.0f, wallBottom, center.z + halfSize},
+               {segWidth, wallHeight, 1.0f}, "eden_basement_wall");
+    spawnPanel({center.x, lintelBottom, center.z + halfSize},
+               {doorWidth, lintelHeight, 1.0f}, "eden_basement_wall");
+
+    // South wall (negative Z face, stretches along X)
+    spawnPanel({center.x - doorHalfW - segWidth / 2.0f, wallBottom, center.z - halfSize},
+               {segWidth, wallHeight, 1.0f}, "eden_basement_wall");
+    spawnPanel({center.x + doorHalfW + segWidth / 2.0f, wallBottom, center.z - halfSize},
+               {segWidth, wallHeight, 1.0f}, "eden_basement_wall");
+    spawnPanel({center.x, lintelBottom, center.z - halfSize},
+               {doorWidth, lintelHeight, 1.0f}, "eden_basement_wall");
+
+    // East wall (positive X face, stretches along Z)
+    spawnPanel({center.x + halfSize, wallBottom, center.z - doorHalfW - segWidth / 2.0f},
+               {1.0f, wallHeight, segWidth}, "eden_basement_wall");
+    spawnPanel({center.x + halfSize, wallBottom, center.z + doorHalfW + segWidth / 2.0f},
+               {1.0f, wallHeight, segWidth}, "eden_basement_wall");
+    spawnPanel({center.x + halfSize, lintelBottom, center.z},
+               {1.0f, lintelHeight, doorWidth}, "eden_basement_wall");
+
+    // West wall (negative X face, stretches along Z)
+    spawnPanel({center.x - halfSize, wallBottom, center.z - doorHalfW - segWidth / 2.0f},
+               {1.0f, wallHeight, segWidth}, "eden_basement_wall");
+    spawnPanel({center.x - halfSize, wallBottom, center.z + doorHalfW + segWidth / 2.0f},
+               {1.0f, wallHeight, segWidth}, "eden_basement_wall");
+    spawnPanel({center.x - halfSize, lintelBottom, center.z},
+               {1.0f, lintelHeight, doorWidth}, "eden_basement_wall");
 
     // Floor — bottom at floorY - 1, top at floorY
     spawnPanel({center.x, floorY - 1.0f, center.z},
@@ -1106,9 +1140,13 @@ void FilesystemBrowser::spawnObjects(const std::string& dirPath) {
         return a.name < b.name;
     });
 
-    float terrainY = m_terrain->getHeightAt(m_spawnOrigin.x, m_spawnOrigin.z);
-    // Lift everything up so the basement floor sits just above the terrain (avoid z-fighting)
-    float baseY = terrainY + BASEMENT_HEIGHT + 0.1f;
+    // Use cached baseY so silo stays aligned with persistent basement across navigations.
+    // Only recompute from terrain when no cached value exists (first spawn or new level).
+    if (!m_basementBaseYValid) {
+        m_basementBaseY = 100.0f;  // Fixed Y — silo complex sits at 100m
+        m_basementBaseYValid = true;
+    }
+    float baseY = m_basementBaseY;
     glm::vec3 center = m_spawnOrigin;
     center.y = baseY;
 
@@ -1152,6 +1190,7 @@ void FilesystemBrowser::spawnObjects(const std::string& dirPath) {
             obj->setPrimitiveSize(1.0f);
             obj->setPrimitiveColor(colColor);
             obj->setBuildingType("filesystem_wall");
+            obj->setAABBCollision(true);
 
             obj->getTransform().setPosition({colX, baseY - BASEMENT_HEIGHT, colZ});
             obj->getTransform().setScale({0.3f, totalHeight, 0.3f});

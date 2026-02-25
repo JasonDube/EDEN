@@ -3,6 +3,7 @@
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 #include <functional>
+#include <vector>
 
 namespace eden {
 
@@ -24,6 +25,12 @@ enum class ViewPreset {
     Back,       // Looking down +Z
     Right,      // Looking down -X
     Left        // Looking down +X
+};
+
+// Simple AABB for wall collision (avoids depending on SceneObject.hpp)
+struct CollisionBox {
+    glm::vec3 min{0};
+    glm::vec3 max{0};
 };
 
 // Function type for querying terrain height at a world position
@@ -95,7 +102,14 @@ public:
     void setNoClip(bool noClip) { m_noClip = noClip; }
     bool isNoClip() const { return m_noClip; }
 
+    // AABB wall collision boxes (e.g. basement walls)
+    void addCollisionBox(const glm::vec3& bmin, const glm::vec3& bmax) {
+        m_collisionBoxes.push_back({bmin, bmax});
+    }
+    void clearCollisionBoxes() { m_collisionBoxes.clear(); }
+
 private:
+    void resolveAABBCollision(const glm::vec3& oldPos, glm::vec3& newPos);
     void updateVectors();
 
     glm::vec3 m_position;
@@ -135,6 +149,9 @@ private:
 
     // Noclip mode - camera ignores terrain collision (for editor mode)
     bool m_noClip = false;
+
+    // AABB wall collision boxes
+    std::vector<CollisionBox> m_collisionBoxes;
 };
 
 } // namespace eden

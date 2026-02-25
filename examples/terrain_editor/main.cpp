@@ -1016,6 +1016,19 @@ protected:
         m_filesystemBrowser.processNavigation();
         m_filesystemBrowser.updateAnimations(deltaTime);
 
+        // Refresh camera collision boxes from all level geometry (walls, floors, ceilings)
+        {
+            m_camera.clearCollisionBoxes();
+            for (const auto& obj : m_sceneObjects) {
+                if (!obj) continue;
+                const std::string& bt = obj->getBuildingType();
+                if (bt == "eden_basement_wall" || bt == "eden_basement" || bt == "filesystem_wall") {
+                    AABB bounds = obj->getWorldBounds();
+                    m_camera.addCollisionBox(bounds.min, bounds.max);
+                }
+            }
+        }
+
         // Check if Hunyuan3D generation completed — place model on forge pad
         if (m_aiGenerateComplete.load()) {
             m_aiGenerateComplete = false;
@@ -4282,6 +4295,7 @@ private:
             if (f9 && !wasF9 && m_isPlayMode) {
                 if (m_filesystemBrowser.isActive()) {
                     m_filesystemBrowser.clearFilesystemObjects();
+                    m_camera.clearCollisionBoxes();
                     m_camera.setNoClip(false); // Restore terrain collision
                     // std::cout << "[F9] Filesystem browser dismissed" << std::endl;
                 } else {
@@ -4290,15 +4304,16 @@ private:
                     glm::vec3 spawnPos = m_camera.getPosition() + m_camera.getFront() * 8.0f;
                     m_filesystemBrowser.setSpawnOrigin(spawnPos);
                     m_filesystemBrowser.navigate(homePath);
-                    // Teleport to center of new gallery
+                    m_filesystemBrowser.processNavigation(); // spawn silo immediately
+                    // Teleport into the silo (on ceiling slab, offset past 8m hole)
                     glm::vec3 galleryCam = spawnPos;
-                    galleryCam.y += 2.0f;
+                    galleryCam.x += 8.0f;
+                    galleryCam.y = 102.7f; // ceiling top (101) + eye height (1.7)
                     m_camera.setPosition(galleryCam);
                     if (m_characterController) {
                         m_characterController->setPosition(galleryCam);
                     }
-                    m_camera.setNoClip(true); // Disable terrain collision in filesystem silo
-                    // std::cout << "[F9] Filesystem browser opened: " << homePath << std::endl;
+                    // noclip no longer needed — AABB collision on basement floor/ceiling/walls handles it
                 }
             }
             wasF9 = f9;
@@ -4813,11 +4828,11 @@ private:
                     // Door — navigate immediately
                     std::string target = hit->getTargetLevel();
                     if (target.rfind("fs://", 0) == 0) {
-                        glm::vec3 doorPos = hit->getTransform().getPosition();
-                        m_filesystemBrowser.setSpawnOrigin(doorPos);
+                        // Keep spawn origin unchanged — silo rebuilds at same center
                         m_filesystemBrowser.navigate(target.substr(5));
-                        glm::vec3 camPos = doorPos;
-                        camPos.y += 2.0f;
+                        glm::vec3 camPos = m_filesystemBrowser.getSpawnOrigin();
+                        camPos.x += 8.0f; // offset past ceiling hole
+                        camPos.y = 102.7f; // silo floor (ceiling top 101 + eye height 1.7)
                         m_camera.setPosition(camPos);
                         if (m_characterController) {
                             m_characterController->setPosition(camPos);
@@ -9270,6 +9285,10 @@ private:
                 ImGui::TextColored(vramColor, "VRAM: %.1f GB", m_cachedVramMB / 1024.0f);
             else
                 ImGui::TextColored(vramColor, "VRAM: %.0f MB", m_cachedVramMB);
+
+            // Camera position
+            glm::vec3 cp = m_camera.getPosition();
+            ImGui::TextColored(ImVec4(0.7f, 0.8f, 1.0f, 1.0f), "XYZ: %.1f, %.1f, %.1f", cp.x, cp.y, cp.z);
         }
         ImGui::End();
     }
@@ -9698,6 +9717,22 @@ private:
                         }
                     }
                 }
+                // "Copy Image to Clipboard" for single image files
+                if (selectedFiles.size() == 1) {
+                    std::string target = selectedFiles[0]->getTargetLevel();
+                    if (target.rfind("fs://", 0) == 0) {
+                        std::string path = target.substr(5);
+                        std::string ext = std::filesystem::path(path).extension().string();
+                        std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+                        if (ext == ".png" || ext == ".jpg" || ext == ".jpeg" || ext == ".webp" ||
+                            ext == ".bmp" || ext == ".gif") {
+                            if (ImGui::MenuItem("Copy Image to Clipboard")) {
+                                std::string cmd = "xclip -selection clipboard -t image/png -i " + shellEscapeFS(path) + " 2>/dev/null &";
+                                system(cmd.c_str());
+                            }
+                        }
+                    }
+                }
                 ImGui::Separator();
                 if (selectedFiles.size() == 1) {
                     if (ImGui::MenuItem("Rename")) {
@@ -9751,6 +9786,13 @@ private:
                         m_fsClipboard.clear();
                         m_fsClipboardIsCut = true;
                         m_fsClipboard.push_back(wallItemPath);
+                    }
+                    // "Copy Image to Clipboard" for image walls
+                    if (wallType == "image") {
+                        if (ImGui::MenuItem("Copy Image to Clipboard")) {
+                            std::string cmd = "xclip -selection clipboard -t image/png -i " + shellEscapeFS(wallItemPath) + " 2>/dev/null &";
+                            system(cmd.c_str());
+                        }
                     }
                     ImGui::Separator();
                     if (ImGui::MenuItem("Rename")) {
@@ -10424,7 +10466,7 @@ private:
             for (auto& obj : m_sceneObjects) {
                 const std::string& bt = obj->getBuildingType();
                 if (bt.empty() || bt.substr(0, 10) == "worker_at_" ||
-                    bt == "filesystem" || bt == "filesystem_wall" || bt == "image_desc" || bt == "eden_basement") continue;
+                    bt == "filesystem" || bt == "filesystem_wall" || bt == "image_desc" || bt == "eden_basement" || bt == "eden_basement_wall") continue;
 
                 glm::vec3 pos = obj->getTransform().getPosition();
                 glm::ivec2 gp = m_zoneSystem->worldToGrid(pos.x, pos.z);
@@ -10533,7 +10575,7 @@ private:
                     for (auto& bobj : m_sceneObjects) {
                         const std::string& bt = bobj->getBuildingType();
                         if (bt.empty() || bt.substr(0, 10) == "worker_at_" ||
-                    bt == "filesystem" || bt == "filesystem_wall" || bt == "image_desc" || bt == "eden_basement") continue;
+                    bt == "filesystem" || bt == "filesystem_wall" || bt == "image_desc" || bt == "eden_basement" || bt == "eden_basement_wall") continue;
                         glm::vec3 bpos = bobj->getTransform().getPosition();
                         glm::ivec2 bgp = m_zoneSystem->worldToGrid(bpos.x, bpos.z);
                         if (bgp.x == hoverGX && bgp.y == hoverGZ) {
@@ -11705,7 +11747,14 @@ private:
                     if (!fsPath.empty()) {
                         m_filesystemBrowser.setSpawnOrigin(origin);
                         m_filesystemBrowser.navigate(fsPath);
-                        std::cout << "Restored EDEN OS silo at (" << origin.x << ", " << origin.z << ")" << std::endl;
+                        m_filesystemBrowser.processNavigation(); // spawn immediately
+                        // Teleport camera into the silo (baseY=100, offset past ceiling hole)
+                        glm::vec3 siloCam(origin.x + 8.0f, 102.7f, origin.z);
+                        m_camera.setPosition(siloCam);
+                        m_camera.setYaw(-90.0f);
+                        m_camera.setPitch(0.0f);
+                        std::cout << "Restored EDEN OS silo at (" << origin.x << ", " << origin.z << ") cam=("
+                                  << siloCam.x << "," << siloCam.y << "," << siloCam.z << ")" << std::endl;
                     }
                 }
             } catch (const std::exception& e) {
@@ -12037,14 +12086,13 @@ private:
         const char* home = getenv("HOME");
         std::string homePath = home ? home : "/";
         m_filesystemBrowser.navigate(homePath);
+        m_filesystemBrowser.processNavigation(); // spawn immediately so silo exists
 
-        // Teleport camera above the foundation looking down into the silo
-        float basementHeight = 16.0f; // matches BASEMENT_HEIGHT
-        glm::vec3 camPos = spawnPos;
-        camPos.y = terrainY + basementHeight + 4.0f; // above the silo floor
+        // Teleport camera into the silo — offset past the 8m ceiling hole (gapHalf=4)
+        glm::vec3 camPos(8.0f, 102.7f, 0.0f);
         m_camera.setPosition(camPos);
         m_camera.setYaw(-90.0f);
-        m_camera.setPitch(-15.0f); // slight downward look
+        m_camera.setPitch(0.0f);
 
         if (m_characterController) {
             m_characterController->setPosition(camPos);
@@ -12844,9 +12892,8 @@ private:
                 std::string targetDoorId = closestObj->getTargetDoorId();
 
                 if (!targetLevel.empty() && targetLevel.rfind("fs://", 0) == 0) {
-                    // Filesystem navigation — extract path after fs://
+                    // Filesystem navigation — keep spawn origin unchanged so silo stays centered
                     std::string fsPath = targetLevel.substr(5);
-                    m_filesystemBrowser.setSpawnOrigin(closestObj->getTransform().getPosition());
                     m_filesystemBrowser.navigate(fsPath);
                 } else if (!targetLevel.empty()) {
                     // Level transition - load new level

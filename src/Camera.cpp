@@ -38,10 +38,97 @@ static float getMaxHeightInRadius(const HeightQueryFunc& heightQuery, float x, f
     return maxHeight;
 }
 
+void Camera::resolveAABBCollision(const glm::vec3& oldPos, glm::vec3& newPos) {
+    if (m_collisionBoxes.empty()) return;
+
+    for (const auto& box : m_collisionBoxes) {
+        // Expand box by collision radius on X/Z
+        float bMinX = box.min.x - m_collisionRadius;
+        float bMaxX = box.max.x + m_collisionRadius;
+        float bMinZ = box.min.z - m_collisionRadius;
+        float bMaxZ = box.max.z + m_collisionRadius;
+        // Y uses feet/head directly against box faces
+        float bMinY = box.min.y;
+        float bMaxY = box.max.y;
+
+        float feetY = newPos.y - m_eyeHeight;
+        float headY = newPos.y + 0.2f;
+
+        // Check if new position overlaps this box
+        if (newPos.x < bMinX || newPos.x > bMaxX) continue;
+        if (newPos.z < bMinZ || newPos.z > bMaxZ) continue;
+        if (feetY > bMaxY || headY < bMinY) continue;
+
+        // Overlapping — use old position to determine which axes to push back on.
+        float oldFeetY = oldPos.y - m_eyeHeight;
+        float oldHeadY = oldPos.y + 0.2f;
+
+        bool wasOutX = (oldPos.x < bMinX || oldPos.x > bMaxX);
+        bool wasOutZ = (oldPos.z < bMinZ || oldPos.z > bMaxZ);
+        bool wasOutY = (oldFeetY > bMaxY || oldHeadY < bMinY);
+
+        // Count how many axes were outside
+        int outsideCount = (wasOutX ? 1 : 0) + (wasOutZ ? 1 : 0) + (wasOutY ? 1 : 0);
+
+        if (outsideCount >= 2) {
+            // Came from outside on multiple axes — pick the one with largest movement
+            float dx = wasOutX ? std::abs(newPos.x - oldPos.x) : 0.0f;
+            float dz = wasOutZ ? std::abs(newPos.z - oldPos.z) : 0.0f;
+            float dy = wasOutY ? std::abs(newPos.y - oldPos.y) : 0.0f;
+
+            if (dx >= dz && dx >= dy) {
+                wasOutZ = false; wasOutY = false;
+            } else if (dz >= dx && dz >= dy) {
+                wasOutX = false; wasOutY = false;
+            } else {
+                wasOutX = false; wasOutZ = false;
+            }
+        }
+
+        if (wasOutX) {
+            if (oldPos.x < bMinX) newPos.x = bMinX;
+            else                  newPos.x = bMaxX;
+        } else if (wasOutZ) {
+            if (oldPos.z < bMinZ) newPos.z = bMinZ;
+            else                  newPos.z = bMaxZ;
+        } else if (wasOutY) {
+            // Vertical collision — push feet above or head below
+            if (oldFeetY > bMaxY)  newPos.y = bMaxY + m_eyeHeight; // land on top
+            else                   newPos.y = bMinY - 0.2f;        // push head below ceiling
+        } else {
+            // Already inside — push out on nearest axis
+            float penNX = newPos.x - bMinX;
+            float penPX = bMaxX - newPos.x;
+            float penNZ = newPos.z - bMinZ;
+            float penPZ = bMaxZ - newPos.z;
+            float penTop = bMaxY - feetY;       // push feet up out of top
+            float penBot = headY - bMinY;       // push head down out of bottom
+
+            float minPen = penNX;
+            int axis = 0;
+            if (penPX  < minPen) { minPen = penPX;  axis = 1; }
+            if (penNZ  < minPen) { minPen = penNZ;  axis = 2; }
+            if (penPZ  < minPen) { minPen = penPZ;  axis = 3; }
+            if (penTop < minPen) { minPen = penTop; axis = 4; }
+            if (penBot < minPen) { minPen = penBot; axis = 5; }
+
+            switch (axis) {
+                case 0: newPos.x = bMinX; break;
+                case 1: newPos.x = bMaxX; break;
+                case 2: newPos.z = bMinZ; break;
+                case 3: newPos.z = bMaxZ; break;
+                case 4: newPos.y = bMaxY + m_eyeHeight; break;
+                case 5: newPos.y = bMinY - 0.2f; break;
+            }
+        }
+    }
+}
+
 void Camera::updateMovement(float deltaTime, bool forward, bool backward, bool left, bool right,
                             bool jump, bool descend, const HeightQueryFunc& heightQuery) {
     m_currentTime += deltaTime;
     float velocity = m_speed * deltaTime;
+    glm::vec3 oldPosition = m_position; // saved for AABB collision
 
     // Get ground height at player center (allows descending into valleys)
     float groundHeight = heightQuery(m_position.x, m_position.z);
@@ -58,6 +145,9 @@ void Camera::updateMovement(float deltaTime, bool forward, bool backward, bool l
         if (right)    m_position += m_right * velocity;
         if (jump)     m_position += m_worldUp * velocity;
         if (descend)  m_position -= m_worldUp * velocity;
+
+        // AABB wall collision in fly mode (always active — noclip only skips terrain)
+        resolveAABBCollision(oldPosition, m_position);
 
         // Skip terrain collision in noclip mode (editor mode)
         if (!m_noClip) {
@@ -147,6 +237,9 @@ void Camera::updateMovement(float deltaTime, bool forward, bool backward, bool l
                 m_position.z = intendedPos.z;
             }
         }
+
+        // AABB wall collision in walk mode
+        resolveAABBCollision(oldPosition, m_position);
 
         // Get actual ground height at player center
         float actualGroundHeight = heightQuery(m_position.x, m_position.z);
