@@ -221,6 +221,8 @@ protected:
         loadSplashTexture();
         loadGroveLogoTexture();
         loadBuildingTextures();
+        loadInventory();
+        syncExcludedPaths();
 
         // Create scripts directory
         {
@@ -949,6 +951,25 @@ protected:
     }
 
     void onCleanup() override {
+        // Stop AI generation thread
+        m_aiGenerateCancelled = true;
+        if (m_aiGenerateThread.joinable()) {
+            m_aiGenerateThread.join();
+        }
+
+        // Stop Hunyuan server if running
+        stopHunyuanServer();
+
+        // Always join startup threads to prevent std::terminate on destroy
+        if (m_aiServerStartupThread.joinable()) {
+            m_aiServerRunning = false;
+            m_aiServerStartupThread.join();
+        }
+        if (m_smolvlmStartupThread.joinable()) {
+            m_smolvlmServerRunning = false;
+            m_smolvlmStartupThread.join();
+        }
+
         // Shutdown terminal before Vulkan cleanup
         m_terminalScreenObject = nullptr;
         m_terminalPixelsDirty = false;
@@ -960,6 +981,7 @@ protected:
         saveEditorConfig();
         Audio::getInstance().shutdown();
         NFD_Quit();
+        cleanupInventoryThumbnails();
         cleanupSplashTexture();
         cleanupGroveLogoTexture();
         cleanupBuildingTextures();
@@ -972,10 +994,31 @@ protected:
 
         m_imguiManager.cleanup();
 
+        // Clean up filesystem GPU resources before destroying renderers
+        m_filesystemBrowser.clearFilesystemObjects();
+
+        // Destroy all remaining scene objects' GPU buffers in one batch
+        if (m_modelRenderer) {
+            std::vector<uint32_t> handles;
+            for (auto& obj : m_sceneObjects) {
+                if (obj) {
+                    uint32_t handle = obj->getBufferHandle();
+                    if (handle != 0) handles.push_back(handle);
+                }
+            }
+            m_modelRenderer->destroyModels(handles);
+        }
+        m_sceneObjects.clear();
+
+        m_brushRing.reset();
+        m_gizmoRenderer.reset();
+        m_splineRenderer.reset();
+        m_aiNodeRenderer.reset();
         m_waterRenderer.reset();
         m_skinnedModelRenderer.reset();
         m_modelRenderer.reset();
         m_skybox.reset();
+        m_textureManager.reset();
         m_pipeline.reset();
     }
 
@@ -1033,10 +1076,20 @@ protected:
         if (m_aiGenerateComplete.load()) {
             m_aiGenerateComplete = false;
             m_aiGenerating = false;
-            m_aiGenerateStatus = "Done! Model on pad.";
-            if (auto* forge = m_filesystemBrowser.getForgeRoom()) {
-                forge->placeModelOnPad(m_aiGeneratedGLBPath);
+            m_aiGenerateStatus = "Done! Model saved.";
+
+            // Place the new model directly on the forge pad instead of
+            // re-navigating the entire silo (which reloads ALL models and OOMs)
+            if (!m_aiGeneratedGLBPath.empty()) {
+                ForgeRoom* forge = m_filesystemBrowser.getForgeRoom();
+                if (forge && forge->isSpawned()) {
+                    forge->placeModelOnPad(m_aiGeneratedGLBPath);
+                    std::cout << "[Hunyuan3D] Model placed on forge pad" << std::endl;
+                } else {
+                    std::cout << "[Hunyuan3D] Model saved (no forge pad active)" << std::endl;
+                }
             }
+
             if (m_aiGenerateThread.joinable()) m_aiGenerateThread.join();
         }
 
@@ -1448,6 +1501,21 @@ protected:
 
         vkCmdBeginRenderPass(cmd, &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
 
+        // Set dynamic viewport and scissor (required by ModelRenderer pipelines)
+        VkViewport vp0{};
+        vp0.x = 0.0f;
+        vp0.y = 0.0f;
+        vp0.width = static_cast<float>(getSwapchain().getExtent().width);
+        vp0.height = static_cast<float>(getSwapchain().getExtent().height);
+        vp0.minDepth = 0.0f;
+        vp0.maxDepth = 1.0f;
+        vkCmdSetViewport(cmd, 0, 1, &vp0);
+
+        VkRect2D scissor0{};
+        scissor0.offset = {0, 0};
+        scissor0.extent = getSwapchain().getExtent();
+        vkCmdSetScissor(cmd, 0, 1, &scissor0);
+
         float aspect = static_cast<float>(getSwapchain().getExtent().width) /
                        static_cast<float>(getSwapchain().getExtent().height);
         glm::mat4 view = m_camera.getViewMatrix();
@@ -1544,35 +1612,92 @@ protected:
             }
         }
 
+        // Render 3D model toolbar previews — tiny models positioned in front of camera
+        // aligned with each toolbar slot's screen position
+        if (m_isPlayMode) {
+            float windowW = static_cast<float>(getWindow().getWidth());
+            float windowH = static_cast<float>(getWindow().getHeight());
+            constexpr float slotSize = 48.0f;
+            constexpr float slotGap = 4.0f;
+            float totalWidth = TOOLBAR_SLOT_COUNT * slotSize + (TOOLBAR_SLOT_COUNT - 1) * slotGap;
+            float startX = (windowW - totalWidth) * 0.5f;
+            float startY = windowH - 16.0f - slotSize;
+
+            // Unproject slot centers from screen space to world space
+            glm::mat4 invVP = glm::inverse(vp);
+            glm::vec3 camForward = glm::normalize(glm::vec3(
+                view[0][2], view[1][2], view[2][2])) * -1.0f;
+            glm::vec3 camPos = m_camera.getPosition();
+
+            for (int si = 0; si < TOOLBAR_SLOT_COUNT; si++) {
+                auto& slot = m_toolbarSlots[si];
+                if (!slot.occupied || !slot.is3DModel || slot.gpuHandle == 0) continue;
+
+                // Screen center of this slot
+                float sx = startX + si * (slotSize + slotGap) + slotSize * 0.5f;
+                float sy = startY + slotSize * 0.5f;
+
+                // Convert to NDC [-1,1]
+                float ndcX = (sx / windowW) * 2.0f - 1.0f;
+                float ndcY = (sy / windowH) * 2.0f - 1.0f; // Vulkan Y already flipped in proj
+
+                // Unproject to get a world-space direction
+                glm::vec4 nearPt = invVP * glm::vec4(ndcX, ndcY, 0.0f, 1.0f);
+                nearPt /= nearPt.w;
+                glm::vec3 dir = glm::normalize(glm::vec3(nearPt) - camPos);
+
+                // Place model 1.2 units in front of camera along that direction
+                float dist = 1.2f;
+                glm::vec3 modelPos = camPos + dir * dist;
+
+                // Scale: make it fit within roughly slotSize pixels at that distance
+                float modelScale = 0.04f;
+
+                // Slowly spin the model for visual interest
+                float spinAngle = static_cast<float>(glfwGetTime()) * 0.8f;
+
+                glm::mat4 modelMatrix = glm::translate(glm::mat4(1.0f), modelPos);
+                modelMatrix = glm::rotate(modelMatrix, spinAngle, glm::vec3(0, 1, 0));
+                modelMatrix = glm::scale(modelMatrix, glm::vec3(modelScale));
+
+                m_modelRenderer->render(cmd, vp, slot.gpuHandle, modelMatrix);
+            }
+        }
+
         // Draw wireframe outlines for selected/drag-hovered filesystem objects
         // Skip in panel focus mode — the outline is distracting when zoomed in
-        if (!m_inPanelFocusMode)
-        for (auto& obj : m_sceneObjects) {
-            if (!obj || !obj->isSelected()) continue;
-            const auto& bt = obj->getBuildingType();
-            if (bt != "filesystem" && bt != "filesystem_wall") continue;
-            // Green for drag-hover target, yellow for normal selection
-            bool isDragHover = (m_fsDragActive && obj.get() == m_fsDragHoverWall);
-            glm::vec3 wireColor = isDragHover ? glm::vec3(0.0f, 1.0f, 0.3f) : glm::vec3(1.0f, 0.7f, 0.0f);
-            const AABB& lb = obj->getLocalBounds();
-            if (lb.getSize().x > 0.001f || lb.getSize().y > 0.001f || lb.getSize().z > 0.001f) {
-                glm::mat4 m = obj->getTransform().getMatrix();
-                glm::vec3 c[8];
-                c[0] = glm::vec3(m * glm::vec4(lb.min.x, lb.min.y, lb.min.z, 1.0f));
-                c[1] = glm::vec3(m * glm::vec4(lb.max.x, lb.min.y, lb.min.z, 1.0f));
-                c[2] = glm::vec3(m * glm::vec4(lb.max.x, lb.min.y, lb.max.z, 1.0f));
-                c[3] = glm::vec3(m * glm::vec4(lb.min.x, lb.min.y, lb.max.z, 1.0f));
-                c[4] = glm::vec3(m * glm::vec4(lb.min.x, lb.max.y, lb.min.z, 1.0f));
-                c[5] = glm::vec3(m * glm::vec4(lb.max.x, lb.max.y, lb.min.z, 1.0f));
-                c[6] = glm::vec3(m * glm::vec4(lb.max.x, lb.max.y, lb.max.z, 1.0f));
-                c[7] = glm::vec3(m * glm::vec4(lb.min.x, lb.max.y, lb.max.z, 1.0f));
-                std::vector<glm::vec3> boxLines = {
-                    c[0],c[1], c[1],c[2], c[2],c[3], c[3],c[0],
-                    c[4],c[5], c[5],c[6], c[6],c[7], c[7],c[4],
-                    c[0],c[4], c[1],c[5], c[2],c[6], c[3],c[7]
-                };
-                m_modelRenderer->renderLines(cmd, vp, boxLines, wireColor);
+        if (!m_inPanelFocusMode) {
+            std::vector<glm::vec3> selectionLines;
+            std::vector<glm::vec3> dragHoverLines;
+            for (auto& obj : m_sceneObjects) {
+                if (!obj || !obj->isSelected()) continue;
+                const auto& bt = obj->getBuildingType();
+                if (bt != "filesystem" && bt != "filesystem_wall") continue;
+                bool isDragHover = (m_fsDragActive && obj.get() == m_fsDragHoverWall);
+                const AABB& lb = obj->getLocalBounds();
+                if (lb.getSize().x > 0.001f || lb.getSize().y > 0.001f || lb.getSize().z > 0.001f) {
+                    glm::mat4 m = obj->getTransform().getMatrix();
+                    glm::vec3 c[8];
+                    c[0] = glm::vec3(m * glm::vec4(lb.min.x, lb.min.y, lb.min.z, 1.0f));
+                    c[1] = glm::vec3(m * glm::vec4(lb.max.x, lb.min.y, lb.min.z, 1.0f));
+                    c[2] = glm::vec3(m * glm::vec4(lb.max.x, lb.min.y, lb.max.z, 1.0f));
+                    c[3] = glm::vec3(m * glm::vec4(lb.min.x, lb.min.y, lb.max.z, 1.0f));
+                    c[4] = glm::vec3(m * glm::vec4(lb.min.x, lb.max.y, lb.min.z, 1.0f));
+                    c[5] = glm::vec3(m * glm::vec4(lb.max.x, lb.max.y, lb.min.z, 1.0f));
+                    c[6] = glm::vec3(m * glm::vec4(lb.max.x, lb.max.y, lb.max.z, 1.0f));
+                    c[7] = glm::vec3(m * glm::vec4(lb.min.x, lb.max.y, lb.max.z, 1.0f));
+                    auto& dest = isDragHover ? dragHoverLines : selectionLines;
+                    dest.insert(dest.end(), {
+                        c[0],c[1], c[1],c[2], c[2],c[3], c[3],c[0],
+                        c[4],c[5], c[5],c[6], c[6],c[7], c[7],c[4],
+                        c[0],c[4], c[1],c[5], c[2],c[6], c[3],c[7]
+                    });
+                }
             }
+            if (!selectionLines.empty())
+                m_modelRenderer->renderLines(cmd, vp, selectionLines, glm::vec3(1.0f, 0.7f, 0.0f));
+            if (!dragHoverLines.empty())
+                m_modelRenderer->renderLines(cmd, vp, dragHoverLines, glm::vec3(0.0f, 1.0f, 0.3f));
         }
 
         // Draw folder attention emanations (wireframe squares expanding outward)
@@ -2163,6 +2288,9 @@ private:
         m_editorUI.setNewEdenOSLevelCallback([this]() {
             newEdenOSLevel();
         });
+        m_editorUI.setLoadEdenOSLevelCallback([this]() {
+            loadEdenOSLevel();
+        });
         m_editorUI.setFileOpenCallback([this]() {
             showLoadDialog();
         });
@@ -2670,6 +2798,11 @@ private:
         m_groveContext.spawnPlotPosts = [this](int gx, int gz) { spawnPlotPosts(gx, gz); };
         m_groveContext.removePlotPosts = [this](int gx, int gz) { removePlotPosts(gx, gz); };
         m_groveContext.loadPathForAction = [this](SceneObject* o, const Action& a) { loadPathForAction(o, a); };
+        m_groveContext.getWidgetKit = [this]() -> eden::WidgetKit* {
+            if (auto* forge = m_filesystemBrowser.getForgeRoom())
+                return &forge->getWidgetKit();
+            return nullptr;
+        };
 
         registerGroveHostFunctions(m_groveVm, &m_groveContext);
 
@@ -3313,6 +3446,213 @@ private:
             }
         }
         m_buildingTextures.clear();
+    }
+
+    // ── Inventory persistence & thumbnails ──────────────────────────────
+
+    static constexpr int THUMB_SIZE = 48;
+
+    std::string getInventoryDir() {
+        const char* home = getenv("HOME");
+        return home ? std::string(home) + "/eden/inventory" : "inventory";
+    }
+
+    void createSlotThumbnail(int i) {
+        auto& slot = m_toolbarSlots[i];
+        if (!slot.occupied || slot.gpuHandle != 0) return;
+
+        // Check if it's a 3D model — load full geometry for in-world rendering
+        {
+            std::string ext;
+            auto dotPos = slot.filePath.rfind('.');
+            if (dotPos != std::string::npos) ext = slot.filePath.substr(dotPos);
+            std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+            bool is3D = (ext == ".glb" || ext == ".gltf" || ext == ".lime" || ext == ".obj");
+            if (is3D) {
+                std::vector<ModelVertex> allVerts;
+                std::vector<uint32_t> allIndices;
+                std::vector<unsigned char> texStorage; // owns texture data
+                int texW = 0, texH = 0;
+                bool loaded = false;
+
+                if (ext == ".glb" || ext == ".gltf") {
+                    auto result = GLBLoader::load(slot.filePath);
+                    if (result.success && !result.meshes.empty()) {
+                        for (auto& mesh : result.meshes) {
+                            uint32_t baseIdx = static_cast<uint32_t>(allVerts.size());
+                            allVerts.insert(allVerts.end(), mesh.vertices.begin(), mesh.vertices.end());
+                            for (auto idx : mesh.indices) allIndices.push_back(baseIdx + idx);
+                            if (texStorage.empty() && mesh.hasTexture && mesh.texture.width > 0) {
+                                texStorage = std::move(mesh.texture.data);
+                                texW = mesh.texture.width;
+                                texH = mesh.texture.height;
+                            }
+                        }
+                        loaded = true;
+                    }
+                } else if (ext == ".lime") {
+                    auto result = LimeLoader::load(slot.filePath);
+                    if (result.success) {
+                        allVerts = std::move(result.mesh.vertices);
+                        allIndices = std::move(result.mesh.indices);
+                        if (result.mesh.hasTexture && result.mesh.textureWidth > 0) {
+                            texStorage = std::move(result.mesh.textureData);
+                            texW = result.mesh.textureWidth;
+                            texH = result.mesh.textureHeight;
+                        }
+                        loaded = true;
+                    }
+                }
+
+                if (loaded && !allVerts.empty()) {
+                    // Center on origin so it rotates nicely
+                    glm::vec3 bmin(FLT_MAX), bmax(-FLT_MAX);
+                    for (auto& v : allVerts) {
+                        bmin = glm::min(bmin, v.position);
+                        bmax = glm::max(bmax, v.position);
+                    }
+                    glm::vec3 center = (bmin + bmax) * 0.5f;
+                    for (auto& v : allVerts) v.position -= center;
+
+                    const unsigned char* texData = texStorage.empty() ? nullptr : texStorage.data();
+                    slot.gpuHandle = m_modelRenderer->createModel(allVerts, allIndices, texData, texW, texH);
+                    slot.modelIndexCount = static_cast<uint32_t>(allIndices.size());
+                    slot.is3DModel = true;
+                    return;
+                }
+            }
+        }
+
+        // 2D thumbnail path: images and fallback
+        std::vector<unsigned char> thumbData(THUMB_SIZE * THUMB_SIZE * 4);
+        bool gotThumb = false;
+
+        // Try loading as image (png/jpg/etc)
+        {
+            int w = 0, h = 0, ch = 0;
+            unsigned char* pixels = stbi_load(slot.filePath.c_str(), &w, &h, &ch, STBI_rgb_alpha);
+            if (pixels && w > 0 && h > 0) {
+                for (int ty = 0; ty < THUMB_SIZE; ty++) {
+                    for (int tx = 0; tx < THUMB_SIZE; tx++) {
+                        int sx = tx * w / THUMB_SIZE;
+                        int sy = ty * h / THUMB_SIZE;
+                        int si = (sy * w + sx) * 4;
+                        int di = (ty * THUMB_SIZE + tx) * 4;
+                        thumbData[di + 0] = pixels[si + 0];
+                        thumbData[di + 1] = pixels[si + 1];
+                        thumbData[di + 2] = pixels[si + 2];
+                        thumbData[di + 3] = pixels[si + 3];
+                    }
+                }
+                stbi_image_free(pixels);
+                gotThumb = true;
+            } else {
+                if (pixels) stbi_image_free(pixels);
+            }
+        }
+
+        // Fallback: colored label
+        if (!gotThumb) {
+            for (int p = 0; p < THUMB_SIZE * THUMB_SIZE; p++) {
+                thumbData[p * 4 + 0] = 30;
+                thumbData[p * 4 + 1] = 40;
+                thumbData[p * 4 + 2] = 60;
+                thumbData[p * 4 + 3] = 255;
+            }
+            for (int ty = 0; ty < 12; ty++) {
+                for (int tx = 0; tx < THUMB_SIZE; tx++) {
+                    int di = (ty * THUMB_SIZE + tx) * 4;
+                    thumbData[di + 0] = 60;
+                    thumbData[di + 1] = 120;
+                    thumbData[di + 2] = 200;
+                    thumbData[di + 3] = 255;
+                }
+            }
+        }
+
+        // Create a tiny quad model with the thumbnail as texture
+        std::vector<ModelVertex> verts = {
+            {{-0.5f, -0.5f, 0}, {0,0,1}, {0,1}, {1,1,1,1}},
+            {{ 0.5f, -0.5f, 0}, {0,0,1}, {1,1}, {1,1,1,1}},
+            {{ 0.5f,  0.5f, 0}, {0,0,1}, {1,0}, {1,1,1,1}},
+            {{-0.5f,  0.5f, 0}, {0,0,1}, {0,0}, {1,1,1,1}},
+        };
+        std::vector<uint32_t> indices = {0, 1, 2, 2, 3, 0};
+        slot.gpuHandle = m_modelRenderer->createModel(verts, indices, thumbData.data(), THUMB_SIZE, THUMB_SIZE);
+
+        // Get the GPU data to create ImGui descriptor
+        ModelGPUData* gpuData = m_modelRenderer->getModelData(slot.gpuHandle);
+        if (gpuData && gpuData->hasTexture) {
+            slot.imguiDescriptor = ImGui_ImplVulkan_AddTexture(
+                gpuData->textureSampler, gpuData->textureView,
+                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        }
+    }
+
+    void destroySlotThumbnail(int i) {
+        auto& slot = m_toolbarSlots[i];
+        if (slot.imguiDescriptor) {
+            ImGui_ImplVulkan_RemoveTexture(slot.imguiDescriptor);
+            slot.imguiDescriptor = VK_NULL_HANDLE;
+        }
+        if (slot.gpuHandle != 0) {
+            m_modelRenderer->destroyModel(slot.gpuHandle);
+            slot.gpuHandle = 0;
+        }
+        slot.is3DModel = false;
+        slot.modelIndexCount = 0;
+    }
+
+    void saveInventorySlot(int i) {
+        namespace fs = std::filesystem;
+        std::string dir = getInventoryDir();
+        fs::create_directories(dir);
+        std::string linkPath = dir + "/slot_" + std::to_string(i);
+        // Remove existing symlink
+        std::error_code ec;
+        fs::remove(linkPath, ec);
+        if (m_toolbarSlots[i].occupied && !m_toolbarSlots[i].filePath.empty()) {
+            fs::create_symlink(m_toolbarSlots[i].filePath, linkPath, ec);
+        }
+    }
+
+    void loadInventory() {
+        namespace fs = std::filesystem;
+        std::string dir = getInventoryDir();
+        if (!fs::is_directory(dir)) return;
+        for (int i = 0; i < TOOLBAR_SLOT_COUNT; i++) {
+            std::string linkPath = dir + "/slot_" + std::to_string(i);
+            std::error_code ec;
+            if (!fs::is_symlink(linkPath, ec)) continue;
+            auto target = fs::read_symlink(linkPath, ec);
+            if (ec) continue;
+            std::string path = target.string();
+            // Only load if file still exists
+            if (!fs::exists(path)) continue;
+            m_toolbarSlots[i].occupied = true;
+            m_toolbarSlots[i].filePath = path;
+            std::string name = path;
+            auto slashPos = name.rfind('/');
+            if (slashPos != std::string::npos)
+                name = name.substr(slashPos + 1);
+            m_toolbarSlots[i].displayName = name;
+            createSlotThumbnail(i);
+        }
+    }
+
+    void cleanupInventoryThumbnails() {
+        for (int i = 0; i < TOOLBAR_SLOT_COUNT; i++) {
+            destroySlotThumbnail(i);
+        }
+    }
+
+    void syncExcludedPaths() {
+        std::set<std::string> paths;
+        for (int i = 0; i < TOOLBAR_SLOT_COUNT; i++) {
+            if (m_toolbarSlots[i].occupied && !m_toolbarSlots[i].filePath.empty())
+                paths.insert(m_toolbarSlots[i].filePath);
+        }
+        m_filesystemBrowser.setExcludedPaths(paths);
     }
 
     void renderLoadingScreen() {
@@ -4093,7 +4433,19 @@ private:
         }
         wasEscapeDown = escapeDown;
 
-        // Enter/F — enter panel focus mode when a filesystem panel is selected
+        // F key toggles focus mode exit (edge-detected)
+        {
+            static bool wasFDown = false;
+            bool fDown = Input::isKeyDown(Input::KEY_F);
+            if (fDown && !wasFDown && m_inPanelFocusMode && !ImGui::GetIO().WantCaptureKeyboard) {
+                exitPanelFocusMode();
+                wasFDown = fDown;
+                return;
+            }
+            wasFDown = fDown;
+        }
+
+        // F — enter panel focus mode when a filesystem panel is selected
         {
             // After entering focus, wait for ALL keys to be released + 2 extra frames
             static int focusInputCooldown = 0;
@@ -4101,9 +4453,8 @@ private:
 
             if (m_isPlayMode && m_filesystemBrowser.isActive() && !m_inPanelFocusMode &&
                 !ImGui::GetIO().WantCaptureKeyboard) {
-                bool enterPressed = Input::isKeyPressed(Input::KEY_ENTER);
                 bool fPressed = Input::isKeyPressed(Input::KEY_F);
-                if (enterPressed || fPressed) {
+                if (fPressed) {
                     SceneObject* selectedPanel = nullptr;
                     SceneObject* selectedWall = nullptr;
                     for (auto& obj : m_sceneObjects) {
@@ -4142,9 +4493,7 @@ private:
                 bool shouldDrain = false;
 
                 if (focusWaitRelease) {
-                    bool anyHeld = Input::isKeyDown(Input::KEY_ENTER) ||
-                                   Input::isKeyDown(Input::KEY_F) ||
-                                   ImGui::IsKeyDown(ImGuiKey_Enter) ||
+                    bool anyHeld = Input::isKeyDown(Input::KEY_F) ||
                                    ImGui::IsKeyDown(ImGuiKey_F);
                     if (!anyHeld) {
                         focusWaitRelease = false;
@@ -4262,6 +4611,156 @@ private:
                     Input::clearTypedChars();
                 }
             }
+
+            // Segment click mode: click to isolate subject after user chose "Segment Point"
+            if (m_segmentClickMode && m_inPanelFocusMode && m_filesystemBrowser.isImageFocused() &&
+                !m_filesystemBrowser.isSegmenting()) {
+                if (ImGui::IsMouseClicked(ImGuiMouseButton_Left) && !ImGui::GetIO().WantCaptureMouse) {
+                    auto [imgW, imgH] = m_filesystemBrowser.getFocusedImageDimensions();
+                    if (imgW > 0 && imgH > 0 && m_focusedPanel) {
+                        glm::vec2 mousePos = Input::getMousePosition();
+                        float screenW = static_cast<float>(getWindow().getWidth());
+                        float screenH = static_cast<float>(getWindow().getHeight());
+                        float ndcX = (mousePos.x / screenW) * 2.0f - 1.0f;
+                        float ndcY = 1.0f - (mousePos.y / screenH) * 2.0f;
+                        float screenAspect = screenW / screenH;
+                        float orthoSize = m_camera.getOrthoSize();
+                        float visW = orthoSize * screenAspect;
+                        float visH = orthoSize;
+                        glm::vec3 panelScale = m_focusedPanel->getTransform().getScale();
+                        float panelHalfW = panelScale.x * 0.75f;
+                        float panelHalfH = panelScale.y * 0.75f;
+                        float worldX = ndcX * visW;
+                        float worldY = ndcY * visH;
+                        float u = (worldX / panelHalfW + 1.0f) * 0.5f;
+                        float v = (worldY / panelHalfH + 1.0f) * 0.5f;
+                        if (u >= 0.0f && u <= 1.0f && v >= 0.0f && v <= 1.0f) {
+                            int pixX = static_cast<int>(u * imgW);
+                            int pixY = static_cast<int>((1.0f - v) * imgH);
+                            pixX = std::clamp(pixX, 0, imgW - 1);
+                            pixY = std::clamp(pixY, 0, imgH - 1);
+                            m_filesystemBrowser.segmentImage(pixX, pixY);
+                        }
+                    }
+                    m_segmentClickMode = false;
+                }
+            }
+
+            // Segment box drag tracking (always update so edge detection is correct)
+            {
+                static bool wasLmbForBox = false;
+                bool lmbDown = Input::isMouseButtonDown(0);
+                bool lmbClicked = lmbDown && !wasLmbForBox;
+                bool lmbReleased = !lmbDown && wasLmbForBox;
+                wasLmbForBox = lmbDown;
+
+            // Segment box mode: drag rectangle to isolate subject
+            if (m_segmentBoxMode && m_inPanelFocusMode && m_filesystemBrowser.isImageFocused() &&
+                !m_filesystemBrowser.isSegmenting()) {
+                if (!m_segmentBoxDragging) {
+                    if (lmbClicked && !ImGui::GetIO().WantCaptureMouse) {
+                        m_segmentBoxDragging = true;
+                        glm::vec2 mp = Input::getMousePosition();
+                        m_segmentBoxStart = mp;
+                        m_segmentBoxEnd = mp;
+                        std::cout << "[SegmentBox] Drag started at (" << mp.x << "," << mp.y << ")" << std::endl;
+                    }
+                } else {
+                    // Update end while dragging
+                    m_segmentBoxEnd = Input::getMousePosition();
+
+                    // Finish on mouse release
+                    if (lmbReleased) {
+                        std::cout << "[SegmentBox] Drag ended at (" << m_segmentBoxEnd.x << "," << m_segmentBoxEnd.y << ")" << std::endl;
+                        m_segmentBoxDragging = false;
+                        auto [imgW, imgH] = m_filesystemBrowser.getFocusedImageDimensions();
+                        std::cout << "[SegmentBox] imgW=" << imgW << " imgH=" << imgH
+                                  << " panel=" << (m_focusedPanel ? "yes" : "null") << std::endl;
+                        if (imgW > 0 && imgH > 0 && m_focusedPanel) {
+                            float screenW = static_cast<float>(getWindow().getWidth());
+                            float screenH = static_cast<float>(getWindow().getHeight());
+                            float screenAspect = screenW / screenH;
+                            float orthoSize = m_camera.getOrthoSize();
+                            float visW = orthoSize * screenAspect;
+                            float visH = orthoSize;
+                            glm::vec3 panelScale = m_focusedPanel->getTransform().getScale();
+                            float panelHalfW = panelScale.x * 0.75f;
+                            float panelHalfH = panelScale.y * 0.75f;
+
+                            // Convert both corners to pixel coords
+                            auto screenToPixel = [&](const char* label, glm::vec2 sp, int& px, int& py) -> bool {
+                                float ndcX = (sp.x / screenW) * 2.0f - 1.0f;
+                                float ndcY = 1.0f - (sp.y / screenH) * 2.0f;
+                                float u = (ndcX * visW / panelHalfW + 1.0f) * 0.5f;
+                                float v = (ndcY * visH / panelHalfH + 1.0f) * 0.5f;
+                                std::cout << "[SegmentBox] " << label << " NDC(" << ndcX << "," << ndcY
+                                          << ") UV(" << u << "," << v << ")" << std::endl;
+                                if (u < 0.0f || u > 1.0f || v < 0.0f || v > 1.0f) {
+                                    std::cout << "[SegmentBox] " << label << " OUT OF BOUNDS" << std::endl;
+                                    return false;
+                                }
+                                px = std::clamp(static_cast<int>(u * imgW), 0, imgW - 1);
+                                py = std::clamp(static_cast<int>((1.0f - v) * imgH), 0, imgH - 1);
+                                return true;
+                            };
+
+                            int x1, y1, x2, y2;
+                            bool ok1 = screenToPixel("start", m_segmentBoxStart, x1, y1);
+                            bool ok2 = screenToPixel("end", m_segmentBoxEnd, x2, y2);
+                            if (ok1 && ok2) {
+                                if (x1 > x2) std::swap(x1, x2);
+                                if (y1 > y2) std::swap(y1, y2);
+                                std::cout << "[SegmentBox] Calling segmentImageBox(" << x1 << "," << y1
+                                          << "," << x2 << "," << y2 << ")" << std::endl;
+                                m_filesystemBrowser.segmentImageBox(x1, y1, x2, y2);
+                            } else {
+                                std::cout << "[SegmentBox] Skipped — corner(s) out of bounds" << std::endl;
+                            }
+                        }
+                        m_segmentBoxMode = false;
+                    }
+                }
+            }
+            } // end box drag tracking scope
+
+            // Eraser / Restore brush: paint to erase or restore parts of segmented image
+            if ((m_eraserMode || m_restoreMode) && m_inPanelFocusMode && m_filesystemBrowser.isImageFocused() &&
+                m_filesystemBrowser.hasSegmentation() && !m_filesystemBrowser.isSegmenting()) {
+                // Brush size: [ decreases, ] increases
+                if (Input::isKeyPressed(91)) m_eraserRadius = std::max(2, m_eraserRadius - 3); // '['
+                if (Input::isKeyPressed(93)) m_eraserRadius = std::min(100, m_eraserRadius + 3); // ']'
+
+                // Paint while left mouse held
+                if (Input::isMouseButtonDown(0) && !ImGui::GetIO().WantCaptureMouse && m_focusedPanel) {
+                    auto [imgW, imgH] = m_filesystemBrowser.getFocusedImageDimensions();
+                    if (imgW > 0 && imgH > 0) {
+                        glm::vec2 mousePos = Input::getMousePosition();
+                        float screenW = static_cast<float>(getWindow().getWidth());
+                        float screenH = static_cast<float>(getWindow().getHeight());
+                        float ndcX = (mousePos.x / screenW) * 2.0f - 1.0f;
+                        float ndcY = 1.0f - (mousePos.y / screenH) * 2.0f;
+                        float screenAspect = screenW / screenH;
+                        float orthoSize = m_camera.getOrthoSize();
+                        float visW = orthoSize * screenAspect;
+                        float visH = orthoSize;
+                        glm::vec3 panelScale = m_focusedPanel->getTransform().getScale();
+                        float panelHalfW = panelScale.x * 0.75f;
+                        float panelHalfH = panelScale.y * 0.75f;
+                        float u = (ndcX * visW / panelHalfW + 1.0f) * 0.5f;
+                        float v = (ndcY * visH / panelHalfH + 1.0f) * 0.5f;
+                        if (u >= 0.0f && u <= 1.0f && v >= 0.0f && v <= 1.0f) {
+                            int pixX = static_cast<int>(u * imgW);
+                            int pixY = static_cast<int>((1.0f - v) * imgH);
+                            pixX = std::clamp(pixX, 0, imgW - 1);
+                            pixY = std::clamp(pixY, 0, imgH - 1);
+                            if (m_eraserMode)
+                                m_filesystemBrowser.eraseSegmentAt(pixX, pixY, m_eraserRadius);
+                            else
+                                m_filesystemBrowser.restoreSegmentAt(pixX, pixY, m_eraserRadius);
+                        }
+                    }
+                }
+            }
         }
 
         // F6 — run Grove test script (fast iteration, no LLM needed)
@@ -4288,32 +4787,41 @@ private:
             wasF6 = f6;
         }
 
-        // F9 — toggle filesystem browser (spawn ~/  or clear)
+        // F9 — toggle filesystem browser (load OS level objects + spawn silo, or dismiss)
         {
             static bool wasF9 = false;
             bool f9 = Input::isKeyDown(298); // GLFW_KEY_F9 = 298
             if (f9 && !wasF9 && m_isPlayMode) {
                 if (m_filesystemBrowser.isActive()) {
                     m_filesystemBrowser.clearFilesystemObjects();
+                    clearOSLevelObjects();
                     m_camera.clearCollisionBoxes();
                     m_camera.setNoClip(false); // Restore terrain collision
-                    // std::cout << "[F9] Filesystem browser dismissed" << std::endl;
                 } else {
+                    // Load persistent OS level objects (buildings, basement from save file)
                     const char* home = getenv("HOME");
-                    std::string homePath = home ? home : "/";
-                    glm::vec3 spawnPos = m_camera.getPosition() + m_camera.getFront() * 8.0f;
+                    std::string osLevelPath = std::string(home ? home : "/tmp") + "/.eden/os_level.eden";
+
+                    if (std::filesystem::exists(osLevelPath)) {
+                        loadOSLevelObjects(osLevelPath);
+                    }
+
+                    // Spawn the silo at origin
+                    glm::vec3 spawnPos(0.0f, 0.0f, 0.0f);
+                    float terrainY = m_terrain.getHeightAt(spawnPos.x, spawnPos.z);
+                    spawnPos.y = terrainY;
                     m_filesystemBrowser.setSpawnOrigin(spawnPos);
+
+                    std::string homePath = home ? home : "/";
                     m_filesystemBrowser.navigate(homePath);
-                    m_filesystemBrowser.processNavigation(); // spawn silo immediately
-                    // Teleport into the silo (on ceiling slab, offset past 8m hole)
-                    glm::vec3 galleryCam = spawnPos;
-                    galleryCam.x += 8.0f;
-                    galleryCam.y = 102.7f; // ceiling top (101) + eye height (1.7)
+                    m_filesystemBrowser.processNavigation();
+
+                    // Teleport into the silo
+                    glm::vec3 galleryCam(32.0f, 102.7f, 0.0f);
                     m_camera.setPosition(galleryCam);
                     if (m_characterController) {
                         m_characterController->setPosition(galleryCam);
                     }
-                    // noclip no longer needed — AABB collision on basement floor/ceiling/walls handles it
                 }
             }
             wasF9 = f9;
@@ -4480,6 +4988,18 @@ private:
         }
         wasF3Down = f3Down;
 
+        // Home key — navigate to home directory
+        static bool wasHomeDown = false;
+        bool homeDown = Input::isKeyDown(Input::KEY_HOME);
+        if (homeDown && !wasHomeDown && m_isPlayMode && m_filesystemBrowser.isActive()
+            && !ImGui::GetIO().WantTextInput) {
+            const char* homeEnv = getenv("HOME");
+            if (homeEnv) {
+                m_filesystemBrowser.navigate(std::string(homeEnv));
+            }
+        }
+        wasHomeDown = homeDown;
+
         // M key - toggle zone map
         static bool wasMKeyDown = false;
         bool mKeyDown = Input::isKeyDown(Input::KEY_M);
@@ -4527,12 +5047,223 @@ private:
 
         static bool wasDeleteDown = false;
         bool deleteDown = Input::isKeyDown(Input::KEY_DELETE);
-        if (deleteDown && !wasDeleteDown && !ImGui::GetIO().WantTextInput && !m_isPlayMode) {
-            if (m_selectedObjectIndex >= 0) {
+        if (deleteDown && !wasDeleteDown && !ImGui::GetIO().WantTextInput) {
+            if (m_isPlayMode && m_filesystemBrowser.isActive()) {
+                // Silo mode: trash files on disk, then refresh silo
+                for (auto& obj : m_sceneObjects) {
+                    if (!obj || !obj->isSelected()) continue;
+                    const auto& bt = obj->getBuildingType();
+                    if (bt != "filesystem" && bt != "filesystem_wall") continue;
+                    std::string target = obj->getTargetLevel();
+                    if (target.rfind("fs://", 0) == 0 && target.size() > 5) {
+                        std::string path = target.substr(5);
+                        std::string cmd = "gio trash " + shellEscapeFS(path);
+                        int ret = system(cmd.c_str());
+                        if (ret != 0) {
+                            std::cerr << "[FS] Trash failed: " << path << std::endl;
+                        }
+                    }
+                }
+                // Refresh silo to rebuild without trashed files
+                m_filesystemBrowser.navigate(m_filesystemBrowser.getCurrentPath());
+            } else if (m_selectedObjectIndices.size() > 1) {
+                // Multi-delete: delete all selected objects (highest index first to preserve indices)
+                std::vector<int> toDelete(m_selectedObjectIndices.begin(), m_selectedObjectIndices.end());
+                std::sort(toDelete.rbegin(), toDelete.rend());
+                for (int idx : toDelete) {
+                    deleteObject(idx);
+                }
+                m_selectedObjectIndices.clear();
+                m_selectedObjectIndex = -1;
+                m_editorUI.setSelectedObjectIndex(-1);
+                m_editorUI.setSelectedObjectIndices(m_selectedObjectIndices);
+            } else if (m_selectedObjectIndex >= 0) {
                 deleteObject(m_selectedObjectIndex);
+                m_selectedObjectIndices.clear();
+                m_editorUI.setSelectedObjectIndices(m_selectedObjectIndices);
             }
         }
         wasDeleteDown = deleteDown;
+
+        // Number keys 1-0: toolbar slot selection + pick up filesystem objects
+        if (m_isPlayMode && !ImGui::GetIO().WantTextInput && !m_quickChatMode && !m_inConversation) {
+            static const int slotKeys[10] = {
+                Input::KEY_1, Input::KEY_2, Input::KEY_3, Input::KEY_4, Input::KEY_5,
+                Input::KEY_6, Input::KEY_7, Input::KEY_8, Input::KEY_9, Input::KEY_0
+            };
+            for (int i = 0; i < 10; i++) {
+                if (Input::isKeyPressed(slotKeys[i])) {
+                    m_activeToolbarSlot = i;
+
+                    // If exactly one filesystem object is selected, pick it up into this slot
+                    if (m_filesystemBrowser.isActive()) {
+                        SceneObject* selectedFS = nullptr;
+                        int selectedIdx = -1;
+                        int count = 0;
+                        for (int si = 0; si < (int)m_sceneObjects.size(); si++) {
+                            auto& obj = m_sceneObjects[si];
+                            if (!obj || !obj->isSelected()) continue;
+                            const auto& bt = obj->getBuildingType();
+                            if (bt == "filesystem" && !obj->isDoor()) {
+                                selectedFS = obj.get();
+                                selectedIdx = si;
+                                count++;
+                            }
+                        }
+                        if (count == 1 && selectedFS && selectedIdx >= 0) {
+                            std::string target = selectedFS->getTargetLevel();
+                            std::string path;
+                            if (target.rfind("fs://", 0) == 0 && target.size() > 5)
+                                path = target.substr(5);
+                            // Clear the parent wall's targetLevel so it becomes available again
+                            for (auto& wallObj : m_sceneObjects) {
+                                if (!wallObj) continue;
+                                if (wallObj->getBuildingType() != "filesystem_wall") continue;
+                                if (wallObj->getTargetLevel() == "fs://" + path) {
+                                    wallObj->setTargetLevel("");
+                                    break;
+                                }
+                            }
+                            destroySlotThumbnail(i);
+                            m_toolbarSlots[i].occupied = true;
+                            m_toolbarSlots[i].filePath = path;
+                            std::string name = path;
+                            auto slashPos = name.rfind('/');
+                            if (slashPos != std::string::npos)
+                                name = name.substr(slashPos + 1);
+                            m_toolbarSlots[i].displayName = name;
+
+                            // Check if this is a 3D model — steal its GPU handle directly
+                            std::string ext;
+                            auto dotPos = path.rfind('.');
+                            if (dotPos != std::string::npos) ext = path.substr(dotPos);
+                            std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+                            if (ext == ".glb" || ext == ".gltf" || ext == ".lime" || ext == ".obj") {
+                                // Steal the GPU handle — don't destroy it
+                                m_toolbarSlots[i].gpuHandle = selectedFS->getBufferHandle();
+                                m_toolbarSlots[i].modelIndexCount = selectedFS->getIndexCount();
+                                m_toolbarSlots[i].is3DModel = true;
+                                // Remove scene object without destroying GPU resources
+                                selectedFS->setSelected(false);
+                                m_sceneObjects.erase(m_sceneObjects.begin() + selectedIdx);
+                                if (m_selectedObjectIndex == selectedIdx) m_selectedObjectIndex = -1;
+                                else if (m_selectedObjectIndex > selectedIdx) m_selectedObjectIndex--;
+                                if (m_spawnObjectIndex == selectedIdx) { m_spawnObjectIndex = -1; m_hasSpawnPoint = false; }
+                                else if (m_spawnObjectIndex > selectedIdx) m_spawnObjectIndex--;
+                                m_editorUI.setSelectedObjectIndex(m_selectedObjectIndex);
+                            } else {
+                                createSlotThumbnail(i);
+                                selectedFS->setSelected(false);
+                                deleteObject(selectedIdx);
+                            }
+                            saveInventorySlot(i);
+                            syncExcludedPaths();
+                        } else if (m_toolbarSlots[i].occupied && count == 0) {
+                            // Drop-to-wall: press number key with occupied slot, no FS object selected
+                            // Raycast from crosshair to find an empty filesystem_wall
+                            float aspect = static_cast<float>(getWindow().getWidth()) / getWindow().getHeight();
+                            glm::mat4 proj = m_camera.getProjectionMatrix(aspect, 0.1f, 5000.0f);
+                            glm::mat4 view = m_camera.getViewMatrix();
+                            glm::mat4 invVP = glm::inverse(proj * view);
+                            glm::vec4 nearPt = invVP * glm::vec4(0, 0, -1, 1); nearPt /= nearPt.w;
+                            glm::vec4 farPt  = invVP * glm::vec4(0, 0,  1, 1); farPt  /= farPt.w;
+                            glm::vec3 rayO = glm::vec3(nearPt);
+                            glm::vec3 rayD = glm::normalize(glm::vec3(farPt - nearPt));
+
+                            float closestDist = std::numeric_limits<float>::max();
+                            SceneObject* hitWall = nullptr;
+                            for (auto& obj : m_sceneObjects) {
+                                if (!obj) continue;
+                                if (obj->getBuildingType() != "filesystem_wall") continue;
+                                // Only target empty walls
+                                const auto& tl = obj->getTargetLevel();
+                                if (!tl.empty()) continue;
+                                float dist = obj->getWorldBounds().intersect(rayO, rayD);
+                                if (dist >= 0 && dist < 200.0f && dist < closestDist) {
+                                    closestDist = dist;
+                                    hitWall = obj.get();
+                                }
+                            }
+                            if (hitWall) {
+                                glm::vec3 wallPos = hitWall->getTransform().getPosition();
+                                glm::vec3 wallScale = hitWall->getTransform().getScale();
+                                float wallYaw = hitWall->getEulerRotation().y;
+                                hitWall->setTargetLevel("fs://" + m_toolbarSlots[i].filePath);
+                                m_filesystemBrowser.spawnFileAtWall(m_toolbarSlots[i].filePath, wallPos, wallScale, wallYaw);
+                                destroySlotThumbnail(i);
+                                m_toolbarSlots[i].occupied = false;
+                                m_toolbarSlots[i].filePath.clear();
+                                m_toolbarSlots[i].displayName.clear();
+                                saveInventorySlot(i);
+                                syncExcludedPaths();
+                            }
+
+                            // Also check for machine_slot / hitbox slot / widget slot hits
+                            if (!hitWall) {
+                                SceneObject* hitSlot = nullptr;
+                                float slotDist = std::numeric_limits<float>::max();
+                                bool hitWidgetSlot = false;
+                                for (auto& obj : m_sceneObjects) {
+                                    if (!obj) continue;
+                                    bool isSlot = obj->getBuildingType() == "machine_slot";
+                                    if (!isSlot && obj->getBuildingType() == "hitbox") {
+                                        const auto& desc = obj->getDescription();
+                                        isSlot = (desc.rfind("slot_", 0) == 0);
+                                    }
+                                    // Check widget slots
+                                    bool isWidgetSlotObj = false;
+                                    if (!isSlot && obj->getBuildingType() == "widget") {
+                                        const auto& desc = obj->getDescription();
+                                        isWidgetSlotObj = (desc.rfind("slot:", 0) == 0);
+                                        isSlot = isWidgetSlotObj;
+                                    }
+                                    if (!isSlot) continue;
+                                    // Skip already-filled machine slots
+                                    if (!isWidgetSlotObj) {
+                                        const auto& tl = obj->getTargetLevel();
+                                        if (!tl.empty()) continue;
+                                    }
+                                    float dist = obj->getWorldBounds().intersect(rayO, rayD);
+                                    if (dist >= 0 && dist < 200.0f && dist < slotDist) {
+                                        slotDist = dist;
+                                        hitSlot = obj.get();
+                                        hitWidgetSlot = isWidgetSlotObj;
+                                    }
+                                }
+                                if (hitSlot) {
+                                    if (hitWidgetSlot) {
+                                        // Widget slot drop
+                                        if (auto* forge = m_filesystemBrowser.getForgeRoom()) {
+                                            forge->getWidgetKit().handleSlotDrop(hitSlot, m_toolbarSlots[i].filePath);
+                                            destroySlotThumbnail(i);
+                                            m_toolbarSlots[i].occupied = false;
+                                            m_toolbarSlots[i].filePath.clear();
+                                            m_toolbarSlots[i].displayName.clear();
+                                            saveInventorySlot(i);
+                                            syncExcludedPaths();
+                                        }
+                                    } else if (auto* forge = m_filesystemBrowser.getForgeRoom()) {
+                                        int slotIdx = forge->getMachineSlotIndex(hitSlot);
+                                        if (slotIdx >= 0) {
+                                            std::cout << "[Machine] Dropping slot " << i << " filePath='" << m_toolbarSlots[i].filePath << "' onto machine slot " << slotIdx << std::endl;
+                                            forge->setSlotImage(slotIdx, m_toolbarSlots[i].filePath);
+                                            hitSlot->setTargetLevel("img://" + m_toolbarSlots[i].filePath);
+                                            destroySlotThumbnail(i);
+                                            m_toolbarSlots[i].occupied = false;
+                                            m_toolbarSlots[i].filePath.clear();
+                                            m_toolbarSlots[i].displayName.clear();
+                                            saveInventorySlot(i);
+                                            syncExcludedPaths();
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    break;
+                }
+            }
+        }
 
         // V - duplicate selected object(s) (editor mode only)
         static bool wasVKeyDown = false;
@@ -4779,6 +5510,7 @@ private:
         updateEconomySystems(deltaTime);
 
         // Left click — crosshair raycast to interact with filesystem objects + drag-and-drop
+        m_fsDblClickTimer += deltaTime;
         m_shootCooldown -= deltaTime;
         bool leftDown = Input::isMouseButtonDown(Input::MOUSE_LEFT) && !ImGui::GetIO().WantCaptureMouse;
         bool leftPressed = Input::isMouseButtonPressed(Input::MOUSE_LEFT) && !ImGui::GetIO().WantCaptureMouse;
@@ -4831,7 +5563,7 @@ private:
                         // Keep spawn origin unchanged — silo rebuilds at same center
                         m_filesystemBrowser.navigate(target.substr(5));
                         glm::vec3 camPos = m_filesystemBrowser.getSpawnOrigin();
-                        camPos.x += 8.0f; // offset past ceiling hole
+                        camPos.x += 32.0f; // offset past ceiling hole
                         camPos.y = 102.7f; // silo floor (ceiling top 101 + eye height 1.7)
                         m_camera.setPosition(camPos);
                         if (m_characterController) {
@@ -4839,36 +5571,37 @@ private:
                         }
                     }
                     m_shootCooldown = 0.2f;
-                } else if (hit && hit->getBuildingType() == "filesystem" && !hit->isDoor()) {
-                    // Non-door file — start drag candidate
-                    m_fsDragObject = hit;
-                    m_fsDragHoldTime = 0.0f;
-                    m_fsDragActive = false;
-                    m_fsDragHoverWall = nullptr;
-                } else if (hit && hit->getBuildingType() == "filesystem_wall") {
-                    // Wall click — select it, and start drag if wall has an item on it
+                } else if (hit && ((hit->getBuildingType() == "filesystem" && !hit->isDoor()) ||
+                                    hit->getBuildingType() == "filesystem_wall")) {
+                    // Unified double-click detection for both file objects and wall panels
+                    float hitY = hit->getTransform().getPosition().y;
+                    float prevY = m_fsDblClickTarget ? m_fsDblClickTarget->getTransform().getPosition().y : -9999.0f;
+                    bool isDoubleClick = (m_fsDblClickTimer < 1.0f && std::abs(hitY - prevY) < 2.0f);
+                    m_fsDblClickTimer = 0.0f;
+                    m_fsDblClickTarget = hit;
+
                     bool ctrlHeld = Input::isKeyDown(Input::KEY_LEFT_CONTROL) || Input::isKeyDown(Input::KEY_RIGHT_CONTROL);
-                    if (!ctrlHeld) {
+                    if (isDoubleClick && !ctrlHeld) {
+                        // Double-click (without Ctrl): select entire ring
                         for (auto& obj : m_sceneObjects) {
                             if (!obj) continue;
-                            const auto& bt = obj->getBuildingType();
-                            if (bt == "filesystem" || bt == "filesystem_wall")
-                                obj->setSelected(false);
+                            if (obj->getBuildingType() != "filesystem") continue;
+                            float objY = obj->getTransform().getPosition().y;
+                            if (std::abs(objY - hitY) < 2.0f) {
+                                obj->setSelected(true);
+                            }
                         }
-                    }
-                    hit->setSelected(!hit->isSelected());
-                    // If wall has an item, allow drag (for moving files/folders)
-                    std::string wt = hit->getTargetLevel();
-                    if (wt.rfind("fs://", 0) == 0 && wt.size() > 5) {
+                        m_fsDblClickRingSelected = true;
+                    } else {
+                        // Single click — start drag candidate (selection handled on release)
                         m_fsDragObject = hit;
                         m_fsDragHoldTime = 0.0f;
                         m_fsDragActive = false;
                         m_fsDragHoverWall = nullptr;
-                    } else {
-                        m_shootCooldown = 0.2f;
                     }
                 } else {
                     // Nothing hit — clear all selections
+                    m_fsDblClickTarget = nullptr;
                     for (auto& obj : m_sceneObjects) {
                         if (!obj) continue;
                         const auto& bt = obj->getBuildingType();
@@ -5007,8 +5740,8 @@ private:
                     }
 
                     m_fsDragHoverWall->setSelected(false);
-                } else if (!m_fsDragActive) {
-                    // Short click — select the object
+                } else if (!m_fsDragActive && !m_fsDblClickRingSelected) {
+                    // Short click — select the object (skip if double-click just selected a ring)
                     bool ctrlHeld = Input::isKeyDown(Input::KEY_LEFT_CONTROL) || Input::isKeyDown(Input::KEY_RIGHT_CONTROL);
                     if (!ctrlHeld) {
                         for (auto& obj : m_sceneObjects) {
@@ -5027,6 +5760,7 @@ private:
                 m_fsDragHoverWall = nullptr;
                 m_fsDragActive = false;
                 m_fsDragHoldTime = 0.0f;
+                m_fsDblClickRingSelected = false;
                 m_shootCooldown = 0.2f;
             }
 
@@ -5042,8 +5776,28 @@ private:
                 glm::vec3 rayO, rayD;
                 doCrosshairRay(rayO, rayD);
                 SceneObject* hover = raycastFS(rayO, rayD);
+                // Also check machine objects for hover tooltip
+                if (!hover) {
+                    float closestMDist = std::numeric_limits<float>::max();
+                    for (auto& obj : m_sceneObjects) {
+                        if (!obj) continue;
+                        const auto& bt = obj->getBuildingType();
+                        if (bt != "machine_slot" && bt != "machine_lever" && bt != "machine_platform" && bt != "machine_label" && bt != "hitbox" && bt != "machine_visual" && bt != "widget") continue;
+                        float dist = obj->getWorldBounds().intersect(rayO, rayD);
+                        if (dist >= 0 && dist < 200.0f && dist < closestMDist) {
+                            closestMDist = dist;
+                            hover = obj.get();
+                        }
+                    }
+                }
                 if (hover && (hover->getBuildingType() == "filesystem" ||
-                             hover->getBuildingType() == "image_desc")) {
+                             hover->getBuildingType() == "image_desc" ||
+                             hover->getBuildingType() == "machine_slot" ||
+                             hover->getBuildingType() == "machine_lever" ||
+                             hover->getBuildingType() == "machine_label" ||
+                             hover->getBuildingType() == "hitbox" ||
+                             hover->getBuildingType() == "machine_visual" ||
+                             hover->getBuildingType() == "widget")) {
                     m_fsHoverName = hover->getDescription();
                     if (m_tooltipVerbose) {
                         std::string target = hover->getTargetLevel();
@@ -5096,6 +5850,11 @@ private:
         // E key for interaction
         if (Input::isKeyPressed(Input::KEY_E) && !m_inConversation) {
             interactWithCrosshair();
+        }
+
+        // CullSession input (Up/Down arrow for accept/reject)
+        if (auto* cull = m_filesystemBrowser.getCullSession(); cull && cull->isActive()) {
+            cull->handleInput();
         }
     }
 
@@ -9124,6 +9883,11 @@ private:
 
         m_inPanelFocusMode = true;
         m_focusedPanel = panel;
+        m_segmentClickMode = false;
+        m_segmentBoxMode = false;
+        m_segmentBoxDragging = false;
+        m_eraserMode = false;
+        m_restoreMode = false;
 
         // Hide player avatar so it doesn't appear as a green line in ortho view
         if (m_playerAvatar) m_playerAvatar->setVisible(false);
@@ -9177,6 +9941,11 @@ private:
 
         m_inPanelFocusMode = false;
         m_focusedPanel = nullptr;
+        m_segmentClickMode = false;
+        m_segmentBoxMode = false;
+        m_segmentBoxDragging = false;
+        m_eraserMode = false;
+        m_restoreMode = false;
 
         // Reset terminal copy mode
         if (m_terminalMode != TerminalMode::NORMAL) {
@@ -9293,10 +10062,258 @@ private:
         ImGui::End();
     }
 
+    void renderToolbarUI() {
+        auto* drawList = ImGui::GetForegroundDrawList();
+        float windowW = static_cast<float>(getWindow().getWidth());
+        float windowH = static_cast<float>(getWindow().getHeight());
+
+        constexpr float slotSize = 48.0f;
+        constexpr float gap = 4.0f;
+        constexpr float bottomMargin = 16.0f;
+        float totalWidth = TOOLBAR_SLOT_COUNT * slotSize + (TOOLBAR_SLOT_COUNT - 1) * gap;
+        float startX = (windowW - totalWidth) * 0.5f;
+        float startY = windowH - bottomMargin - slotSize;
+
+        for (int i = 0; i < TOOLBAR_SLOT_COUNT; i++) {
+            float x = startX + i * (slotSize + gap);
+            ImVec2 tl(x, startY);
+            ImVec2 br(x + slotSize, startY + slotSize);
+
+            bool is3D = m_toolbarSlots[i].occupied && m_toolbarSlots[i].is3DModel;
+
+            // Semi-transparent dark background (skip for 3D models so the model shows through)
+            if (!is3D) {
+                drawList->AddRectFilled(tl, br, IM_COL32(20, 20, 20, 160));
+            }
+
+            // Border: active = white 3px, inactive = gray 1.5px
+            if (i == m_activeToolbarSlot) {
+                drawList->AddRect(tl, br, IM_COL32(255, 255, 255, 255), 0.0f, 0, 3.0f);
+            } else {
+                drawList->AddRect(tl, br, IM_COL32(128, 128, 128, 180), 0.0f, 0, 1.5f);
+            }
+
+            // Number label in top-left corner
+            char label[2];
+            label[0] = (i < 9) ? ('1' + i) : '0';
+            label[1] = '\0';
+            drawList->AddText(ImVec2(x + 3.0f, startY + 1.0f), IM_COL32(200, 200, 200, 180), label);
+
+            // Occupied slot: show thumbnail or fallback text (skip for 3D — rendered in-world)
+            if (m_toolbarSlots[i].occupied && !is3D) {
+                if (m_toolbarSlots[i].imguiDescriptor) {
+                    drawList->AddImage((ImTextureID)m_toolbarSlots[i].imguiDescriptor,
+                        ImVec2(x + 4, startY + 4),
+                        ImVec2(x + slotSize - 4, startY + slotSize - 4));
+                } else {
+                    std::string name = m_toolbarSlots[i].displayName;
+                    if (name.size() > 7) name = name.substr(0, 6) + "~";
+                    ImVec2 textSize = ImGui::CalcTextSize(name.c_str());
+                    float tx = x + (slotSize - textSize.x) * 0.5f;
+                    float ty = startY + (slotSize - textSize.y) * 0.5f;
+                    drawList->AddText(ImVec2(tx, ty), IM_COL32(100, 230, 255, 255), name.c_str());
+                }
+            }
+        }
+    }
+
     void renderPlayModeUI() {
         renderPlayModeTopBar();
         renderSiloConfigWindow();
         renderPerfWindow();
+        renderToolbarUI();
+
+        // SAM2 segmentation progress overlay
+        if (m_filesystemBrowser.isSegmenting()) {
+            float windowW = static_cast<float>(getWindow().getWidth());
+            float windowH = static_cast<float>(getWindow().getHeight());
+            std::string segStatus = m_filesystemBrowser.getSegmentationStatus();
+            if (segStatus.empty()) segStatus = "Segmenting";
+
+            // Animated dots
+            int dots = (static_cast<int>(ImGui::GetTime() * 3.0f) % 3) + 1;
+            std::string label = segStatus + std::string(dots, '.');
+
+            ImGui::SetNextWindowPos(ImVec2(windowW * 0.5f, windowH - 60.0f), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+            ImGui::SetNextWindowBgAlpha(0.7f);
+            if (ImGui::Begin("##SegmentOverlay", nullptr,
+                ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+                ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoMove |
+                ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing)) {
+                ImGui::TextColored(ImVec4(0.4f, 0.9f, 1.0f, 1.0f), "%s", label.c_str());
+            }
+            ImGui::End();
+        }
+
+        // Image Tools window — shown when focused on an image panel
+        if (m_inPanelFocusMode && m_filesystemBrowser.isImageFocused()) {
+            float windowW = static_cast<float>(getWindow().getWidth());
+            float windowH = static_cast<float>(getWindow().getHeight());
+            ImGui::SetNextWindowPos(ImVec2(windowW - 180.0f, 60.0f), ImGuiCond_Always);
+            ImGui::SetNextWindowSize(ImVec2(170.0f, 0.0f));
+            ImGui::SetNextWindowBgAlpha(0.8f);
+            if (ImGui::Begin("Image Tools", nullptr,
+                ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
+                ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoCollapse)) {
+                if (!m_filesystemBrowser.isSegmenting()) {
+                    if (ImGui::Button("Segment Point", ImVec2(-1, 0))) {
+                        m_segmentClickMode = true;
+                        m_segmentBoxMode = false;
+                        m_segmentBoxDragging = false;
+                        m_eraserMode = false;
+                        m_restoreMode = false;
+                    }
+                    if (ImGui::Button("Segment Box", ImVec2(-1, 0))) {
+                        m_segmentBoxMode = true;
+                        m_segmentClickMode = false;
+                        m_segmentBoxDragging = false;
+                        m_eraserMode = false;
+                        m_restoreMode = false;
+                    }
+                    if (m_filesystemBrowser.hasSegmentation()) {
+                        ImGui::Separator();
+                        bool eraserActive = m_eraserMode;
+                        if (eraserActive) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.8f, 0.3f, 0.3f, 1.0f));
+                        if (ImGui::Button(eraserActive ? "Eraser (ON)" : "Eraser", ImVec2(-1, 0))) {
+                            m_eraserMode = !m_eraserMode;
+                            m_restoreMode = false;
+                            m_segmentClickMode = false;
+                            m_segmentBoxMode = false;
+                            m_segmentBoxDragging = false;
+                        }
+                        if (eraserActive) ImGui::PopStyleColor();
+
+                        bool restoreActive = m_restoreMode;
+                        if (restoreActive) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.2f, 0.7f, 0.3f, 1.0f));
+                        if (ImGui::Button(restoreActive ? "Restore (ON)" : "Restore", ImVec2(-1, 0))) {
+                            m_restoreMode = !m_restoreMode;
+                            m_eraserMode = false;
+                            m_segmentClickMode = false;
+                            m_segmentBoxMode = false;
+                            m_segmentBoxDragging = false;
+                        }
+                        if (restoreActive) ImGui::PopStyleColor();
+
+                        if (m_eraserMode || m_restoreMode) {
+                            ImGui::Text("Size: %d  [ / ]", m_eraserRadius);
+                        }
+                        if (ImGui::Button("Undo Segment", ImVec2(-1, 0))) {
+                            m_filesystemBrowser.undoSegmentation();
+                            m_eraserMode = false;
+                            m_restoreMode = false;
+                        }
+                        ImGui::Separator();
+                        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.5f, 0.1f, 0.9f, 1.0f));
+                        if (ImGui::Button("Send to Forge", ImVec2(-1, 0))) {
+                            std::string saved = m_filesystemBrowser.saveSegmentationToForge();
+                            if (!saved.empty()) {
+                                std::cout << "[Forge] Image sent: " << saved << std::endl;
+                            }
+                        }
+                        ImGui::PopStyleColor();
+                    }
+                } else {
+                    ImGui::TextColored(ImVec4(0.4f, 0.9f, 1.0f, 1.0f), "Segmenting...");
+                }
+
+                // Generate Model section
+                ImGui::Separator();
+                // Server toggle
+                {
+                    bool serverOn = m_aiServerRunning;
+                    if (ImGui::Checkbox("AI Server", &serverOn)) {
+                        if (serverOn) startHunyuanServer(m_generateLowVRAM);
+                        else stopHunyuanServer();
+                    }
+                    ImGui::SameLine();
+                    if (m_aiServerReady) {
+                        ImGui::TextColored(ImVec4(0.3f, 1.0f, 0.3f, 1.0f), "Ready");
+                    } else if (m_aiServerRunning) {
+                        ImGui::TextColored(ImVec4(1.0f, 1.0f, 0.3f, 1.0f), "...");
+                    } else {
+                        ImGui::TextDisabled("Off");
+                    }
+                }
+
+                // Get current focused image path (don't save to forge yet — only on tag click)
+                std::string focusedImg;
+                bool focusedIsSegmentation = m_filesystemBrowser.hasSegmentation();
+                if (!focusedIsSegmentation) {
+                    focusedImg = m_filesystemBrowser.getFocusedImagePath();
+                }
+
+                // Generate 3D model button (single-view)
+                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.1f, 0.6f, 0.9f, 1.0f));
+                if (m_aiGenerating) {
+                    ImGui::TextColored(ImVec4(1, 1, 0, 1), "Generating...");
+                    if (ImGui::Button("Cancel", ImVec2(-1, 0))) {
+                        cancelAIGeneration();
+                    }
+                } else {
+                    bool canGen = m_aiServerReady && !focusedImg.empty();
+                    if (!canGen) ImGui::BeginDisabled();
+                    if (ImGui::Button("Generate Model", ImVec2(-1, 0))) {
+                        m_generateImagePath = focusedImg;
+                        m_showForgeGenerateWindow = true;
+                        m_playModeCursorVisible = true;
+                        Input::setMouseCaptured(false);
+                    }
+                    if (!canGen) ImGui::EndDisabled();
+                }
+                ImGui::PopStyleColor();
+            }
+            ImGui::End();
+
+            // Hint overlay when waiting for segment click or box drag
+            if (m_segmentClickMode || m_segmentBoxMode) {
+                std::string hint = m_segmentClickMode ? "Click on subject to isolate"
+                                                      : "Drag rectangle around subject";
+                ImVec2 hintSize = ImGui::CalcTextSize(hint.c_str());
+                ImGui::SetNextWindowPos(ImVec2(windowW * 0.5f, windowH - 40.0f), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+                ImGui::SetNextWindowBgAlpha(0.7f);
+                if (ImGui::Begin("##SegmentHint", nullptr,
+                    ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+                    ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoMove |
+                    ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing)) {
+                    ImGui::TextColored(ImVec4(1.0f, 1.0f, 0.4f, 1.0f), "%s", hint.c_str());
+                }
+                ImGui::End();
+            }
+
+            // Draw rectangle overlay while dragging
+            if (m_segmentBoxDragging) {
+                ImDrawList* dl = ImGui::GetForegroundDrawList();
+                ImVec2 a(std::min(m_segmentBoxStart.x, m_segmentBoxEnd.x),
+                         std::min(m_segmentBoxStart.y, m_segmentBoxEnd.y));
+                ImVec2 b(std::max(m_segmentBoxStart.x, m_segmentBoxEnd.x),
+                         std::max(m_segmentBoxStart.y, m_segmentBoxEnd.y));
+                dl->AddRect(a, b, IM_COL32(255, 255, 100, 220), 0.0f, 0, 2.0f);
+                dl->AddRectFilled(a, b, IM_COL32(255, 255, 100, 30));
+            }
+
+            // Draw brush cursor (eraser = red, restore = green)
+            if ((m_eraserMode || m_restoreMode) && m_filesystemBrowser.hasSegmentation() && !ImGui::GetIO().WantCaptureMouse) {
+                ImDrawList* dl = ImGui::GetForegroundDrawList();
+                ImVec2 mp = ImGui::GetMousePos();
+                // Convert brush radius from image pixels to screen pixels
+                float screenW = static_cast<float>(getWindow().getWidth());
+                float screenH = static_cast<float>(getWindow().getHeight());
+                auto [imgW, imgH] = m_filesystemBrowser.getFocusedImageDimensions();
+                if (imgW > 0 && m_focusedPanel) {
+                    float screenAspect = screenW / screenH;
+                    float orthoSize = m_camera.getOrthoSize();
+                    float visW = orthoSize * screenAspect;
+                    glm::vec3 panelScale = m_focusedPanel->getTransform().getScale();
+                    float panelHalfW = panelScale.x * 0.75f;
+                    // image pixels -> UV fraction -> world units -> screen pixels
+                    float radiusUV = static_cast<float>(m_eraserRadius) / imgW;
+                    float radiusWorld = radiusUV * panelHalfW * 2.0f;
+                    float radiusScreen = (radiusWorld / visW) * (screenW * 0.5f);
+                    ImU32 brushCol = m_eraserMode ? IM_COL32(255, 100, 100, 200) : IM_COL32(100, 255, 100, 200);
+                    dl->AddCircle(mp, radiusScreen, brushCol, 32, 2.0f);
+                }
+            }
+        }
 
         if (m_filesystemBrowser.isActive()) {
             // Filesystem mode: show current directory path centered at top
@@ -9497,6 +10514,27 @@ private:
             m_imageBotMenuWasOpen = ibotMenuOpen;
         }
 
+        // CullSession decision UI (accept/reject buttons)
+        if (auto* cull = m_filesystemBrowser.getCullSession(); cull && cull->isActive()) {
+            bool cullDecisionOpen = (cull->isActive() && !cull->isSessionComplete());
+            cull->renderDecisionUI();
+            if (cullDecisionOpen && !m_playModeCursorVisible) {
+                m_playModeCursorVisible = true;
+                Input::setMouseCaptured(false);
+            }
+            if (!cullDecisionOpen && m_cullDecisionWasOpen) {
+                m_playModeCursorVisible = false;
+                Input::setMouseCaptured(true);
+            }
+            m_cullDecisionWasOpen = cullDecisionOpen;
+        } else {
+            if (m_cullDecisionWasOpen) {
+                m_playModeCursorVisible = false;
+                Input::setMouseCaptured(true);
+                m_cullDecisionWasOpen = false;
+            }
+        }
+
         // Forge Room: Assignment popup + Generate Robot button + Generate window
         if (auto* forge = m_filesystemBrowser.getForgeRoom()) {
             // Render assignment popup if open
@@ -9508,29 +10546,13 @@ private:
             }
             m_forgeAssignMenuWasOpen = forgePopupOpen;
 
-            // "Generate Robot" button in the path bar area
-            if (m_filesystemBrowser.isActive()) {
-                float windowW = static_cast<float>(getWindow().getWidth());
-                ImGui::SetNextWindowPos(ImVec2(windowW - 170, 25));
-                ImGui::SetNextWindowBgAlpha(0.7f);
-                if (ImGui::Begin("##ForgeGenBtn", nullptr,
-                    ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
-                    ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoMove |
-                    ImGuiWindowFlags_NoSavedSettings)) {
-                    if (ImGui::Button("Generate Robot")) {
-                        m_showForgeGenerateWindow = true;
-                        m_playModeCursorVisible = true;
-                        Input::setMouseCaptured(false);
-                    }
-                }
-                ImGui::End();
-            }
+            // (Generate Model button moved into Image Tools panel)
 
             // AI Generate window
             if (m_showForgeGenerateWindow) {
                 ImGui::SetNextWindowPos(ImVec2(400, 100), ImGuiCond_FirstUseEver);
                 ImGui::SetNextWindowSize(ImVec2(520, 580), ImGuiCond_FirstUseEver);
-                if (ImGui::Begin("AI Generate (Hunyuan3D)##forgeWindow", &m_showForgeGenerateWindow)) {
+                if (ImGui::Begin("Generate Model (Hunyuan3D)##forgeWindow", &m_showForgeGenerateWindow)) {
                     // Server control
                     bool serverOn = m_aiServerRunning;
                     if (ImGui::Checkbox("Server##hunyuan", &serverOn)) {
@@ -10836,6 +11858,12 @@ private:
     }
 
     void showSaveDialog() {
+        // EDEN OS levels save directly to ~/.eden/os_level.eden without a dialog
+        if (m_isEdenOSLevel && !m_currentLevelPath.empty()) {
+            saveLevel(m_currentLevelPath);
+            return;
+        }
+
         nfdchar_t* outPath = nullptr;
         nfdfilteritem_t filters[1] = {{"EDEN Level", "eden"}};
 
@@ -11749,7 +12777,7 @@ private:
                         m_filesystemBrowser.navigate(fsPath);
                         m_filesystemBrowser.processNavigation(); // spawn immediately
                         // Teleport camera into the silo (baseY=100, offset past ceiling hole)
-                        glm::vec3 siloCam(origin.x + 8.0f, 102.7f, origin.z);
+                        glm::vec3 siloCam(origin.x + 32.0f, 102.7f, origin.z);
                         m_camera.setPosition(siloCam);
                         m_camera.setYaw(-90.0f);
                         m_camera.setPitch(0.0f);
@@ -11965,6 +12993,9 @@ private:
         m_isSpaceLevel = false;
         m_editorUI.setSpaceLevelMode(false);
 
+        // Reset EDEN OS level state
+        m_isEdenOSLevel = false;
+
         // Reset zone system
         if (m_zoneSystem) {
             m_zoneSystem->generateDefaultLayout();
@@ -12076,29 +13107,188 @@ private:
         // Start with a fresh level
         newLevel();
 
-        // Place the filesystem silo at world origin (0, 0)
+        // Place the basement at world origin (0, 0)
         glm::vec3 spawnPos(0.0f, 0.0f, 0.0f);
         float terrainY = m_terrain.getHeightAt(spawnPos.x, spawnPos.z);
         spawnPos.y = terrainY;
 
         m_filesystemBrowser.setSpawnOrigin(spawnPos);
 
-        const char* home = getenv("HOME");
-        std::string homePath = home ? home : "/";
-        m_filesystemBrowser.navigate(homePath);
-        m_filesystemBrowser.processNavigation(); // spawn immediately so silo exists
+        // Only spawn the basement — no silo. The silo appears at runtime via F9.
+        float baseY = 100.0f;
+        m_filesystemBrowser.spawnBasement(spawnPos, baseY);
 
-        // Teleport camera into the silo — offset past the 8m ceiling hole (gapHalf=4)
-        glm::vec3 camPos(8.0f, 102.7f, 0.0f);
+        // Teleport camera into the basement
+        glm::vec3 camPos(0.0f, baseY - 8.0f, 0.0f); // center of basement (16m tall, so midpoint is baseY - 8)
         m_camera.setPosition(camPos);
-        m_camera.setYaw(-90.0f);
+        m_camera.setYaw(0.0f);
         m_camera.setPitch(0.0f);
 
         if (m_characterController) {
             m_characterController->setPosition(camPos);
         }
 
-        std::cout << "EDEN OS level created — home silo at origin (press F5 for play mode)" << std::endl;
+        m_isEdenOSLevel = true;
+
+        // Default save path for OS levels
+        const char* home = getenv("HOME");
+        std::string edenDir = std::string(home ? home : "/tmp") + "/.eden";
+        std::filesystem::create_directories(edenDir);
+        m_currentLevelPath = edenDir + "/os_level.eden";
+
+        std::cout << "EDEN OS level created — basement at origin (build around it, F9 spawns silo in play mode)" << std::endl;
+    }
+
+    void loadEdenOSLevel() {
+        const char* home = getenv("HOME");
+        std::string osLevelPath = std::string(home ? home : "/tmp") + "/.eden/os_level.eden";
+
+        if (!std::filesystem::exists(osLevelPath)) {
+            std::cerr << "No EDEN OS level found at " << osLevelPath << std::endl;
+            return;
+        }
+
+        loadLevel(osLevelPath);
+        m_isEdenOSLevel = true;
+        m_currentLevelPath = osLevelPath;
+        std::cout << "Loaded EDEN OS level from " << osLevelPath << std::endl;
+    }
+
+    // Load scene objects from an .eden file and append them to the current scene.
+    // Objects are tagged with buildingType "eden_os_persistent" so they can be
+    // removed when the OS view is dismissed, without disrupting the rest of the scene.
+    void loadOSLevelObjects(const std::string& filepath) {
+        LevelData levelData;
+        if (!LevelSerializer::load(filepath, levelData)) {
+            std::cerr << "Failed to load OS level: " << LevelSerializer::getLastError() << std::endl;
+            return;
+        }
+
+        for (const auto& objData : levelData.objects) {
+            if (objData.modelPath.empty() && objData.primitiveType == 0) continue;
+
+            std::unique_ptr<SceneObject> obj;
+
+            if (objData.primitiveType != 0) {
+                PrimitiveType primType = static_cast<PrimitiveType>(objData.primitiveType);
+                PrimitiveMeshBuilder::MeshData meshData;
+
+                switch (primType) {
+                    case PrimitiveType::Cube:
+                        meshData = PrimitiveMeshBuilder::createCube(objData.primitiveSize, objData.primitiveColor);
+                        break;
+                    case PrimitiveType::Cylinder:
+                        meshData = PrimitiveMeshBuilder::createCylinder(
+                            objData.primitiveRadius, objData.primitiveHeight,
+                            objData.primitiveSegments, objData.primitiveColor);
+                        break;
+                    case PrimitiveType::SpawnMarker:
+                        meshData = PrimitiveMeshBuilder::createSpawnMarker(objData.primitiveSize);
+                        break;
+                    case PrimitiveType::Door:
+                        meshData = PrimitiveMeshBuilder::createCube(objData.primitiveSize, objData.primitiveColor);
+                        break;
+                    default:
+                        continue;
+                }
+
+                std::string name = objData.name.empty() ? "Primitive" : objData.name;
+                obj = std::make_unique<SceneObject>(name);
+                uint32_t handle = m_modelRenderer->createModel(meshData.vertices, meshData.indices);
+                obj->setBufferHandle(handle);
+                obj->setIndexCount(static_cast<uint32_t>(meshData.indices.size()));
+                obj->setVertexCount(static_cast<uint32_t>(meshData.vertices.size()));
+                obj->setLocalBounds(meshData.bounds);
+                obj->setMeshData(meshData.vertices, meshData.indices);
+                obj->setPrimitiveType(primType);
+                obj->setPrimitiveSize(objData.primitiveSize);
+                obj->setPrimitiveRadius(objData.primitiveRadius);
+                obj->setPrimitiveHeight(objData.primitiveHeight);
+                obj->setPrimitiveSegments(objData.primitiveSegments);
+                obj->setPrimitiveColor(objData.primitiveColor);
+
+                if (primType == PrimitiveType::Door) {
+                    obj->setDoorId(objData.doorId);
+                    obj->setTargetLevel(objData.targetLevel);
+                    obj->setTargetDoorId(objData.targetDoorId);
+                }
+            } else if (objData.isSkinned) {
+                auto result = SkinnedGLBLoader::load(objData.modelPath);
+                if (!result.success || result.meshes.empty()) continue;
+
+                const auto& mesh = result.meshes[0];
+                uint32_t handle = m_skinnedModelRenderer->createModel(
+                    mesh.vertices, mesh.indices,
+                    std::make_unique<Skeleton>(*result.skeleton),
+                    result.animations,
+                    mesh.hasTexture ? mesh.textureData.data() : nullptr,
+                    mesh.textureWidth, mesh.textureHeight);
+
+                obj = std::make_unique<SceneObject>(mesh.name);
+                obj->setSkinnedModelHandle(handle);
+                obj->setVertexCount(static_cast<uint32_t>(mesh.vertices.size()));
+
+                auto animNames = m_skinnedModelRenderer->getAnimationNames(handle);
+                obj->setAnimationNames(animNames);
+                if (!objData.currentAnimation.empty()) {
+                    m_skinnedModelRenderer->playAnimation(handle, objData.currentAnimation, true);
+                    obj->setCurrentAnimation(objData.currentAnimation);
+                } else if (!animNames.empty()) {
+                    m_skinnedModelRenderer->playAnimation(handle, animNames[0], true);
+                    obj->setCurrentAnimation(animNames[0]);
+                }
+            } else {
+                auto result = GLBLoader::load(objData.modelPath);
+                if (!result.success || result.meshes.empty()) continue;
+
+                obj = GLBLoader::createSceneObject(result.meshes[0], *m_modelRenderer);
+                if (!obj) continue;
+            }
+
+            obj->setModelPath(objData.modelPath);
+            obj->getTransform().setPosition(objData.position);
+            obj->setEulerRotation(objData.rotation);
+            obj->getTransform().setScale(objData.scale);
+            obj->setHueShift(objData.hueShift);
+            obj->setSaturation(objData.saturation);
+            obj->setBrightness(objData.brightness);
+            obj->setVisible(objData.visible);
+            obj->setAABBCollision(objData.aabbCollision);
+            obj->setPolygonCollision(objData.polygonCollision);
+            obj->setBulletCollisionType(static_cast<BulletCollisionType>(objData.bulletCollisionType));
+            obj->setKinematicPlatform(objData.kinematicPlatform);
+            obj->setBeingType(static_cast<BeingType>(objData.beingType));
+            if (!objData.groveScript.empty()) obj->setGroveScriptPath(objData.groveScript);
+            obj->setDailySchedule(objData.dailySchedule);
+            obj->setPatrolSpeed(objData.patrolSpeed);
+            if (!objData.description.empty()) obj->setDescription(objData.description);
+
+            // Tag for cleanup — override buildingType so we can remove on dismiss
+            // (preserve original buildingType in name prefix if needed)
+            obj->setBuildingType("eden_os_persistent");
+
+            m_sceneObjects.push_back(std::move(obj));
+        }
+
+        std::cout << "Loaded " << levelData.objects.size() << " OS level objects from " << filepath << std::endl;
+    }
+
+    // Remove all objects tagged as eden_os_persistent (loaded by F9)
+    void clearOSLevelObjects() {
+        std::vector<uint32_t> handles;
+        auto it = m_sceneObjects.begin();
+        while (it != m_sceneObjects.end()) {
+            if (*it && (*it)->getBuildingType() == "eden_os_persistent") {
+                uint32_t handle = (*it)->getBufferHandle();
+                if (handle != 0) handles.push_back(handle);
+                it = m_sceneObjects.erase(it);
+            } else {
+                ++it;
+            }
+        }
+        if (!handles.empty()) {
+            m_modelRenderer->destroyModels(handles);
+        }
     }
 
     void runGame() {
@@ -12872,26 +14062,102 @@ private:
 
         float closestDist = std::numeric_limits<float>::max();
         SceneObject* closestObj = nullptr;
+        float closestDoorDist = std::numeric_limits<float>::max();
+        SceneObject* closestDoor = nullptr;
+
+        float closestLeverDist = std::numeric_limits<float>::max();
+        SceneObject* closestLever = nullptr;
+
+        float closestWidgetDist = std::numeric_limits<float>::max();
+        SceneObject* closestWidget = nullptr;
 
         for (auto& obj : m_sceneObjects) {
-            if (!obj || !obj->isVisible()) continue;
+            if (!obj) continue;
+            // Allow invisible hitbox lever and widget buttons/checkboxes through
+            bool isWidgetInteractive = false;
+            if (obj->getBuildingType() == "widget") {
+                const auto& desc = obj->getDescription();
+                isWidgetInteractive = (desc.rfind("button:", 0) == 0 || desc.rfind("checkbox:", 0) == 0);
+            }
+            if (!obj->isVisible() && !(obj->getBuildingType() == "hitbox" && obj->getDescription() == "lever") && !isWidgetInteractive) continue;
+            // Skip non-interactive machine parts
+            if (obj->getBuildingType() == "machine_platform" ||
+                obj->getBuildingType() == "machine_label" ||
+                obj->getBuildingType() == "machine_preview" ||
+                obj->getBuildingType() == "machine_visual") continue;
+            // Skip hitbox slots (they only respond to hotbar drops, not crosshair interaction)
+            if (obj->getBuildingType() == "hitbox" && obj->getDescription() != "lever") continue;
+            // Skip widget slots (they only respond to hotbar drops)
+            if (obj->getBuildingType() == "widget" && !isWidgetInteractive) continue;
 
             AABB worldBounds = obj->getWorldBounds();
             float dist = worldBounds.intersect(rayOrigin, rayDir);
 
-            if (dist >= 0 && dist < closestDist && dist < 10.0f) {
+            if (dist >= 0 && dist < closestDist && dist < 50.0f) {
                 closestDist = dist;
                 closestObj = obj.get();
             }
+            // Track closest door separately — rotated wall AABBs can
+            // inflate and occlude the door in front of them
+            if (dist >= 0 && dist < closestDoorDist && dist < 50.0f && obj->isDoor()) {
+                closestDoorDist = dist;
+                closestDoor = obj.get();
+            }
+            // Track closest lever — platform AABB can occlude it
+            if (dist >= 0 && dist < closestLeverDist && dist < 50.0f &&
+                (obj->getBuildingType() == "machine_lever" ||
+                 (obj->getBuildingType() == "hitbox" && obj->getDescription() == "lever"))) {
+                closestLeverDist = dist;
+                closestLever = obj.get();
+            }
+            // Track closest widget (button/checkbox)
+            if (dist >= 0 && dist < closestWidgetDist && dist < 50.0f && isWidgetInteractive) {
+                closestWidgetDist = dist;
+                closestWidget = obj.get();
+            }
+        }
+
+        // Prefer door over wall when both are hit at similar distances
+        // (wall AABBs inflate when rotated, hiding doors behind them)
+        if (closestDoor && closestObj && !closestObj->isDoor() &&
+            closestObj->getBuildingType() == "filesystem_wall") {
+            closestObj = closestDoor;
+            closestDist = closestDoorDist;
+        }
+
+        // Prefer lever over platform/slot when both are hit
+        if (closestLever && closestObj &&
+            (closestObj->getBuildingType() == "machine_slot" ||
+             closestObj->getBuildingType() == "machine_platform" ||
+             closestObj->getBuildingType() == "machine_visual")) {
+            closestObj = closestLever;
+            closestDist = closestLeverDist;
+        }
+
+        // Prefer widget over machine visual when both are hit
+        if (closestWidget && closestObj &&
+            closestObj->getBuildingType() == "machine_visual") {
+            closestObj = closestWidget;
+            closestDist = closestWidgetDist;
         }
 
         if (closestObj) {
+            // Check if this is a widget button/checkbox — handle before other interactions
+            if (closestObj->getBuildingType() == "widget") {
+                if (auto* forge = m_filesystemBrowser.getForgeRoom()) {
+                    forge->getWidgetKit().handleCrosshairInteract(closestObj);
+                }
+                return;
+            }
             // Check if this is a door - handle level transition or teleport
             if (closestObj->isDoor()) {
                 std::string targetLevel = closestObj->getTargetLevel();
                 std::string targetDoorId = closestObj->getTargetDoorId();
 
-                if (!targetLevel.empty() && targetLevel.rfind("fs://", 0) == 0) {
+                if (!targetLevel.empty() && targetLevel.rfind("app://", 0) == 0) {
+                    // App launcher navigation — pass full app:// path
+                    m_filesystemBrowser.navigate(targetLevel);
+                } else if (!targetLevel.empty() && targetLevel.rfind("fs://", 0) == 0) {
                     // Filesystem navigation — keep spawn origin unchanged so silo stays centered
                     std::string fsPath = targetLevel.substr(5);
                     m_filesystemBrowser.navigate(fsPath);
@@ -12913,6 +14179,23 @@ private:
                     Input::setMouseCaptured(false);
                     return;
                 }
+                // Check if player clicked the machine lever
+                if (forge->isLever(closestObj)) {
+                    std::cout << "[Machine] Lever pulled! frontFilled=" << forge->isFrontFilled() << std::endl;
+                    if (forge->isFrontFilled()) {
+                        std::string front = forge->getSlotImagePath(0);
+                        std::string back  = forge->getSlotImagePath(1);
+                        std::string left  = forge->getSlotImagePath(2);
+                        std::string right = forge->getSlotImagePath(3);
+                        std::cout << "[Machine] front='" << front << "' back='" << back << "'" << std::endl;
+                        forge->clearMachineSlots();
+                        startMultiviewGeneration(front, left, right, back);
+                    } else {
+                        std::cout << "[Machine] No front image, aborting" << std::endl;
+                        m_aiGenerateStatus = "Place at least a FRONT image on the machine";
+                    }
+                    return;
+                }
             }
 
             // Check if player is interacting with the cleaner bot
@@ -12931,6 +14214,22 @@ private:
                 m_playModeCursorVisible = true;
                 Input::setMouseCaptured(false);
                 return;
+            }
+
+            // Check if player is interacting with a cull robot
+            if (auto* cull = m_filesystemBrowser.getCullSession()) {
+                if (auto* robot = cull->getRobotAt(closestObj)) {
+                    if (!cull->isActive()) {
+                        cull->startCulling();
+                        m_playModeCursorVisible = true;
+                        Input::setMouseCaptured(false);
+                    } else {
+                        robot->showMenu();
+                        m_playModeCursorVisible = true;
+                        Input::setMouseCaptured(false);
+                    }
+                    return;
+                }
             }
 
             closestObj->triggerBehavior(TriggerType::ON_INTERACT);
@@ -13173,7 +14472,8 @@ private:
         std::string uid = m_hunyuanClient.startGeneration(
             prompt, imageBase64, m_generateSteps, m_generateOctreeRes,
             m_generateGuidance, m_generateMaxFaces, m_generateTexture,
-            m_generateSeed, m_generateTexSize, m_generateRemBG);
+            m_generateSeed, m_generateTexSize, m_generateRemBG,
+            false, "", "", "");
         if (uid.empty()) {
             m_aiGenerateStatus = "Failed to start generation";
             return;
@@ -13186,6 +14486,9 @@ private:
         m_aiGenerateStatus = "Generating...";
         m_aiLogIndex = 0;
         m_aiLogLines.clear();
+
+        // Defensive: join any previous thread before reassignment
+        if (m_aiGenerateThread.joinable()) m_aiGenerateThread.join();
 
         m_aiGenerateThread = std::thread([this, uid]() {
             Hunyuan3DClient client("localhost", 8081);
@@ -13220,18 +14523,112 @@ private:
                         std::cout << "[Hunyuan3D] Model saved to: " << outputPath << std::endl;
                     } else {
                         m_aiGenerateStatus = "Failed to decode model data";
-                        m_aiGenerating = false;
+                        m_aiGenerateComplete = true; // Signal main loop to join this thread
                     }
                     return;
                 } else if (status == "error") {
                     m_aiGenerateStatus = "Server error during generation";
-                    m_aiGenerating = false;
+                    m_aiGenerateComplete = true; // Signal main loop to join this thread
                     return;
                 }
             }
-            m_aiGenerating = false;
+            m_aiGenerateComplete = true; // Signal main loop to join this thread (cancelled)
             m_aiGenerateStatus = "Cancelled";
         });
+    }
+
+    void startMultiviewGeneration(const std::string& frontPath,
+                                  const std::string& leftPath,
+                                  const std::string& rightPath,
+                                  const std::string& backPath) {
+        if (m_aiGenerating) return;
+
+        if (!m_hunyuanClient.isServerRunning()) {
+            m_aiGenerateStatus = "Server not running (localhost:8081)";
+            std::cout << "[Machine] " << m_aiGenerateStatus << std::endl;
+            return;
+        }
+
+        // Encode front image (required)
+        std::cout << "[Machine] Encoding front image..." << std::endl;
+        std::string frontB64 = Hunyuan3DClient::base64EncodeFile(frontPath);
+        if (frontB64.empty()) {
+            m_aiGenerateStatus = "Failed to read front image";
+            return;
+        }
+
+        // Encode optional view images
+        std::string leftB64, rightB64, backB64;
+        if (!leftPath.empty())  leftB64  = Hunyuan3DClient::base64EncodeFile(leftPath);
+        if (!rightPath.empty()) rightB64 = Hunyuan3DClient::base64EncodeFile(rightPath);
+        if (!backPath.empty())  backB64  = Hunyuan3DClient::base64EncodeFile(backPath);
+
+        std::string uid = m_hunyuanClient.startGeneration(
+            "", frontB64, m_generateSteps, m_generateOctreeRes,
+            m_generateGuidance, m_generateMaxFaces, m_generateTexture,
+            m_generateSeed, m_generateTexSize, true/*removeBG*/,
+            true/*multiView*/, leftB64, rightB64, backB64);
+        if (uid.empty()) {
+            m_aiGenerateStatus = "Failed to start multiview generation";
+            return;
+        }
+
+        m_aiGenerateJobUID = uid;
+        m_aiGenerating = true;
+        m_aiGenerateComplete = false;
+        m_aiGenerateCancelled = false;
+        m_aiGenerateStatus = "Generating (multiview)...";
+        m_aiLogIndex = 0;
+        m_aiLogLines.clear();
+
+        if (m_aiGenerateThread.joinable()) m_aiGenerateThread.join();
+
+        m_aiGenerateThread = std::thread([this, uid]() {
+            Hunyuan3DClient client("localhost", 8081);
+            while (!m_aiGenerateCancelled) {
+                std::this_thread::sleep_for(std::chrono::seconds(2));
+                if (m_aiGenerateCancelled) break;
+
+                std::vector<std::string> newLines;
+                int newTotal = client.fetchLog(m_aiLogIndex, newLines);
+                if (newTotal >= 0) {
+                    for (auto& line : newLines) m_aiLogLines.push_back(std::move(line));
+                    m_aiLogIndex = newTotal;
+                }
+
+                std::string base64GLB;
+                std::string status = client.checkStatus(uid, base64GLB);
+
+                if (status == "completed" && !base64GLB.empty()) {
+                    auto now = std::chrono::system_clock::now();
+                    auto timestamp = std::chrono::duration_cast<std::chrono::seconds>(
+                        now.time_since_epoch()).count();
+                    std::string outputDir = m_filesystemBrowser.getCurrentPath();
+                    if (outputDir.empty()) outputDir = "models";
+                    std::filesystem::create_directories(outputDir);
+                    std::string outputPath = outputDir + "/ai_multiview_" +
+                        std::to_string(timestamp) + ".glb";
+
+                    if (Hunyuan3DClient::base64DecodeToFile(base64GLB, outputPath)) {
+                        m_aiGeneratedGLBPath = outputPath;
+                        m_aiGenerateComplete = true;
+                        std::cout << "[Hunyuan3D] Multiview model saved to: " << outputPath << std::endl;
+                    } else {
+                        m_aiGenerateStatus = "Failed to decode model data";
+                        m_aiGenerateComplete = true;
+                    }
+                    return;
+                } else if (status == "error") {
+                    m_aiGenerateStatus = "Server error during generation";
+                    m_aiGenerateComplete = true;
+                    return;
+                }
+            }
+            m_aiGenerateComplete = true;
+            m_aiGenerateStatus = "Cancelled";
+        });
+
+        std::cout << "[Hunyuan3D] Multiview generation started (front=" << frontPath << ")" << std::endl;
     }
 
     void executeTransition() {
@@ -16415,6 +17812,14 @@ private:
 
     // Panel focus mode — orthographic lock-on view for reading panels
     bool m_inPanelFocusMode = false;
+    bool m_segmentClickMode = false; // waiting for click to segment (point)
+    bool m_segmentBoxMode = false;   // waiting for drag to segment (rectangle)
+    bool m_segmentBoxDragging = false; // currently dragging a rectangle
+    glm::vec2 m_segmentBoxStart{0.0f}; // screen-space drag start
+    glm::vec2 m_segmentBoxEnd{0.0f};   // screen-space drag end
+    bool m_eraserMode = false;       // eraser brush active
+    bool m_restoreMode = false;      // restore brush active
+    int m_eraserRadius = 15;         // brush radius in image pixels (shared)
     SceneObject* m_focusedPanel = nullptr;
     struct PanelFocusState {
         glm::vec3 cameraPos;
@@ -16425,6 +17830,20 @@ private:
         MovementMode movementMode;
         bool cursorVisible;
     } m_preFocusCameraState;
+
+    // Toolbar / hotbar (Minecraft-style inventory bar)
+    struct ToolbarSlot {
+        bool occupied = false;
+        std::string filePath;      // stripped fs:// path
+        std::string displayName;   // filename
+        VkDescriptorSet imguiDescriptor = VK_NULL_HANDLE; // for drawList->AddImage()
+        uint32_t gpuHandle = 0;    // ModelRenderer handle owning the thumbnail texture or 3D model
+        bool is3DModel = false;    // true = gpuHandle is an actual 3D model to render in-world
+        uint32_t modelIndexCount = 0;
+    };
+    static constexpr int TOOLBAR_SLOT_COUNT = 10;
+    ToolbarSlot m_toolbarSlots[10];
+    int m_activeToolbarSlot = 0;
 
     // Editor subsystems
     EditorUI m_editorUI;
@@ -16579,6 +17998,9 @@ private:
     float m_fsDragHoldTime = 0.0f;             // How long mouse has been held
     bool m_fsDragActive = false;               // True once hold threshold passed
     bool m_fsLeftWasDown = false;              // Track mouse release
+    float m_fsDblClickTimer = 0.0f;           // Time since last click for double-click detection
+    SceneObject* m_fsDblClickTarget = nullptr; // Object from first click
+    bool m_fsDblClickRingSelected = false;     // Double-click just selected a ring
     std::string m_fsHoverName;                 // Filename under crosshair
     bool m_playModeDebug = false;          // F3 toggles debug visuals (waypoints, etc.)
 
@@ -16616,8 +18038,21 @@ private:
     bool m_generateLowVRAM = false;
     bool m_showForgeGenerateWindow = false;
     bool m_forgeAssignMenuWasOpen = false;
+
+    // Multiview tagging for model generation
+    struct ViewTag {
+        std::string imagePath;
+        std::string label;  // displayed on wall
+    };
+    std::string m_viewFront;
+    std::string m_viewBack;
+    std::string m_viewLeft;
+    std::string m_viewRight;
+    void clearViewTags() { m_viewFront.clear(); m_viewBack.clear(); m_viewLeft.clear(); m_viewRight.clear(); }
+    int viewTagCount() const { return (!m_viewFront.empty()) + (!m_viewBack.empty()) + (!m_viewLeft.empty()) + (!m_viewRight.empty()); }
     bool m_botMenuWasOpen = false;
     bool m_imageBotMenuWasOpen = false;
+    bool m_cullDecisionWasOpen = false;
 
     // SmolVLM server for ImageBot
     pid_t m_smolvlmServerPID = -1;
@@ -16633,6 +18068,7 @@ private:
     // Test level state
     bool m_isTestLevel = false;
     bool m_isSpaceLevel = false;
+    bool m_isEdenOSLevel = false;
     float m_testFloorSize = 100.0f;
     PhysicsBackend m_physicsBackend = PhysicsBackend::Jolt;  // Physics backend for this level
     float m_editorCameraYaw = 0.0f;

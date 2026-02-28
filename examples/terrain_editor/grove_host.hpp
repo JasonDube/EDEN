@@ -13,6 +13,7 @@ namespace eden {
     class SceneObject;
     class ZoneSystem;
     class ModelRenderer;
+    class WidgetKit;
     struct Action;
 }
 
@@ -56,6 +57,9 @@ struct GroveContext {
     float*               cityCredits;
     bool*                isPlayMode;
     std::string*         currentLevelPath;
+
+    // Widget Kit accessor (lazy resolve through forge room)
+    std::function<eden::WidgetKit*()> getWidgetKit;
 
     // Method callbacks (call TerrainEditor methods without knowing the class)
     std::function<void(int, int)> spawnPlotPosts;

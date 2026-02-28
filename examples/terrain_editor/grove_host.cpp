@@ -5,6 +5,7 @@
 #include "Editor/PrimitiveMeshBuilder.hpp"
 #include "Renderer/ModelRenderer.hpp"
 #include "Zone/ZoneSystem.hpp"
+#include "Forge/WidgetKit.hpp"
 #include <eden/Camera.hpp>
 #include <eden/Terrain.hpp>
 #include <eden/Action.hpp>
@@ -2283,6 +2284,71 @@ static int32_t groveDeductCityCreditsFn(const GroveValue* args, uint32_t argc, G
     return 0;
 }
 
+// ─── Widget Kit query functions ───
+
+// widget_state(name) → number (0 or 1 for checkbox toggle state)
+static int32_t groveWidgetState(const GroveValue* args, uint32_t argc, GroveValue* result, void* ud) {
+    auto* ctx = static_cast<GroveContext*>(ud);
+    result->tag = GROVE_NUMBER;
+    result->data.number_val = 0.0;
+    if (argc < 1 || args[0].tag != GROVE_STRING) return 0;
+    auto* wk = ctx->getWidgetKit ? ctx->getWidgetKit() : nullptr;
+    if (!wk) return 0;
+    std::string name(args[0].data.string_val.ptr, args[0].data.string_val.len);
+    auto* wi = wk->findByName(name);
+    if (wi) result->data.number_val = wi->toggleState ? 1.0 : 0.0;
+    return 0;
+}
+
+// widget_slot_value(name) → string (file path dropped in slot, or "")
+static int32_t groveWidgetSlotValue(const GroveValue* args, uint32_t argc, GroveValue* result, void* ud) {
+    auto* ctx = static_cast<GroveContext*>(ud);
+    result->tag = GROVE_STRING;
+    result->data.string_val.ptr = "";
+    result->data.string_val.len = 0;
+    if (argc < 1 || args[0].tag != GROVE_STRING) return 0;
+    auto* wk = ctx->getWidgetKit ? ctx->getWidgetKit() : nullptr;
+    if (!wk) return 0;
+    std::string name(args[0].data.string_val.ptr, args[0].data.string_val.len);
+    auto* wi = wk->findByName(name);
+    if (wi && !wi->slotValue.empty()) {
+        // Note: Grove expects the string to remain valid — use static thread_local buffer
+        static thread_local std::string s_slotBuf;
+        s_slotBuf = wi->slotValue;
+        result->data.string_val.ptr = s_slotBuf.c_str();
+        result->data.string_val.len = static_cast<uint32_t>(s_slotBuf.size());
+    }
+    return 0;
+}
+
+// widget_set_state(name, value) → bool (true if widget found)
+static int32_t groveWidgetSetState(const GroveValue* args, uint32_t argc, GroveValue* result, void* ud) {
+    auto* ctx = static_cast<GroveContext*>(ud);
+    result->tag = GROVE_BOOL;
+    result->data.bool_val = 0;
+    if (argc < 2 || args[0].tag != GROVE_STRING || args[1].tag != GROVE_NUMBER) return 0;
+    auto* wk = ctx->getWidgetKit ? ctx->getWidgetKit() : nullptr;
+    if (!wk) return 0;
+    std::string name(args[0].data.string_val.ptr, args[0].data.string_val.len);
+    auto* wi = wk->findByName(name);
+    if (wi && wi->widgetType == "checkbox") {
+        wi->toggleState = args[1].data.number_val != 0.0;
+        // Update visual
+        if (wi->hitbox) {
+            wi->hitbox->setVisible(true);
+            if (wi->toggleState) {
+                wi->hitbox->setHueShift(120.0f);
+                wi->hitbox->setBrightness(1.5f);
+            } else {
+                wi->hitbox->setHueShift(0.0f);
+                wi->hitbox->setBrightness(1.0f);
+            }
+        }
+        result->data.bool_val = 1;
+    }
+    return 0;
+}
+
 // ─── Registration ───
 
 void registerGroveHostFunctions(GroveVm* vm, GroveContext* ctx) {
@@ -2366,4 +2432,9 @@ void registerGroveHostFunctions(GroveVm* vm, GroveContext* ctx) {
     grove_register_fn(vm, "get_city_credits", groveGetCityCreditsFn, ctx);
     grove_register_fn(vm, "add_city_credits", groveAddCityCreditsFn, ctx);
     grove_register_fn(vm, "deduct_city_credits", groveDeductCityCreditsFn, ctx);
+
+    // Widget Kit query functions
+    grove_register_fn(vm, "widget_state", groveWidgetState, ctx);
+    grove_register_fn(vm, "widget_slot_value", groveWidgetSlotValue, ctx);
+    grove_register_fn(vm, "widget_set_state", groveWidgetSetState, ctx);
 }

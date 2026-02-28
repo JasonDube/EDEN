@@ -172,7 +172,10 @@ set(EDEN_SOURCES
     src/AI/DogfightAI.cpp
     src/AI/CleanerBot.cpp
     src/AI/ImageBot.cpp
+    src/AI/CullRobot.cpp
+    src/AI/CullSession.cpp
     src/Forge/ForgeRoom.cpp
+    src/Forge/WidgetKit.cpp
     src/Renderer/DialogueBubbleRenderer.cpp
     src/Game/SentientBeing.cpp
     src/Game/Human.cpp
@@ -295,3 +298,4 @@ add_subdirectory(examples/terrain_editor)
 add_subdirectory(examples/model_editor)
 add_subdirectory(examples/eve)
 add_subdirectory(examples/spacegame)
+add_subdirectory(examples/trading_terminal)
