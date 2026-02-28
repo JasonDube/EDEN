@@ -54,6 +54,11 @@ void ForgeRoom::spawn(const glm::vec3& center, float baseY) {
     // Spawn the multiview machine next to the pad
     spawnMachine(glm::vec3(center.x + 7.0f, center.y, center.z), baseY,
                  "examples/terrain_editor/assets/models/multiview_machine.lime");
+
+    // Spawn test widget machine on the other side of the pad
+    m_widgetKit.spawnFromLime("examples/terrain_editor/assets/models/test_widget_machine.lime",
+                              glm::vec3(center.x - 7.0f, center.y, center.z),
+                              baseY, m_sceneObjects, m_renderer);
 }
 
 void ForgeRoom::despawn() {

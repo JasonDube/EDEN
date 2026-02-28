@@ -9980,8 +9980,16 @@ private:
     void renderSiloConfigWindow() {
         if (!m_showSiloConfig) return;
         if (ImGui::Begin("Silo Config", &m_showSiloConfig)) {
-            ImGui::ColorEdit4("Wall Color", &m_filesystemBrowser.siloConfig().wallColor.x);
-            ImGui::ColorEdit4("Column Color", &m_filesystemBrowser.siloConfig().columnColor.x);
+            // Silo size selector
+            auto& cfg = m_filesystemBrowser.siloConfig();
+            const char* sizeNames[] = {"Small", "Medium", "Large"};
+            int currentSize = static_cast<int>(cfg.size);
+            if (ImGui::Combo("Silo Size", &currentSize, sizeNames, 3)) {
+                cfg.size = static_cast<eden::FilesystemBrowser::SiloSize>(currentSize);
+            }
+
+            ImGui::ColorEdit4("Wall Color", &cfg.wallColor.x);
+            ImGui::ColorEdit4("Column Color", &cfg.columnColor.x);
             if (ImGui::Button("Apply")) {
                 m_filesystemBrowser.navigate(m_filesystemBrowser.getCurrentPath());
             }

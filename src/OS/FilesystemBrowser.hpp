@@ -8,20 +8,25 @@
 #include <memory>
 #include <filesystem>
 #include <unordered_map>
+#include <set>
 #include <thread>
 #include <mutex>
 #include <atomic>
 #include "../AI/CleanerBot.hpp"
 #include "../AI/ImageBot.hpp"
+#include "../AI/CullSession.hpp"
 #include "../Forge/ForgeRoom.hpp"
 
 namespace eden {
 
 class FilesystemBrowser {
 public:
+    enum class SiloSize { Small = 0, Medium = 1, Large = 2 };
+
     struct SiloConfig {
         glm::vec4 wallColor{0.15f, 0.15f, 0.18f, 1.0f};
         glm::vec4 columnColor{1.0f, 1.0f, 1.0f, 1.0f};
+        SiloSize size = SiloSize::Large;
     };
 
     FilesystemBrowser() = default;
@@ -44,13 +49,15 @@ public:
     void clearFilesystemObjects();
 
     bool isActive() const { return m_active; }
+    bool hasPendingNavigation() const { return m_pendingNavigation; }
     const std::string& getCurrentPath() const { return m_currentPath; }
-    void setSpawnOrigin(const glm::vec3& origin) { m_spawnOrigin = origin; }
+    void setSpawnOrigin(const glm::vec3& origin) { m_spawnOrigin = origin; m_basementBaseYValid = false; }
     const glm::vec3& getSpawnOrigin() const { return m_spawnOrigin; }
     SiloConfig& siloConfig() { return m_siloConfig; }
     CleanerBot* getCleanerBot() { return m_cleanerBot.isSpawned() ? &m_cleanerBot : nullptr; }
     ImageBot* getImageBot() { return m_imageBot.isSpawned() ? &m_imageBot : nullptr; }
     ForgeRoom* getForgeRoom() { return m_forgeRoom.isSpawned() ? &m_forgeRoom : nullptr; }
+    CullSession* getCullSession() { return &m_cullSession; }
 
     // Emanation rendering — call from render loop after scene objects
     // Returns line pairs and color (with alpha) for each batch
@@ -65,12 +72,45 @@ public:
     void unfocusImage();
     bool isImageFocused() const { return m_imageFocus.active; }
 
+    // SAM2 segmentation: isolate subject in focused image
+    void segmentImage(int imgX, int imgY);
+    void segmentImageBox(int x1, int y1, int x2, int y2);
+    void pollSegmentation();
+    void undoSegmentation();
+    void cancelSegmentation();
+    bool isSegmenting() const { return m_segmentation.processing; }
+    bool hasSegmentation() const { return m_segmentation.active; }
+    void eraseSegmentAt(int imgX, int imgY, int radius);
+    void restoreSegmentAt(int imgX, int imgY, int radius);
+    // Save segmented image as PNG to the forge (assets/models) directory
+    // Returns the saved file path, or empty string on failure
+    std::string saveSegmentationToForge();
+    std::string getSegmentationStatus() const {
+        if (!m_segmentation.statusMutex || !m_segmentation.statusText) return "";
+        std::lock_guard<std::mutex> lk(*m_segmentation.statusMutex);
+        return *m_segmentation.statusText;
+    }
+    std::pair<int,int> getFocusedImageDimensions() const { return {m_imageFocus.focusedWidth, m_imageFocus.focusedHeight}; }
+    std::string getFocusedImagePath() const {
+        if (!m_imageFocus.active || !m_imageFocus.panel) return "";
+        std::string t = m_imageFocus.panel->getTargetLevel();
+        return (t.size() > 5 && t.substr(0, 5) == "fs://") ? t.substr(5) : "";
+    }
+
     // Spawn a file object directly onto a wall slot (for paste-in-place)
     // wallPos/wallScale/wallYawDeg come from the selected wall's transform
     void spawnFileAtWall(const std::string& filePath,
                          const glm::vec3& wallPos,
                          const glm::vec3& wallScale,
                          float wallYawDeg);
+    void spawnBasement(const glm::vec3& center, float baseY);
+
+    // App launcher ring (level -1 below home silo)
+    void spawnAppRing(const glm::vec3& center, float baseY);
+    void spawnAppSpace(const std::string& appPath, const glm::vec3& center, float baseY);
+
+    // Paths currently held in inventory — excluded from silo spawning
+    void setExcludedPaths(const std::set<std::string>& paths) { m_excludedPaths = paths; }
 
 private:
     enum class FileCategory {
@@ -142,7 +182,10 @@ private:
     bool m_spawnFailed = false;
 
     glm::vec3 m_spawnOrigin{0.0f};
+    float m_basementBaseY = 0.0f;   // cached baseY so silo stays aligned with persistent basement
+    bool m_basementBaseYValid = false;
     SiloConfig m_siloConfig;
+    std::set<std::string> m_excludedPaths; // inventory items to skip during spawn
 
     // Video animation state
     struct VideoAnimation {
@@ -193,8 +236,27 @@ private:
         uint32_t bufferHandle = 0;
         glm::vec3 originalScale{1.0f};
         bool active = false;
+        int focusedWidth = 0;
+        int focusedHeight = 0;
     };
     ImageFocusState m_imageFocus;
+
+    // SAM2 segmentation state
+    struct SegmentationState {
+        bool active = false;        // segmented texture currently displayed
+        bool processing = false;    // background thread running
+        std::string imagePath;      // source image path
+        std::shared_ptr<std::atomic<bool>> done;
+        std::shared_ptr<std::atomic<bool>> cancelled;
+        std::string outputPath;     // temp file for result PNG
+        std::thread workerThread;
+        std::shared_ptr<std::mutex> statusMutex;
+        std::shared_ptr<std::string> statusText;
+        std::vector<unsigned char> rgbaData;     // raw RGBA pixels (editable)
+        std::vector<unsigned char> originalData; // original full image RGBA (for restore brush)
+        int rgbaW = 0, rgbaH = 0;               // dimensions of rgbaData/originalData
+    };
+    SegmentationState m_segmentation;
 
     // Cleaner Bot NPC
     CleanerBot m_cleanerBot;
@@ -204,6 +266,9 @@ private:
 
     // Forge Room (for assets/models/ directory)
     ForgeRoom m_forgeRoom;
+
+    // Cull Session (binary object culling workflow)
+    CullSession m_cullSession;
 
     // Folder visit tracking (attention system)
     std::unordered_map<std::string, int> m_folderVisits;
@@ -234,22 +299,43 @@ private:
     static constexpr float EMANATION_SPEED = 2.5f;       // meters per second
     static constexpr float EMANATION_SPAWN_INTERVAL = 0.6f; // seconds between rings
 
-    static constexpr int MAX_ENTRIES = 200;
+    static constexpr int MAX_ENTRIES = 300;
     static constexpr int MAX_VIDEO_FRAMES = 20;
-    static constexpr float GRID_SPACING = 4.0f;
+    static constexpr float GRID_SPACING = 16.0f;
     static constexpr int GRID_COLUMNS = 10;
     static constexpr int LABEL_SIZE = 256;
 
-    // Gallery room
-    static constexpr int GALLERY_SIDES = 20;
-    static constexpr float GALLERY_RADIUS = 20.0f;
-    static constexpr float GALLERY_RING_GAP = 12.0f; // radius decrease per ring
-    static constexpr float GALLERY_WALL_HEIGHT = 4.0f;
+    // Gallery room — dimensions vary by silo size
+    static constexpr float GALLERY_WALL_HEIGHT = 16.0f;
 
-    // Basement foundation
-    static constexpr float BASEMENT_HEIGHT = 16.0f;
-    static constexpr float BASEMENT_SIZE = 44.0f;  // side length (wider than silo for a massive foundation)
-    void spawnBasement(const glm::vec3& center, float baseY);
+    int gallerySides() const {
+        switch (m_siloConfig.size) {
+            case SiloSize::Small:  return 5;
+            case SiloSize::Medium: return 10;
+            default:               return 20;
+        }
+    }
+    float galleryRadius() const {
+        switch (m_siloConfig.size) {
+            case SiloSize::Small:  return 20.0f;
+            case SiloSize::Medium: return 40.0f;
+            default:               return 80.0f;
+        }
+    }
+    float basementSize() const {
+        switch (m_siloConfig.size) {
+            case SiloSize::Small:  return 44.0f;
+            case SiloSize::Medium: return 88.0f;
+            default:               return 176.0f;
+        }
+    }
+    float basementHeight() const {
+        switch (m_siloConfig.size) {
+            case SiloSize::Small:  return 16.0f;
+            case SiloSize::Medium: return 32.0f;
+            default:               return 64.0f;
+        }
+    }
 };
 
 } // namespace eden

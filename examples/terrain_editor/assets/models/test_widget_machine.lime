@@ -1,0 +1,29 @@
+# Test Widget Machine — a simple box with 3 widget control points
+# Button on front, checkbox on left, slot on right
+transform_pos: 0 0 0
+transform_rot: 1 0 0 0
+transform_scale: 1 1 1
+# 8 vertices for a 4x2x4 box (centered at origin, bottom at y=0)
+v 0: -2 0 -2 | 0 -1 0 | 0 0 | 0.4 0.4 0.5 1 | 0 0
+v 1: 2 0 -2 | 0 -1 0 | 1 0 | 0.4 0.4 0.5 1 | 0 0
+v 2: 2 0 2 | 0 -1 0 | 1 1 | 0.4 0.4 0.5 1 | 0 0
+v 3: -2 0 2 | 0 -1 0 | 0 1 | 0.4 0.4 0.5 1 | 0 0
+v 4: -2 2 -2 | 0 1 0 | 0 0 | 0.5 0.5 0.6 1 | 0 0
+v 5: 2 2 -2 | 0 1 0 | 1 0 | 0.5 0.5 0.6 1 | 0 0
+v 6: 2 2 2 | 0 1 0 | 1 1 | 0.5 0.5 0.6 1 | 0 0
+v 7: -2 2 2 | 0 1 0 | 0 1 | 0.5 0.5 0.6 1 | 0 0
+# 3 extra vertices as control point anchors (placed on surfaces)
+v 8: 0 1 -2.1 | 0 0 -1 | 0.5 0.5 | 1 0.3 0.3 1 | 0 0
+v 9: -2.1 1 0 | -1 0 0 | 0.5 0.5 | 0.3 1 0.3 1 | 0 0
+v 10: 2.1 1 0 | 1 0 0 | 0.5 0.5 | 0.3 0.3 1 1 | 0 0
+# 6 faces (box sides) — each quad references 4 vertices
+f 0: 0 4 0 | 0 1 5 4
+f 1: 0 4 0 | 1 2 6 5
+f 2: 0 4 0 | 2 3 7 6
+f 3: 0 4 0 | 3 0 4 7
+f 4: 0 4 0 | 0 1 2 3
+f 5: 0 4 0 | 4 5 6 7
+# Widget control points
+cp 0: 8 "widget_button_activate"
+cp 1: 9 "widget_checkbox_option1"
+cp 2: 10 "widget_slot_front"

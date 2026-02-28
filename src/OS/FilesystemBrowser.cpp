@@ -5,6 +5,7 @@
 #include "Terminal/EdenTerminalFont.inc"
 
 #include <stb_image.h>
+#include <stb_image_write.h>
 #include <algorithm>
 #include <iostream>
 #include <fstream>
@@ -321,6 +322,7 @@ float FilesystemBrowser::getVisitGlow(const std::string& path) const {
 // ── Init / Navigate / Clear ────────────────────────────────────────────
 
 FilesystemBrowser::~FilesystemBrowser() {
+    cancelSegmentation();
     cancelAllExtractions();
 }
 
@@ -358,7 +360,6 @@ void FilesystemBrowser::processNavigation() {
     } else {
         m_currentPath = m_pendingPath;
         recordVisit(m_currentPath);
-        // std::cout << "[FilesystemBrowser] Navigated to: " << m_currentPath << std::endl;
     }
     m_active = true;
 }
@@ -433,6 +434,9 @@ void FilesystemBrowser::updateAnimations(float deltaTime) {
     // Update image bot state machine
     m_imageBot.update(deltaTime);
 
+    // Update cull session
+    m_cullSession.update(deltaTime);
+
     // Spin 3D model objects on their turntable
     for (auto& spin : m_modelSpins) {
         if (!spin.obj) continue;
@@ -462,6 +466,9 @@ void FilesystemBrowser::updateAnimations(float deltaTime) {
         std::remove_if(m_emanationRings.begin(), m_emanationRings.end(),
             [maxAge](const EmanationRing& r) { return r.age >= maxAge; }),
         m_emanationRings.end());
+
+    // Poll segmentation background task
+    pollSegmentation();
 }
 
 void FilesystemBrowser::clearFilesystemObjects() {
@@ -469,8 +476,10 @@ void FilesystemBrowser::clearFilesystemObjects() {
 
     m_cleanerBot.despawn();
     m_imageBot.despawn();
+    m_cullSession.despawn();
     m_forgeRoom.despawn();
 
+    cancelSegmentation();
     cancelAllExtractions();
     m_videoAnimations.clear();
     m_modelSpins.clear();
@@ -822,8 +831,8 @@ int FilesystemBrowser::spawnGalleryRing(const std::vector<EntryInfo>& items,
 
     int totalItems = static_cast<int>(items.size());
     int level = startLevel;
-    float radius = GALLERY_RADIUS;
-    float segmentAngle = 2.0f * M_PI / GALLERY_SIDES;
+    float radius = galleryRadius();
+    float segmentAngle = 2.0f * M_PI / gallerySides();
     float segmentWidth = 2.0f * radius * sinf(segmentAngle / 2.0f);
 
     // Determine scale based on type (all items in this call are same type)
@@ -831,10 +840,10 @@ int FilesystemBrowser::spawnGalleryRing(const std::vector<EntryInfo>& items,
     bool isDoorType = (cat == FileCategory::Folder);
 
     for (int placed = 0; placed < totalItems; ) {
-        int itemsThisLevel = std::min(GALLERY_SIDES, totalItems - placed);
+        int itemsThisLevel = std::min(gallerySides(), totalItems - placed);
         float levelY = baseY + level * GALLERY_WALL_HEIGHT;
 
-        for (int s = 0; s < GALLERY_SIDES; ++s) {
+        for (int s = 0; s < gallerySides(); ++s) {
             float angle = s * segmentAngle;
             float wallX = center.x + radius * cosf(angle);
             float wallZ = center.z + radius * sinf(angle);
@@ -884,15 +893,15 @@ int FilesystemBrowser::spawnGalleryRing(const std::vector<EntryInfo>& items,
                 int idx = placed + s;
                 const auto& item = items[idx];
 
-                float inset = 0.6f;
+                float inset = 2.4f;
                 float itemX = center.x + (radius - inset) * cosf(angle);
                 float itemZ = center.z + (radius - inset) * sinf(angle);
                 bool isModel = (cat == FileCategory::Model3D);
-                float itemY = isModel ? levelY + GALLERY_WALL_HEIGHT / 2.0f : levelY + 0.5f;
+                float itemY = isModel ? levelY + GALLERY_WALL_HEIGHT * 0.5f : levelY;
                 glm::vec3 scale;
                 if (isDoorType) {
                     // Doors: tall slab shape, fitting within wall
-                    scale = {segmentWidth * 0.5f / 2.0f, (GALLERY_WALL_HEIGHT - 1.0f) / 2.0f, 0.15f};
+                    scale = {segmentWidth * 0.5f / 2.0f, (GALLERY_WALL_HEIGHT - 1.0f) / 2.0f, 2.0f};
                 } else if (isModel) {
                     // 3D models: uniform scale so they keep their shape
                     float uniformSize = std::min(segmentWidth * 0.7f, GALLERY_WALL_HEIGHT - 1.0f) / 1.5f;
@@ -936,18 +945,22 @@ void FilesystemBrowser::spawnFileAtWall(const std::string& filePath,
     // Recover the radial angle from the wall yaw: yawDeg = -angle * 180/PI + 90
     float angle = (90.0f - wallYawDeg) * static_cast<float>(M_PI) / 180.0f;
 
-    // Position: inset 0.6 toward center from wall, raised 0.5 from wall base
-    float inset = 0.6f;
+    // Position: inset toward center from wall, raised from wall base
+    float inset = 2.4f;
     float itemX = wallPos.x - inset * cosf(angle);
     float itemZ = wallPos.z - inset * sinf(angle);
-    float itemY = wallPos.y + 0.5f;
+    bool isModel = (cat == FileCategory::Model3D);
+    float itemY = isModel ? wallPos.y + GALLERY_WALL_HEIGHT * 0.5f : wallPos.y;
 
     // Scale: match gallery ring layout
     bool isDoorType = (cat == FileCategory::Folder);
     float segmentWidth = wallScale.x; // wall scale X == segmentWidth
     glm::vec3 scale;
     if (isDoorType) {
-        scale = {segmentWidth * 0.5f / 2.0f, (GALLERY_WALL_HEIGHT - 1.0f) / 2.0f, 0.15f};
+        scale = {segmentWidth * 0.5f / 2.0f, (GALLERY_WALL_HEIGHT - 1.0f) / 2.0f, 2.0f};
+    } else if (isModel) {
+        float uniformSize = std::min(segmentWidth * 0.7f, GALLERY_WALL_HEIGHT - 1.0f) / 1.5f;
+        scale = glm::vec3(uniformSize);
     } else {
         float w = segmentWidth * 0.85f / 1.5f;
         float h = (GALLERY_WALL_HEIGHT - 1.0f) / 1.5f;
@@ -964,6 +977,263 @@ void FilesystemBrowser::spawnFileAtWall(const std::string& filePath,
     std::cout << "[FilesystemBrowser] Pasted " << name << " at wall slot" << std::endl;
 }
 
+// ── App Launcher Ring ──────────────────────────────────────────────────
+
+void FilesystemBrowser::spawnAppRing(const glm::vec3& center, float baseY) {
+    if (!m_modelRenderer || !m_sceneObjects) return;
+
+    // App ring is level 0 of the silo (filesystem content starts at level 1)
+    float levelY = baseY;
+    float radius = galleryRadius();
+    float segmentAngle = 2.0f * M_PI / gallerySides();
+    float segmentWidth = 2.0f * radius * sinf(segmentAngle / 2.0f);
+
+    glm::vec4 appWallColor{0.12f, 0.08f, 0.18f, 1.0f};
+    glm::vec4 appDoorColor{0.6f, 0.15f, 0.7f, 1.0f}; // purple/magenta
+
+    auto wallMesh = PrimitiveMeshBuilder::createCube(1.0f, appWallColor);
+
+    for (int s = 0; s < gallerySides(); ++s) {
+        float angle = s * segmentAngle;
+        float wallX = center.x + radius * cosf(angle);
+        float wallZ = center.z + radius * sinf(angle);
+        float yawDeg = -angle * 180.0f / M_PI + 90.0f;
+
+        // Wall segment
+        uint32_t wallHandle = m_modelRenderer->createModel(
+            wallMesh.vertices, wallMesh.indices, nullptr, 0, 0);
+
+        auto wallObj = std::make_unique<SceneObject>("FSAppWall_" + std::to_string(s));
+        wallObj->setBufferHandle(wallHandle);
+        wallObj->setIndexCount(static_cast<uint32_t>(wallMesh.indices.size()));
+        wallObj->setVertexCount(static_cast<uint32_t>(wallMesh.vertices.size()));
+        wallObj->setLocalBounds(wallMesh.bounds);
+        wallObj->setMeshData(wallMesh.vertices, wallMesh.indices);
+        wallObj->setPrimitiveType(PrimitiveType::Cube);
+        wallObj->setPrimitiveSize(1.0f);
+        wallObj->setPrimitiveColor(appWallColor);
+        wallObj->setBuildingType("filesystem_wall");
+        wallObj->setAABBCollision(true);
+        wallObj->setDescription("wall_app");
+
+        wallObj->getTransform().setPosition({wallX, levelY, wallZ});
+        wallObj->getTransform().setScale({segmentWidth, GALLERY_WALL_HEIGHT, 0.15f});
+        wallObj->setEulerRotation({0.0f, yawDeg, 0.0f});
+
+        m_sceneObjects->push_back(std::move(wallObj));
+
+        // Place Forge door on segment 0
+        if (s == 0) {
+            float inset = 2.4f;
+            float doorX = center.x + (radius - inset) * cosf(angle);
+            float doorZ = center.z + (radius - inset) * sinf(angle);
+            float doorY = levelY;
+
+            auto doorMesh = PrimitiveMeshBuilder::createCube(2.0f, appDoorColor);
+
+            // Load custom forge door image
+            std::vector<unsigned char> texPixels;
+            int texW = LABEL_SIZE, texH = LABEL_SIZE;
+            bool loadedImage = false;
+            for (const auto& candidate : {
+                "assets/textures/forge_door.jpeg",
+                "../../../examples/terrain_editor/assets/textures/forge_door.jpeg",
+                "examples/terrain_editor/assets/textures/forge_door.jpeg"
+            }) {
+                int imgW, imgH, imgChannels;
+                unsigned char* data = stbi_load(candidate, &imgW, &imgH, &imgChannels, 4);
+                if (data) {
+                    texW = imgW; texH = imgH;
+                    texPixels.resize(imgW * imgH * 4);
+                    // Flip vertically to match Vulkan UV coordinates
+                    for (int y = 0; y < imgH; ++y) {
+                        memcpy(&texPixels[y * imgW * 4],
+                               &data[(imgH - 1 - y) * imgW * 4],
+                               imgW * 4);
+                    }
+                    stbi_image_free(data);
+                    loadedImage = true;
+                    break;
+                }
+            }
+            if (!loadedImage) {
+                renderLabel(texPixels, "Forge", FileCategory::Executable, appDoorColor);
+                texW = LABEL_SIZE; texH = LABEL_SIZE;
+            }
+            uint32_t doorHandle = m_modelRenderer->createModel(
+                doorMesh.vertices, doorMesh.indices,
+                texPixels.data(), texW, texH);
+
+            auto doorObj = std::make_unique<SceneObject>("FSAppDoor_Forge");
+            doorObj->setBufferHandle(doorHandle);
+            doorObj->setIndexCount(static_cast<uint32_t>(doorMesh.indices.size()));
+            doorObj->setVertexCount(static_cast<uint32_t>(doorMesh.vertices.size()));
+            doorObj->setLocalBounds(doorMesh.bounds);
+            doorObj->setMeshData(doorMesh.vertices, doorMesh.indices);
+            doorObj->setPrimitiveType(PrimitiveType::Door);
+            doorObj->setPrimitiveSize(2.0f);
+            doorObj->setPrimitiveColor(appDoorColor);
+            doorObj->setBuildingType("filesystem");
+            doorObj->setDescription("Forge");
+            doorObj->setDoorId("appdoor_forge");
+            // Navigate to the real assets/models directory where ForgeRoom spawns
+            // Try multiple locations relative to the executable
+            std::string forgePath;
+            for (const auto& candidate : {
+                "assets/models",
+                "../../../examples/terrain_editor/assets/models",
+                "examples/terrain_editor/assets/models"
+            }) {
+                std::error_code ec;
+                auto p = std::filesystem::canonical(candidate, ec);
+                if (!ec) { forgePath = p.string(); break; }
+            }
+            if (forgePath.empty()) {
+                // Last resort: create it next to home
+                forgePath = std::string(getenv("HOME") ? getenv("HOME") : "/tmp") + "/assets/models";
+                std::filesystem::create_directories(forgePath);
+            }
+            doorObj->setTargetLevel("fs://" + forgePath);
+
+            glm::vec3 doorScale = {segmentWidth * 0.5f / 2.0f, (GALLERY_WALL_HEIGHT - 1.0f) / 2.0f, 2.0f};
+            doorObj->getTransform().setPosition({doorX, doorY, doorZ});
+            doorObj->getTransform().setScale(doorScale);
+            doorObj->setEulerRotation({0.0f, yawDeg, 0.0f});
+
+            m_sceneObjects->push_back(std::move(doorObj));
+        }
+
+        // Place Home door on segment 1
+        if (s == 1) {
+            const char* homeEnv = getenv("HOME");
+            if (homeEnv) {
+                float inset = 2.4f;
+                float doorX = center.x + (radius - inset) * cosf(angle);
+                float doorZ = center.z + (radius - inset) * sinf(angle);
+                float doorY = levelY;
+
+                glm::vec4 homeColor{0.15f, 0.5f, 0.8f, 1.0f}; // blue
+                auto doorMesh = PrimitiveMeshBuilder::createCube(2.0f, homeColor);
+
+                std::vector<unsigned char> texPixels;
+                renderLabel(texPixels, "Home", FileCategory::Folder, homeColor);
+                uint32_t doorHandle = m_modelRenderer->createModel(
+                    doorMesh.vertices, doorMesh.indices,
+                    texPixels.data(), LABEL_SIZE, LABEL_SIZE);
+
+                auto doorObj = std::make_unique<SceneObject>("FSAppDoor_Home");
+                doorObj->setBufferHandle(doorHandle);
+                doorObj->setIndexCount(static_cast<uint32_t>(doorMesh.indices.size()));
+                doorObj->setVertexCount(static_cast<uint32_t>(doorMesh.vertices.size()));
+                doorObj->setLocalBounds(doorMesh.bounds);
+                doorObj->setMeshData(doorMesh.vertices, doorMesh.indices);
+                doorObj->setPrimitiveType(PrimitiveType::Door);
+                doorObj->setPrimitiveSize(2.0f);
+                doorObj->setPrimitiveColor(homeColor);
+                doorObj->setBuildingType("filesystem");
+                doorObj->setDescription("Home");
+                doorObj->setDoorId("appdoor_home");
+                doorObj->setTargetLevel("fs://" + std::string(homeEnv));
+
+                glm::vec3 doorScale = {segmentWidth * 0.5f / 2.0f, (GALLERY_WALL_HEIGHT - 1.0f) / 2.0f, 2.0f};
+                doorObj->getTransform().setPosition({doorX, doorY, doorZ});
+                doorObj->getTransform().setScale(doorScale);
+                doorObj->setEulerRotation({0.0f, yawDeg, 0.0f});
+
+                m_sceneObjects->push_back(std::move(doorObj));
+            }
+        }
+    }
+}
+
+void FilesystemBrowser::spawnAppSpace(const std::string& appPath, const glm::vec3& center, float baseY) {
+    if (!m_modelRenderer || !m_sceneObjects) return;
+
+    if (appPath == "app://forge") {
+        // Spawn the ForgeRoom pad at center
+        m_forgeRoom.init(m_sceneObjects, m_modelRenderer);
+        m_forgeRoom.spawn(center, baseY);
+        m_forgeRoom.loadRegistry();
+
+        // Spawn a minimal containment ring
+        float radius = galleryRadius();
+        float segmentAngle = 2.0f * M_PI / gallerySides();
+        float segmentWidth = 2.0f * radius * sinf(segmentAngle / 2.0f);
+        glm::vec4 wallColor{0.12f, 0.08f, 0.18f, 1.0f};
+        glm::vec4 backDoorColor{0.3f, 0.6f, 0.9f, 1.0f}; // blue "Back" door
+
+        auto wallMesh = PrimitiveMeshBuilder::createCube(1.0f, wallColor);
+
+        for (int s = 0; s < gallerySides(); ++s) {
+            float angle = s * segmentAngle;
+            float wallX = center.x + radius * cosf(angle);
+            float wallZ = center.z + radius * sinf(angle);
+            float yawDeg = -angle * 180.0f / M_PI + 90.0f;
+
+            uint32_t wallHandle = m_modelRenderer->createModel(
+                wallMesh.vertices, wallMesh.indices, nullptr, 0, 0);
+
+            auto wallObj = std::make_unique<SceneObject>("FSForgeWall_" + std::to_string(s));
+            wallObj->setBufferHandle(wallHandle);
+            wallObj->setIndexCount(static_cast<uint32_t>(wallMesh.indices.size()));
+            wallObj->setVertexCount(static_cast<uint32_t>(wallMesh.vertices.size()));
+            wallObj->setLocalBounds(wallMesh.bounds);
+            wallObj->setMeshData(wallMesh.vertices, wallMesh.indices);
+            wallObj->setPrimitiveType(PrimitiveType::Cube);
+            wallObj->setPrimitiveSize(1.0f);
+            wallObj->setPrimitiveColor(wallColor);
+            wallObj->setBuildingType("filesystem_wall");
+            wallObj->setAABBCollision(true);
+
+            wallObj->getTransform().setPosition({wallX, baseY, wallZ});
+            wallObj->getTransform().setScale({segmentWidth, GALLERY_WALL_HEIGHT, 0.15f});
+            wallObj->setEulerRotation({0.0f, yawDeg, 0.0f});
+
+            m_sceneObjects->push_back(std::move(wallObj));
+
+            // Place "Back" door on segment 0
+            if (s == 0) {
+                float inset = 2.4f;
+                float doorX = center.x + (radius - inset) * cosf(angle);
+                float doorZ = center.z + (radius - inset) * sinf(angle);
+                float doorY = baseY;
+
+                auto doorMesh = PrimitiveMeshBuilder::createCube(2.0f, backDoorColor);
+
+                std::vector<unsigned char> texPixels;
+                renderLabel(texPixels, "Back", FileCategory::Folder, backDoorColor);
+                uint32_t doorHandle = m_modelRenderer->createModel(
+                    doorMesh.vertices, doorMesh.indices,
+                    texPixels.data(), LABEL_SIZE, LABEL_SIZE);
+
+                const char* homeEnv = getenv("HOME");
+                std::string homePath = homeEnv ? std::string(homeEnv) : "/";
+
+                auto doorObj = std::make_unique<SceneObject>("FSAppDoor_Back");
+                doorObj->setBufferHandle(doorHandle);
+                doorObj->setIndexCount(static_cast<uint32_t>(doorMesh.indices.size()));
+                doorObj->setVertexCount(static_cast<uint32_t>(doorMesh.vertices.size()));
+                doorObj->setLocalBounds(doorMesh.bounds);
+                doorObj->setMeshData(doorMesh.vertices, doorMesh.indices);
+                doorObj->setPrimitiveType(PrimitiveType::Door);
+                doorObj->setPrimitiveSize(2.0f);
+                doorObj->setPrimitiveColor(backDoorColor);
+                doorObj->setBuildingType("filesystem");
+                doorObj->setDescription("Back");
+                doorObj->setDoorId("appdoor_back");
+                doorObj->setTargetLevel("fs://" + homePath);
+
+                glm::vec3 doorScale = {segmentWidth * 0.5f / 2.0f, (GALLERY_WALL_HEIGHT - 1.0f) / 2.0f, 2.0f};
+                doorObj->getTransform().setPosition({doorX, doorY, doorZ});
+                doorObj->getTransform().setScale(doorScale);
+                doorObj->setEulerRotation({0.0f, yawDeg, 0.0f});
+
+                m_sceneObjects->push_back(std::move(doorObj));
+            }
+        }
+    }
+}
+
 // ── Basement Room ──────────────────────────────────────────────────────
 
 void FilesystemBrowser::spawnBasement(const glm::vec3& center, float baseY) {
@@ -974,8 +1244,8 @@ void FilesystemBrowser::spawnBasement(const glm::vec3& center, float baseY) {
         if (obj && obj->getBuildingType() == "eden_basement") return;
     }
 
-    float halfSize = BASEMENT_SIZE / 2.0f;
-    float floorY = baseY - BASEMENT_HEIGHT;
+    float halfSize = basementSize() / 2.0f;
+    float floorY = baseY - basementHeight();
     glm::vec4 wallColor = m_siloConfig.wallColor;
 
     auto cubeMesh = PrimitiveMeshBuilder::createCube(1.0f, wallColor);
@@ -1009,12 +1279,12 @@ void FilesystemBrowser::spawnBasement(const glm::vec3& center, float baseY) {
     float wallHeight = (baseY + 1.0f) - wallBottom;
 
     // 4 walls — each split into 3 panels around a centered door opening
-    // Door opening: 4 units wide, 3.5 units tall from floor
-    const float doorWidth  = 4.0f;
-    const float doorHeight = 3.5f;
+    // Door opening: 16 units wide, 14 units tall from floor
+    const float doorWidth  = 16.0f;
+    const float doorHeight = 14.0f;
     const float doorHalfW  = doorWidth / 2.0f;
-    // Each side segment: (BASEMENT_SIZE - doorWidth) / 2 = 20
-    const float segWidth   = (BASEMENT_SIZE - doorWidth) / 2.0f;
+    // Each side segment: (basementSize() - doorWidth) / 2 = 20
+    const float segWidth   = (basementSize() - doorWidth) / 2.0f;
     const float lintelBottom = floorY - 1.0f + doorHeight; // wallBottom + doorHeight
     const float lintelHeight = wallHeight - doorHeight;
 
@@ -1052,28 +1322,31 @@ void FilesystemBrowser::spawnBasement(const glm::vec3& center, float baseY) {
 
     // Floor — bottom at floorY - 1, top at floorY
     spawnPanel({center.x, floorY - 1.0f, center.z},
-               {BASEMENT_SIZE, 1.0f, BASEMENT_SIZE});
+               {basementSize(), 1.0f, basementSize()});
 
-    // Ceiling with central hole — 4 strips around an 8m gap
+    // Solid ceiling — no hole
     // Bottom at baseY, top at baseY + 1
-    float gapHalf = 4.0f;
-    float stripDepth = halfSize - gapHalf;
-    float stripOffset = gapHalf + stripDepth / 2.0f;
-
-    spawnPanel({center.x, baseY, center.z + stripOffset},
-               {BASEMENT_SIZE, 1.0f, stripDepth});
-    spawnPanel({center.x, baseY, center.z - stripOffset},
-               {BASEMENT_SIZE, 1.0f, stripDepth});
-    spawnPanel({center.x + stripOffset, baseY, center.z},
-               {stripDepth, 1.0f, gapHalf * 2.0f});
-    spawnPanel({center.x - stripOffset, baseY, center.z},
-               {stripDepth, 1.0f, gapHalf * 2.0f});
+    spawnPanel({center.x, baseY, center.z},
+               {basementSize(), 1.0f, basementSize()});
 }
 
 // ── Spawn Objects ──────────────────────────────────────────────────────
 
 void FilesystemBrowser::spawnObjects(const std::string& dirPath) {
     if (!m_modelRenderer || !m_sceneObjects || !m_terrain) return;
+
+    // Handle app:// virtual paths (e.g. "app://forge")
+    if (dirPath.rfind("app://", 0) == 0) {
+        if (!m_basementBaseYValid) {
+            m_basementBaseY = 100.0f;
+            m_basementBaseYValid = true;
+        }
+        float baseY = m_basementBaseY;
+        glm::vec3 center = m_spawnOrigin;
+        center.y = baseY;
+        spawnAppSpace(dirPath, center, baseY);
+        return;
+    }
 
     namespace fs = std::filesystem;
     fs::path dir(dirPath);
@@ -1095,16 +1368,32 @@ void FilesystemBrowser::spawnObjects(const std::string& dirPath) {
 
     try {
         for (const auto& entry : fs::directory_iterator(dir, fs::directory_options::skip_permission_denied)) {
-            if (entries.size() >= MAX_ENTRIES) break;
             std::string name = entry.path().filename().string();
             // Skip ImageBot sidecar description files
             if (name.size() > 9 && name.substr(name.size() - 9) == ".desc.txt") continue;
-            FileCategory cat = categorize(entry);
             std::string full = entry.path().string();
+            // Skip files currently held in inventory
+            if (m_excludedPaths.count(full)) continue;
+            FileCategory cat = categorize(entry);
             entries.push_back({name, full, cat});
         }
     } catch (const std::exception& e) {
         std::cerr << "[FilesystemBrowser] Error scanning " << dirPath << ": " << e.what() << std::endl;
+    }
+
+    // Sort all entries by modification time (newest first) before truncating
+    // so the MAX_ENTRIES cap keeps the most recent files
+    std::sort(entries.begin(), entries.end(), [](const EntryInfo& a, const EntryInfo& b) {
+        if (a.name == "..") return true;
+        if (b.name == "..") return false;
+        std::error_code ec1, ec2;
+        auto ta = std::filesystem::last_write_time(a.fullPath, ec1);
+        auto tb = std::filesystem::last_write_time(b.fullPath, ec2);
+        if (ec1 || ec2) return a.name < b.name;
+        return ta > tb;
+    });
+    if (entries.size() > MAX_ENTRIES) {
+        entries.resize(MAX_ENTRIES);
     }
 
     // Split entries by type
@@ -1124,21 +1413,23 @@ void FilesystemBrowser::spawnObjects(const std::string& dirPath) {
         }
     }
 
-    // Sort each group alphabetically (.. always first in folders)
-    auto sortAlpha = [](std::vector<EntryInfo>& v) {
+    // Sort each group by modification time (newest first), .. always first in folders
+    auto sortByTime = [](std::vector<EntryInfo>& v) {
         std::sort(v.begin(), v.end(), [](const EntryInfo& a, const EntryInfo& b) {
             if (a.name == "..") return true;
             if (b.name == "..") return false;
-            return a.name < b.name;
+            std::error_code ec1, ec2;
+            auto ta = std::filesystem::last_write_time(a.fullPath, ec1);
+            auto tb = std::filesystem::last_write_time(b.fullPath, ec2);
+            if (ec1 || ec2) return a.name < b.name; // fallback to alpha
+            return ta > tb; // newest first
         });
     };
-    sortAlpha(folders);
-    sortAlpha(images);
-    sortAlpha(videos);
-    sortAlpha(models);
-    std::sort(others.begin(), others.end(), [](const EntryInfo& a, const EntryInfo& b) {
-        return a.name < b.name;
-    });
+    sortByTime(folders);
+    sortByTime(images);
+    sortByTime(videos);
+    sortByTime(models);
+    sortByTime(others);
 
     // Use cached baseY so silo stays aligned with persistent basement across navigations.
     // Only recompute from terrain when no cached value exists (first spawn or new level).
@@ -1152,8 +1443,12 @@ void FilesystemBrowser::spawnObjects(const std::string& dirPath) {
 
     bool hasRing = !folders.empty() || !images.empty() || !videos.empty() || !models.empty();
 
-    // Stack types on the gallery ring: folders (bottom), images, videos, 3D models
-    int nextLevel = 0;
+    // Reserve level 0 for the app launcher ring in every silo
+    // App ring takes level 0, filesystem content starts at level 1
+    int nextLevel = 1;
+
+    // Spawn app launcher ring at level 0 (base of every silo)
+    spawnAppRing(center, baseY);
     nextLevel = spawnGalleryRing(folders, center, baseY, nextLevel);
     nextLevel = spawnGalleryRing(images,  center, baseY, nextLevel);
     nextLevel = spawnGalleryRing(videos,  center, baseY, nextLevel);
@@ -1166,12 +1461,12 @@ void FilesystemBrowser::spawnObjects(const std::string& dirPath) {
 
     // Spawn vertical columns between panel sections (extended down through basement)
     if (nextLevel > 0) {
-        float totalHeight = nextLevel * GALLERY_WALL_HEIGHT + BASEMENT_HEIGHT;
-        float radius = GALLERY_RADIUS;
-        float segmentAngle = 2.0f * M_PI / GALLERY_SIDES;
+        float totalHeight = nextLevel * GALLERY_WALL_HEIGHT + basementHeight();
+        float radius = galleryRadius();
+        float segmentAngle = 2.0f * M_PI / gallerySides();
         glm::vec4 colColor = m_siloConfig.columnColor;
 
-        for (int s = 0; s < GALLERY_SIDES; ++s) {
+        for (int s = 0; s < gallerySides(); ++s) {
             float angle = (s + 0.5f) * segmentAngle;
             float colX = center.x + radius * cosf(angle);
             float colZ = center.z + radius * sinf(angle);
@@ -1192,7 +1487,7 @@ void FilesystemBrowser::spawnObjects(const std::string& dirPath) {
             obj->setBuildingType("filesystem_wall");
             obj->setAABBCollision(true);
 
-            obj->getTransform().setPosition({colX, baseY - BASEMENT_HEIGHT, colZ});
+            obj->getTransform().setPosition({colX, baseY - basementHeight(), colZ});
             obj->getTransform().setScale({0.3f, totalHeight, 0.3f});
             obj->setEulerRotation({0.0f, yawDeg, 0.0f});
 
@@ -1256,6 +1551,10 @@ void FilesystemBrowser::spawnObjects(const std::string& dirPath) {
             m_imageBot.spawn(botPos, m_modelRenderer, bot.modelPath);
             spawnedImageBot = true;
         }
+        if (bot.job == "CullRobot") {
+            m_cullSession.init(m_sceneObjects, m_modelRenderer, center, baseY);
+            m_cullSession.spawnRobots(center, baseY, m_modelRenderer, bot.modelPath);
+        }
     }
 
     // Spawn default cleaner bot in home directory (only if no deployed bot took the slot)
@@ -1268,6 +1567,7 @@ void FilesystemBrowser::spawnObjects(const std::string& dirPath) {
             m_cleanerBot.spawn(botPos, m_modelRenderer);
         }
     }
+
 }
 
 // ── Label Rendering ────────────────────────────────────────────────────
@@ -1427,6 +1727,10 @@ void FilesystemBrowser::focusImage(SceneObject* panel) {
     // Upload hi-res texture
     m_modelRenderer->updateTexture(m_imageFocus.bufferHandle, hiRes.data(), capW, capH);
 
+    // Store focused image dimensions for click-to-pixel mapping
+    m_imageFocus.focusedWidth = capW;
+    m_imageFocus.focusedHeight = capH;
+
     // Adjust panel scale to match image aspect ratio
     // Keep Y scale, adjust X = Y * aspect, keep Z
     float aspect = static_cast<float>(capW) / capH;
@@ -1438,6 +1742,8 @@ void FilesystemBrowser::focusImage(SceneObject* panel) {
 
 void FilesystemBrowser::unfocusImage() {
     if (!m_imageFocus.active || !m_imageFocus.panel || !m_modelRenderer) return;
+
+    cancelSegmentation();
 
     // Get source path and reload as 256x256 thumbnail
     std::string target = m_imageFocus.panel->getTargetLevel();
@@ -1469,6 +1775,462 @@ void FilesystemBrowser::unfocusImage() {
     m_imageFocus.active = false;
     m_imageFocus.panel = nullptr;
     m_imageFocus.bufferHandle = 0;
+    m_imageFocus.focusedWidth = 0;
+    m_imageFocus.focusedHeight = 0;
+}
+
+// ── SAM2 Segmentation ──────────────────────────────────────────────────
+
+void FilesystemBrowser::segmentImage(int imgX, int imgY) {
+    if (!m_imageFocus.active) return;
+
+    // Cancel any in-progress segmentation first
+    if (m_segmentation.processing) {
+        cancelSegmentation();
+    }
+
+    // If already segmented, undo first to work from original
+    if (m_segmentation.active) {
+        undoSegmentation();
+    }
+
+    // Get source image path from focused panel
+    if (!m_imageFocus.panel) return;
+    std::string target = m_imageFocus.panel->getTargetLevel();
+    if (target.size() <= 5 || target.substr(0, 5) != "fs://") return;
+    std::string imagePath = target.substr(5);
+
+    // Create temp output path
+    std::string outputPath = "/tmp/eden_segment_result.png";
+
+    m_segmentation.imagePath = imagePath;
+    m_segmentation.outputPath = outputPath;
+    m_segmentation.done = std::make_shared<std::atomic<bool>>(false);
+    m_segmentation.cancelled = std::make_shared<std::atomic<bool>>(false);
+    m_segmentation.statusMutex = std::make_shared<std::mutex>();
+    m_segmentation.statusText = std::make_shared<std::string>("Starting...");
+    m_segmentation.processing = true;
+
+    auto done = m_segmentation.done;
+    auto cancelled = m_segmentation.cancelled;
+    auto statusMtx = m_segmentation.statusMutex;
+    auto statusTxt = m_segmentation.statusText;
+
+    m_segmentation.workerThread = std::thread([imagePath, outputPath, imgX, imgY, done, cancelled, statusMtx, statusTxt]() {
+        if (cancelled->load()) { done->store(true); return; }
+
+        std::string python = "/home/jasondube/Desktop/segment/.venv/bin/python3";
+        std::string script = "/home/jasondube/Desktop/segment/segment_cli.py";
+
+        std::string cmd = shellEscape(python) + " " + shellEscape(script)
+            + " --input " + shellEscape(imagePath)
+            + " --px " + std::to_string(imgX)
+            + " --py " + std::to_string(imgY)
+            + " --output " + shellEscape(outputPath)
+            + " 2>&1";
+
+        std::cerr << "[Segment] Running: " << cmd << std::endl;
+        FILE* pipe = popen(cmd.c_str(), "r");
+        if (!pipe) {
+            std::cerr << "[Segment] popen failed!" << std::endl;
+            done->store(true);
+            return;
+        }
+        char buf[512];
+        while (fgets(buf, sizeof(buf), pipe)) {
+            std::string line(buf);
+            while (!line.empty() && (line.back() == '\n' || line.back() == '\r'))
+                line.pop_back();
+            if (!line.empty()) std::cerr << "[Segment] " << line << std::endl;
+            if (line.rfind("STATUS ", 0) == 0) {
+                std::lock_guard<std::mutex> lk(*statusMtx);
+                *statusTxt = line.substr(7);
+            }
+        }
+        int exitCode = pclose(pipe);
+        std::cerr << "[Segment] Process exited with code " << exitCode << std::endl;
+        done->store(true);
+    });
+}
+
+void FilesystemBrowser::segmentImageBox(int x1, int y1, int x2, int y2) {
+    if (!m_imageFocus.active) return;
+
+    if (m_segmentation.processing) cancelSegmentation();
+    if (m_segmentation.active) undoSegmentation();
+
+    if (!m_imageFocus.panel) return;
+    std::string target = m_imageFocus.panel->getTargetLevel();
+    if (target.size() <= 5 || target.substr(0, 5) != "fs://") return;
+    std::string imagePath = target.substr(5);
+    std::string outputPath = "/tmp/eden_segment_result.png";
+
+    m_segmentation.imagePath = imagePath;
+    m_segmentation.outputPath = outputPath;
+    m_segmentation.done = std::make_shared<std::atomic<bool>>(false);
+    m_segmentation.cancelled = std::make_shared<std::atomic<bool>>(false);
+    m_segmentation.statusMutex = std::make_shared<std::mutex>();
+    m_segmentation.statusText = std::make_shared<std::string>("Starting...");
+    m_segmentation.processing = true;
+
+    auto done = m_segmentation.done;
+    auto cancelled = m_segmentation.cancelled;
+    auto statusMtx = m_segmentation.statusMutex;
+    auto statusTxt = m_segmentation.statusText;
+
+    m_segmentation.workerThread = std::thread([imagePath, outputPath, x1, y1, x2, y2, done, cancelled, statusMtx, statusTxt]() {
+        if (cancelled->load()) { done->store(true); return; }
+
+        std::string python = "/home/jasondube/Desktop/segment/.venv/bin/python3";
+        std::string script = "/home/jasondube/Desktop/segment/segment_cli.py";
+
+        std::string cmd = shellEscape(python) + " " + shellEscape(script)
+            + " --input " + shellEscape(imagePath)
+            + " --box " + std::to_string(x1) + " " + std::to_string(y1)
+            + " " + std::to_string(x2) + " " + std::to_string(y2)
+            + " --output " + shellEscape(outputPath)
+            + " 2>&1";
+
+        std::cerr << "[Segment] Running: " << cmd << std::endl;
+        FILE* pipe = popen(cmd.c_str(), "r");
+        if (!pipe) {
+            std::cerr << "[Segment] popen failed!" << std::endl;
+            done->store(true);
+            return;
+        }
+        char buf[512];
+        while (fgets(buf, sizeof(buf), pipe)) {
+            std::string line(buf);
+            while (!line.empty() && (line.back() == '\n' || line.back() == '\r'))
+                line.pop_back();
+            if (!line.empty()) std::cerr << "[Segment] " << line << std::endl;
+            if (line.rfind("STATUS ", 0) == 0) {
+                std::lock_guard<std::mutex> lk(*statusMtx);
+                *statusTxt = line.substr(7);
+            }
+        }
+        int exitCode = pclose(pipe);
+        std::cerr << "[Segment] Process exited with code " << exitCode << std::endl;
+        done->store(true);
+    });
+}
+
+void FilesystemBrowser::pollSegmentation() {
+    if (!m_segmentation.processing || !m_segmentation.done) return;
+    if (!m_segmentation.done->load()) return;
+
+    // Join the worker thread
+    if (m_segmentation.workerThread.joinable()) {
+        m_segmentation.workerThread.join();
+    }
+    m_segmentation.processing = false;
+
+    // If cancelled, just clean up
+    if (m_segmentation.cancelled && m_segmentation.cancelled->load()) {
+        std::remove(m_segmentation.outputPath.c_str());
+        return;
+    }
+
+    // Load the output RGBA PNG
+    if (!m_imageFocus.active || !m_imageFocus.panel || !m_modelRenderer) {
+        std::remove(m_segmentation.outputPath.c_str());
+        return;
+    }
+
+    int imgW, imgH, imgChannels;
+    unsigned char* data = stbi_load(m_segmentation.outputPath.c_str(), &imgW, &imgH, &imgChannels, 4);
+    if (!data) {
+        std::cerr << "[Segmentation] Failed to load result: " << m_segmentation.outputPath << std::endl;
+        std::remove(m_segmentation.outputPath.c_str());
+        return;
+    }
+
+    // Cap to FOCUS_MAX_SIZE preserving aspect ratio (same as focusImage)
+    int capW = imgW, capH = imgH;
+    int maxDim = std::max(imgW, imgH);
+    if (maxDim > FOCUS_MAX_SIZE) {
+        float scale = static_cast<float>(FOCUS_MAX_SIZE) / maxDim;
+        capW = static_cast<int>(imgW * scale);
+        capH = static_cast<int>(imgH * scale);
+        if (capW < 1) capW = 1;
+        if (capH < 1) capH = 1;
+    }
+
+    // Resample into raw RGBA buffer (image-space, top-down for eraser)
+    m_segmentation.rgbaW = capW;
+    m_segmentation.rgbaH = capH;
+    m_segmentation.rgbaData.resize(capW * capH * 4);
+    for (int py = 0; py < capH; ++py) {
+        int srcY = py * imgH / capH;
+        for (int px = 0; px < capW; ++px) {
+            int srcX = px * imgW / capW;
+            int srcIdx = (srcY * imgW + srcX) * 4;
+            int dstIdx = (py * capW + px) * 4;
+            m_segmentation.rgbaData[dstIdx + 0] = data[srcIdx + 0];
+            m_segmentation.rgbaData[dstIdx + 1] = data[srcIdx + 1];
+            m_segmentation.rgbaData[dstIdx + 2] = data[srcIdx + 2];
+            m_segmentation.rgbaData[dstIdx + 3] = data[srcIdx + 3];
+        }
+    }
+    stbi_image_free(data);
+
+    // Composite over checkerboard for display (flipped vertically for GPU)
+    std::vector<unsigned char> pixels(capW * capH * 4);
+    for (int py = 0; py < capH; ++py) {
+        int srcY = capH - 1 - py; // flip for GPU
+        for (int px = 0; px < capW; ++px) {
+            int srcIdx = (srcY * capW + px) * 4;
+            int dstIdx = (py * capW + px) * 4;
+            unsigned char r = m_segmentation.rgbaData[srcIdx + 0];
+            unsigned char g = m_segmentation.rgbaData[srcIdx + 1];
+            unsigned char b = m_segmentation.rgbaData[srcIdx + 2];
+            unsigned char a = m_segmentation.rgbaData[srcIdx + 3];
+            bool light = ((px / 16) + (py / 16)) % 2 == 0;
+            unsigned char bg = light ? 60 : 40;
+            float af = a / 255.0f;
+            pixels[dstIdx + 0] = static_cast<unsigned char>(r * af + bg * (1.0f - af));
+            pixels[dstIdx + 1] = static_cast<unsigned char>(g * af + bg * (1.0f - af));
+            pixels[dstIdx + 2] = static_cast<unsigned char>(b * af + bg * (1.0f - af));
+            pixels[dstIdx + 3] = 255;
+        }
+    }
+
+    std::cerr << "[Segment] Uploading segmented texture " << capW << "x" << capH
+              << " to buffer " << m_imageFocus.bufferHandle << std::endl;
+    m_modelRenderer->updateTexture(m_imageFocus.bufferHandle, pixels.data(), capW, capH);
+    m_imageFocus.focusedWidth = capW;
+    m_imageFocus.focusedHeight = capH;
+    m_segmentation.active = true;
+
+    // Load original image at same resolution for restore brush
+    m_segmentation.originalData.resize(capW * capH * 4);
+    int origW, origH, origC;
+    unsigned char* origData = stbi_load(m_segmentation.imagePath.c_str(), &origW, &origH, &origC, 4);
+    if (origData) {
+        for (int py = 0; py < capH; ++py) {
+            int srcY = py * origH / capH;
+            for (int px = 0; px < capW; ++px) {
+                int srcX = px * origW / capW;
+                int srcIdx = (srcY * origW + srcX) * 4;
+                int dstIdx = (py * capW + px) * 4;
+                m_segmentation.originalData[dstIdx + 0] = origData[srcIdx + 0];
+                m_segmentation.originalData[dstIdx + 1] = origData[srcIdx + 1];
+                m_segmentation.originalData[dstIdx + 2] = origData[srcIdx + 2];
+                m_segmentation.originalData[dstIdx + 3] = 255;
+            }
+        }
+        stbi_image_free(origData);
+    }
+
+    // Clean up temp file
+    std::remove(m_segmentation.outputPath.c_str());
+    std::cerr << "[Segment] Done! Segmentation active." << std::endl;
+}
+
+void FilesystemBrowser::undoSegmentation() {
+    if (!m_segmentation.active || !m_imageFocus.active || !m_imageFocus.panel || !m_modelRenderer) return;
+
+    // Re-load original hi-res image (same logic as focusImage)
+    std::string target = m_imageFocus.panel->getTargetLevel();
+    if (target.size() <= 5 || target.substr(0, 5) != "fs://") return;
+    std::string path = target.substr(5);
+
+    int imgW, imgH, imgChannels;
+    unsigned char* data = stbi_load(path.c_str(), &imgW, &imgH, &imgChannels, 4);
+    if (!data) return;
+
+    int capW = imgW, capH = imgH;
+    int maxDim = std::max(imgW, imgH);
+    if (maxDim > FOCUS_MAX_SIZE) {
+        float scale = static_cast<float>(FOCUS_MAX_SIZE) / maxDim;
+        capW = static_cast<int>(imgW * scale);
+        capH = static_cast<int>(imgH * scale);
+        if (capW < 1) capW = 1;
+        if (capH < 1) capH = 1;
+    }
+
+    std::vector<unsigned char> hiRes(capW * capH * 4);
+    for (int py = 0; py < capH; ++py) {
+        int srcY = (capH - 1 - py) * imgH / capH;
+        for (int px = 0; px < capW; ++px) {
+            int srcX = px * imgW / capW;
+            int srcIdx = (srcY * imgW + srcX) * 4;
+            int dstIdx = (py * capW + px) * 4;
+            hiRes[dstIdx + 0] = data[srcIdx + 0];
+            hiRes[dstIdx + 1] = data[srcIdx + 1];
+            hiRes[dstIdx + 2] = data[srcIdx + 2];
+            hiRes[dstIdx + 3] = data[srcIdx + 3];
+        }
+    }
+    stbi_image_free(data);
+
+    m_modelRenderer->updateTexture(m_imageFocus.bufferHandle, hiRes.data(), capW, capH);
+    m_imageFocus.focusedWidth = capW;
+    m_imageFocus.focusedHeight = capH;
+    m_segmentation.active = false;
+    m_segmentation.rgbaData.clear();
+    m_segmentation.originalData.clear();
+    m_segmentation.rgbaW = 0;
+    m_segmentation.rgbaH = 0;
+}
+
+void FilesystemBrowser::eraseSegmentAt(int imgX, int imgY, int radius) {
+    if (!m_segmentation.active || m_segmentation.rgbaData.empty()) return;
+    int w = m_segmentation.rgbaW;
+    int h = m_segmentation.rgbaH;
+    if (w <= 0 || h <= 0) return;
+
+    // Zero alpha in a circle around (imgX, imgY)
+    int r2 = radius * radius;
+    int x0 = std::max(0, imgX - radius);
+    int x1 = std::min(w - 1, imgX + radius);
+    int y0 = std::max(0, imgY - radius);
+    int y1 = std::min(h - 1, imgY + radius);
+    for (int py = y0; py <= y1; ++py) {
+        for (int px = x0; px <= x1; ++px) {
+            int dx = px - imgX, dy = py - imgY;
+            if (dx * dx + dy * dy <= r2) {
+                m_segmentation.rgbaData[(py * w + px) * 4 + 3] = 0;
+            }
+        }
+    }
+
+    // Re-composite over checkerboard and upload (flipped for GPU)
+    std::vector<unsigned char> pixels(w * h * 4);
+    for (int py = 0; py < h; ++py) {
+        int srcY = h - 1 - py;
+        for (int px = 0; px < w; ++px) {
+            int srcIdx = (srcY * w + px) * 4;
+            int dstIdx = (py * w + px) * 4;
+            unsigned char r = m_segmentation.rgbaData[srcIdx + 0];
+            unsigned char g = m_segmentation.rgbaData[srcIdx + 1];
+            unsigned char b = m_segmentation.rgbaData[srcIdx + 2];
+            unsigned char a = m_segmentation.rgbaData[srcIdx + 3];
+            bool light = ((px / 16) + (py / 16)) % 2 == 0;
+            unsigned char bg = light ? 60 : 40;
+            float af = a / 255.0f;
+            pixels[dstIdx + 0] = static_cast<unsigned char>(r * af + bg * (1.0f - af));
+            pixels[dstIdx + 1] = static_cast<unsigned char>(g * af + bg * (1.0f - af));
+            pixels[dstIdx + 2] = static_cast<unsigned char>(b * af + bg * (1.0f - af));
+            pixels[dstIdx + 3] = 255;
+        }
+    }
+    m_modelRenderer->updateTexture(m_imageFocus.bufferHandle, pixels.data(), w, h);
+}
+
+void FilesystemBrowser::restoreSegmentAt(int imgX, int imgY, int radius) {
+    if (!m_segmentation.active || m_segmentation.rgbaData.empty() || m_segmentation.originalData.empty()) return;
+    int w = m_segmentation.rgbaW;
+    int h = m_segmentation.rgbaH;
+    if (w <= 0 || h <= 0) return;
+
+    // Copy RGB from original and set alpha=255 in a circle
+    int r2 = radius * radius;
+    int x0 = std::max(0, imgX - radius);
+    int x1 = std::min(w - 1, imgX + radius);
+    int y0 = std::max(0, imgY - radius);
+    int y1 = std::min(h - 1, imgY + radius);
+    for (int py = y0; py <= y1; ++py) {
+        for (int px = x0; px <= x1; ++px) {
+            int dx = px - imgX, dy = py - imgY;
+            if (dx * dx + dy * dy <= r2) {
+                int idx = (py * w + px) * 4;
+                m_segmentation.rgbaData[idx + 0] = m_segmentation.originalData[idx + 0];
+                m_segmentation.rgbaData[idx + 1] = m_segmentation.originalData[idx + 1];
+                m_segmentation.rgbaData[idx + 2] = m_segmentation.originalData[idx + 2];
+                m_segmentation.rgbaData[idx + 3] = 255;
+            }
+        }
+    }
+
+    // Re-composite and upload
+    std::vector<unsigned char> pixels(w * h * 4);
+    for (int py = 0; py < h; ++py) {
+        int srcY = h - 1 - py;
+        for (int px = 0; px < w; ++px) {
+            int srcIdx = (srcY * w + px) * 4;
+            int dstIdx = (py * w + px) * 4;
+            unsigned char r = m_segmentation.rgbaData[srcIdx + 0];
+            unsigned char g = m_segmentation.rgbaData[srcIdx + 1];
+            unsigned char b = m_segmentation.rgbaData[srcIdx + 2];
+            unsigned char a = m_segmentation.rgbaData[srcIdx + 3];
+            bool light = ((px / 16) + (py / 16)) % 2 == 0;
+            unsigned char bg = light ? 60 : 40;
+            float af = a / 255.0f;
+            pixels[dstIdx + 0] = static_cast<unsigned char>(r * af + bg * (1.0f - af));
+            pixels[dstIdx + 1] = static_cast<unsigned char>(g * af + bg * (1.0f - af));
+            pixels[dstIdx + 2] = static_cast<unsigned char>(b * af + bg * (1.0f - af));
+            pixels[dstIdx + 3] = 255;
+        }
+    }
+    m_modelRenderer->updateTexture(m_imageFocus.bufferHandle, pixels.data(), w, h);
+}
+
+void FilesystemBrowser::cancelSegmentation() {
+    if (m_segmentation.processing) {
+        if (m_segmentation.cancelled) m_segmentation.cancelled->store(true);
+        if (m_segmentation.workerThread.joinable()) m_segmentation.workerThread.join();
+        m_segmentation.processing = false;
+        std::remove(m_segmentation.outputPath.c_str());
+    }
+    m_segmentation.active = false;
+    m_segmentation.done.reset();
+    m_segmentation.cancelled.reset();
+}
+
+std::string FilesystemBrowser::saveSegmentationToForge() {
+    if (!m_segmentation.active || m_segmentation.rgbaData.empty()) return "";
+
+    // Find the forge (assets/models) directory
+    std::string forgeDir;
+    for (const auto& candidate : {
+        "assets/models",
+        "../../../examples/terrain_editor/assets/models",
+        "examples/terrain_editor/assets/models"
+    }) {
+        std::error_code ec;
+        auto p = std::filesystem::canonical(candidate, ec);
+        if (!ec) { forgeDir = p.string(); break; }
+    }
+    if (forgeDir.empty()) {
+        forgeDir = std::string(getenv("HOME") ? getenv("HOME") : "/tmp") + "/assets/models";
+        std::filesystem::create_directories(forgeDir);
+    }
+
+    // Generate filename from source image name + timestamp
+    std::string baseName = "segment";
+    if (!m_segmentation.imagePath.empty()) {
+        auto stem = std::filesystem::path(m_segmentation.imagePath).stem().string();
+        if (!stem.empty()) baseName = stem;
+    }
+    auto now = std::chrono::system_clock::now().time_since_epoch();
+    auto secs = std::chrono::duration_cast<std::chrono::seconds>(now).count();
+    std::string outPath = forgeDir + "/" + baseName + "_" + std::to_string(secs) + ".png";
+
+    // Pre-multiply alpha: zero out RGB where alpha is 0 so the background
+    // is truly removed (not just hidden behind alpha channel)
+    int w = m_segmentation.rgbaW;
+    int h = m_segmentation.rgbaH;
+    std::vector<unsigned char> saveData(m_segmentation.rgbaData.begin(),
+                                         m_segmentation.rgbaData.end());
+    for (int i = 0; i < w * h; ++i) {
+        if (saveData[i * 4 + 3] == 0) {
+            saveData[i * 4 + 0] = 0;
+            saveData[i * 4 + 1] = 0;
+            saveData[i * 4 + 2] = 0;
+        }
+    }
+
+    // Write RGBA data as PNG
+    int ok = stbi_write_png(outPath.c_str(), w, h, 4,
+                            saveData.data(), w * 4);
+    if (ok) {
+        std::cout << "[FilesystemBrowser] Saved segmentation to forge: " << outPath << std::endl;
+        return outPath;
+    } else {
+        std::cerr << "[FilesystemBrowser] Failed to save segmentation to: " << outPath << std::endl;
+        return "";
+    }
 }
 
 // ── Emanation Render Data ───────────────────────────────────────────────
