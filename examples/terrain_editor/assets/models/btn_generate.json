@@ -1,0 +1,5 @@
+{
+    "widget": "button",
+    "action": "trigger",
+    "description": "Click to trigger the wired machine — starts Hunyuan3D generation"
+}

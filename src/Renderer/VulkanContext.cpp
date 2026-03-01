@@ -155,6 +155,9 @@ void VulkanContext::createLogicalDevice() {
     }
 
     VkPhysicalDeviceFeatures deviceFeatures{};
+    deviceFeatures.fillModeNonSolid = VK_TRUE;   // Required for VK_POLYGON_MODE_LINE (wireframe)
+    deviceFeatures.wideLines = VK_TRUE;           // Required for lineWidth > 1.0
+    deviceFeatures.samplerAnisotropy = VK_TRUE;   // Required for anisotropic texture filtering
 
     VkDeviceCreateInfo createInfo{};
     createInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;

@@ -16,6 +16,7 @@
 #include "../AI/ImageBot.hpp"
 #include "../AI/CullSession.hpp"
 #include "../Forge/ForgeRoom.hpp"
+#include "PlatformGrid.hpp"
 
 namespace eden {
 
@@ -58,6 +59,8 @@ public:
     ImageBot* getImageBot() { return m_imageBot.isSpawned() ? &m_imageBot : nullptr; }
     ForgeRoom* getForgeRoom() { return m_forgeRoom.isSpawned() ? &m_forgeRoom : nullptr; }
     CullSession* getCullSession() { return &m_cullSession; }
+    PlatformGridBuilder& getPlatformGrid() { return m_platformGrid; }
+    float getPlatformY() const { return m_platformY; }
 
     // Emanation rendering — call from render loop after scene objects
     // Returns line pairs and color (with alpha) for each batch
@@ -97,12 +100,22 @@ public:
         return (t.size() > 5 && t.substr(0, 5) == "fs://") ? t.substr(5) : "";
     }
 
+    // Parse filename prefix to determine frame type and set WallFrame fields
+    static void parseFrameType(const std::string& filename, WallFrame& frame);
+
     // Spawn a file object directly onto a wall slot (for paste-in-place)
     // wallPos/wallScale/wallYawDeg come from the selected wall's transform
     void spawnFileAtWall(const std::string& filePath,
                          const glm::vec3& wallPos,
                          const glm::vec3& wallScale,
                          float wallYawDeg);
+
+    // Spawn a file object onto a wall frame (uses frame's exact position/size/yaw)
+    void spawnFileAtFrame(const std::string& filePath, SceneObject* frame);
+
+    // Spawn a file as a functional freestanding object at a world position (Ctrl+Number)
+    void spawnFileAtPosition(const std::string& filePath, const glm::vec3& position);
+
     void spawnBasement(const glm::vec3& center, float baseY);
 
     // App launcher ring (level -1 below home silo)
@@ -224,9 +237,14 @@ private:
         SceneObject* obj = nullptr;
         float baseYaw = 0.0f;   // original yaw from gallery wall
         float angle = 0.0f;     // current spin angle (degrees)
+        bool paused = false;
     };
     std::vector<ModelSpin> m_modelSpins;
     static constexpr float MODEL_SPIN_SPEED = 30.0f; // degrees per second
+public:
+    // Toggle spin on/off for a given scene object; returns true if it was found
+    bool toggleSpin(SceneObject* obj);
+private:
 
     // Image focus state
     static constexpr int FOCUS_MAX_SIZE = 2048;
@@ -269,6 +287,10 @@ private:
 
     // Cull Session (binary object culling workflow)
     CullSession m_cullSession;
+
+    // Platform grid (user-customizable walls on top of silo)
+    PlatformGridBuilder m_platformGrid;
+    float m_platformY = 100.0f;  // Y of the platform (top of silo)
 
     // Folder visit tracking (attention system)
     std::unordered_map<std::string, int> m_folderVisits;

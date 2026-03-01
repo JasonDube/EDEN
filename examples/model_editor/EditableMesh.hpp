@@ -235,6 +235,7 @@ public:
     void selectFace(uint32_t idx, bool additive = false);
     void selectEdgeLoop(uint32_t heIdx);
     void selectEdgeRing(uint32_t heIdx);
+    void selectFacesByNormal(const glm::vec3& viewDir, float maxAngleDeg, const std::set<uint32_t>& skipFaces = {});
     void clearSelection();
     void invertSelection(ModelingSelectionMode mode);
 

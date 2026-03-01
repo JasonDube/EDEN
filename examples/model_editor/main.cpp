@@ -307,6 +307,12 @@ protected:
         // Stop Hunyuan server if we started it
         stopHunyuanServer();
 
+        // Always join startup thread to prevent std::terminate on destroy
+        if (m_aiServerStartupThread.joinable()) {
+            m_aiServerRunning = false;  // Signal thread to exit
+            m_aiServerStartupThread.join();
+        }
+
         // Stop MCP server
         if (m_mcpServer) {
             m_mcpServer->stop();
@@ -1093,7 +1099,14 @@ protected:
             }
             m_aiGenerating = false;
             if (!m_aiGeneratedGLBPath.empty()) {
+                std::cout << "[Hunyuan3D] Loading generated model: " << m_aiGeneratedGLBPath << std::endl;
                 loadModel(m_aiGeneratedGLBPath);
+                std::cout << "[Hunyuan3D] Model loaded, framing..." << std::endl;
+                // Auto-frame the generated model so the camera shows it properly
+                if (m_selectedObject) {
+                    Camera& cam = (m_splitView && !m_activeViewportLeft) ? m_camera2 : m_camera;
+                    frameSelected(cam);
+                }
                 m_aiGenerateStatus = "Model loaded!";
                 std::cout << "[Hunyuan3D] Auto-loaded generated model" << std::endl;
             }
@@ -1112,6 +1125,8 @@ protected:
         if (!m_pendingDeletions.empty()) {
             vkDeviceWaitIdle(getContext().getDevice());
             for (SceneObject* obj : m_pendingDeletions) {
+                if (!obj) continue;
+
                 // Remove from multi-selection set first
                 m_selectedObjects.erase(obj);
 
@@ -1120,11 +1135,18 @@ protected:
                     m_selectedObject = nullptr;
                 }
 
+                // Clear editable mesh if it was built from this object
+                if (m_modelingMode && m_editorContext) {
+                    m_editorContext->editableMesh.clear();
+                    m_editorContext->meshDirty = false;
+                }
+
                 // Find and remove from scene
                 for (auto it = m_sceneObjects.begin(); it != m_sceneObjects.end(); ++it) {
                     if (it->get() == obj) {
-                        if ((*it)->getBufferHandle() != UINT32_MAX) {
-                            m_modelRenderer->destroyModel((*it)->getBufferHandle());
+                        uint32_t handle = (*it)->getBufferHandle();
+                        if (handle != UINT32_MAX && handle != 0) {
+                            m_modelRenderer->destroyModel(handle);
                         }
                         m_sceneObjects.erase(it);
                         break;

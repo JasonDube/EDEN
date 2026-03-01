@@ -16,7 +16,13 @@ VulkanApplicationBase::~VulkanApplicationBase() = default;
 
 void VulkanApplicationBase::run() {
     init();
-    mainLoop();
+    try {
+        mainLoop();
+    } catch (...) {
+        // Ensure cleanup always runs even if mainLoop throws (e.g. Vulkan/OOM errors)
+        cleanup();
+        throw;
+    }
     cleanup();
 }
 
@@ -80,6 +86,9 @@ void VulkanApplicationBase::mainLoop() {
 }
 
 void VulkanApplicationBase::cleanup() {
+    if (m_cleanedUp) return;
+    m_cleanedUp = true;
+
     m_context->waitIdle();
 
     // Call derived class cleanup first
@@ -180,7 +189,7 @@ void VulkanApplicationBase::endFrame(uint32_t imageIndex) {
 
     VkResult submitResult = vkQueueSubmit(m_context->getGraphicsQueue(), 1, &submitInfo, m_inFlightFences[m_currentFrame]);
     if (submitResult != VK_SUCCESS) {
-        std::cerr << "vkQueueSubmit failed with error code: " << submitResult << std::endl;
+        std::cerr << "[VULKAN] vkQueueSubmit failed with error code: " << submitResult << std::endl;
         throw std::runtime_error("Failed to submit draw command buffer");
     }
 

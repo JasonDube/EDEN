@@ -1449,6 +1449,10 @@ void ModelRenderer::recreatePipeline(VkRenderPass renderPass, VkExtent2D extent)
         vkDestroyPipeline(device, m_linePipeline, nullptr);
         m_linePipeline = VK_NULL_HANDLE;
     }
+    if (m_pointPipeline) {
+        vkDestroyPipeline(device, m_pointPipeline, nullptr);
+        m_pointPipeline = VK_NULL_HANDLE;
+    }
     if (m_wireframePipelineLayout) {
         vkDestroyPipelineLayout(device, m_wireframePipelineLayout, nullptr);
         m_wireframePipelineLayout = VK_NULL_HANDLE;

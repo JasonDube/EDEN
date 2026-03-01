@@ -1,0 +1,6 @@
+{
+    "widget": "output",
+    "param": "model",
+    "type": "model",
+    "description": "Output slot — generated GLB model appears here after machine completes"
+}

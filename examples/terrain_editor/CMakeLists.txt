@@ -1,6 +1,8 @@
 add_executable(terrain_editor main.cpp grove_host.cpp MCPServer.cpp
     ${CMAKE_SOURCE_DIR}/src/Terminal/EdenTerminal.cpp
-    ${CMAKE_SOURCE_DIR}/src/OS/FilesystemBrowser.cpp)
+    ${CMAKE_SOURCE_DIR}/src/OS/FilesystemBrowser.cpp
+    ${CMAKE_SOURCE_DIR}/src/OS/PlatformGrid.cpp
+    ${CMAKE_SOURCE_DIR}/src/Forge/WallMachine.cpp)
 
 # libvterm for terminal emulation
 find_package(PkgConfig REQUIRED)

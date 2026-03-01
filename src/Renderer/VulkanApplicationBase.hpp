@@ -95,6 +95,7 @@ protected:
 
     // State
     bool m_framebufferResized = false;
+    bool m_cleanedUp = false;
 
 private:
     int m_initialWidth;

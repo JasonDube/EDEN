@@ -25,40 +25,7 @@ void ForgeRoom::init(std::vector<std::unique_ptr<SceneObject>>* sceneObjects,
 
 void ForgeRoom::spawn(const glm::vec3& center, float baseY) {
     if (m_spawned || !m_sceneObjects || !m_renderer) return;
-
-    // Create purple disc (teleport pad)
-    glm::vec4 padColor{0.5f, 0.1f, 0.9f, 1.0f};
-    auto mesh = PrimitiveMeshBuilder::createCylinder(2.5f, 0.15f, 32, padColor);
-    uint32_t handle = m_renderer->createModel(
-        mesh.vertices, mesh.indices, nullptr, 0, 0);
-
-    auto obj = std::make_unique<SceneObject>("ForgePad");
-    obj->setBufferHandle(handle);
-    obj->setIndexCount(static_cast<uint32_t>(mesh.indices.size()));
-    obj->setVertexCount(static_cast<uint32_t>(mesh.vertices.size()));
-    obj->setLocalBounds(mesh.bounds);
-    obj->setMeshData(mesh.vertices, mesh.indices);
-    obj->setPrimitiveType(PrimitiveType::Cylinder);
-    obj->setPrimitiveSize(2.5f);
-    obj->setPrimitiveColor(padColor);
-    obj->setBuildingType("forge_pad");
-    obj->setDescription("Robot Forge Pad");
-
-    obj->getTransform().setPosition({center.x, baseY, center.z});
-    obj->getTransform().setScale({1.0f, 1.0f, 1.0f});
-
-    m_padObject = obj.get();
-    m_sceneObjects->push_back(std::move(obj));
     m_spawned = true;
-
-    // Spawn the multiview machine next to the pad
-    spawnMachine(glm::vec3(center.x + 7.0f, center.y, center.z), baseY,
-                 "examples/terrain_editor/assets/models/multiview_machine.lime");
-
-    // Spawn test widget machine on the other side of the pad
-    m_widgetKit.spawnFromLime("examples/terrain_editor/assets/models/test_widget_machine.lime",
-                              glm::vec3(center.x - 7.0f, center.y, center.z),
-                              baseY, m_sceneObjects, m_renderer);
 }
 
 void ForgeRoom::despawn() {

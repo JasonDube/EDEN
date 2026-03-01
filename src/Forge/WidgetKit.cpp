@@ -18,6 +18,9 @@ void WidgetKit::spawnFromLime(const std::string& limePath, const glm::vec3& posi
         return;
     }
 
+    // Scale factor — .lime models are authored in small units, scale up for game world
+    float machineScale = 3.0f;
+
     // Spawn the visual model
     auto visual = LimeLoader::createSceneObject(result.mesh, *renderer);
     if (!visual) return;
@@ -25,6 +28,7 @@ void WidgetKit::spawnFromLime(const std::string& limePath, const glm::vec3& posi
     visual->setBuildingType("machine_visual");
     visual->setDescription("Widget Machine");
     visual->getTransform().setPosition({position.x, baseY, position.z});
+    visual->getTransform().setScale(glm::vec3(machineScale));
     m_visual = visual.get();
     scene->push_back(std::move(visual));
 
@@ -45,15 +49,18 @@ void WidgetKit::spawnFromLime(const std::string& limePath, const glm::vec3& posi
             continue;
         }
 
-        // Get control point world position
+        // Get control point world position (scaled to match visual)
         glm::vec3 cpPos{0.0f};
         if (cp.vertexIndex < result.mesh.vertices.size()) {
-            cpPos = result.mesh.vertices[cp.vertexIndex].position;
+            cpPos = result.mesh.vertices[cp.vertexIndex].position * machineScale;
         }
         cpPos += glm::vec3(position.x, baseY, position.z);
 
-        // Create invisible hitbox cube
-        glm::vec4 hitboxColor{0.0f, 0.0f, 0.0f, 0.0f};
+        // Create visible hitbox cube with color per widget type
+        glm::vec4 hitboxColor{0.5f, 0.5f, 0.5f, 1.0f};
+        if (widgetType == "button")   hitboxColor = {0.9f, 0.2f, 0.2f, 1.0f};
+        else if (widgetType == "checkbox") hitboxColor = {0.2f, 0.9f, 0.2f, 1.0f};
+        else if (widgetType == "slot")     hitboxColor = {0.2f, 0.2f, 0.9f, 1.0f};
         auto mesh = PrimitiveMeshBuilder::createCube(1.0f, hitboxColor);
         uint32_t handle = renderer->createModel(
             mesh.vertices, mesh.indices, nullptr, 0, 0);
@@ -67,7 +74,7 @@ void WidgetKit::spawnFromLime(const std::string& limePath, const glm::vec3& posi
         obj->setPrimitiveType(PrimitiveType::Cube);
         obj->setBuildingType("widget");
         obj->setDescription(widgetType + ":" + widgetName);
-        obj->setVisible(false);
+        obj->setVisible(true);
         obj->getTransform().setPosition(cpPos);
         obj->getTransform().setScale({1.5f, 1.5f, 1.5f});
 

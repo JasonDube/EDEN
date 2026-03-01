@@ -2342,6 +2342,23 @@ void EditableMesh::selectEdgeRing(uint32_t heIdx) {
     }
 }
 
+void EditableMesh::selectFacesByNormal(const glm::vec3& viewDir, float maxAngleDeg,
+                                        const std::set<uint32_t>& skipFaces) {
+    float cosThreshold = cosf(glm::radians(maxAngleDeg));
+    glm::vec3 dir = glm::normalize(viewDir);
+
+    for (uint32_t i = 0; i < m_faces.size(); ++i) {
+        if (skipFaces.count(i)) continue;
+        glm::vec3 normal = getFaceNormal(i);
+        // Face normal points outward; camera looks inward.
+        // A front-facing face has normal opposing the view direction.
+        float dot = glm::dot(normal, -dir);
+        if (dot >= cosThreshold) {
+            m_faces[i].selected = true;
+        }
+    }
+}
+
 void EditableMesh::clearSelection() {
     for (auto& v : m_vertices) {
         v.selected = false;

@@ -993,6 +993,7 @@ void ModelingMode::renderModelingEditorUI() {
 
                 // Clear selection and mesh state immediately
                 m_ctx.selectedObject = nullptr;
+                m_ctx.selectedObjects.clear();
                 m_ctx.editableMesh.clear();
                 m_ctx.meshDirty = false;
             }
@@ -2370,6 +2371,22 @@ void ModelingMode::renderModelingEditorUI() {
 
         if (m_ctx.selectionTool == SelectionTool::Paint) {
             ImGui::SliderFloat("Brush Radius", &m_ctx.paintSelectRadius, 5.0f, 100.0f, "%.0f px");
+        }
+
+        // Select Facing — mass select front-facing faces
+        ImGui::Separator();
+        ImGui::TextColored(ImVec4(0.9f, 0.9f, 0.3f, 1.0f), "Select by Normal:");
+        static float selectFacingAngle = 45.0f;
+        ImGui::SliderFloat("Max Angle", &selectFacingAngle, 5.0f, 90.0f, "%.0f deg");
+        if (ImGui::Button("Select Facing Camera")) {
+            Camera& cam = m_ctx.getActiveCamera();
+            glm::vec3 viewDir = cam.getFront();
+            // Transform view direction into model local space (inverse model rotation)
+            if (m_ctx.selectedObject) {
+                glm::mat4 invModel = glm::inverse(m_ctx.selectedObject->getTransform().getMatrix());
+                viewDir = glm::normalize(glm::vec3(invModel * glm::vec4(viewDir, 0.0f)));
+            }
+            m_ctx.editableMesh.selectFacesByNormal(viewDir, selectFacingAngle, m_ctx.hiddenFaces);
         }
 
         // Face visibility controls
@@ -4233,13 +4250,16 @@ void ModelingMode::processModelingInput(float deltaTime, bool gizmoActive) {
             m_ctx.editableMesh.clear();
             m_ctx.meshDirty = false;
             std::cout << "[Delete] Queued " << m_ctx.pendingDeletions.size() << " object(s) for deletion" << std::endl;
+            return;  // Don't process further input after deletion
         } else if (m_ctx.selectedObject) {
             // Delete single selected object
             m_ctx.pendingDeletions.push_back(m_ctx.selectedObject);
             m_ctx.selectedObject = nullptr;
+            m_ctx.selectedObjects.clear();
             m_ctx.editableMesh.clear();
             m_ctx.meshDirty = false;
             std::cout << "[Delete] Queued 1 object for deletion" << std::endl;
+            return;  // Don't process further input after deletion
         }
     }
 

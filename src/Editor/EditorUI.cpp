@@ -126,6 +126,9 @@ void EditorUI::renderMenuBar() {
             if (ImGui::MenuItem("New EDEN OS Level")) {
                 if (m_onNewEdenOSLevel) m_onNewEdenOSLevel();
             }
+            if (ImGui::MenuItem("Load EDEN OS Level")) {
+                if (m_onLoadEdenOSLevel) m_onLoadEdenOSLevel();
+            }
             if (ImGui::MenuItem("Open...", "Ctrl+O")) {
                 if (m_onFileOpen) m_onFileOpen();
             }

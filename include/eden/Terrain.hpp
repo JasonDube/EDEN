@@ -184,6 +184,7 @@ public:
 
     const std::vector<VisibleChunk>& getVisibleChunks() const { return m_visibleChunks; }
     const TerrainConfig& getConfig() const { return m_config; }
+    TerrainConfig& getConfigMutable() { return m_config; }
 
     float getHeightAt(float worldX, float worldZ) const;
 

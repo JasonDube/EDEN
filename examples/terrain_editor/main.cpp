@@ -75,6 +75,7 @@
 #include "MCPServer.hpp"
 #include "Terminal/EdenTerminal.hpp"
 #include "../../examples/model_editor/Hunyuan3DClient.hpp"
+#include "Forge/WallMachine.hpp"
 #include <httplib.h>
 
 #include <dirent.h>
@@ -920,7 +921,7 @@ protected:
     }
 
     void onBeforeMainLoop() override {
-        if (m_terrain.getConfig().useFixedBounds) {
+        if (!m_isEdenOSLevel && m_terrain.getConfig().useFixedBounds) {
             int totalChunks = m_terrain.getTotalChunkCount();
             std::cout << "Pre-loading " << totalChunks << " terrain chunks...\n";
 
@@ -1056,8 +1057,23 @@ protected:
         }
 
         // Process pending filesystem navigation
+        bool hadPending = m_filesystemBrowser.hasPendingNavigation();
         m_filesystemBrowser.processNavigation();
         m_filesystemBrowser.updateAnimations(deltaTime);
+
+        // Teleport to platform after navigation completes
+        if (hadPending && m_pendingTeleportToPlatform && m_filesystemBrowser.isActive()) {
+            m_pendingTeleportToPlatform = false;
+            float platY = m_filesystemBrowser.getPlatformY();
+            glm::vec3 origin = m_filesystemBrowser.getSpawnOrigin();
+            // Platform slab is 1.0 unit thick (cube mesh bottom-aligned), so surface = platY + 1.0
+            // Offset from center to avoid the hole (holeHalfSize = 8m)
+            glm::vec3 camPos(origin.x + 10.0f, platY + 1.0f + 1.7f, origin.z);
+            m_camera.setPosition(camPos);
+            if (m_characterController) {
+                m_characterController->setPosition(camPos);
+            }
+        }
 
         // Refresh camera collision boxes from all level geometry (walls, floors, ceilings)
         {
@@ -1065,7 +1081,7 @@ protected:
             for (const auto& obj : m_sceneObjects) {
                 if (!obj) continue;
                 const std::string& bt = obj->getBuildingType();
-                if (bt == "eden_basement_wall" || bt == "eden_basement" || bt == "filesystem_wall") {
+                if (bt == "eden_basement_wall" || bt == "eden_basement" || bt == "filesystem_wall" || bt == "platform_wall" || bt == "platform_slab") {
                     AABB bounds = obj->getWorldBounds();
                     m_camera.addCollisionBox(bounds.min, bounds.max);
                 }
@@ -1091,6 +1107,37 @@ protected:
             }
 
             if (m_aiGenerateThread.joinable()) m_aiGenerateThread.join();
+        }
+
+        // Poll wall machine system for completion
+        if (m_filesystemBrowser.isActive()) {
+            m_machinePollTimer += deltaTime;
+            if (m_machinePollTimer >= MACHINE_POLL_INTERVAL) {
+                m_machinePollTimer = 0.0f;
+                auto completed = m_wallMachine.poll();
+                for (int machFrameIdx : completed) {
+                    std::string outPath = m_wallMachine.getOutputPath(machFrameIdx);
+                    if (!outPath.empty()) {
+                        // Find wired output frame and spawn the GLB there
+                        auto& grid = m_filesystemBrowser.getPlatformGrid().grid();
+                        for (const auto& wire : grid.wires) {
+                            if (wire.fromFrame == machFrameIdx &&
+                                wire.toFrame >= 0 && wire.toFrame < static_cast<int>(grid.frames.size()) &&
+                                grid.frames[wire.toFrame].frameType == FrameType::Output) {
+                                auto& outFrame = grid.frames[wire.toFrame];
+                                glm::vec3 outPos(outFrame.worldX, outFrame.worldY, outFrame.worldZ);
+                                // Offset forward from wall
+                                float yawRad = outFrame.yawDeg * static_cast<float>(M_PI) / 180.0f;
+                                outPos.x += sinf(yawRad) * 2.0f;
+                                outPos.z += cosf(yawRad) * 2.0f;
+                                m_filesystemBrowser.spawnFileAtPosition(outPath, outPos);
+                                std::cout << "[WallMachine] Output spawned at output frame" << std::endl;
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
         }
 
         // Poll system clipboard for changes (add to history automatically)
@@ -1232,8 +1279,10 @@ protected:
 
         trackFPS(deltaTime);
 
-        m_terrain.update(m_camera.getPosition());
-        m_chunkManager->uploadPendingChunks(m_terrain);
+        if (!m_isEdenOSLevel) {
+            m_terrain.update(m_camera.getPosition());
+            m_chunkManager->uploadPendingChunks(m_terrain);
+        }
 
         if (m_isPlayMode) {
             updatePlayMode(deltaTime);
@@ -1539,8 +1588,8 @@ protected:
         pushConstants.fogStart = m_editorUI.getFogStart();
         pushConstants.fogEnd = m_editorUI.getFogEnd();
 
-        // Skip terrain rendering in test/space level mode
-        if (!m_isTestLevel && !m_isSpaceLevel) {
+        // Skip terrain rendering in test/space level mode or EDEN OS mode
+        if (!m_isTestLevel && !m_isSpaceLevel && !m_isEdenOSLevel) {
             for (const auto& vc : m_terrain.getVisibleChunks()) {
                 auto* buffers = getBufferManager().getMeshBuffers(vc.chunk->getBufferHandle());
                 if (!buffers || !buffers->vertexBuffer) continue;
@@ -1672,7 +1721,7 @@ protected:
             for (auto& obj : m_sceneObjects) {
                 if (!obj || !obj->isSelected()) continue;
                 const auto& bt = obj->getBuildingType();
-                if (bt != "filesystem" && bt != "filesystem_wall") continue;
+                if (bt != "filesystem" && bt != "filesystem_wall" && bt != "wall_frame") continue;
                 bool isDragHover = (m_fsDragActive && obj.get() == m_fsDragHoverWall);
                 const AABB& lb = obj->getLocalBounds();
                 if (lb.getSize().x > 0.001f || lb.getSize().y > 0.001f || lb.getSize().z > 0.001f) {
@@ -1703,6 +1752,158 @@ protected:
         // Draw folder attention emanations (wireframe squares expanding outward)
         for (const auto& batch : m_filesystemBrowser.getEmanationRenderData()) {
             m_modelRenderer->renderLines(cmd, vp, batch.lines, batch.color);
+        }
+
+        // Draw wall machine wires between frames
+        if (m_filesystemBrowser.isActive()) {
+            auto& grid = m_filesystemBrowser.getPlatformGrid().grid();
+            std::vector<glm::vec3> wireLines;
+            std::vector<glm::vec3> runningWireLines;
+            std::vector<glm::vec3> completeWireLines;
+            for (const auto& wire : grid.wires) {
+                if (wire.fromFrame < 0 || wire.fromFrame >= static_cast<int>(grid.frames.size()) ||
+                    wire.toFrame < 0 || wire.toFrame >= static_cast<int>(grid.frames.size()))
+                    continue;
+                auto& f1 = grid.frames[wire.fromFrame];
+                auto& f2 = grid.frames[wire.toFrame];
+                glm::vec3 p1(f1.worldX, f1.worldY, f1.worldZ);
+                glm::vec3 p2(f2.worldX, f2.worldY, f2.worldZ);
+                // Offset slightly from wall
+                float yaw1 = f1.yawDeg * static_cast<float>(M_PI) / 180.0f;
+                float yaw2 = f2.yawDeg * static_cast<float>(M_PI) / 180.0f;
+                p1.x += sinf(yaw1) * 0.3f; p1.z += cosf(yaw1) * 0.3f;
+                p2.x += sinf(yaw2) * 0.3f; p2.z += cosf(yaw2) * 0.3f;
+
+                // Color by machine state
+                MachineState mState = MachineState::Idle;
+                // Check if either endpoint is a machine
+                if (grid.frames[wire.fromFrame].frameType == FrameType::Machine)
+                    mState = m_wallMachine.getState(wire.fromFrame);
+                else if (grid.frames[wire.toFrame].frameType == FrameType::Machine)
+                    mState = m_wallMachine.getState(wire.toFrame);
+
+                auto& dest = (mState == MachineState::Running) ? runningWireLines :
+                             (mState == MachineState::Complete) ? completeWireLines : wireLines;
+                dest.push_back(p1);
+                dest.push_back(p2);
+            }
+            if (!wireLines.empty())
+                m_modelRenderer->renderLines(cmd, vp, wireLines, glm::vec3(0.0f, 0.8f, 0.8f)); // cyan
+            if (!runningWireLines.empty())
+                m_modelRenderer->renderLines(cmd, vp, runningWireLines, glm::vec3(1.0f, 0.5f, 0.0f)); // orange
+            if (!completeWireLines.empty())
+                m_modelRenderer->renderLines(cmd, vp, completeWireLines, glm::vec3(0.0f, 1.0f, 0.0f)); // green
+
+            // Wire preview line while in wiring mode
+            if (m_wiringMode && m_wireSourceFrame >= 0 && m_wireSourceFrame < static_cast<int>(grid.frames.size())) {
+                auto& srcFrame = grid.frames[m_wireSourceFrame];
+                glm::vec3 srcPos(srcFrame.worldX, srcFrame.worldY, srcFrame.worldZ);
+                float srcYaw = srcFrame.yawDeg * static_cast<float>(M_PI) / 180.0f;
+                srcPos.x += sinf(srcYaw) * 0.3f;
+                srcPos.z += cosf(srcYaw) * 0.3f;
+
+                // Crosshair ray intersection with some far point
+                glm::vec3 camPos = m_camera.getPosition();
+                glm::vec3 camDir = m_camera.getFront();
+                glm::vec3 endPos = camPos + camDir * 20.0f;
+
+                std::vector<glm::vec3> previewLine = {srcPos, endPos};
+                m_modelRenderer->renderLines(cmd, vp, previewLine, glm::vec3(1.0f, 1.0f, 0.0f)); // yellow
+            }
+        }
+
+        // Draw 1m grid wireframe on platform walls when in frame placement mode
+        if (m_framePlacementMode && m_filesystemBrowser.isActive()) {
+            std::vector<glm::vec3> gridLines;
+            float platY = m_filesystemBrowser.getPlatformY();
+            for (auto& obj : m_sceneObjects) {
+                if (!obj || obj->getBuildingType() != "platform_wall") continue;
+                glm::vec3 pos = obj->getTransform().getPosition();
+                glm::vec3 sc = obj->getTransform().getScale();
+                float halfW = sc.x * 0.5f;
+                float halfZ = sc.z * 0.5f;
+                // Grid spans from platform surface to wall top (+1m for wall center offset)
+                float botY = platY;
+                float topY = platY + sc.y + 1.0f;
+
+                // +/-Z faces (front/back of walls running along X)
+                for (int face = 0; face < 2; face++) {
+                    float z = pos.z + (face == 0 ? 1.0f : -1.0f) * (halfZ + 0.06f);
+                    float startX = pos.x - halfW;
+                    float endX = pos.x + halfW;
+
+                    for (float x = std::ceil(startX); x <= endX + 0.001f; x += 1.0f) {
+                        gridLines.push_back({x, botY, z});
+                        gridLines.push_back({x, topY, z});
+                    }
+                    for (float y = std::ceil(botY); y <= topY + 0.001f; y += 1.0f) {
+                        gridLines.push_back({startX, y, z});
+                        gridLines.push_back({endX, y, z});
+                    }
+                }
+
+                // +/-X faces (sides — visible on walls perpendicular to camera)
+                for (int face = 0; face < 2; face++) {
+                    float x = pos.x + (face == 0 ? 1.0f : -1.0f) * (halfW + 0.06f);
+                    float startZ = pos.z - halfZ;
+                    float endZ = pos.z + halfZ;
+
+                    for (float z = std::ceil(startZ); z <= endZ + 0.001f; z += 1.0f) {
+                        gridLines.push_back({x, botY, z});
+                        gridLines.push_back({x, topY, z});
+                    }
+                    for (float y = std::ceil(botY); y <= topY + 0.001f; y += 1.0f) {
+                        gridLines.push_back({x, y, startZ});
+                        gridLines.push_back({x, y, endZ});
+                    }
+                }
+            }
+            if (!gridLines.empty())
+                m_modelRenderer->renderLines(cmd, vp, gridLines, glm::vec3(0.3f, 0.6f, 1.0f));
+
+            // Live frame preview — yellow wireframe showing where the frame will be placed
+            if (m_framePreviewValid) {
+                float fs = m_framePreviewSize;
+                float hs = fs * 0.5f;
+                // Push preview slightly in front of the wall grid to avoid z-fighting
+                glm::vec3 normal = {m_framePreviewNX, 0.0f, m_framePreviewNZ};
+                glm::vec3 p = m_framePreviewPos + normal * 0.1f;
+                std::vector<glm::vec3> previewLines;
+                float yawRad = m_framePreviewYaw * static_cast<float>(M_PI) / 180.0f;
+
+                glm::vec3 right = {cosf(yawRad), 0.0f, -sinf(yawRad)};
+                glm::vec3 up = {0.0f, 1.0f, 0.0f};
+
+                // Cube mesh is bottom-aligned (Y from 0 to size), X centered
+                // p.y = bottom of frame, p.x/z = center horizontally
+                glm::vec3 c0 = p + right * (-hs);                  // bottom-left
+                glm::vec3 c1 = p + right * ( hs);                  // bottom-right
+                glm::vec3 c2 = p + right * ( hs) + up * fs;        // top-right
+                glm::vec3 c3 = p + right * (-hs) + up * fs;        // top-left
+
+                // Outer rectangle (draw twice for thickness)
+                previewLines.insert(previewLines.end(), {
+                    c0, c1, c1, c2, c2, c3, c3, c0
+                });
+
+                // Cross lines for visibility
+                previewLines.push_back(c0); previewLines.push_back(c2);
+                previewLines.push_back(c1); previewLines.push_back(c3);
+
+                // Inner grid at 1m intervals
+                for (float t = 1.0f; t < fs - 0.001f; t += 1.0f) {
+                    // Horizontal lines
+                    previewLines.push_back(p + right * (-hs) + up * t);
+                    previewLines.push_back(p + right * ( hs) + up * t);
+                }
+                for (float t = -hs + 1.0f; t < hs - 0.001f; t += 1.0f) {
+                    // Vertical lines
+                    previewLines.push_back(p + right * t);
+                    previewLines.push_back(p + right * t + up * fs);
+                }
+
+                m_modelRenderer->renderLines(cmd, vp, previewLines, glm::vec3(1.0f, 1.0f, 0.0f));
+            }
         }
 
         if (m_waterRenderer && m_waterRenderer->isVisible()) {
@@ -3652,6 +3853,13 @@ private:
             if (m_toolbarSlots[i].occupied && !m_toolbarSlots[i].filePath.empty())
                 paths.insert(m_toolbarSlots[i].filePath);
         }
+        // Also exclude files placed in wall frames (same directory, no doubles)
+        if (m_filesystemBrowser.isActive()) {
+            for (const auto& fr : m_filesystemBrowser.getPlatformGrid().grid().frames) {
+                if (!fr.filePath.empty())
+                    paths.insert(fr.filePath);
+            }
+        }
         m_filesystemBrowser.setExcludedPaths(paths);
     }
 
@@ -3761,7 +3969,8 @@ private:
                         for (auto& obj : m_sceneObjects) {
                             if (obj && obj->isSelected() &&
                                 (obj->getBuildingType() == "filesystem" ||
-                                 obj->getBuildingType() == "filesystem_wall")) {
+                                 obj->getBuildingType() == "filesystem_wall" ||
+                                 obj->getBuildingType() == "wall_frame")) {
                                 hasSelection = true;
                                 break;
                             }
@@ -3962,7 +4171,7 @@ private:
 
         float speedMult = (!imguiWantsKeyboard && Input::isKeyDown(Input::KEY_LEFT_CONTROL)) ? 3.0f : 1.0f;
         glm::vec3 camPos = m_camera.getPosition();
-        float groundHeight = m_terrain.getHeightAt(camPos.x, camPos.z);
+        float groundHeight = m_isEdenOSLevel ? -10000.0f : m_terrain.getHeightAt(camPos.x, camPos.z);
 
         // In play mode, also check for non-Bullet objects we can stand on for jump detection
         // Bullet objects only block movement, they don't provide ground to stand on
@@ -4024,7 +4233,9 @@ private:
 
         // Height query function - includes terrain, AABB objects, and Bullet raycasts
         auto heightQuery = [this](float x, float z) {
-            float height = m_terrain.getHeightAt(x, z);
+            // In EDEN OS mode there's no terrain — use a very low floor so player
+            // can descend freely through the silo (gravity still works via AABB objects)
+            float height = m_isEdenOSLevel ? -10000.0f : m_terrain.getHeightAt(x, z);
             const float playerRadius = 0.15f;
             glm::vec3 camPos = m_camera.getPosition();
 
@@ -4058,11 +4269,59 @@ private:
 
         glm::vec3 oldCameraPos = m_camera.getPosition();
 
-        // Double-tap space toggles fly/walk mode
+        // Double-tap space toggles fly/walk mode; spacebar on selected spinning model toggles spin
         if (m_isPlayMode && !imguiWantsKeyboard && !m_inConversation && !m_quickChatMode) {
             if (Input::isKeyPressed(Input::KEY_SPACE)) {
-                float groundHeight = heightQuery(m_camera.getPosition().x, m_camera.getPosition().z);
-                m_camera.onSpacePressed(groundHeight);
+                // Check if any selected filesystem model has a spin — toggle it
+                bool handledSpin = false;
+                if (m_filesystemBrowser.isActive()) {
+                    for (auto& obj : m_sceneObjects) {
+                        if (!obj || !obj->isSelected()) continue;
+                        if (obj->getBuildingType() == "filesystem") {
+                            if (m_filesystemBrowser.toggleSpin(obj.get()))
+                                handledSpin = true;
+                        }
+                    }
+                }
+                if (!handledSpin) {
+                    float groundHeight = heightQuery(m_camera.getPosition().x, m_camera.getPosition().z);
+                    m_camera.onSpacePressed(groundHeight);
+                }
+            }
+        }
+
+        // Enter on selected .lime filesystem object: activate as widget machine
+        if (m_isPlayMode && !imguiWantsKeyboard && !m_inConversation && !m_quickChatMode &&
+            m_filesystemBrowser.isActive() && Input::isKeyPressed(Input::KEY_ENTER)) {
+            // Find a selected .lime object — collect info before modifying the vector
+            std::string activatePath;
+            glm::vec3 activatePos{0.0f};
+            int activateIdx = -1;
+            for (int si = 0; si < (int)m_sceneObjects.size(); si++) {
+                auto& obj = m_sceneObjects[si];
+                if (!obj || !obj->isSelected()) continue;
+                if (obj->getBuildingType() != "filesystem") continue;
+                std::string target = obj->getTargetLevel();
+                if (target.size() <= 5 || target.substr(0, 5) != "fs://") continue;
+                std::string fp = target.substr(5);
+                std::string ext;
+                auto dotPos = fp.rfind('.');
+                if (dotPos != std::string::npos) ext = fp.substr(dotPos);
+                std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+                if (ext != ".lime") continue;
+                activatePath = fp;
+                activatePos = obj->getTransform().getPosition();
+                activateIdx = si;
+                m_filesystemBrowser.toggleSpin(obj.get());
+                obj->setSelected(false);
+                break;
+            }
+            if (activateIdx >= 0) {
+                deleteObject(activateIdx);
+                m_activatedWidgets.emplace_back();
+                m_activatedWidgets.back().spawnFromLime(
+                    activatePath, activatePos, activatePos.y,
+                    &m_sceneObjects, m_modelRenderer.get());
             }
         }
 
@@ -4816,8 +5075,11 @@ private:
                     m_filesystemBrowser.navigate(homePath);
                     m_filesystemBrowser.processNavigation();
 
-                    // Teleport into the silo
-                    glm::vec3 galleryCam(32.0f, 102.7f, 0.0f);
+                    // Teleport onto the platform (top of silo)
+                    // Platform slab is 1.0 unit thick (cube mesh bottom-aligned), surface = platY + 1.0
+                    // Offset from center to avoid the hole (holeHalfSize = 8m)
+                    float platY = m_filesystemBrowser.getPlatformY();
+                    glm::vec3 galleryCam(spawnPos.x + 10.0f, platY + 1.0f + 1.7f, spawnPos.z);
                     m_camera.setPosition(galleryCam);
                     if (m_characterController) {
                         m_characterController->setPosition(galleryCam);
@@ -5000,11 +5262,36 @@ private:
         }
         wasHomeDown = homeDown;
 
-        // M key - toggle zone map
+        // M key - toggle zone map or platform grid map mode
         static bool wasMKeyDown = false;
         bool mKeyDown = Input::isKeyDown(Input::KEY_M);
         if (mKeyDown && !wasMKeyDown && !ImGui::GetIO().WantTextInput) {
-            m_showZoneMap = !m_showZoneMap;
+            if (m_isPlayMode && m_filesystemBrowser.isActive() && !m_mapModeActive) {
+                // Enter platform grid map mode
+                m_mapModeActive = true;
+                // Copy current grid for editing
+                m_mapGridEdit = m_filesystemBrowser.getPlatformGrid().grid();
+                // Reset zoom/pan
+                m_mapZoom = 1.0f;
+                m_mapPan = {0.0f, 0.0f};
+                m_mapPanning = false;
+                // Move camera to top-down view
+                m_mapModeSavedCamPos = m_camera.getPosition();
+                m_mapModeSavedYaw = m_camera.getYaw();
+                m_mapModeSavedPitch = m_camera.getPitch();
+                m_playModeCursorVisible = true;
+                Input::setMouseCaptured(false);
+            } else if (m_mapModeActive) {
+                // Cancel map mode (don't apply changes)
+                m_mapModeActive = false;
+                m_camera.setPosition(m_mapModeSavedCamPos);
+                m_camera.setYaw(m_mapModeSavedYaw);
+                m_camera.setPitch(m_mapModeSavedPitch);
+                m_playModeCursorVisible = false;
+                Input::setMouseCaptured(true);
+            } else {
+                m_showZoneMap = !m_showZoneMap;
+            }
         }
         wasMKeyDown = mKeyDown;
 
@@ -5053,7 +5340,7 @@ private:
                 for (auto& obj : m_sceneObjects) {
                     if (!obj || !obj->isSelected()) continue;
                     const auto& bt = obj->getBuildingType();
-                    if (bt != "filesystem" && bt != "filesystem_wall") continue;
+                    if (bt != "filesystem" && bt != "filesystem_wall" && bt != "wall_frame") continue;
                     std::string target = obj->getTargetLevel();
                     if (target.rfind("fs://", 0) == 0 && target.size() > 5) {
                         std::string path = target.substr(5);
@@ -5118,10 +5405,31 @@ private:
                             // Clear the parent wall's targetLevel so it becomes available again
                             for (auto& wallObj : m_sceneObjects) {
                                 if (!wallObj) continue;
-                                if (wallObj->getBuildingType() != "filesystem_wall") continue;
-                                if (wallObj->getTargetLevel() == "fs://" + path) {
-                                    wallObj->setTargetLevel("");
-                                    break;
+                                const auto& wbt = wallObj->getBuildingType();
+                                if (wbt == "filesystem_wall") {
+                                    if (wallObj->getTargetLevel() == "fs://" + path) {
+                                        wallObj->setTargetLevel("");
+                                        break;
+                                    }
+                                } else if (wbt == "wall_frame") {
+                                    if (wallObj->getTargetLevel() == "fs://" + path) {
+                                        // Restore frame visual — find matching WallFrame
+                                        wallObj->setTargetLevel("");
+                                        auto& pg = m_filesystemBrowser.getPlatformGrid();
+                                        glm::vec3 fp = wallObj->getTransform().getPosition();
+                                        for (auto& fr : pg.grid().frames) {
+                                            if (std::abs(fr.worldX - fp.x) < 0.1f &&
+                                                std::abs(fr.worldY - fp.y) < 0.1f &&
+                                                std::abs(fr.worldZ - fp.z) < 0.1f) {
+                                                fr.filePath.clear();
+                                                float s = static_cast<float>(fr.size);
+                                                wallObj->getTransform().setScale({s, s, 0.1f});
+                                                break;
+                                            }
+                                        }
+                                        pg.saveConfig(m_filesystemBrowser.getCurrentPath());
+                                        break;
+                                    }
                                 }
                             }
                             destroySlotThumbnail(i);
@@ -5159,6 +5467,45 @@ private:
                             saveInventorySlot(i);
                             syncExcludedPaths();
                         } else if (m_toolbarSlots[i].occupied && count == 0) {
+                            // Ctrl+Number: functional placement on any collidable surface
+                            bool ctrlHeldForDrop = Input::isKeyDown(Input::KEY_LEFT_CONTROL) || Input::isKeyDown(Input::KEY_RIGHT_CONTROL);
+                            if (ctrlHeldForDrop) {
+                                float aspect = static_cast<float>(getWindow().getWidth()) / getWindow().getHeight();
+                                glm::mat4 proj = m_camera.getProjectionMatrix(aspect, 0.1f, 5000.0f);
+                                glm::mat4 view = m_camera.getViewMatrix();
+                                glm::mat4 invVP = glm::inverse(proj * view);
+                                glm::vec4 nearPt = invVP * glm::vec4(0, 0, -1, 1); nearPt /= nearPt.w;
+                                glm::vec4 farPt  = invVP * glm::vec4(0, 0,  1, 1); farPt  /= farPt.w;
+                                glm::vec3 rayO = glm::vec3(nearPt);
+                                glm::vec3 rayD = glm::normalize(glm::vec3(farPt - nearPt));
+
+                                float closestDist = std::numeric_limits<float>::max();
+                                SceneObject* hitObj = nullptr;
+                                for (auto& obj : m_sceneObjects) {
+                                    if (!obj || !obj->isVisible()) continue;
+                                    float dist = obj->getWorldBounds().intersect(rayO, rayD);
+                                    if (dist >= 0 && dist < 200.0f && dist < closestDist) {
+                                        closestDist = dist;
+                                        hitObj = obj.get();
+                                    }
+                                }
+                                if (hitObj) {
+                                    float surfaceY = hitObj->getWorldBounds().max.y;
+                                    glm::vec3 hitPoint = rayO + rayD * closestDist;
+                                    glm::vec3 spawnPos(hitPoint.x, surfaceY, hitPoint.z);
+
+                                    m_filesystemBrowser.spawnFileAtPosition(m_toolbarSlots[i].filePath, spawnPos);
+
+                                    destroySlotThumbnail(i);
+                                    m_toolbarSlots[i].occupied = false;
+                                    m_toolbarSlots[i].filePath.clear();
+                                    m_toolbarSlots[i].displayName.clear();
+                                    saveInventorySlot(i);
+                                    syncExcludedPaths();
+                                }
+                                continue; // skip wall-drop logic below
+                            }
+
                             // Drop-to-wall: press number key with occupied slot, no FS object selected
                             // Raycast from crosshair to find an empty filesystem_wall
                             float aspect = static_cast<float>(getWindow().getWidth()) / getWindow().getHeight();
@@ -5174,8 +5521,9 @@ private:
                             SceneObject* hitWall = nullptr;
                             for (auto& obj : m_sceneObjects) {
                                 if (!obj) continue;
-                                if (obj->getBuildingType() != "filesystem_wall") continue;
-                                // Only target empty walls
+                                const auto& bt = obj->getBuildingType();
+                                if (bt != "filesystem_wall" && bt != "platform_wall" && bt != "wall_frame") continue;
+                                // Only target empty walls/frames
                                 const auto& tl = obj->getTargetLevel();
                                 if (!tl.empty()) continue;
                                 float dist = obj->getWorldBounds().intersect(rayO, rayD);
@@ -5185,11 +5533,33 @@ private:
                                 }
                             }
                             if (hitWall) {
-                                glm::vec3 wallPos = hitWall->getTransform().getPosition();
-                                glm::vec3 wallScale = hitWall->getTransform().getScale();
-                                float wallYaw = hitWall->getEulerRotation().y;
-                                hitWall->setTargetLevel("fs://" + m_toolbarSlots[i].filePath);
-                                m_filesystemBrowser.spawnFileAtWall(m_toolbarSlots[i].filePath, wallPos, wallScale, wallYaw);
+                                if (hitWall->getBuildingType() == "wall_frame") {
+                                    // Drop file into wall frame
+                                    m_filesystemBrowser.spawnFileAtFrame(m_toolbarSlots[i].filePath, hitWall);
+                                    // Update the WallFrame data
+                                    auto& pg = m_filesystemBrowser.getPlatformGrid();
+                                    glm::vec3 fp = hitWall->getTransform().getPosition();
+                                    std::string dropFilename = std::filesystem::path(m_toolbarSlots[i].filePath).filename().string();
+                                    for (auto& fr : pg.grid().frames) {
+                                        if (std::abs(fr.worldX - fp.x) < 0.1f &&
+                                            std::abs(fr.worldY - fp.y) < 0.1f &&
+                                            std::abs(fr.worldZ - fp.z) < 0.1f) {
+                                            fr.filePath = m_toolbarSlots[i].filePath;
+                                            FilesystemBrowser::parseFrameType(dropFilename, fr);
+                                            break;
+                                        }
+                                    }
+                                    // Hide the frame visual (scale to zero)
+                                    hitWall->getTransform().setScale({0.0f, 0.0f, 0.0f});
+                                    hitWall->setTargetLevel("fs://" + m_toolbarSlots[i].filePath);
+                                    pg.saveConfig(m_filesystemBrowser.getCurrentPath());
+                                } else {
+                                    glm::vec3 wallPos = hitWall->getTransform().getPosition();
+                                    glm::vec3 wallScale = hitWall->getTransform().getScale();
+                                    float wallYaw = hitWall->getEulerRotation().y;
+                                    hitWall->setTargetLevel("fs://" + m_toolbarSlots[i].filePath);
+                                    m_filesystemBrowser.spawnFileAtWall(m_toolbarSlots[i].filePath, wallPos, wallScale, wallYaw);
+                                }
                                 destroySlotThumbnail(i);
                                 m_toolbarSlots[i].occupied = false;
                                 m_toolbarSlots[i].filePath.clear();
@@ -5233,8 +5603,16 @@ private:
                                 if (hitSlot) {
                                     if (hitWidgetSlot) {
                                         // Widget slot drop
+                                        bool slotHandled = false;
                                         if (auto* forge = m_filesystemBrowser.getForgeRoom()) {
-                                            forge->getWidgetKit().handleSlotDrop(hitSlot, m_toolbarSlots[i].filePath);
+                                            slotHandled = forge->getWidgetKit().handleSlotDrop(hitSlot, m_toolbarSlots[i].filePath);
+                                        }
+                                        if (!slotHandled) {
+                                            for (auto& wk : m_activatedWidgets) {
+                                                if (wk.handleSlotDrop(hitSlot, m_toolbarSlots[i].filePath)) { slotHandled = true; break; }
+                                            }
+                                        }
+                                        if (slotHandled) {
                                             destroySlotThumbnail(i);
                                             m_toolbarSlots[i].occupied = false;
                                             m_toolbarSlots[i].filePath.clear();
@@ -5355,6 +5733,163 @@ private:
         }
         wasGKeyDown = gKeyDown;
 
+        // Ctrl+W — wire mode: connect two wall frames
+        {
+            static bool wasWireKey = false;
+            bool wireKey = Input::isKeyDown(Input::KEY_W) && ctrlDown;
+            if (wireKey && !wasWireKey && m_isPlayMode && m_filesystemBrowser.isActive() &&
+                !ImGui::GetIO().WantCaptureKeyboard) {
+                handleWireKeyPress();
+            }
+            wasWireKey = wireKey;
+        }
+
+    }
+
+    // Find the frame index in PlatformGrid::frames closest to a world position
+    int findFrameIndexAtPos(const glm::vec3& pos) {
+        auto& frames = m_filesystemBrowser.getPlatformGrid().grid().frames;
+        for (int i = 0; i < static_cast<int>(frames.size()); i++) {
+            if (std::abs(frames[i].worldX - pos.x) < 0.5f &&
+                std::abs(frames[i].worldY - pos.y) < 0.5f &&
+                std::abs(frames[i].worldZ - pos.z) < 0.5f) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    // Find scene object that's a wall_frame or typed frame under crosshair
+    SceneObject* findFrameUnderCrosshair(float maxDist = 200.0f) {
+        float aspect = static_cast<float>(getWindow().getWidth()) / getWindow().getHeight();
+        glm::mat4 proj = m_camera.getProjectionMatrix(aspect, 0.1f, 5000.0f);
+        glm::mat4 view = m_camera.getViewMatrix();
+        glm::mat4 invVP = glm::inverse(proj * view);
+        glm::vec4 nearPt = invVP * glm::vec4(0, 0, -1, 1); nearPt /= nearPt.w;
+        glm::vec4 farPt  = invVP * glm::vec4(0, 0,  1, 1); farPt  /= farPt.w;
+        glm::vec3 rayO = glm::vec3(nearPt);
+        glm::vec3 rayD = glm::normalize(glm::vec3(farPt - nearPt));
+
+        float closestDist = maxDist;
+        SceneObject* hitFrame = nullptr;
+        for (auto& obj : m_sceneObjects) {
+            if (!obj) continue;
+            const auto& bt = obj->getBuildingType();
+            if (bt != "wall_frame") continue;
+            float dist = obj->getWorldBounds().intersect(rayO, rayD);
+            if (dist >= 0 && dist < closestDist) {
+                closestDist = dist;
+                hitFrame = obj.get();
+            }
+        }
+        // Also check filesystem objects placed on frames (they have targetLevel starting with "fs://")
+        for (auto& obj : m_sceneObjects) {
+            if (!obj) continue;
+            const auto& bt = obj->getBuildingType();
+            if (bt != "filesystem") continue;
+            const auto& tl = obj->getTargetLevel();
+            if (tl.empty() || tl.substr(0, 5) != "fs://") continue;
+            float dist = obj->getWorldBounds().intersect(rayO, rayD);
+            if (dist >= 0 && dist < closestDist) {
+                closestDist = dist;
+                hitFrame = obj.get();
+            }
+        }
+        return hitFrame;
+    }
+
+    void handleWireKeyPress() {
+        auto& pg = m_filesystemBrowser.getPlatformGrid();
+        auto& grid = pg.grid();
+
+        SceneObject* hitFrame = findFrameUnderCrosshair();
+        if (!hitFrame) {
+            if (m_wiringMode) {
+                m_wiringMode = false;
+                m_wireSourceFrame = -1;
+                std::cout << "[Wire] Wiring cancelled (no frame under crosshair)" << std::endl;
+            }
+            return;
+        }
+
+        glm::vec3 framePos = hitFrame->getTransform().getPosition();
+        int frameIdx = findFrameIndexAtPos(framePos);
+        if (frameIdx < 0) {
+            std::cout << "[Wire] Frame not found in grid data" << std::endl;
+            return;
+        }
+
+        if (!m_wiringMode) {
+            // First press: select source
+            m_wiringMode = true;
+            m_wireSourceFrame = frameIdx;
+            std::cout << "[Wire] Source frame " << frameIdx
+                      << " (type=" << static_cast<int>(grid.frames[frameIdx].frameType) << ")" << std::endl;
+        } else {
+            // Second press: complete wire
+            int toFrame = frameIdx;
+            if (toFrame == m_wireSourceFrame) {
+                std::cout << "[Wire] Cannot wire frame to itself" << std::endl;
+                m_wiringMode = false;
+                m_wireSourceFrame = -1;
+                return;
+            }
+
+            // Validation: widget/input → machine, machine → output/log only
+            FrameType srcType = grid.frames[m_wireSourceFrame].frameType;
+            FrameType dstType = grid.frames[toFrame].frameType;
+            bool valid = false;
+
+            // Input/widget → machine
+            if ((srcType == FrameType::Input || srcType == FrameType::Button ||
+                 srcType == FrameType::Checkbox || srcType == FrameType::Slider) &&
+                dstType == FrameType::Machine) {
+                valid = true;
+            }
+            // Machine → output/log
+            if (srcType == FrameType::Machine &&
+                (dstType == FrameType::Output || dstType == FrameType::Log)) {
+                valid = true;
+            }
+            // Also allow reverse direction for convenience
+            if ((dstType == FrameType::Input || dstType == FrameType::Button ||
+                 dstType == FrameType::Checkbox || dstType == FrameType::Slider) &&
+                srcType == FrameType::Machine) {
+                // Swap so it's always widget→machine
+                std::swap(m_wireSourceFrame, toFrame);
+                valid = true;
+            }
+            if (dstType == FrameType::Machine &&
+                (srcType == FrameType::Output || srcType == FrameType::Log)) {
+                std::swap(m_wireSourceFrame, toFrame);
+                valid = true;
+            }
+
+            if (!valid) {
+                std::cout << "[Wire] Invalid connection: type " << static_cast<int>(srcType)
+                          << " -> " << static_cast<int>(dstType) << std::endl;
+            } else {
+                // Check for duplicate
+                bool duplicate = false;
+                for (const auto& w : grid.wires) {
+                    if (w.fromFrame == m_wireSourceFrame && w.toFrame == toFrame) {
+                        duplicate = true;
+                        break;
+                    }
+                }
+                if (!duplicate) {
+                    grid.wires.push_back({m_wireSourceFrame, toFrame});
+                    pg.saveConfig(m_filesystemBrowser.getCurrentPath());
+                    std::cout << "[Wire] Connected frame " << m_wireSourceFrame
+                              << " -> " << toFrame << std::endl;
+                } else {
+                    std::cout << "[Wire] Wire already exists" << std::endl;
+                }
+            }
+
+            m_wiringMode = false;
+            m_wireSourceFrame = -1;
+        }
     }
 
     void trackFPS(float deltaTime) {
@@ -5535,13 +6070,14 @@ private:
                 for (auto& obj : m_sceneObjects) {
                     if (!obj) continue;
                     const auto& bt = obj->getBuildingType();
-                    if (bt != "filesystem" && bt != "filesystem_wall" && bt != "image_desc") continue;
+                    if (bt != "filesystem" && bt != "filesystem_wall" && bt != "image_desc" &&
+                        bt != "platform_wall" && bt != "wall_frame") continue;
                     float dist = obj->getWorldBounds().intersect(rayO, rayD);
                     if (dist < 0 || dist >= 200.0f) continue;
                     // Walls' rotated AABBs inflate and can shadow doors behind them.
                     // Penalize wall hits so doors/files at similar distances always win.
                     float effectiveDist = dist;
-                    if (bt == "filesystem_wall") effectiveDist += 3.0f;
+                    if (bt == "filesystem_wall" || bt == "platform_wall" || bt == "wall_frame") effectiveDist += 3.0f;
                     if (effectiveDist < closestDist) {
                         closestDist = effectiveDist;
                         closestHit = obj.get();
@@ -5550,11 +6086,197 @@ private:
                 return closestHit;
             };
 
+            // Frame placement mode — continuous preview + click to place
+            m_framePreviewValid = false;
+            if (m_framePlacementMode) {
+                glm::vec3 rayO, rayD;
+                doCrosshairRay(rayO, rayD);
+
+                // Raycast for platform_wall only
+                float closestDist = std::numeric_limits<float>::max();
+                SceneObject* hitWall = nullptr;
+                for (auto& obj : m_sceneObjects) {
+                    if (!obj) continue;
+                    if (obj->getBuildingType() != "platform_wall") continue;
+                    float dist = obj->getWorldBounds().intersect(rayO, rayD);
+                    if (dist >= 0 && dist < 200.0f && dist < closestDist) {
+                        closestDist = dist;
+                        hitWall = obj.get();
+                    }
+                }
+
+                if (hitWall) {
+                    glm::vec3 hitPt = rayO + rayD * closestDist;
+                    glm::vec3 wallPos = hitWall->getTransform().getPosition();
+                    glm::vec3 wallScale = hitWall->getTransform().getScale();
+                    float halfW = wallScale.x * 0.5f;
+                    float halfH = wallScale.y * 0.5f;
+                    float halfZ = wallScale.z * 0.5f;
+
+                    // Determine which face was hit
+                    float dx = hitPt.x - wallPos.x;
+                    float dz = hitPt.z - wallPos.z;
+                    float distToXFace = std::abs(std::abs(dx) - halfW);
+                    float distToZFace = std::abs(std::abs(dz) - halfZ);
+
+                    float nx = 0.0f, nz_val = 0.0f;
+                    float yawDeg = 0.0f;
+                    bool hitXFace = (distToXFace < distToZFace);
+
+                    if (hitXFace) {
+                        nx = (dx > 0) ? 1.0f : -1.0f;
+                        yawDeg = (dx > 0) ? 90.0f : -90.0f;
+                    } else {
+                        nz_val = (dz > 0) ? 1.0f : -1.0f;
+                        yawDeg = (dz > 0) ? 0.0f : 180.0f;
+                    }
+
+                    float frameSize = static_cast<float>(m_frameSizeSetting);
+                    float halfFrame = frameSize * 0.5f;
+
+                    float snappedH, snappedY, frameX, frameZ;
+                    float faceMinH, faceMaxH;
+                    // Frame Y bounds: platform surface to wallHeight above it
+                    float platSurface = m_filesystemBrowser.getPlatformY();
+                    float wallMinY = platSurface;
+                    float wallMaxY = platSurface + wallScale.y + 1.0f;
+
+                    if (hitXFace) {
+                        faceMinH = wallPos.z - halfZ;
+                        faceMaxH = wallPos.z + halfZ;
+                        float edge = std::round(hitPt.z - halfFrame);
+                        snappedH = std::clamp(edge + halfFrame, faceMinH + halfFrame, faceMaxH - halfFrame);
+                        frameX = wallPos.x + nx * (halfW + 0.05f);
+                        frameZ = snappedH;
+                    } else {
+                        faceMinH = wallPos.x - halfW;
+                        faceMaxH = wallPos.x + halfW;
+                        float edge = std::round(hitPt.x - halfFrame);
+                        snappedH = std::clamp(edge + halfFrame, faceMinH + halfFrame, faceMaxH - halfFrame);
+                        frameX = snappedH;
+                        frameZ = wallPos.z + nz_val * (halfZ + 0.05f);
+                    }
+
+                    // Snap frame bottom edge to 1m grid
+                    float botEdge = std::round(hitPt.y - halfFrame);
+                    snappedY = std::clamp(botEdge, wallMinY, wallMaxY - frameSize);
+
+                    float faceWidth = faceMaxH - faceMinH;
+                    bool fits = (frameSize <= faceWidth + 0.01f) &&
+                                (frameSize <= wallScale.y + 0.01f);
+
+                    if (fits) {
+                        // Update live preview
+                        m_framePreviewValid = true;
+                        m_framePreviewPos = {frameX, snappedY, frameZ};
+                        m_framePreviewYaw = yawDeg;
+                        m_framePreviewSize = frameSize;
+                        m_framePreviewNX = nx;
+                        m_framePreviewNZ = nz_val;
+
+                        // On click — actually place the frame
+                        if (leftPressed && m_shootCooldown <= 0.0f) {
+                            auto& pg = m_filesystemBrowser.getPlatformGrid();
+                            bool overlaps = false;
+                            for (const auto& ef : pg.grid().frames) {
+                                if (std::abs(ef.normalX - nx) > 0.1f || std::abs(ef.normalZ - nz_val) > 0.1f) continue;
+                                float eHalf = ef.size * 0.5f;
+                                bool overlapX = std::abs(frameX - ef.worldX) < (halfFrame + eHalf - 0.01f);
+                                // Both Y values are bottom-aligned
+                                float newTop = snappedY + frameSize;
+                                float efTop = ef.worldY + ef.size;
+                                bool overlapY = (snappedY < efTop - 0.01f) && (newTop > ef.worldY + 0.01f);
+                                bool overlapZ = std::abs(frameZ - ef.worldZ) < (halfFrame + eHalf - 0.01f);
+                                if (overlapX && overlapY && overlapZ) {
+                                    overlaps = true;
+                                    break;
+                                }
+                            }
+
+                            if (!overlaps) {
+                                eden::WallFrame newFrame;
+                                newFrame.worldX = frameX;
+                                newFrame.worldY = snappedY;
+                                newFrame.worldZ = frameZ;
+                                newFrame.size = m_frameSizeSetting;
+                                newFrame.normalX = nx;
+                                newFrame.normalZ = nz_val;
+                                newFrame.yawDeg = yawDeg;
+                                pg.grid().frames.push_back(newFrame);
+
+                                pg.spawnFrameObjects(m_filesystemBrowser.getSpawnOrigin(),
+                                                     m_filesystemBrowser.getPlatformY());
+                                pg.saveConfig(m_filesystemBrowser.getCurrentPath());
+                            }
+                            m_shootCooldown = 0.2f;
+                        }
+                    }
+                }
+            }
+
             // Mouse just pressed — start potential drag or immediate action
-            if (leftPressed && m_shootCooldown <= 0.0f) {
+            if (leftPressed && !m_framePlacementMode && m_shootCooldown <= 0.0f) {
                 glm::vec3 rayO, rayD;
                 doCrosshairRay(rayO, rayD);
                 SceneObject* hit = raycastFS(rayO, rayD);
+
+                // Check if hit is a button frame — trigger wired machine
+                if (hit && leftPressed) {
+                    glm::vec3 hitPos = hit->getTransform().getPosition();
+                    int hitFrameIdx = findFrameIndexAtPos(hitPos);
+                    if (hitFrameIdx >= 0) {
+                        auto& grid = m_filesystemBrowser.getPlatformGrid().grid();
+                        auto& hitFrame = grid.frames[hitFrameIdx];
+                        if (hitFrame.frameType == FrameType::Button) {
+                            // Find the machine this button is wired to
+                            for (const auto& wire : grid.wires) {
+                                int machIdx = -1;
+                                if (wire.fromFrame == hitFrameIdx &&
+                                    wire.toFrame >= 0 && wire.toFrame < static_cast<int>(grid.frames.size()) &&
+                                    grid.frames[wire.toFrame].frameType == FrameType::Machine)
+                                    machIdx = wire.toFrame;
+                                if (wire.toFrame == hitFrameIdx &&
+                                    wire.fromFrame >= 0 && wire.fromFrame < static_cast<int>(grid.frames.size()) &&
+                                    grid.frames[wire.fromFrame].frameType == FrameType::Machine)
+                                    machIdx = wire.fromFrame;
+                                if (machIdx < 0) continue;
+
+                                // Load schema if needed
+                                if (!m_wallMachineSchemaLoaded) {
+                                    std::string schemaPath = std::string(CMAKE_SOURCE_DIR) +
+                                        "/examples/terrain_editor/assets/models/mach_hunyuan3d.json";
+                                    m_wallMachine.loadSchema(schemaPath);
+                                    m_wallMachineSchemaLoaded = true;
+                                }
+
+                                // Collect input image from wired inp_ frame
+                                std::string imagePath;
+                                std::vector<WallMachineInstance::CollectedParam> params;
+                                for (const auto& w2 : grid.wires) {
+                                    int srcIdx = -1;
+                                    if (w2.toFrame == machIdx) srcIdx = w2.fromFrame;
+                                    else if (w2.fromFrame == machIdx) srcIdx = w2.toFrame;
+                                    if (srcIdx < 0 || srcIdx >= static_cast<int>(grid.frames.size())) continue;
+                                    auto& srcFrame = grid.frames[srcIdx];
+                                    if (srcFrame.frameType == FrameType::Input && !srcFrame.filePath.empty()) {
+                                        imagePath = srcFrame.filePath;
+                                        params.push_back({"image", imagePath});
+                                    }
+                                }
+
+                                if (!imagePath.empty()) {
+                                    std::string outputDir = std::filesystem::path(imagePath).parent_path().string();
+                                    m_wallMachine.execute(machIdx, imagePath, outputDir, params);
+                                    std::cout << "[WallMachine] Triggered from button, image=" << imagePath << std::endl;
+                                } else {
+                                    std::cout << "[WallMachine] No input image wired to machine" << std::endl;
+                                }
+                                break;
+                            }
+                            m_shootCooldown = 0.3f;
+                        }
+                    }
+                }
 
                 if (hit && hit->isDoor()) {
                     // Door — navigate immediately
@@ -5562,17 +6284,12 @@ private:
                     if (target.rfind("fs://", 0) == 0) {
                         // Keep spawn origin unchanged — silo rebuilds at same center
                         m_filesystemBrowser.navigate(target.substr(5));
-                        glm::vec3 camPos = m_filesystemBrowser.getSpawnOrigin();
-                        camPos.x += 32.0f; // offset past ceiling hole
-                        camPos.y = 102.7f; // silo floor (ceiling top 101 + eye height 1.7)
-                        m_camera.setPosition(camPos);
-                        if (m_characterController) {
-                            m_characterController->setPosition(camPos);
-                        }
+                        m_pendingTeleportToPlatform = true;
                     }
                     m_shootCooldown = 0.2f;
                 } else if (hit && ((hit->getBuildingType() == "filesystem" && !hit->isDoor()) ||
-                                    hit->getBuildingType() == "filesystem_wall")) {
+                                    hit->getBuildingType() == "filesystem_wall" ||
+                                    hit->getBuildingType() == "wall_frame")) {
                     // Unified double-click detection for both file objects and wall panels
                     float hitY = hit->getTransform().getPosition().y;
                     float prevY = m_fsDblClickTarget ? m_fsDblClickTarget->getTransform().getPosition().y : -9999.0f;
@@ -5605,7 +6322,7 @@ private:
                     for (auto& obj : m_sceneObjects) {
                         if (!obj) continue;
                         const auto& bt = obj->getBuildingType();
-                        if (bt == "filesystem" || bt == "filesystem_wall")
+                        if (bt == "filesystem" || bt == "filesystem_wall" || bt == "wall_frame")
                             obj->setSelected(false);
                     }
                     m_shootCooldown = 0.2f;
@@ -5638,11 +6355,11 @@ private:
                     for (auto& obj : m_sceneObjects) {
                         if (!obj || obj.get() == m_fsDragObject) continue;
                         const auto& bt = obj->getBuildingType();
-                        if (bt != "filesystem" && bt != "filesystem_wall") continue;
+                        if (bt != "filesystem" && bt != "filesystem_wall" && bt != "wall_frame") continue;
                         float dist = obj->getWorldBounds().intersect(rayO, rayD);
                         if (dist < 0 || dist >= 200.0f) continue;
                         float effectiveDist = dist;
-                        if (bt == "filesystem_wall") effectiveDist += 3.0f;
+                        if (bt == "filesystem_wall" || bt == "wall_frame") effectiveDist += 3.0f;
                         if (effectiveDist < closestDist) {
                             closestDist = effectiveDist;
                             hoverHit = obj.get();
@@ -5651,8 +6368,10 @@ private:
 
                     if (hoverHit) {
                         bool isFolder = (hoverHit->getBuildingType() == "filesystem" && hoverHit->isDoor());
-                        bool isWall = (hoverHit->getBuildingType() == "filesystem_wall");
-                        // Only highlight valid drop targets (folders and empty walls, not other files)
+                        bool isWall = (hoverHit->getBuildingType() == "filesystem_wall" ||
+                                       hoverHit->getBuildingType() == "platform_wall" ||
+                                       hoverHit->getBuildingType() == "wall_frame");
+                        // Only highlight valid drop targets (folders, empty walls, and frames, not other files)
                         if (isFolder || isWall) {
                             hoverHit->setSelected(true);
                             m_fsDragHoverWall = hoverHit;
@@ -5720,11 +6439,7 @@ private:
                             }
                         }
                     } else if (!srcPath.empty() && !droppedOnFolder) {
-                        // Drop onto wall — move the file object to this wall slot
-                        glm::vec3 wallPos = m_fsDragHoverWall->getTransform().getPosition();
-                        glm::vec3 wallScale = m_fsDragHoverWall->getTransform().getScale();
-                        float wallYaw = m_fsDragHoverWall->getEulerRotation().y;
-
+                        // Drop onto wall or frame — move the file object
                         // Remove the visible file/folder object
                         removeSceneObjectByPath(srcPath);
                         // Clear source wall's item reference if dragged from a wall
@@ -5732,11 +6447,33 @@ private:
                             m_fsDragObject->setTargetLevel("");
                         }
 
-                        // Update destination wall's item reference
-                        m_fsDragHoverWall->setTargetLevel("fs://" + srcPath);
-
-                        // Spawn at new wall position
-                        m_filesystemBrowser.spawnFileAtWall(srcPath, wallPos, wallScale, wallYaw);
+                        if (m_fsDragHoverWall->getBuildingType() == "wall_frame") {
+                            // Drop onto wall frame
+                            m_filesystemBrowser.spawnFileAtFrame(srcPath, m_fsDragHoverWall);
+                            auto& pg = m_filesystemBrowser.getPlatformGrid();
+                            glm::vec3 fp = m_fsDragHoverWall->getTransform().getPosition();
+                            std::string dragDropFilename = std::filesystem::path(srcPath).filename().string();
+                            for (auto& fr : pg.grid().frames) {
+                                if (std::abs(fr.worldX - fp.x) < 0.1f &&
+                                    std::abs(fr.worldY - fp.y) < 0.1f &&
+                                    std::abs(fr.worldZ - fp.z) < 0.1f) {
+                                    fr.filePath = srcPath;
+                                    FilesystemBrowser::parseFrameType(dragDropFilename, fr);
+                                    break;
+                                }
+                            }
+                            m_fsDragHoverWall->getTransform().setScale({0.0f, 0.0f, 0.0f});
+                            m_fsDragHoverWall->setTargetLevel("fs://" + srcPath);
+                            pg.saveConfig(m_filesystemBrowser.getCurrentPath());
+                            syncExcludedPaths();
+                        } else {
+                            // Drop onto regular wall
+                            glm::vec3 wallPos = m_fsDragHoverWall->getTransform().getPosition();
+                            glm::vec3 wallScale = m_fsDragHoverWall->getTransform().getScale();
+                            float wallYaw = m_fsDragHoverWall->getEulerRotation().y;
+                            m_fsDragHoverWall->setTargetLevel("fs://" + srcPath);
+                            m_filesystemBrowser.spawnFileAtWall(srcPath, wallPos, wallScale, wallYaw);
+                        }
                     }
 
                     m_fsDragHoverWall->setSelected(false);
@@ -5747,7 +6484,7 @@ private:
                         for (auto& obj : m_sceneObjects) {
                             if (!obj) continue;
                             const auto& bt = obj->getBuildingType();
-                            if (bt == "filesystem" || bt == "filesystem_wall")
+                            if (bt == "filesystem" || bt == "filesystem_wall" || bt == "wall_frame")
                                 obj->setSelected(false);
                         }
                     }
@@ -9990,6 +10727,34 @@ private:
 
             ImGui::ColorEdit4("Wall Color", &cfg.wallColor.x);
             ImGui::ColorEdit4("Column Color", &cfg.columnColor.x);
+
+            if (m_filesystemBrowser.isActive()) {
+                auto& pg = m_filesystemBrowser.getPlatformGrid();
+
+                ImGui::Separator();
+                ImGui::Text("Wall Frames");
+                ImGui::SliderInt("Frame Size", &m_frameSizeSetting, 1, 16, "%dm");
+                ImGui::Checkbox("Frame Placement Mode", &m_framePlacementMode);
+                if (m_framePlacementMode) {
+                    ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f),
+                        "Click on a platform wall to place a %dm frame", m_frameSizeSetting);
+                }
+                ImGui::Text("Frames: %d", (int)pg.grid().frames.size());
+                if (ImGui::Button("Clear All Frames")) {
+                    pg.grid().frames.clear();
+                    pg.clearFrames();
+                    pg.saveConfig(m_filesystemBrowser.getCurrentPath());
+                    syncExcludedPaths();
+                }
+                ImGui::Separator();
+
+                if (ImGui::Button("Apply & Save")) {
+                    // Save this folder's platform config then rebuild
+                    pg.saveConfig(m_filesystemBrowser.getCurrentPath());
+                    m_filesystemBrowser.navigate(m_filesystemBrowser.getCurrentPath());
+                }
+            }
+
             if (ImGui::Button("Apply")) {
                 m_filesystemBrowser.navigate(m_filesystemBrowser.getCurrentPath());
             }
@@ -10125,9 +10890,214 @@ private:
         }
     }
 
+    void renderPlatformMapMode() {
+        if (!m_mapModeActive) return;
+
+        float screenW = static_cast<float>(getWindow().getWidth());
+        float screenH = static_cast<float>(getWindow().getHeight());
+
+        ImGui::SetNextWindowPos(ImVec2(0, 0));
+        ImGui::SetNextWindowSize(ImVec2(screenW, screenH));
+        ImGui::Begin("Platform Grid Map", nullptr,
+            ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
+            ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoBringToFrontOnFocus);
+
+        ImGui::SetCursorPosX((screenW - ImGui::CalcTextSize("Platform Grid Editor").x) / 2.0f);
+        ImGui::Text("Platform Grid Editor");
+
+        // Scroll wheel to zoom (works regardless of which mouse button)
+        float scrollY = ImGui::GetIO().MouseWheel;
+        if (scrollY != 0.0f) {
+            float oldZoom = m_mapZoom;
+            m_mapZoom *= (scrollY > 0) ? 1.15f : (1.0f / 1.15f);
+            m_mapZoom = std::clamp(m_mapZoom, 0.2f, 10.0f);
+            // Scale pan so the grid point under the mouse stays fixed
+            float ratio = m_mapZoom / oldZoom;
+            m_mapPan *= ratio;
+        }
+
+        // MMB drag to pan
+        if (ImGui::IsMouseClicked(ImGuiMouseButton_Middle)) {
+            m_mapPanning = true;
+            ImVec2 mp = ImGui::GetMousePos();
+            m_mapPanStart = {mp.x, mp.y};
+            m_mapPanOrigin = m_mapPan;
+        }
+        if (m_mapPanning && ImGui::IsMouseDown(ImGuiMouseButton_Middle)) {
+            ImVec2 mp = ImGui::GetMousePos();
+            m_mapPan.x = m_mapPanOrigin.x + (mp.x - m_mapPanStart.x);
+            m_mapPan.y = m_mapPanOrigin.y + (mp.y - m_mapPanStart.y);
+        }
+        if (!ImGui::IsMouseDown(ImGuiMouseButton_Middle)) {
+            m_mapPanning = false;
+        }
+
+        // Center the grid on screen with zoom and pan
+        int gridW = m_mapGridEdit.width;
+        int gridD = m_mapGridEdit.depth;
+        float baseCellPx = std::min((screenW - 100.0f) / gridW, (screenH - 160.0f) / gridD);
+        baseCellPx = std::max(baseCellPx, 8.0f);
+        float cellPx = baseCellPx * m_mapZoom;
+        float totalW = gridW * cellPx;
+        float totalH = gridD * cellPx;
+        float originX = (screenW - totalW) / 2.0f + m_mapPan.x;
+        float originY = 60.0f + m_mapPan.y;
+
+        auto* drawList = ImGui::GetWindowDrawList();
+
+        // Draw grid cells
+        for (int z = 0; z < gridD; z++) {
+            for (int x = 0; x < gridW; x++) {
+                ImVec2 tl(originX + x * cellPx, originY + z * cellPx);
+                ImVec2 br(tl.x + cellPx, tl.y + cellPx);
+
+                bool isWall = m_mapGridEdit.getCell(x, z);
+                bool wasWall = m_filesystemBrowser.getPlatformGrid().grid().getCell(x, z);
+
+                // Check if this cell is in the center hole area
+                int cx = gridW / 2;
+                int cz = gridD / 2;
+                float holeHalf = 8.0f;
+                int holeCells = static_cast<int>(holeHalf / m_mapGridEdit.cellSize);
+                bool isHole = (x >= cx - holeCells && x < cx + holeCells &&
+                               z >= cz - holeCells && z < cz + holeCells);
+
+                if (isWall && !wasWall) {
+                    // Newly added wall — green tint
+                    drawList->AddRectFilled(tl, br, IM_COL32(0, 80, 0, 255));
+                } else if (isWall) {
+                    drawList->AddRectFilled(tl, br, IM_COL32(0, 0, 0, 255));
+                } else if (!isWall && wasWall) {
+                    // Deleted wall — red tint
+                    drawList->AddRectFilled(tl, br, IM_COL32(120, 30, 30, 220));
+                } else if (isHole) {
+                    drawList->AddRectFilled(tl, br, IM_COL32(100, 30, 30, 200));
+                } else {
+                    drawList->AddRectFilled(tl, br, IM_COL32(50, 50, 55, 100));
+                }
+                drawList->AddRect(tl, br, IM_COL32(90, 90, 100, 160));
+            }
+        }
+
+        // Handle left-click on grid (toggle / paint walls)
+        if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+            ImVec2 mousePos = ImGui::GetMousePos();
+            int clickX = static_cast<int>((mousePos.x - originX) / cellPx);
+            int clickZ = static_cast<int>((mousePos.y - originY) / cellPx);
+            if (clickX >= 0 && clickX < gridW && clickZ >= 0 && clickZ < gridD) {
+                m_mapGridEdit.toggleCell(clickX, clickZ);
+            }
+        }
+
+        // Left-drag painting (place walls)
+        if (ImGui::IsMouseDown(ImGuiMouseButton_Left) && !ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+            ImVec2 mousePos = ImGui::GetMousePos();
+            int hoverX = static_cast<int>((mousePos.x - originX) / cellPx);
+            int hoverZ = static_cast<int>((mousePos.y - originY) / cellPx);
+            if (hoverX >= 0 && hoverX < gridW && hoverZ >= 0 && hoverZ < gridD) {
+                m_mapGridEdit.setCell(hoverX, hoverZ, true);
+            }
+        }
+
+        // Right-click to erase a single cell
+        if (ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
+            ImVec2 mousePos = ImGui::GetMousePos();
+            int clickX = static_cast<int>((mousePos.x - originX) / cellPx);
+            int clickZ = static_cast<int>((mousePos.y - originY) / cellPx);
+            if (clickX >= 0 && clickX < gridW && clickZ >= 0 && clickZ < gridD) {
+                m_mapGridEdit.setCell(clickX, clickZ, false);
+            }
+        }
+
+        // Right-drag erasing (remove walls)
+        if (ImGui::IsMouseDown(ImGuiMouseButton_Right) && !ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
+            ImVec2 mousePos = ImGui::GetMousePos();
+            int hoverX = static_cast<int>((mousePos.x - originX) / cellPx);
+            int hoverZ = static_cast<int>((mousePos.y - originY) / cellPx);
+            if (hoverX >= 0 && hoverX < gridW && hoverZ >= 0 && hoverZ < gridD) {
+                m_mapGridEdit.setCell(hoverX, hoverZ, false);
+            }
+        }
+
+        // Accept / Cancel buttons
+        float buttonW = 120.0f;
+        float buttonY = screenH - 60.0f;
+        float buttonX = (screenW - buttonW * 2 - 20.0f) / 2.0f;
+
+        ImGui::SetCursorPos(ImVec2(buttonX, buttonY));
+        if (ImGui::Button("Accept", ImVec2(buttonW, 36.0f))) {
+            auto& pg = m_filesystemBrowser.getPlatformGrid();
+            glm::vec3 origin = m_filesystemBrowser.getSpawnOrigin();
+
+            // Preserve frames from old grid, apply new wall layout
+            auto savedFrames = pg.grid().frames;
+            pg.grid() = m_mapGridEdit;
+            pg.grid().frames = std::move(savedFrames);
+
+            // Remove frames sitting on deleted wall cells
+            float platW = pg.grid().width * pg.grid().cellSize;
+            float platD = pg.grid().depth * pg.grid().cellSize;
+            float origX = origin.x - platW / 2.0f;
+            float origZ = origin.z - platD / 2.0f;
+            float cs = pg.grid().cellSize;
+
+            auto& frames = pg.grid().frames;
+            for (auto it = frames.begin(); it != frames.end(); ) {
+                int cx = static_cast<int>((it->worldX - origX) / cs);
+                int cz = static_cast<int>((it->worldZ - origZ) / cs);
+                bool onWall = pg.grid().getCell(cx, cz) ||
+                              pg.grid().getCell(cx - 1, cz) ||
+                              pg.grid().getCell(cx + 1, cz) ||
+                              pg.grid().getCell(cx, cz - 1) ||
+                              pg.grid().getCell(cx, cz + 1);
+                if (!onWall) {
+                    it = frames.erase(it);
+                } else {
+                    ++it;
+                }
+            }
+
+            // Save the updated grid + frames, then full re-navigate
+            // Re-navigation rebuilds everything: walls, frames, silo rings
+            // so freed files instantly appear on ring walls
+            pg.saveConfig(m_filesystemBrowser.getCurrentPath());
+            syncExcludedPaths();
+
+            // Exit map mode
+            m_mapModeActive = false;
+            m_camera.setPosition(m_mapModeSavedCamPos);
+            m_camera.setYaw(m_mapModeSavedYaw);
+            m_camera.setPitch(m_mapModeSavedPitch);
+            m_playModeCursorVisible = false;
+            Input::setMouseCaptured(true);
+
+            // Full re-navigation rebuilds silo with correct ring contents
+            if (m_filesystemBrowser.isActive()) {
+                m_filesystemBrowser.navigate(m_filesystemBrowser.getCurrentPath());
+                m_filesystemBrowser.processNavigation();
+            }
+        }
+
+        ImGui::SameLine(0, 20.0f);
+        if (ImGui::Button("Cancel", ImVec2(buttonW, 36.0f))) {
+            m_mapModeActive = false;
+            m_camera.setPosition(m_mapModeSavedCamPos);
+            m_camera.setYaw(m_mapModeSavedYaw);
+            m_camera.setPitch(m_mapModeSavedPitch);
+            m_playModeCursorVisible = false;
+            Input::setMouseCaptured(true);
+        }
+
+        ImGui::SetCursorPosX((screenW - ImGui::CalcTextSize("Left-click/drag = place walls.  Right-click/drag = erase walls.  Accept to build.").x) / 2.0f);
+        ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f), "Left-click/drag = place walls.  Right-click/drag = erase walls.  Accept to build.");
+
+        ImGui::End();
+    }
+
     void renderPlayModeUI() {
         renderPlayModeTopBar();
         renderSiloConfigWindow();
+        renderPlatformMapMode();
         renderPerfWindow();
         renderToolbarUI();
 
@@ -11496,7 +12466,7 @@ private:
             for (auto& obj : m_sceneObjects) {
                 const std::string& bt = obj->getBuildingType();
                 if (bt.empty() || bt.substr(0, 10) == "worker_at_" ||
-                    bt == "filesystem" || bt == "filesystem_wall" || bt == "image_desc" || bt == "eden_basement" || bt == "eden_basement_wall") continue;
+                    bt == "filesystem" || bt == "filesystem_wall" || bt == "image_desc" || bt == "platform_wall" || bt == "platform_slab" || bt == "wall_frame" || bt == "eden_basement" || bt == "eden_basement_wall") continue;
 
                 glm::vec3 pos = obj->getTransform().getPosition();
                 glm::ivec2 gp = m_zoneSystem->worldToGrid(pos.x, pos.z);
@@ -11605,7 +12575,7 @@ private:
                     for (auto& bobj : m_sceneObjects) {
                         const std::string& bt = bobj->getBuildingType();
                         if (bt.empty() || bt.substr(0, 10) == "worker_at_" ||
-                    bt == "filesystem" || bt == "filesystem_wall" || bt == "image_desc" || bt == "eden_basement" || bt == "eden_basement_wall") continue;
+                    bt == "filesystem" || bt == "filesystem_wall" || bt == "image_desc" || bt == "platform_wall" || bt == "platform_slab" || bt == "wall_frame" || bt == "eden_basement" || bt == "eden_basement_wall") continue;
                         glm::vec3 bpos = bobj->getTransform().getPosition();
                         glm::ivec2 bgp = m_zoneSystem->worldToGrid(bpos.x, bpos.z);
                         if (bgp.x == hoverGX && bgp.y == hoverGZ) {
@@ -11936,7 +12906,7 @@ private:
         while (it != m_sceneObjects.end()) {
             if (!*it) { ++it; continue; }
             const auto& bt = (*it)->getBuildingType();
-            bool isFS = (bt == "filesystem" || bt == "filesystem_wall" || bt == "image_desc");
+            bool isFS = (bt == "filesystem" || bt == "filesystem_wall" || bt == "image_desc" || bt == "platform_wall" || bt == "platform_slab" || bt == "wall_frame");
             bool isAvatar = (it->get() == m_playerAvatar);
             if (isFS || isAvatar) {
                 if (isAvatar) m_playerAvatar = nullptr;
@@ -12784,8 +13754,9 @@ private:
                         m_filesystemBrowser.setSpawnOrigin(origin);
                         m_filesystemBrowser.navigate(fsPath);
                         m_filesystemBrowser.processNavigation(); // spawn immediately
-                        // Teleport camera into the silo (baseY=100, offset past ceiling hole)
-                        glm::vec3 siloCam(origin.x + 32.0f, 102.7f, origin.z);
+                        // Teleport camera onto the platform
+                        float platY2 = m_filesystemBrowser.getPlatformY();
+                        glm::vec3 siloCam(origin.x + 10.0f, platY2 + 1.0f + 1.7f, origin.z);
                         m_camera.setPosition(siloCam);
                         m_camera.setYaw(-90.0f);
                         m_camera.setPitch(0.0f);
@@ -13137,6 +14108,8 @@ private:
         }
 
         m_isEdenOSLevel = true;
+        // Zero out terrain height so getHeightAt() always returns 0
+        m_terrain.getConfigMutable().heightScale = 0.0f;
 
         // Default save path for OS levels
         const char* home = getenv("HOME");
@@ -14128,7 +15101,7 @@ private:
         // Prefer door over wall when both are hit at similar distances
         // (wall AABBs inflate when rotated, hiding doors behind them)
         if (closestDoor && closestObj && !closestObj->isDoor() &&
-            closestObj->getBuildingType() == "filesystem_wall") {
+            (closestObj->getBuildingType() == "filesystem_wall" || closestObj->getBuildingType() == "platform_wall")) {
             closestObj = closestDoor;
             closestDist = closestDoorDist;
         }
@@ -14152,8 +15125,14 @@ private:
         if (closestObj) {
             // Check if this is a widget button/checkbox — handle before other interactions
             if (closestObj->getBuildingType() == "widget") {
+                bool handled = false;
                 if (auto* forge = m_filesystemBrowser.getForgeRoom()) {
-                    forge->getWidgetKit().handleCrosshairInteract(closestObj);
+                    handled = forge->getWidgetKit().handleCrosshairInteract(closestObj);
+                }
+                if (!handled) {
+                    for (auto& wk : m_activatedWidgets) {
+                        if (wk.handleCrosshairInteract(closestObj)) break;
+                    }
                 }
                 return;
             }
@@ -17793,6 +18772,9 @@ private:
     // Filesystem browser (3D file/folder objects)
     eden::FilesystemBrowser m_filesystemBrowser;
 
+    // User-activated widget machines (Enter on selected .lime objects)
+    std::vector<eden::WidgetKit> m_activatedWidgets;
+
     // Terminal emulator
     eden::EdenTerminal m_terminal;
     ImFont* m_monoFont = nullptr;
@@ -18122,6 +19104,29 @@ private:
     bool m_showPlanetInfo = false;
     bool m_showSiloConfig = false;
     bool m_showPerfWindow = false;
+
+    // Wall frame placement
+    int m_frameSizeSetting = 4;
+    bool m_framePlacementMode = false;
+    bool m_framePreviewValid = false;
+    glm::vec3 m_framePreviewPos{0.0f};
+    float m_framePreviewYaw = 0.0f;
+    float m_framePreviewSize = 4.0f;
+    float m_framePreviewNX = 0.0f;
+    float m_framePreviewNZ = 1.0f;
+
+    // Platform grid map mode
+    bool m_mapModeActive = false;
+    eden::PlatformGrid m_mapGridEdit;        // working copy for editing
+    glm::vec3 m_mapModeSavedCamPos{0.0f};
+    float m_mapModeSavedYaw = 0.0f;
+    float m_mapModeSavedPitch = 0.0f;
+    float m_mapZoom = 1.0f;                  // map zoom level (scroll wheel)
+    glm::vec2 m_mapPan{0.0f, 0.0f};         // map pan offset in pixels
+    bool m_mapPanning = false;               // MMB drag active
+    bool m_pendingTeleportToPlatform = false; // teleport to platform after next navigation
+    glm::vec2 m_mapPanStart{0.0f, 0.0f};    // mouse pos when pan started
+    glm::vec2 m_mapPanOrigin{0.0f, 0.0f};   // pan offset when pan started
     float m_cachedRamMB = 0.0f;
     float m_cachedVramMB = 0.0f;
     float m_perfUpdateTimer = 0.0f;
@@ -18200,6 +19205,14 @@ private:
         bool waitingForCargoJettison = false; // True when target is low health
     };
     std::vector<Pirate> m_pirates;
+
+    // Wall Machine system (spatial wiring on platform grid)
+    eden::WallMachine m_wallMachine;
+    bool m_wallMachineSchemaLoaded = false;
+    bool m_wiringMode = false;          // W key: selecting wire endpoints
+    int m_wireSourceFrame = -1;         // first selected frame index for wiring
+    float m_machinePollTimer = 0.0f;    // poll running machines every 2s
+    static constexpr float MACHINE_POLL_INTERVAL = 2.0f;
 };
 
 static void crashHandler(int sig) {

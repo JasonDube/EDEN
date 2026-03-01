@@ -332,6 +332,7 @@ void FilesystemBrowser::init(ModelRenderer* modelRenderer,
     m_modelRenderer = modelRenderer;
     m_sceneObjects = sceneObjects;
     m_terrain = terrain;
+    m_platformGrid.init(modelRenderer, sceneObjects);
     loadFolderVisits();
 }
 
@@ -439,7 +440,7 @@ void FilesystemBrowser::updateAnimations(float deltaTime) {
 
     // Spin 3D model objects on their turntable
     for (auto& spin : m_modelSpins) {
-        if (!spin.obj) continue;
+        if (!spin.obj || spin.paused) continue;
         spin.angle += MODEL_SPIN_SPEED * deltaTime;
         if (spin.angle >= 360.0f) spin.angle -= 360.0f;
         spin.obj->setEulerRotation({0.0f, spin.baseYaw + spin.angle, 0.0f});
@@ -491,7 +492,8 @@ void FilesystemBrowser::clearFilesystemObjects() {
     auto it = m_sceneObjects->begin();
     while (it != m_sceneObjects->end()) {
         const auto& bt = (*it) ? (*it)->getBuildingType() : "";
-        if (*it && (bt == "filesystem" || bt == "filesystem_wall" || bt == "image_desc")) {
+        if (*it && (bt == "filesystem" || bt == "filesystem_wall" || bt == "image_desc" ||
+                    bt == "platform_wall" || bt == "platform_slab" || bt == "wall_frame")) {
             uint32_t handle = (*it)->getBufferHandle();
             if (handle != 0) {
                 handles.push_back(handle);
@@ -977,6 +979,232 @@ void FilesystemBrowser::spawnFileAtWall(const std::string& filePath,
     std::cout << "[FilesystemBrowser] Pasted " << name << " at wall slot" << std::endl;
 }
 
+bool FilesystemBrowser::toggleSpin(SceneObject* obj) {
+    for (auto& spin : m_modelSpins) {
+        if (spin.obj == obj) {
+            spin.paused = !spin.paused;
+            return true;
+        }
+    }
+    return false;
+}
+
+void FilesystemBrowser::parseFrameType(const std::string& filename, WallFrame& frame) {
+    // Extract prefix from filename to determine frame type
+    struct PrefixMap {
+        const char* prefix;
+        FrameType type;
+    };
+    static const PrefixMap prefixes[] = {
+        {"mach_",  FrameType::Machine},
+        {"inp_",   FrameType::Input},
+        {"out_",   FrameType::Output},
+        {"btn_",   FrameType::Button},
+        {"ckbx_",  FrameType::Checkbox},
+        {"sldr_",  FrameType::Slider},
+        {"log_",   FrameType::Log},
+    };
+
+    for (const auto& pm : prefixes) {
+        size_t prefixLen = strlen(pm.prefix);
+        if (filename.size() > prefixLen && filename.substr(0, prefixLen) == pm.prefix) {
+            frame.frameType = pm.type;
+
+            // Extract the name part (between prefix and extension)
+            std::string rest = filename.substr(prefixLen);
+            auto dot = rest.rfind('.');
+            std::string namePart = (dot != std::string::npos) ? rest.substr(0, dot) : rest;
+
+            if (pm.type == FrameType::Machine) {
+                frame.machineName = namePart; // e.g. "hunyuan3d"
+            } else {
+                frame.paramName = namePart;   // e.g. "image" for inp_image.png
+            }
+            return;
+        }
+    }
+
+    frame.frameType = FrameType::None;
+}
+
+void FilesystemBrowser::spawnFileAtFrame(const std::string& filePath, SceneObject* frame) {
+    if (!m_modelRenderer || !m_sceneObjects || !frame) return;
+
+    namespace fs = std::filesystem;
+    fs::path p(filePath);
+    if (!fs::exists(p)) return;
+
+    std::string name = p.filename().string();
+
+    // Use frame's position, size, and yaw directly
+    glm::vec3 framePos = frame->getTransform().getPosition();
+    glm::vec3 frameScale = frame->getTransform().getScale();
+    float frameYaw = frame->getEulerRotation().y;
+    float s = frameScale.x; // frame size in meters (square)
+    float yawRad = frameYaw * static_cast<float>(M_PI) / 180.0f;
+
+    // Check if this file has a machine-system prefix
+    WallFrame tmpFrame;
+    parseFrameType(name, tmpFrame);
+
+    if (tmpFrame.frameType != FrameType::None) {
+        // Spawn a colored 3D widget primitive instead of rendering the file
+        glm::vec4 widgetColor;
+        std::string label;
+        PrimitiveType primType = PrimitiveType::Cube;
+        float widgetDepth = 0.4f; // how far it sticks out from the wall
+
+        switch (tmpFrame.frameType) {
+            case FrameType::Machine:
+                widgetColor = {1.0f, 0.5f, 0.0f, 1.0f}; // orange
+                label = "MACH";
+                widgetDepth = 0.6f;
+                break;
+            case FrameType::Input:
+                widgetColor = {0.2f, 0.5f, 1.0f, 1.0f}; // blue
+                label = "IN";
+                break;
+            case FrameType::Output:
+                widgetColor = {1.0f, 0.85f, 0.0f, 1.0f}; // gold
+                label = "OUT";
+                widgetDepth = 0.5f;
+                break;
+            case FrameType::Button:
+                widgetColor = {1.0f, 0.15f, 0.15f, 1.0f}; // red
+                label = "BTN";
+                widgetDepth = 0.3f;
+                break;
+            case FrameType::Checkbox:
+                widgetColor = {0.2f, 0.85f, 0.2f, 1.0f}; // green
+                label = "CHK";
+                widgetDepth = 0.25f;
+                break;
+            case FrameType::Slider:
+                widgetColor = {0.6f, 0.2f, 0.85f, 1.0f}; // purple
+                label = "SLD";
+                widgetDepth = 0.2f;
+                break;
+            case FrameType::Log:
+                widgetColor = {0.5f, 0.5f, 0.5f, 1.0f}; // gray
+                label = "LOG";
+                widgetDepth = 0.15f;
+                break;
+            default:
+                widgetColor = {0.5f, 0.5f, 0.5f, 1.0f};
+                label = "???";
+                break;
+        }
+
+        // Widget size: fill the frame, with depth sticking out from wall
+        float cubeSize = 1.0f;
+        auto meshData = PrimitiveMeshBuilder::createCube(cubeSize, widgetColor);
+        uint32_t handle = m_modelRenderer->createModel(meshData.vertices, meshData.indices);
+
+        std::string objName = "WallWidget_" + label + "_" + std::to_string(m_sceneObjects->size());
+        auto obj = std::make_unique<SceneObject>(objName);
+        obj->setBufferHandle(handle);
+        obj->setIndexCount(static_cast<uint32_t>(meshData.indices.size()));
+        obj->setVertexCount(static_cast<uint32_t>(meshData.vertices.size()));
+        obj->setLocalBounds(meshData.bounds);
+        obj->setMeshData(meshData.vertices, meshData.indices);
+        obj->setPrimitiveType(primType);
+        obj->setPrimitiveSize(cubeSize);
+        obj->setPrimitiveColor(widgetColor);
+        obj->setBuildingType("filesystem"); // so the interaction system can pick it up
+        obj->setTargetLevel("fs://" + filePath);
+        obj->setDescription(label + ": " + name);
+
+        // Position: centered on frame, offset forward from wall surface
+        glm::vec3 spawnPos = framePos;
+        spawnPos.x += sinf(yawRad) * (widgetDepth * 0.5f + 0.1f);
+        spawnPos.z += cosf(yawRad) * (widgetDepth * 0.5f + 0.1f);
+
+        obj->getTransform().setPosition(spawnPos);
+        // Scale: fill frame width/height, with widget depth
+        float scaleFactor = s / 1.5f; // cube mesh is 1.5 units
+        obj->getTransform().setScale({scaleFactor, scaleFactor, widgetDepth});
+        obj->setEulerRotation({0.0f, frameYaw, 0.0f});
+
+        m_sceneObjects->push_back(std::move(obj));
+        std::cout << "[FilesystemBrowser] Placed widget " << label << " (" << name << ") at wall frame" << std::endl;
+        return;
+    }
+
+    // Normal file placement (non-widget)
+    fs::directory_entry dirEntry(p);
+    FileCategory cat = categorize(dirEntry);
+    EntryInfo entry{name, filePath, cat};
+
+    bool isModel = (cat == FileCategory::Model3D);
+    bool isDoor = (cat == FileCategory::Folder);
+
+    // Cube mesh is 1.5 units, so divide by 1.5 to get actual meters
+    glm::vec3 scale;
+    if (isDoor) {
+        scale = {s * 0.55f / 1.5f, s / 1.5f, 2.0f};
+    } else if (isModel) {
+        float uniformSize = s * 0.8f / 1.5f;
+        scale = glm::vec3(uniformSize);
+    } else {
+        scale = {s / 1.5f, s / 1.5f, 0.03f};
+    }
+
+    // Offset slightly in front of frame surface
+    // Frame worldY is bottom-aligned; lift 3D models up by 50% of frame size
+    glm::vec3 spawnPos = framePos;
+    if (isModel) {
+        spawnPos.y += s * 0.5f;
+    }
+    spawnPos.x += sinf(yawRad) * 0.15f;
+    spawnPos.z += cosf(yawRad) * 0.15f;
+
+    // Ensure cancel token exists for video extraction threads
+    if (!m_cancelExtraction) {
+        m_cancelExtraction = std::make_shared<std::atomic<bool>>(false);
+    }
+
+    spawnOneObject(entry, m_sceneObjects->size(), spawnPos, scale, frameYaw);
+
+    std::cout << "[FilesystemBrowser] Placed " << name << " at wall frame" << std::endl;
+}
+
+void FilesystemBrowser::spawnFileAtPosition(const std::string& filePath, const glm::vec3& position) {
+    if (!m_modelRenderer || !m_sceneObjects) return;
+
+    namespace fs = std::filesystem;
+    fs::path p(filePath);
+    if (!fs::exists(p)) return;
+
+    std::string name = p.filename().string();
+    fs::directory_entry dirEntry(p);
+    FileCategory cat = categorize(dirEntry);
+    EntryInfo entry{name, filePath, cat};
+
+    bool isModel = (cat == FileCategory::Model3D);
+
+    // Scale: cube mesh is 1.5 units, so divide by 1.5 to get meters
+    glm::vec3 scale;
+    if (isModel) {
+        float uniformSize = 4.0f / 1.5f;
+        scale = glm::vec3(uniformSize);
+    } else {
+        // Non-models (images, etc.) — lay flat horizontally on surface
+        float w = 4.0f / 1.5f;
+        scale = {w, 0.03f, w};
+    }
+
+    // Ensure cancel token exists for video extraction threads
+    if (!m_cancelExtraction) {
+        m_cancelExtraction = std::make_shared<std::atomic<bool>>(false);
+    }
+
+    // Yaw = 0 for functional placement (no wall-facing rotation)
+    spawnOneObject(entry, m_sceneObjects->size(), position, scale, 0.0f);
+
+    std::cout << "[FilesystemBrowser] Placed " << name << " functionally at ("
+              << position.x << ", " << position.y << ", " << position.z << ")" << std::endl;
+}
+
 // ── App Launcher Ring ──────────────────────────────────────────────────
 
 void FilesystemBrowser::spawnAppRing(const glm::vec3& center, float baseY) {
@@ -1152,7 +1380,7 @@ void FilesystemBrowser::spawnAppSpace(const std::string& appPath, const glm::vec
     if (appPath == "app://forge") {
         // Spawn the ForgeRoom pad at center
         m_forgeRoom.init(m_sceneObjects, m_modelRenderer);
-        m_forgeRoom.spawn(center, baseY);
+        m_forgeRoom.spawn(center, m_platformY);
         m_forgeRoom.loadRegistry();
 
         // Spawn a minimal containment ring
@@ -1359,6 +1587,16 @@ void FilesystemBrowser::spawnObjects(const std::string& dirPath) {
 
     m_cancelExtraction = std::make_shared<std::atomic<bool>>(false);
 
+    // Pre-load platform grid config so frame file paths are known before scanning
+    // (prevents files placed in frames from also appearing in gallery rings)
+    if (m_platformGrid.hasConfig(dirPath)) {
+        m_platformGrid.loadConfig(dirPath);
+        for (const auto& fr : m_platformGrid.grid().frames) {
+            if (!fr.filePath.empty())
+                m_excludedPaths.insert(fr.filePath);
+        }
+    }
+
     // Collect entries
     std::vector<EntryInfo> entries;
 
@@ -1443,25 +1681,40 @@ void FilesystemBrowser::spawnObjects(const std::string& dirPath) {
 
     bool hasRing = !folders.empty() || !images.empty() || !videos.empty() || !models.empty();
 
+    // Count how many ring levels we need
+    int nextLevel = 1; // level 0 = app ring
+    auto countLevels = [&](const std::vector<EntryInfo>& items, int start) -> int {
+        if (items.empty()) return start;
+        int levels = (static_cast<int>(items.size()) + gallerySides() - 1) / gallerySides();
+        return start + levels;
+    };
+    nextLevel = countLevels(folders, nextLevel);
+    nextLevel = countLevels(images, nextLevel);
+    nextLevel = countLevels(videos, nextLevel);
+    nextLevel = countLevels(models, nextLevel);
+
+    // Platform is ALWAYS at a fixed Y (100m above terrain).
+    // Silo rings grow downward from the platform.
+    static constexpr float FIXED_PLATFORM_HEIGHT = 100.0f;
+    m_platformY = baseY + FIXED_PLATFORM_HEIGHT;
+
+    // Gallery rings stack downward from the platform
+    // Level 0 (app ring) is just below the platform, higher levels go further down
+    float ringBaseY = m_platformY - nextLevel * GALLERY_WALL_HEIGHT;
+
     // Reserve level 0 for the app launcher ring in every silo
-    // App ring takes level 0, filesystem content starts at level 1
-    int nextLevel = 1;
+    int spawnLevel = 1;
 
-    // Spawn app launcher ring at level 0 (base of every silo)
-    spawnAppRing(center, baseY);
-    nextLevel = spawnGalleryRing(folders, center, baseY, nextLevel);
-    nextLevel = spawnGalleryRing(images,  center, baseY, nextLevel);
-    nextLevel = spawnGalleryRing(videos,  center, baseY, nextLevel);
-    nextLevel = spawnGalleryRing(models,  center, baseY, nextLevel);
+    // Spawn app launcher ring at level 0 (base of silo, just below platform)
+    spawnAppRing(center, ringBaseY);
+    spawnLevel = spawnGalleryRing(folders, center, ringBaseY, spawnLevel);
+    spawnLevel = spawnGalleryRing(images,  center, ringBaseY, spawnLevel);
+    spawnLevel = spawnGalleryRing(videos,  center, ringBaseY, spawnLevel);
+    spawnLevel = spawnGalleryRing(models,  center, ringBaseY, spawnLevel);
 
-    // Spawn basement room beneath the silo
-    if (nextLevel > 0) {
-        spawnBasement(center, baseY);
-    }
-
-    // Spawn vertical columns between panel sections (extended down through basement)
-    if (nextLevel > 0) {
-        float totalHeight = nextLevel * GALLERY_WALL_HEIGHT + basementHeight();
+    // Spawn vertical columns between panel sections
+    if (spawnLevel > 0) {
+        float totalHeight = spawnLevel * GALLERY_WALL_HEIGHT;
         float radius = galleryRadius();
         float segmentAngle = 2.0f * M_PI / gallerySides();
         glm::vec4 colColor = m_siloConfig.columnColor;
@@ -1487,7 +1740,7 @@ void FilesystemBrowser::spawnObjects(const std::string& dirPath) {
             obj->setBuildingType("filesystem_wall");
             obj->setAABBCollision(true);
 
-            obj->getTransform().setPosition({colX, baseY - basementHeight(), colZ});
+            obj->getTransform().setPosition({colX, ringBaseY, colZ});
             obj->getTransform().setScale({0.3f, totalHeight, 0.3f});
             obj->setEulerRotation({0.0f, yawDeg, 0.0f});
 
@@ -1495,7 +1748,73 @@ void FilesystemBrowser::spawnObjects(const std::string& dirPath) {
         }
     }
 
-    // Place remaining "other" entries in a grid in the center of the room
+    // Spawn silo floor at the bottom of the rings
+    if (spawnLevel > 0) {
+        float floorSize = galleryRadius() * 2.2f; // slightly wider than silo
+        glm::vec4 floorColor{0.12f, 0.12f, 0.14f, 1.0f};
+        auto floorMesh = PrimitiveMeshBuilder::createCube(1.0f, floorColor);
+        uint32_t floorHandle = m_modelRenderer->createModel(floorMesh.vertices, floorMesh.indices, nullptr, 0, 0);
+        auto floorObj = std::make_unique<SceneObject>("FSSiloFloor");
+        floorObj->setBufferHandle(floorHandle);
+        floorObj->setIndexCount(floorMesh.indices.size());
+        floorObj->setVertexCount(floorMesh.vertices.size());
+        floorObj->setLocalBounds(floorMesh.bounds);
+        floorObj->setMeshData(floorMesh.vertices, floorMesh.indices);
+        floorObj->setPrimitiveType(PrimitiveType::Cube);
+        floorObj->setPrimitiveSize(1.0f);
+        floorObj->setPrimitiveColor(floorColor);
+        floorObj->setBuildingType("filesystem_wall");
+        floorObj->setAABBCollision(true);
+        // Thin slab at the bottom of the silo
+        floorObj->getTransform().setPosition({center.x, ringBaseY - 0.5f, center.z});
+        floorObj->getTransform().setScale({floorSize, 0.5f, floorSize});
+        m_sceneObjects->push_back(std::move(floorObj));
+    }
+
+    m_platformGrid.loadAndBuild(dirPath, center, m_platformY,
+                                GALLERY_WALL_HEIGHT, m_siloConfig.wallColor);
+
+    // Spawn files for occupied wall frames
+    for (const auto& fr : m_platformGrid.grid().frames) {
+        if (fr.filePath.empty()) continue;
+        if (!std::filesystem::exists(fr.filePath)) continue;
+        namespace fs = std::filesystem;
+        fs::path p(fr.filePath);
+        std::string name = p.filename().string();
+        fs::directory_entry dirEntry(p);
+        FileCategory cat = categorize(dirEntry);
+        EntryInfo entry{name, fr.filePath, cat};
+
+        float s = static_cast<float>(fr.size);
+        bool isModel = (cat == FileCategory::Model3D);
+        bool isDoor = (cat == FileCategory::Folder);
+        // Cube mesh is 1.5 units, so divide by 1.5 to get actual meters
+        glm::vec3 scale;
+        if (isDoor) {
+            scale = {s * 0.55f / 1.5f, s / 1.5f, 2.0f};
+        } else if (isModel) {
+            float uniformSize = s * 0.8f / 1.5f;
+            scale = glm::vec3(uniformSize);
+        } else {
+            scale = {s / 1.5f, s / 1.5f, 0.03f};
+        }
+
+        float yawRad = fr.yawDeg * static_cast<float>(M_PI) / 180.0f;
+        float frameY = fr.worldY;
+        if (isModel) {
+            frameY += s * 0.5f; // lift 3D models up by 50% of frame size
+        }
+        glm::vec3 spawnPos{fr.worldX + sinf(yawRad) * 0.15f,
+                           frameY,
+                           fr.worldZ + cosf(yawRad) * 0.15f};
+
+        if (!m_cancelExtraction) {
+            m_cancelExtraction = std::make_shared<std::atomic<bool>>(false);
+        }
+        spawnOneObject(entry, m_sceneObjects->size(), spawnPos, scale, fr.yawDeg);
+    }
+
+    // Place remaining "other" entries on the silo floor
     if (!others.empty()) {
         float gridOffsetX = center.x - (GRID_COLUMNS * GRID_SPACING / 2.0f);
         float gridOffsetZ = center.z - 2.0f;
@@ -1509,7 +1828,7 @@ void FilesystemBrowser::spawnObjects(const std::string& dirPath) {
         for (size_t i = 0; i < others.size(); ++i) {
             float x = gridOffsetX + col * GRID_SPACING;
             float z = gridOffsetZ + row * GRID_SPACING;
-            float y = m_terrain->getHeightAt(x, z);
+            float y = ringBaseY;
 
             spawnOneObject(others[i], i, {x, y, z}, glm::vec3(1.0f));
 
@@ -1519,13 +1838,11 @@ void FilesystemBrowser::spawnObjects(const std::string& dirPath) {
     }
 
     size_t total = folders.size() + images.size() + videos.size() + models.size() + others.size();
-    // std::cout << "[FilesystemBrowser] Spawned " << total
-    //           << " objects for " << dirPath << std::endl;
 
-    // Spawn forge room in assets/models/ directory
+    // Spawn forge room in assets/models/ directory — on top of the platform
     if (dirPath.find("assets/models") != std::string::npos) {
         m_forgeRoom.init(m_sceneObjects, m_modelRenderer);
-        m_forgeRoom.spawn(center, baseY);
+        m_forgeRoom.spawn(center, m_platformY);
     }
 
     // Always load the deployed bots registry (so deployed bots work in any directory)
