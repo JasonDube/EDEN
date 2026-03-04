@@ -171,6 +171,23 @@ LimeLoader::LoadResult LimeLoader::load(const std::string& filepath) {
             }
             result.mesh.controlPoints.push_back({vertIdx, cpName});
         }
+        else if (type == "meta") {
+            // Parse metadata: meta key: value
+            std::string rest;
+            std::getline(iss, rest);
+            // Strip leading whitespace
+            size_t start = rest.find_first_not_of(' ');
+            if (start != std::string::npos) {
+                rest = rest.substr(start);
+            }
+            // Split on first ": "
+            size_t colonPos = rest.find(": ");
+            if (colonPos != std::string::npos) {
+                std::string key = rest.substr(0, colonPos);
+                std::string value = rest.substr(colonPos + 2);
+                result.mesh.metadata[key] = value;
+            }
+        }
         // We don't need half-edge data for rendering, skip "he" lines
     }
 
@@ -210,6 +227,9 @@ LimeLoader::LoadResult LimeLoader::load(const std::string& filepath) {
     }
     if (!result.mesh.controlPoints.empty()) {
         std::cout << ", " << result.mesh.controlPoints.size() << " control points";
+    }
+    if (!result.mesh.metadata.empty()) {
+        std::cout << ", " << result.mesh.metadata.size() << " metadata entries";
     }
     std::cout << std::endl;
 

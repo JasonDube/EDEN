@@ -18,6 +18,7 @@ add_executable(model_editor
 )
 
 target_link_libraries(model_editor PRIVATE eden httplib::httplib)
+target_compile_definitions(model_editor PRIVATE CMAKE_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
 
 # Need access to internal headers for renderers and editor components
 target_include_directories(model_editor PRIVATE

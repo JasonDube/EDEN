@@ -493,7 +493,7 @@ void FilesystemBrowser::clearFilesystemObjects() {
     while (it != m_sceneObjects->end()) {
         const auto& bt = (*it) ? (*it)->getBuildingType() : "";
         if (*it && (bt == "filesystem" || bt == "filesystem_wall" || bt == "image_desc" ||
-                    bt == "platform_wall" || bt == "platform_slab" || bt == "wall_frame")) {
+                    bt == "platform_wall" || bt == "platform_slab" || bt == "wall_frame" || bt == "wall_widget")) {
             uint32_t handle = (*it)->getBufferHandle();
             if (handle != 0) {
                 handles.push_back(handle);
@@ -1043,59 +1043,98 @@ void FilesystemBrowser::spawnFileAtFrame(const std::string& filePath, SceneObjec
     float s = frameScale.x; // frame size in meters (square)
     float yawRad = frameYaw * static_cast<float>(M_PI) / 180.0f;
 
-    // Check if this file has a machine-system prefix
+    // Check if this file has widget metadata (in .lime) or a machine-system prefix
     WallFrame tmpFrame;
-    parseFrameType(name, tmpFrame);
+    std::string ext = p.extension().string();
+    if (ext == ".lime") {
+        // Try loading metadata from the .lime file
+        auto limeResult = LimeLoader::load(filePath);
+        if (limeResult.success && !limeResult.mesh.metadata.empty()) {
+            auto wtIt = limeResult.mesh.metadata.find("widget_type");
+            if (wtIt != limeResult.mesh.metadata.end()) {
+                // Map widget_type string to FrameType
+                static const std::unordered_map<std::string, FrameType> typeMap = {
+                    {"machine",  FrameType::Machine},
+                    {"input",    FrameType::Input},
+                    {"output",   FrameType::Output},
+                    {"button",   FrameType::Button},
+                    {"checkbox", FrameType::Checkbox},
+                    {"slider",   FrameType::Slider},
+                    {"log",      FrameType::Log},
+                };
+                auto ftIt = typeMap.find(wtIt->second);
+                if (ftIt != typeMap.end()) {
+                    tmpFrame.frameType = ftIt->second;
+                    auto mnIt = limeResult.mesh.metadata.find("machine_name");
+                    if (mnIt != limeResult.mesh.metadata.end()) tmpFrame.machineName = mnIt->second;
+                    auto pnIt = limeResult.mesh.metadata.find("param_name");
+                    if (pnIt != limeResult.mesh.metadata.end()) tmpFrame.paramName = pnIt->second;
+                }
+            }
+        }
+    }
+    // Fallback: check filename prefix for non-.lime or .lime without metadata
+    if (tmpFrame.frameType == FrameType::None) {
+        parseFrameType(name, tmpFrame);
+    }
 
     if (tmpFrame.frameType != FrameType::None) {
-        // Spawn a colored 3D widget primitive instead of rendering the file
+        // Determine label and color for the widget type
         glm::vec4 widgetColor;
         std::string label;
-        PrimitiveType primType = PrimitiveType::Cube;
-        float widgetDepth = 0.4f; // how far it sticks out from the wall
+        float widgetDepth = 0.4f;
 
         switch (tmpFrame.frameType) {
-            case FrameType::Machine:
-                widgetColor = {1.0f, 0.5f, 0.0f, 1.0f}; // orange
-                label = "MACH";
-                widgetDepth = 0.6f;
-                break;
-            case FrameType::Input:
-                widgetColor = {0.2f, 0.5f, 1.0f, 1.0f}; // blue
-                label = "IN";
-                break;
-            case FrameType::Output:
-                widgetColor = {1.0f, 0.85f, 0.0f, 1.0f}; // gold
-                label = "OUT";
-                widgetDepth = 0.5f;
-                break;
-            case FrameType::Button:
-                widgetColor = {1.0f, 0.15f, 0.15f, 1.0f}; // red
-                label = "BTN";
-                widgetDepth = 0.3f;
-                break;
-            case FrameType::Checkbox:
-                widgetColor = {0.2f, 0.85f, 0.2f, 1.0f}; // green
-                label = "CHK";
-                widgetDepth = 0.25f;
-                break;
-            case FrameType::Slider:
-                widgetColor = {0.6f, 0.2f, 0.85f, 1.0f}; // purple
-                label = "SLD";
-                widgetDepth = 0.2f;
-                break;
-            case FrameType::Log:
-                widgetColor = {0.5f, 0.5f, 0.5f, 1.0f}; // gray
-                label = "LOG";
-                widgetDepth = 0.15f;
-                break;
-            default:
-                widgetColor = {0.5f, 0.5f, 0.5f, 1.0f};
-                label = "???";
-                break;
+            case FrameType::Machine:  widgetColor = {1.0f, 0.5f, 0.0f, 1.0f}; label = "MACH"; widgetDepth = 0.6f; break;
+            case FrameType::Input:    widgetColor = {0.2f, 0.5f, 1.0f, 1.0f}; label = "IN";   break;
+            case FrameType::Output:   widgetColor = {1.0f, 0.85f, 0.0f, 1.0f}; label = "OUT";  widgetDepth = 0.5f; break;
+            case FrameType::Button:   widgetColor = {1.0f, 0.15f, 0.15f, 1.0f}; label = "BTN";  widgetDepth = 0.3f; break;
+            case FrameType::Checkbox: widgetColor = {0.2f, 0.85f, 0.2f, 1.0f}; label = "CHK";  widgetDepth = 0.25f; break;
+            case FrameType::Slider:   widgetColor = {0.6f, 0.2f, 0.85f, 1.0f}; label = "SLD";  widgetDepth = 0.2f; break;
+            case FrameType::Log:      widgetColor = {0.5f, 0.5f, 0.5f, 1.0f}; label = "LOG";  widgetDepth = 0.15f; break;
+            default:                  widgetColor = {0.5f, 0.5f, 0.5f, 1.0f}; label = "???";  break;
         }
 
-        // Widget size: fill the frame, with depth sticking out from wall
+        // Try to spawn the actual .lime 3D model if available
+        if (ext == ".lime") {
+            auto limeResult = LimeLoader::load(filePath);
+            if (limeResult.success) {
+                auto limeObj = LimeLoader::createSceneObject(limeResult.mesh, *m_modelRenderer);
+                if (limeObj) {
+                    limeObj->setBuildingType("wall_widget");
+                    limeObj->setTargetLevel("fs://" + filePath);
+                    limeObj->setDescription(label + ": " + name);
+
+                    // Scale to fit the frame
+                    AABB bounds = limeObj->getLocalBounds();
+                    glm::vec3 bSize = bounds.getSize();
+                    float maxDim = std::max({bSize.x, bSize.y, bSize.z, 0.001f});
+                    float fitScale = s / maxDim;
+                    limeObj->getTransform().setScale(glm::vec3(fitScale));
+                    limeObj->setEulerRotation({0.0f, frameYaw, 0.0f});
+
+                    // Position: centered on frame, offset forward from wall
+                    // Frame worldY is bottom-aligned; lift to center, then compensate for model bounds
+                    glm::vec3 spawnPos = framePos;
+                    spawnPos.x += sinf(yawRad) * (widgetDepth * 0.5f + 0.1f);
+                    spawnPos.z += cosf(yawRad) * (widgetDepth * 0.5f + 0.1f);
+                    spawnPos.y += s * 0.5f;  // Lift from frame bottom to frame center
+                    glm::vec3 bCenter = bounds.getCenter();
+                    spawnPos.y -= bCenter.y * fitScale;  // Compensate for model origin offset
+                    limeObj->getTransform().setPosition(spawnPos);
+
+                    // Hide the original frame and mark it as occupied
+                    frame->setTargetLevel("fs://" + filePath);
+                    frame->getTransform().setScale({0, 0, 0});
+
+                    m_sceneObjects->push_back(std::move(limeObj));
+                    std::cout << "[FilesystemBrowser] Placed .lime widget " << label << " (" << name << ") at wall frame" << std::endl;
+                    return;
+                }
+            }
+        }
+
+        // Fallback: colored cube primitive
         float cubeSize = 1.0f;
         auto meshData = PrimitiveMeshBuilder::createCube(cubeSize, widgetColor);
         uint32_t handle = m_modelRenderer->createModel(meshData.vertices, meshData.indices);
@@ -1107,21 +1146,19 @@ void FilesystemBrowser::spawnFileAtFrame(const std::string& filePath, SceneObjec
         obj->setVertexCount(static_cast<uint32_t>(meshData.vertices.size()));
         obj->setLocalBounds(meshData.bounds);
         obj->setMeshData(meshData.vertices, meshData.indices);
-        obj->setPrimitiveType(primType);
+        obj->setPrimitiveType(PrimitiveType::Cube);
         obj->setPrimitiveSize(cubeSize);
         obj->setPrimitiveColor(widgetColor);
-        obj->setBuildingType("filesystem"); // so the interaction system can pick it up
+        obj->setBuildingType("wall_widget");
         obj->setTargetLevel("fs://" + filePath);
         obj->setDescription(label + ": " + name);
 
-        // Position: centered on frame, offset forward from wall surface
         glm::vec3 spawnPos = framePos;
         spawnPos.x += sinf(yawRad) * (widgetDepth * 0.5f + 0.1f);
         spawnPos.z += cosf(yawRad) * (widgetDepth * 0.5f + 0.1f);
 
         obj->getTransform().setPosition(spawnPos);
-        // Scale: fill frame width/height, with widget depth
-        float scaleFactor = s / 1.5f; // cube mesh is 1.5 units
+        float scaleFactor = s / 1.5f;
         obj->getTransform().setScale({scaleFactor, scaleFactor, widgetDepth});
         obj->setEulerRotation({0.0f, frameYaw, 0.0f});
 
@@ -1164,6 +1201,10 @@ void FilesystemBrowser::spawnFileAtFrame(const std::string& filePath, SceneObjec
     }
 
     spawnOneObject(entry, m_sceneObjects->size(), spawnPos, scale, frameYaw);
+
+    // Hide the original frame and mark it as occupied
+    frame->setTargetLevel("fs://" + filePath);
+    frame->getTransform().setScale({0, 0, 0});
 
     std::cout << "[FilesystemBrowser] Placed " << name << " at wall frame" << std::endl;
 }
@@ -1257,9 +1298,7 @@ void FilesystemBrowser::spawnAppRing(const glm::vec3& center, float baseY) {
             float doorZ = center.z + (radius - inset) * sinf(angle);
             float doorY = levelY;
 
-            auto doorMesh = PrimitiveMeshBuilder::createCube(2.0f, appDoorColor);
-
-            // Load custom forge door image
+            // Load custom forge door image (check before creating mesh so we can use white for textured)
             std::vector<unsigned char> texPixels;
             int texW = LABEL_SIZE, texH = LABEL_SIZE;
             bool loadedImage = false;
@@ -1273,7 +1312,6 @@ void FilesystemBrowser::spawnAppRing(const glm::vec3& center, float baseY) {
                 if (data) {
                     texW = imgW; texH = imgH;
                     texPixels.resize(imgW * imgH * 4);
-                    // Flip vertically to match Vulkan UV coordinates
                     for (int y = 0; y < imgH; ++y) {
                         memcpy(&texPixels[y * imgW * 4],
                                &data[(imgH - 1 - y) * imgW * 4],
@@ -1288,6 +1326,9 @@ void FilesystemBrowser::spawnAppRing(const glm::vec3& center, float baseY) {
                 renderLabel(texPixels, "Forge", FileCategory::Executable, appDoorColor);
                 texW = LABEL_SIZE; texH = LABEL_SIZE;
             }
+            // Use white mesh when textured so the image isn't tinted
+            glm::vec4 forgeVertColor = loadedImage ? glm::vec4(1.0f) : appDoorColor;
+            auto doorMesh = PrimitiveMeshBuilder::createCube(2.0f, forgeVertColor);
             uint32_t doorHandle = m_modelRenderer->createModel(
                 doorMesh.vertices, doorMesh.indices,
                 texPixels.data(), texW, texH);
@@ -1341,13 +1382,40 @@ void FilesystemBrowser::spawnAppRing(const glm::vec3& center, float baseY) {
                 float doorY = levelY;
 
                 glm::vec4 homeColor{0.15f, 0.5f, 0.8f, 1.0f}; // blue
-                auto doorMesh = PrimitiveMeshBuilder::createCube(2.0f, homeColor);
 
+                // Load custom home door image
                 std::vector<unsigned char> texPixels;
-                renderLabel(texPixels, "Home", FileCategory::Folder, homeColor);
+                int texW = LABEL_SIZE, texH = LABEL_SIZE;
+                bool loadedImage = false;
+                for (const auto& candidate : {
+                    "assets/textures/home.jpeg",
+                    "../../../examples/terrain_editor/assets/textures/home.jpeg",
+                    "examples/terrain_editor/assets/textures/home.jpeg"
+                }) {
+                    int imgW, imgH, imgChannels;
+                    unsigned char* data = stbi_load(candidate, &imgW, &imgH, &imgChannels, 4);
+                    if (data) {
+                        texW = imgW; texH = imgH;
+                        texPixels.resize(imgW * imgH * 4);
+                        for (int y = 0; y < imgH; ++y) {
+                            memcpy(&texPixels[y * imgW * 4],
+                                   &data[(imgH - 1 - y) * imgW * 4],
+                                   imgW * 4);
+                        }
+                        stbi_image_free(data);
+                        loadedImage = true;
+                        break;
+                    }
+                }
+                if (!loadedImage) {
+                    renderLabel(texPixels, "Home", FileCategory::Folder, homeColor);
+                    texW = LABEL_SIZE; texH = LABEL_SIZE;
+                }
+                glm::vec4 homeVertColor = loadedImage ? glm::vec4(1.0f) : homeColor;
+                auto doorMesh = PrimitiveMeshBuilder::createCube(2.0f, homeVertColor);
                 uint32_t doorHandle = m_modelRenderer->createModel(
                     doorMesh.vertices, doorMesh.indices,
-                    texPixels.data(), LABEL_SIZE, LABEL_SIZE);
+                    texPixels.data(), texW, texH);
 
                 auto doorObj = std::make_unique<SceneObject>("FSAppDoor_Home");
                 doorObj->setBufferHandle(doorHandle);
@@ -1370,6 +1438,76 @@ void FilesystemBrowser::spawnAppRing(const glm::vec3& center, float baseY) {
 
                 m_sceneObjects->push_back(std::move(doorObj));
             }
+        }
+
+        // Place Trash door on segment 2
+        if (s == 2) {
+            float inset = 2.4f;
+            float doorX = center.x + (radius - inset) * cosf(angle);
+            float doorZ = center.z + (radius - inset) * sinf(angle);
+            float doorY = levelY;
+
+            glm::vec4 trashColor{0.6f, 0.15f, 0.15f, 1.0f}; // dark red
+
+            // Load custom trash door image
+            std::vector<unsigned char> texPixels;
+            int texW = LABEL_SIZE, texH = LABEL_SIZE;
+            bool loadedImage = false;
+            for (const auto& candidate : {
+                "assets/textures/trash.jpeg",
+                "../../../examples/terrain_editor/assets/textures/trash.jpeg",
+                "examples/terrain_editor/assets/textures/trash.jpeg"
+            }) {
+                int imgW, imgH, imgChannels;
+                unsigned char* data = stbi_load(candidate, &imgW, &imgH, &imgChannels, 4);
+                if (data) {
+                    texW = imgW; texH = imgH;
+                    texPixels.resize(imgW * imgH * 4);
+                    for (int y = 0; y < imgH; ++y) {
+                        memcpy(&texPixels[y * imgW * 4],
+                               &data[(imgH - 1 - y) * imgW * 4],
+                               imgW * 4);
+                    }
+                    stbi_image_free(data);
+                    loadedImage = true;
+                    break;
+                }
+            }
+            if (!loadedImage) {
+                renderLabel(texPixels, "Trash", FileCategory::Folder, trashColor);
+                texW = LABEL_SIZE; texH = LABEL_SIZE;
+            }
+            glm::vec4 trashVertColor = loadedImage ? glm::vec4(1.0f) : trashColor;
+            auto doorMesh = PrimitiveMeshBuilder::createCube(2.0f, trashVertColor);
+            uint32_t doorHandle = m_modelRenderer->createModel(
+                doorMesh.vertices, doorMesh.indices,
+                texPixels.data(), texW, texH);
+
+            auto doorObj = std::make_unique<SceneObject>("FSAppDoor_Trash");
+            doorObj->setBufferHandle(doorHandle);
+            doorObj->setIndexCount(static_cast<uint32_t>(doorMesh.indices.size()));
+            doorObj->setVertexCount(static_cast<uint32_t>(doorMesh.vertices.size()));
+            doorObj->setLocalBounds(doorMesh.bounds);
+            doorObj->setMeshData(doorMesh.vertices, doorMesh.indices);
+            doorObj->setPrimitiveType(PrimitiveType::Door);
+            doorObj->setPrimitiveSize(2.0f);
+            doorObj->setPrimitiveColor(trashColor);
+            doorObj->setBuildingType("filesystem");
+            doorObj->setDescription("Trash");
+            doorObj->setDoorId("appdoor_trash");
+
+            // Point to the XDG trash files directory
+            const char* homeEnv = getenv("HOME");
+            std::string trashPath = std::string(homeEnv ? homeEnv : "/tmp") + "/.local/share/Trash/files";
+            std::filesystem::create_directories(trashPath);
+            doorObj->setTargetLevel("fs://" + trashPath);
+
+            glm::vec3 doorScale = {segmentWidth * 0.5f / 2.0f, (GALLERY_WALL_HEIGHT - 1.0f) / 2.0f, 2.0f};
+            doorObj->getTransform().setPosition({doorX, doorY, doorZ});
+            doorObj->getTransform().setScale(doorScale);
+            doorObj->setEulerRotation({0.0f, yawDeg, 0.0f});
+
+            m_sceneObjects->push_back(std::move(doorObj));
         }
     }
 }
@@ -1701,6 +1839,7 @@ void FilesystemBrowser::spawnObjects(const std::string& dirPath) {
     // Gallery rings stack downward from the platform
     // Level 0 (app ring) is just below the platform, higher levels go further down
     float ringBaseY = m_platformY - nextLevel * GALLERY_WALL_HEIGHT;
+    m_ringBaseY = ringBaseY;
 
     // Reserve level 0 for the app launcher ring in every silo
     int spawnLevel = 1;

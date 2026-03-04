@@ -7226,6 +7226,15 @@ bool EditableMesh::saveLime(const std::string& filepath, const unsigned char* te
         file << "\n";
     }
 
+    // Metadata (widget properties, machine info, etc.)
+    if (!m_metadata.empty()) {
+        file << "# METADATA\n";
+        for (const auto& [key, value] : m_metadata) {
+            file << "meta " << key << ": " << value << "\n";
+        }
+        file << "\n";
+    }
+
     // Summary
     file << "# SUMMARY\n";
     file << "# Total vertices: " << m_vertices.size() << "\n";
@@ -7233,6 +7242,9 @@ bool EditableMesh::saveLime(const std::string& filepath, const unsigned char* te
     file << "# Total half-edges: " << m_halfEdges.size() << "\n";
     if (!m_controlPoints.empty()) {
         file << "# Control points: " << m_controlPoints.size() << "\n";
+    }
+    if (!m_metadata.empty()) {
+        file << "# Metadata entries: " << m_metadata.size() << "\n";
     }
     if (textureData && texWidth > 0 && texHeight > 0) {
         file << "# Texture: " << texWidth << "x" << texHeight << " RGBA\n";
@@ -7271,6 +7283,7 @@ bool EditableMesh::loadLime(const std::string& filepath) {
     m_edgeMap.clear();
     m_selectedEdges.clear();
     m_controlPoints.clear();
+    m_metadata.clear();
 
     std::string line;
     while (std::getline(file, line)) {
@@ -7348,6 +7361,16 @@ bool EditableMesh::loadLime(const std::string& filepath) {
             }
             m_controlPoints.push_back({vertIdx, cpName});
         }
+        else if (type == "meta") {
+            std::string rest;
+            std::getline(iss, rest);
+            size_t start = rest.find_first_not_of(' ');
+            if (start != std::string::npos) rest = rest.substr(start);
+            size_t colonPos = rest.find(": ");
+            if (colonPos != std::string::npos) {
+                m_metadata[rest.substr(0, colonPos)] = rest.substr(colonPos + 2);
+            }
+        }
     }
 
     file.close();
@@ -7358,6 +7381,7 @@ bool EditableMesh::loadLime(const std::string& filepath) {
               << m_faces.size() << " faces, "
               << m_halfEdges.size() << " half-edges"
               << (m_controlPoints.empty() ? "" : ", " + std::to_string(m_controlPoints.size()) + " control points")
+              << (m_metadata.empty() ? "" : ", " + std::to_string(m_metadata.size()) + " metadata entries")
               << std::endl;
 
     return true;
@@ -7375,6 +7399,7 @@ bool EditableMesh::loadLime(const std::string& filepath, std::vector<unsigned ch
     m_halfEdges.clear();
     m_edgeMap.clear();
     m_selectedEdges.clear();
+    m_metadata.clear();
     outTextureData.clear();
     outTexWidth = 0;
     outTexHeight = 0;
@@ -7481,6 +7506,16 @@ bool EditableMesh::loadLime(const std::string& filepath, std::vector<unsigned ch
             }
             m_controlPoints.push_back({vertIdx, cpName});
         }
+        else if (type == "meta") {
+            std::string rest;
+            std::getline(iss, rest);
+            size_t start = rest.find_first_not_of(' ');
+            if (start != std::string::npos) rest = rest.substr(start);
+            size_t colonPos = rest.find(": ");
+            if (colonPos != std::string::npos) {
+                m_metadata[rest.substr(0, colonPos)] = rest.substr(colonPos + 2);
+            }
+        }
     }
 
     file.close();
@@ -7495,6 +7530,9 @@ bool EditableMesh::loadLime(const std::string& filepath, std::vector<unsigned ch
     }
     if (!m_controlPoints.empty()) {
         std::cout << ", " << m_controlPoints.size() << " control points";
+    }
+    if (!m_metadata.empty()) {
+        std::cout << ", " << m_metadata.size() << " metadata entries";
     }
     std::cout << std::endl;
 
@@ -7514,6 +7552,7 @@ bool EditableMesh::loadLime(const std::string& filepath, std::vector<unsigned ch
     m_halfEdges.clear();
     m_edgeMap.clear();
     m_selectedEdges.clear();
+    m_metadata.clear();
     m_skeleton.bones.clear();
     m_skeleton.boneNameToIndex.clear();
     outTextureData.clear();
@@ -7691,6 +7730,16 @@ bool EditableMesh::loadLime(const std::string& filepath, std::vector<unsigned ch
             }
             m_controlPoints.push_back({vertIdx, cpName});
         }
+        else if (type == "meta") {
+            std::string rest;
+            std::getline(iss, rest);
+            size_t start = rest.find_first_not_of(' ');
+            if (start != std::string::npos) rest = rest.substr(start);
+            size_t colonPos = rest.find(": ");
+            if (colonPos != std::string::npos) {
+                m_metadata[rest.substr(0, colonPos)] = rest.substr(colonPos + 2);
+            }
+        }
     }
 
     file.close();
@@ -7705,6 +7754,9 @@ bool EditableMesh::loadLime(const std::string& filepath, std::vector<unsigned ch
     }
     if (!m_controlPoints.empty()) {
         std::cout << ", " << m_controlPoints.size() << " control points";
+    }
+    if (!m_metadata.empty()) {
+        std::cout << ", " << m_metadata.size() << " metadata entries";
     }
     std::cout << ", transform: pos(" << outPosition.x << "," << outPosition.y << "," << outPosition.z << ")"
               << " scale(" << outScale.x << "," << outScale.y << "," << outScale.z << ")";

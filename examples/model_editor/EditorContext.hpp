@@ -15,6 +15,7 @@
 #include <vector>
 #include <set>
 #include <map>
+#include <unordered_map>
 #include <random>
 #include <string>
 #include <functional>
@@ -366,6 +367,9 @@ struct EditorContext {
     bool& aiServerReady;
     std::vector<std::string>& aiLogLines;  // Server log output
     bool showAIGenerateWindow = false;
+
+    // Callback to update widget properties UI when a .lime is loaded
+    std::function<void(const std::unordered_map<std::string, std::string>&)> onMetadataLoaded;
 
     // Helper methods
 

@@ -4,6 +4,7 @@
 #include <glm/glm.hpp>
 #include <vector>
 #include <string>
+#include <unordered_map>
 #include <optional>
 
 namespace eden {
@@ -35,6 +36,7 @@ public:
         glm::vec3 rotation{0.0f};  // Euler degrees (converted from quaternion)
         glm::vec3 scale{1.0f};
         std::vector<ControlPoint> controlPoints;
+        std::unordered_map<std::string, std::string> metadata;
     };
 
     struct LoadResult {

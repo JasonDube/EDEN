@@ -273,6 +273,16 @@ public:
     bool isControlPoint(uint32_t vertexIndex) const;
     std::string getControlPointName(uint32_t vertexIndex) const;
 
+    // Metadata (key-value pairs written to LIME files)
+    void setMetadata(const std::string& key, const std::string& value) { m_metadata[key] = value; }
+    void removeMetadata(const std::string& key) { m_metadata.erase(key); }
+    void clearMetadata() { m_metadata.clear(); }
+    const std::unordered_map<std::string, std::string>& getMetadata() const { return m_metadata; }
+    std::string getMetadataValue(const std::string& key) const {
+        auto it = m_metadata.find(key);
+        return it != m_metadata.end() ? it->second : "";
+    }
+
     // Insert edge loop - cuts perpendicular edges through quads
     // count: number of edge loops to insert (evenly distributed)
     void insertEdgeLoop(uint32_t heIdx, int count = 1);
@@ -445,6 +455,9 @@ private:
 
     // Named control points for modular part connections
     std::vector<ControlPoint> m_controlPoints;
+
+    // Key-value metadata (widget_type, machine_name, etc.)
+    std::unordered_map<std::string, std::string> m_metadata;
 
     // Undo/Redo stacks
     std::vector<MeshState> m_undoStack;

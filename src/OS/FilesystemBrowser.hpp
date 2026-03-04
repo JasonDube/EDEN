@@ -61,6 +61,7 @@ public:
     CullSession* getCullSession() { return &m_cullSession; }
     PlatformGridBuilder& getPlatformGrid() { return m_platformGrid; }
     float getPlatformY() const { return m_platformY; }
+    float getRingBaseY() const { return m_ringBaseY; }
 
     // Emanation rendering — call from render loop after scene objects
     // Returns line pairs and color (with alpha) for each batch
@@ -291,6 +292,7 @@ private:
     // Platform grid (user-customizable walls on top of silo)
     PlatformGridBuilder m_platformGrid;
     float m_platformY = 100.0f;  // Y of the platform (top of silo)
+    float m_ringBaseY = 100.0f;  // Y of the bottom of gallery rings (silo floor)
 
     // Folder visit tracking (attention system)
     std::unordered_map<std::string, int> m_folderVisits;

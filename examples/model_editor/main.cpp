@@ -94,8 +94,8 @@ protected:
         // Start in modeling mode
         switchMode(EditorModeType::ModelingEditor);
 
-        // Initialize library path (relative to executable, but we use source path for safety)
-        m_libraryPath = "/home/jasondube/Desktop/EDEN_Feb_2_2026_0550/examples/model_editor/library";
+        // Initialize library path from project source directory
+        m_libraryPath = std::string(CMAKE_SOURCE_DIR) + "/examples/model_editor/library";
 
         // Initialize MCP server
         initMCPServer();
@@ -1443,7 +1443,23 @@ private:
             .aiGenerateStatus = m_aiGenerateStatus,
             .aiServerRunning = m_aiServerRunning,
             .aiServerReady = m_aiServerReady,
-            .aiLogLines = m_aiLogLines
+            .aiLogLines = m_aiLogLines,
+            .onMetadataLoaded = [this](const std::unordered_map<std::string, std::string>& meta) {
+                m_widgetTypeIndex = 0;
+                memset(m_widgetParamName, 0, sizeof(m_widgetParamName));
+                memset(m_widgetMachineName, 0, sizeof(m_widgetMachineName));
+                auto wtIt = meta.find("widget_type");
+                if (wtIt != meta.end()) {
+                    const char* typeKeys[] = {"machine", "input", "output", "button", "checkbox", "slider", "log"};
+                    for (int i = 0; i < 7; ++i) {
+                        if (wtIt->second == typeKeys[i]) { m_widgetTypeIndex = i + 1; break; }
+                    }
+                    auto mnIt = meta.find("machine_name");
+                    if (mnIt != meta.end()) strncpy(m_widgetMachineName, mnIt->second.c_str(), sizeof(m_widgetMachineName) - 1);
+                    auto pnIt = meta.find("param_name");
+                    if (pnIt != meta.end()) strncpy(m_widgetParamName, pnIt->second.c_str(), sizeof(m_widgetParamName) - 1);
+                }
+            }
         });
     }
 
@@ -2399,8 +2415,52 @@ private:
                         ImGui::EndCombo();
                     }
 
+                    // Widget Properties (metadata for wall machine system)
+                    if (ImGui::TreeNode("Widget Properties")) {
+                        static const char* widgetTypes[] = {
+                            "None", "Machine", "Input", "Output", "Button", "Checkbox", "Slider", "Log"
+                        };
+                        ImGui::SetNextItemWidth(120);
+                        ImGui::Combo("Widget Type", &m_widgetTypeIndex, widgetTypes, IM_ARRAYSIZE(widgetTypes));
+
+                        if (m_widgetTypeIndex == 1) { // Machine
+                            ImGui::SetNextItemWidth(160);
+                            ImGui::InputTextWithHint("##machname", "e.g. hunyuan3d", m_widgetMachineName, sizeof(m_widgetMachineName));
+                            ImGui::SameLine();
+                            ImGui::TextDisabled("Machine Name");
+                        } else if (m_widgetTypeIndex >= 2) { // Input, Output, Button, etc.
+                            ImGui::SetNextItemWidth(160);
+                            ImGui::InputTextWithHint("##paramname", "e.g. image, generate", m_widgetParamName, sizeof(m_widgetParamName));
+                            ImGui::SameLine();
+                            ImGui::TextDisabled("Param Name");
+                        }
+
+                        // CP naming guide
+                        ImGui::TextDisabled("Control point naming:");
+                        ImGui::BulletText("port:name  - wire connection point");
+                        ImGui::BulletText("btn:name   - built-in button");
+                        ImGui::BulletText("screen:name - built-in display");
+                        ImGui::BulletText("slider:name - built-in slider");
+                        ImGui::BulletText("checkbox:name - built-in toggle");
+
+                        ImGui::TreePop();
+                    }
+
                     ImGui::SameLine();
                     if (ImGui::Button("Save")) {
+                        // Write widget metadata into the mesh before saving
+                        m_editableMesh.clearMetadata();
+                        if (m_widgetTypeIndex > 0) {
+                            static const char* typeKeys[] = {
+                                "", "machine", "input", "output", "button", "checkbox", "slider", "log"
+                            };
+                            m_editableMesh.setMetadata("widget_type", typeKeys[m_widgetTypeIndex]);
+                            if (m_widgetTypeIndex == 1 && m_widgetMachineName[0] != '\0') {
+                                m_editableMesh.setMetadata("machine_name", m_widgetMachineName);
+                            } else if (m_widgetTypeIndex >= 2 && m_widgetParamName[0] != '\0') {
+                                m_editableMesh.setMetadata("param_name", m_widgetParamName);
+                            }
+                        }
                         std::string cat = (saveCategoryIndex == 0) ? "" : m_libraryCategories[saveCategoryIndex - 1];
                         saveToLibrary(cat);
                     }
@@ -2897,6 +2957,27 @@ private:
         m_sceneObjects.push_back(std::move(obj));
         m_objectMode = true;
 
+        // Restore widget properties UI from metadata
+        const auto& meta = m_editableMesh.getMetadata();
+        m_widgetTypeIndex = 0;
+        memset(m_widgetParamName, 0, sizeof(m_widgetParamName));
+        memset(m_widgetMachineName, 0, sizeof(m_widgetMachineName));
+        auto wtIt = meta.find("widget_type");
+        if (wtIt != meta.end()) {
+            const char* typeKeys[] = {"machine", "input", "output", "button", "checkbox", "slider", "log"};
+            for (int i = 0; i < 7; ++i) {
+                if (wtIt->second == typeKeys[i]) { m_widgetTypeIndex = i + 1; break; }
+            }
+            auto mnIt = meta.find("machine_name");
+            if (mnIt != meta.end()) {
+                strncpy(m_widgetMachineName, mnIt->second.c_str(), sizeof(m_widgetMachineName) - 1);
+            }
+            auto pnIt = meta.find("param_name");
+            if (pnIt != meta.end()) {
+                strncpy(m_widgetParamName, pnIt->second.c_str(), sizeof(m_widgetParamName) - 1);
+            }
+        }
+
         std::cout << "Loaded from library: " << name
                   << " (scale: " << scale.x << ", " << scale.y << ", " << scale.z << ")" << std::endl;
     }
@@ -3120,6 +3201,23 @@ private:
 
     void startHunyuanServer(bool lowVRAM, bool enableTex = false) {
         if (m_aiServerRunning) return;
+
+        // Kill any orphaned server still holding the port from a previous session
+        {
+            FILE* fp = popen("lsof -ti :8081 2>/dev/null", "r");
+            if (fp) {
+                char buf[64];
+                while (fgets(buf, sizeof(buf), fp)) {
+                    pid_t orphan = atoi(buf);
+                    if (orphan > 0) {
+                        kill(orphan, SIGTERM);
+                        std::cout << "[Hunyuan3D] Killed orphaned process " << orphan << " on port 8081" << std::endl;
+                    }
+                }
+                pclose(fp);
+                usleep(500000); // 500ms for port to free up
+            }
+        }
 
         pid_t pid = fork();
         if (pid == 0) {
@@ -4660,6 +4758,11 @@ private:
     bool m_libraryNeedsRefresh = true;
     char m_librarySaveNameBuffer[128] = "";
     char m_libraryNewCategoryBuffer[64] = "";
+
+    // Widget properties for library save (metadata)
+    int m_widgetTypeIndex = 0;
+    char m_widgetParamName[64] = "";
+    char m_widgetMachineName[64] = "";
     static const int THUMBNAIL_SIZE = 128;
 
     // Image Reference window state

@@ -7904,6 +7904,11 @@ void ModelingMode::loadLimeFile() {
             m_ctx.currentFilePath = filepath;
             m_ctx.currentFileFormat = 2;  // LIME
 
+            // Notify main editor of loaded metadata (for widget properties UI)
+            if (m_ctx.onMetadataLoaded) {
+                m_ctx.onMetadataLoaded(m_ctx.editableMesh.getMetadata());
+            }
+
             std::cout << "Loaded LIME: " << filepath;
             if (texWidth > 0 && texHeight > 0) {
                 std::cout << " (with " << texWidth << "x" << texHeight << " texture)";
