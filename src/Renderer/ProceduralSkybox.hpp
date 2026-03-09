@@ -28,6 +28,10 @@ public:
     // Render the skybox
     void render(VkCommandBuffer commandBuffer, const glm::mat4& view, const glm::mat4& projection);
 
+    // Toggle wireframe overlay
+    void setWireframe(bool on) { m_wireframe = on; }
+    bool isWireframe() const { return m_wireframe; }
+
 private:
     void createCubeGeometry();
     void createPipeline(VkRenderPass renderPass, VkExtent2D extent);
@@ -62,6 +66,8 @@ private:
     // Pipeline
     VkPipelineLayout m_pipelineLayout = VK_NULL_HANDLE;
     VkPipeline m_pipeline = VK_NULL_HANDLE;
+    VkPipeline m_wireframePipeline = VK_NULL_HANDLE;
+    bool m_wireframe = false;
 };
 
 } // namespace eden

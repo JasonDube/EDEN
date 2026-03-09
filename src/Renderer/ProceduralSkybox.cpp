@@ -4,6 +4,7 @@
 #include <stdexcept>
 #include <array>
 #include <cstring>
+#include <cmath>
 
 namespace eden {
 
@@ -28,6 +29,9 @@ ProceduralSkybox::ProceduralSkybox(VulkanContext& context, VkRenderPass renderPa
 ProceduralSkybox::~ProceduralSkybox() {
     VkDevice device = m_context.getDevice();
 
+    if (m_wireframePipeline != VK_NULL_HANDLE) {
+        vkDestroyPipeline(device, m_wireframePipeline, nullptr);
+    }
     if (m_pipeline != VK_NULL_HANDLE) {
         vkDestroyPipeline(device, m_pipeline, nullptr);
     }
@@ -72,38 +76,63 @@ void ProceduralSkybox::updateParameters(const SkyParameters& params) {
 }
 
 void ProceduralSkybox::createCubeGeometry() {
-    // Unit cube vertices (positions only)
+    // Generate icosphere (geodesic sphere) — starts as icosahedron, subdivided 3x
+    // This gives a nice geodesic dome look in wireframe mode
+
+    // Golden ratio for icosahedron vertices
+    const float t = (1.0f + std::sqrt(5.0f)) / 2.0f;
+
     std::vector<glm::vec3> vertices = {
-        // Front face
-        {-1.0f, -1.0f,  1.0f}, { 1.0f, -1.0f,  1.0f},
-        { 1.0f,  1.0f,  1.0f}, {-1.0f,  1.0f,  1.0f},
-        // Back face
-        { 1.0f, -1.0f, -1.0f}, {-1.0f, -1.0f, -1.0f},
-        {-1.0f,  1.0f, -1.0f}, { 1.0f,  1.0f, -1.0f},
-        // Top face
-        {-1.0f,  1.0f,  1.0f}, { 1.0f,  1.0f,  1.0f},
-        { 1.0f,  1.0f, -1.0f}, {-1.0f,  1.0f, -1.0f},
-        // Bottom face
-        {-1.0f, -1.0f, -1.0f}, { 1.0f, -1.0f, -1.0f},
-        { 1.0f, -1.0f,  1.0f}, {-1.0f, -1.0f,  1.0f},
-        // Right face
-        { 1.0f, -1.0f,  1.0f}, { 1.0f, -1.0f, -1.0f},
-        { 1.0f,  1.0f, -1.0f}, { 1.0f,  1.0f,  1.0f},
-        // Left face
-        {-1.0f, -1.0f, -1.0f}, {-1.0f, -1.0f,  1.0f},
-        {-1.0f,  1.0f,  1.0f}, {-1.0f,  1.0f, -1.0f},
+        glm::normalize(glm::vec3{-1,  t,  0}),
+        glm::normalize(glm::vec3{ 1,  t,  0}),
+        glm::normalize(glm::vec3{-1, -t,  0}),
+        glm::normalize(glm::vec3{ 1, -t,  0}),
+        glm::normalize(glm::vec3{ 0, -1,  t}),
+        glm::normalize(glm::vec3{ 0,  1,  t}),
+        glm::normalize(glm::vec3{ 0, -1, -t}),
+        glm::normalize(glm::vec3{ 0,  1, -t}),
+        glm::normalize(glm::vec3{ t,  0, -1}),
+        glm::normalize(glm::vec3{ t,  0,  1}),
+        glm::normalize(glm::vec3{-t,  0, -1}),
+        glm::normalize(glm::vec3{-t,  0,  1}),
     };
 
-    std::vector<uint16_t> indices;
-    for (int i = 0; i < 6; i++) {
-        uint16_t base = i * 4;
-        indices.push_back(base + 0);
-        indices.push_back(base + 1);
-        indices.push_back(base + 2);
-        indices.push_back(base + 2);
-        indices.push_back(base + 3);
-        indices.push_back(base + 0);
+    // 20 triangular faces of icosahedron
+    std::vector<uint16_t> indices = {
+        0,11,5,  0,5,1,  0,1,7,  0,7,10, 0,10,11,
+        1,5,9,   5,11,4, 11,10,2, 10,7,6, 7,1,8,
+        3,9,4,   3,4,2,  3,2,6,  3,6,8,  3,8,9,
+        4,9,5,   2,4,11, 6,2,10, 8,6,7,  9,8,1,
+    };
+
+    // Subdivide 3 times for a smooth geodesic sphere (642 verts, 3840 tris)
+    auto getMidpoint = [&](uint16_t i1, uint16_t i2) -> uint16_t {
+        glm::vec3 mid = glm::normalize((vertices[i1] + vertices[i2]) * 0.5f);
+        // Check for existing vertex at this position (avoid duplicates)
+        for (uint16_t i = 0; i < static_cast<uint16_t>(vertices.size()); i++) {
+            if (glm::length(vertices[i] - mid) < 0.0001f) return i;
+        }
+        vertices.push_back(mid);
+        return static_cast<uint16_t>(vertices.size() - 1);
+    };
+
+    for (int sub = 0; sub < 3; sub++) {
+        std::vector<uint16_t> newIndices;
+        for (size_t i = 0; i < indices.size(); i += 3) {
+            uint16_t a = indices[i], b = indices[i+1], c = indices[i+2];
+            uint16_t ab = getMidpoint(a, b);
+            uint16_t bc = getMidpoint(b, c);
+            uint16_t ca = getMidpoint(c, a);
+            newIndices.insert(newIndices.end(), {
+                a, ab, ca,
+                b, bc, ab,
+                c, ca, bc,
+                ab, bc, ca
+            });
+        }
+        indices = std::move(newIndices);
     }
+
     m_indexCount = static_cast<uint32_t>(indices.size());
 
     VkDevice device = m_context.getDevice();
@@ -419,12 +448,22 @@ void ProceduralSkybox::createPipeline(VkRenderPass renderPass, VkExtent2D extent
         throw std::runtime_error("Failed to create skybox graphics pipeline");
     }
 
+    // Create wireframe variant
+    rasterizer.polygonMode = VK_POLYGON_MODE_LINE;
+    rasterizer.lineWidth = 1.0f;
+    if (vkCreateGraphicsPipelines(m_context.getDevice(), VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &m_wireframePipeline) != VK_SUCCESS) {
+        // Non-fatal — wireframe may not be supported (requires fillModeNonSolid)
+        m_wireframePipeline = VK_NULL_HANDLE;
+    }
+
     vkDestroyShaderModule(m_context.getDevice(), fragShaderModule, nullptr);
     vkDestroyShaderModule(m_context.getDevice(), vertShaderModule, nullptr);
 }
 
 void ProceduralSkybox::render(VkCommandBuffer commandBuffer, const glm::mat4& view, const glm::mat4& projection) {
-    vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipeline);
+    VkPipeline activePipeline = (m_wireframe && m_wireframePipeline != VK_NULL_HANDLE)
+        ? m_wireframePipeline : m_pipeline;
+    vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, activePipeline);
     vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
         m_pipelineLayout, 0, 1, &m_descriptorSet, 0, nullptr);
 

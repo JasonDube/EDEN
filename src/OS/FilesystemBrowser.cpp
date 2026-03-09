@@ -7,6 +7,7 @@
 #include <stb_image.h>
 #include <stb_image_write.h>
 #include <algorithm>
+#include <unordered_set>
 #include <iostream>
 #include <fstream>
 #include <sstream>
@@ -983,10 +984,31 @@ bool FilesystemBrowser::toggleSpin(SceneObject* obj) {
     for (auto& spin : m_modelSpins) {
         if (spin.obj == obj) {
             spin.paused = !spin.paused;
+            // Persist pause state to the matching WallFrame by file path
+            std::string target = obj->getTargetLevel();
+            std::string path;
+            if (target.size() > 5 && target.substr(0, 5) == "fs://")
+                path = target.substr(5);
+            if (!path.empty()) {
+                for (auto& fr : m_platformGrid.grid().frames) {
+                    if (fr.filePath == path) {
+                        fr.spinPaused = spin.paused;
+                        m_platformGrid.saveConfig(m_currentPath);
+                        break;
+                    }
+                }
+            }
             return true;
         }
     }
     return false;
+}
+
+void FilesystemBrowser::removeModelSpin(SceneObject* obj) {
+    m_modelSpins.erase(
+        std::remove_if(m_modelSpins.begin(), m_modelSpins.end(),
+                        [obj](const ModelSpin& s) { return s.obj == obj; }),
+        m_modelSpins.end());
 }
 
 void FilesystemBrowser::parseFrameType(const std::string& filename, WallFrame& frame) {
@@ -1042,6 +1064,7 @@ void FilesystemBrowser::spawnFileAtFrame(const std::string& filePath, SceneObjec
     float frameYaw = frame->getEulerRotation().y;
     float s = frameScale.x; // frame size in meters (square)
     float yawRad = frameYaw * static_cast<float>(M_PI) / 180.0f;
+    bool isFloorFrame = (frameScale.y < frameScale.x * 0.5f); // floor: {s, 0.1, s} vs wall: {s, s, 0.1}
 
     // Check if this file has widget metadata (in .lime) or a machine-system prefix
     WallFrame tmpFrame;
@@ -1113,14 +1136,19 @@ void FilesystemBrowser::spawnFileAtFrame(const std::string& filePath, SceneObjec
                     limeObj->getTransform().setScale(glm::vec3(fitScale));
                     limeObj->setEulerRotation({0.0f, frameYaw, 0.0f});
 
-                    // Position: centered on frame, offset forward from wall
-                    // Frame worldY is bottom-aligned; lift to center, then compensate for model bounds
+                    // Position: centered on frame, offset forward from surface
                     glm::vec3 spawnPos = framePos;
-                    spawnPos.x += sinf(yawRad) * (widgetDepth * 0.5f + 0.1f);
-                    spawnPos.z += cosf(yawRad) * (widgetDepth * 0.5f + 0.1f);
-                    spawnPos.y += s * 0.5f;  // Lift from frame bottom to frame center
-                    glm::vec3 bCenter = bounds.getCenter();
-                    spawnPos.y -= bCenter.y * fitScale;  // Compensate for model origin offset
+                    if (isFloorFrame) {
+                        spawnPos.y += s * 0.5f; // lift so model sits on floor
+                        glm::vec3 bCenter = bounds.getCenter();
+                        spawnPos.y -= bCenter.y * fitScale;
+                    } else {
+                        spawnPos.x += sinf(yawRad) * (widgetDepth * 0.5f + 0.1f);
+                        spawnPos.z += cosf(yawRad) * (widgetDepth * 0.5f + 0.1f);
+                        spawnPos.y += s * 0.5f;
+                        glm::vec3 bCenter = bounds.getCenter();
+                        spawnPos.y -= bCenter.y * fitScale;
+                    }
                     limeObj->getTransform().setPosition(spawnPos);
 
                     // Hide the original frame and mark it as occupied
@@ -1154,12 +1182,17 @@ void FilesystemBrowser::spawnFileAtFrame(const std::string& filePath, SceneObjec
         obj->setDescription(label + ": " + name);
 
         glm::vec3 spawnPos = framePos;
-        spawnPos.x += sinf(yawRad) * (widgetDepth * 0.5f + 0.1f);
-        spawnPos.z += cosf(yawRad) * (widgetDepth * 0.5f + 0.1f);
-
+        if (isFloorFrame) {
+            spawnPos.y += widgetDepth * 0.5f + 0.1f;
+            float scaleFactor = s / 1.5f;
+            obj->getTransform().setScale({scaleFactor, widgetDepth, scaleFactor});
+        } else {
+            spawnPos.x += sinf(yawRad) * (widgetDepth * 0.5f + 0.1f);
+            spawnPos.z += cosf(yawRad) * (widgetDepth * 0.5f + 0.1f);
+            float scaleFactor = s / 1.5f;
+            obj->getTransform().setScale({scaleFactor, scaleFactor, widgetDepth});
+        }
         obj->getTransform().setPosition(spawnPos);
-        float scaleFactor = s / 1.5f;
-        obj->getTransform().setScale({scaleFactor, scaleFactor, widgetDepth});
         obj->setEulerRotation({0.0f, frameYaw, 0.0f});
 
         m_sceneObjects->push_back(std::move(obj));
@@ -1182,18 +1215,26 @@ void FilesystemBrowser::spawnFileAtFrame(const std::string& filePath, SceneObjec
     } else if (isModel) {
         float uniformSize = s * 0.8f / 1.5f;
         scale = glm::vec3(uniformSize);
+    } else if (isFloorFrame) {
+        scale = {s / 1.5f, 0.03f, s / 1.5f}; // flat on floor
     } else {
         scale = {s / 1.5f, s / 1.5f, 0.03f};
     }
 
     // Offset slightly in front of frame surface
-    // Frame worldY is bottom-aligned; lift 3D models up by 50% of frame size
     glm::vec3 spawnPos = framePos;
-    if (isModel) {
-        spawnPos.y += s * 0.5f;
+    if (isFloorFrame) {
+        if (!isModel) {
+            spawnPos.y += 0.15f; // flat files slightly above floor
+        }
+        // Models: position at frame Y, then adjust after spawn using actual bounds
+    } else {
+        if (isModel) {
+            spawnPos.y += s * 0.5f;
+        }
+        spawnPos.x += sinf(yawRad) * 0.15f;
+        spawnPos.z += cosf(yawRad) * 0.15f;
     }
-    spawnPos.x += sinf(yawRad) * 0.15f;
-    spawnPos.z += cosf(yawRad) * 0.15f;
 
     // Ensure cancel token exists for video extraction threads
     if (!m_cancelExtraction) {
@@ -1201,6 +1242,18 @@ void FilesystemBrowser::spawnFileAtFrame(const std::string& filePath, SceneObjec
     }
 
     spawnOneObject(entry, m_sceneObjects->size(), spawnPos, scale, frameYaw);
+
+    // For floor models: lift by half their actual height so they sit on the surface
+    if (isFloorFrame && isModel && !m_sceneObjects->empty()) {
+        auto& spawned = m_sceneObjects->back();
+        if (spawned) {
+            AABB wb = spawned->getWorldBounds();
+            float modelHeight = wb.max.y - wb.min.y;
+            glm::vec3 pos = spawned->getTransform().getPosition();
+            pos.y = framePos.y + modelHeight * 0.5f;
+            spawned->getTransform().setPosition(pos);
+        }
+    }
 
     // Hide the original frame and mark it as occupied
     frame->setTargetLevel("fs://" + filePath);
@@ -1509,6 +1562,40 @@ void FilesystemBrowser::spawnAppRing(const glm::vec3& center, float baseY) {
 
             m_sceneObjects->push_back(std::move(doorObj));
         }
+
+        // Place Exit door on segment 3
+        if (s == 3) {
+            float inset = 2.4f;
+            float doorX = center.x + (radius - inset) * cosf(angle);
+            float doorZ = center.z + (radius - inset) * sinf(angle);
+            float doorY = levelY;
+
+            glm::vec4 exitColor{0.2f, 0.6f, 0.9f, 0.8f}; // blue
+            auto doorMesh = PrimitiveMeshBuilder::createCube(2.0f, exitColor);
+            uint32_t doorHandle = m_modelRenderer->createModel(
+                doorMesh.vertices, doorMesh.indices, nullptr, 0, 0);
+
+            auto doorObj = std::make_unique<SceneObject>("FSExitDoor");
+            doorObj->setBufferHandle(doorHandle);
+            doorObj->setIndexCount(static_cast<uint32_t>(doorMesh.indices.size()));
+            doorObj->setVertexCount(static_cast<uint32_t>(doorMesh.vertices.size()));
+            doorObj->setLocalBounds(doorMesh.bounds);
+            doorObj->setMeshData(doorMesh.vertices, doorMesh.indices);
+            doorObj->setPrimitiveType(PrimitiveType::Door);
+            doorObj->setPrimitiveSize(2.0f);
+            doorObj->setPrimitiveColor(exitColor);
+            doorObj->setBuildingType("filesystem");
+            doorObj->setDescription("Exit");
+            doorObj->setDoorId("appdoor_exit");
+            doorObj->setTargetLevel("exit://terrain");
+
+            glm::vec3 doorScale = {segmentWidth * 0.5f / 2.0f, (GALLERY_WALL_HEIGHT - 1.0f) / 2.0f, 2.0f};
+            doorObj->getTransform().setPosition({doorX, doorY, doorZ});
+            doorObj->getTransform().setScale(doorScale);
+            doorObj->setEulerRotation({0.0f, yawDeg, 0.0f});
+
+            m_sceneObjects->push_back(std::move(doorObj));
+        }
     }
 }
 
@@ -1605,6 +1692,10 @@ void FilesystemBrowser::spawnAppSpace(const std::string& appPath, const glm::vec
 void FilesystemBrowser::spawnBasement(const glm::vec3& center, float baseY) {
     if (!m_modelRenderer || !m_sceneObjects) return;
 
+    // Store the basement baseY so silo rings align with it
+    m_basementBaseY = baseY;
+    m_basementBaseYValid = true;
+
     // Don't spawn if basement already exists (it persists across navigations)
     for (const auto& obj : *m_sceneObjects) {
         if (obj && obj->getBuildingType() == "eden_basement") return;
@@ -1639,10 +1730,10 @@ void FilesystemBrowser::spawnBasement(const glm::vec3& center, float baseY) {
 
     // Cube mesh Y goes from 0 to size, so position.y = bottom edge.
     // Floor slab: bottom at floorY - 1, top at floorY
-    // Ceiling slab: bottom at baseY, top at baseY + 1
-    // Walls: bottom at floorY - 1 (flush with floor bottom), top at baseY + 1 (flush with ceiling top)
+    // Ceiling slab: bottom at baseY - 1, top at baseY (flush with silo ring base)
+    // Walls: bottom at floorY - 1 (flush with floor bottom), top at baseY (flush with ceiling top)
     float wallBottom = floorY - 1.0f;
-    float wallHeight = (baseY + 1.0f) - wallBottom;
+    float wallHeight = baseY - wallBottom;
 
     // 4 walls — each split into 3 panels around a centered door opening
     // Door opening: 16 units wide, 14 units tall from floor
@@ -1686,14 +1777,184 @@ void FilesystemBrowser::spawnBasement(const glm::vec3& center, float baseY) {
     spawnPanel({center.x - halfSize, lintelBottom, center.z},
                {1.0f, lintelHeight, doorWidth}, "eden_basement_wall");
 
-    // Floor — bottom at floorY - 1, top at floorY
-    spawnPanel({center.x, floorY - 1.0f, center.z},
-               {basementSize(), 1.0f, basementSize()});
+    // Floor with central square hole (access to void below)
+    // Same 16x16 hole as ceiling
+    {
+        float floorHoleSize = 16.0f;
+        float floorHoleHalf = floorHoleSize / 2.0f;
+        float floorSlabEdge = (basementSize() - floorHoleSize) / 2.0f;
+        float fy = floorY - 1.0f; // bottom edge of floor slab
 
-    // Solid ceiling — no hole
+        // North slab
+        spawnPanel({center.x, fy, center.z + floorHoleHalf + floorSlabEdge / 2.0f},
+                   {basementSize(), 1.0f, floorSlabEdge});
+        // South slab
+        spawnPanel({center.x, fy, center.z - floorHoleHalf - floorSlabEdge / 2.0f},
+                   {basementSize(), 1.0f, floorSlabEdge});
+        // East slab
+        spawnPanel({center.x + floorHoleHalf + floorSlabEdge / 2.0f, fy, center.z},
+                   {floorSlabEdge, 1.0f, floorHoleSize});
+        // West slab
+        spawnPanel({center.x - floorHoleHalf - floorSlabEdge / 2.0f, fy, center.z},
+                   {floorSlabEdge, 1.0f, floorHoleSize});
+    }
+
+    // Ceiling with central square hole (shared silo floor / basement ceiling)
+    // Hole is 16x16 units centered, ceiling slab is 1 unit thick
     // Bottom at baseY, top at baseY + 1
-    spawnPanel({center.x, baseY, center.z},
-               {basementSize(), 1.0f, basementSize()});
+    float holeSize = 16.0f;
+    float holeHalf = holeSize / 2.0f;
+    float slabEdge = (basementSize() - holeSize) / 2.0f;
+
+    // Slab top surface must align with baseY (ringBaseY), so bottom edge at baseY - 1
+    float ceilY = baseY - 1.0f;
+
+    // North slab
+    spawnPanel({center.x, ceilY, center.z + holeHalf + slabEdge / 2.0f},
+               {basementSize(), 1.0f, slabEdge});
+    // South slab
+    spawnPanel({center.x, ceilY, center.z - holeHalf - slabEdge / 2.0f},
+               {basementSize(), 1.0f, slabEdge});
+    // East slab (between hole edges, only spanning the hole width in Z)
+    spawnPanel({center.x + holeHalf + slabEdge / 2.0f, ceilY, center.z},
+               {slabEdge, 1.0f, holeSize});
+    // West slab
+    spawnPanel({center.x - holeHalf - slabEdge / 2.0f, ceilY, center.z},
+               {slabEdge, 1.0f, holeSize});
+
+    // Punch a hole in the terrain covering the entire void footprint (128m)
+    // so the player doesn't get snapped back to terrain height while exploring
+    if (m_terrain) {
+        float voidHoleHalf = 64.0f; // 128x128 hole centered
+        m_terrain->setHoleRect(
+            center.x - voidHoleHalf, center.z - voidHoleHalf,
+            center.x + voidHoleHalf, center.z + voidHoleHalf);
+    }
+}
+
+// ── Menger Sponge Void ────────────────────────────────────────────────
+
+void FilesystemBrowser::spawnVoid(const glm::vec3& center, float topY,
+                                   const std::vector<EntryInfo>& overflowItems) {
+    if (!m_modelRenderer || !m_sceneObjects || overflowItems.empty()) return;
+
+    // Menger sponge where the files ARE the structure.
+    // Each kept cube position is either a file object or a dark filler.
+    // Removed cubes are void (tunnels you fly through).
+
+    struct VoidCube {
+        glm::vec3 center;
+        float halfSize;
+    };
+
+    // Initial cube: 128m wide, below the basement floor
+    float initialSize = 128.0f;
+    float initialHalf = initialSize / 2.0f;
+    float voidTopY = topY - initialSize / 3.0f;
+    glm::vec3 voidCenter = {center.x, voidTopY - initialHalf, center.z};
+
+    // Subdivide twice: 27 → keep 20 → each 20 subdivides → keep 20 = 400 positions
+    std::vector<VoidCube> cubes;
+    cubes.push_back({voidCenter, initialHalf});
+
+    int maxDepth = 2;
+    for (int depth = 0; depth < maxDepth; ++depth) {
+        std::vector<VoidCube> nextCubes;
+        for (const auto& cube : cubes) {
+            float childHalf = cube.halfSize / 3.0f;
+            float step = cube.halfSize * 2.0f / 3.0f;
+
+            for (int ix = 0; ix < 3; ++ix) {
+                for (int iy = 0; iy < 3; ++iy) {
+                    for (int iz = 0; iz < 3; ++iz) {
+                        int cenCount = (ix == 1 ? 1 : 0) + (iy == 1 ? 1 : 0) + (iz == 1 ? 1 : 0);
+                        if (cenCount >= 2) continue; // void tunnel
+
+                        glm::vec3 childCenter = {
+                            cube.center.x + (ix - 1) * step,
+                            cube.center.y + (iy - 1) * step,
+                            cube.center.z + (iz - 1) * step
+                        };
+                        nextCubes.push_back({childCenter, childHalf});
+                    }
+                }
+            }
+        }
+        cubes = std::move(nextCubes);
+    }
+
+    // cubes now has all kept positions (~400 at depth 2).
+    // Sort top-down so files fill from the top (nearest the basement hole).
+    std::sort(cubes.begin(), cubes.end(), [](const VoidCube& a, const VoidCube& b) {
+        return a.center.y > b.center.y;
+    });
+
+    // Fill with file objects first, then filler cubes for the rest.
+    size_t itemIdx = 0;
+    glm::vec4 fillerColor = {0.08f, 0.08f, 0.12f, 1.0f};
+
+    // Batch filler cubes into a single mesh
+    auto unitCube = PrimitiveMeshBuilder::createCube(1.0f, fillerColor);
+    std::vector<ModelVertex> fillerVerts;
+    std::vector<uint32_t> fillerIndices;
+    AABB fillerBounds;
+    fillerBounds.min = glm::vec3(FLT_MAX);
+    fillerBounds.max = glm::vec3(-FLT_MAX);
+
+    for (const auto& cube : cubes) {
+        float s = cube.halfSize * 2.0f;
+
+        if (itemIdx < overflowItems.size()) {
+            // Spawn file as a cube filling this sponge position exactly.
+            // Cube mesh: X/Z centered at origin (-h to +h), Y from 0 to size.
+            // Offset Y down by half so the cube is centered on cube.center.
+            bool isFolder = (overflowItems[itemIdx].category == FileCategory::Folder);
+            float meshSize = isFolder ? 2.0f : 1.5f;
+            float cubeScale = s / meshSize;
+            glm::vec3 pos = cube.center;
+            pos.y -= s / 2.0f; // shift down so cube centers on the sponge position
+            glm::vec3 scale(cubeScale);
+            spawnOneObject(overflowItems[itemIdx], itemIdx, pos, scale, 0.0f);
+            itemIdx++;
+        } else {
+            // Filler cube — add to batched mesh
+            // Unit cube (size=1): X/Z from -0.5 to 0.5, Y from 0 to 1
+            // We want it centered on cube.center, so offset Y by -0.5 before scaling
+            uint32_t baseVertex = static_cast<uint32_t>(fillerVerts.size());
+            for (const auto& v : unitCube.vertices) {
+                ModelVertex mv = v;
+                glm::vec3 centered = v.position;
+                centered.y -= 0.5f; // center Y
+                mv.position = cube.center + centered * s;
+                fillerVerts.push_back(mv);
+                fillerBounds.min = glm::min(fillerBounds.min, mv.position);
+                fillerBounds.max = glm::max(fillerBounds.max, mv.position);
+            }
+            for (uint32_t idx : unitCube.indices) {
+                fillerIndices.push_back(baseVertex + idx);
+            }
+        }
+    }
+
+    // Upload the batched filler mesh (1 draw call for all empty cubes)
+    if (!fillerVerts.empty()) {
+        uint32_t handle = m_modelRenderer->createModel(fillerVerts, fillerIndices, nullptr, 0, 0);
+        auto obj = std::make_unique<SceneObject>("FSVoid_Filler");
+        obj->setBufferHandle(handle);
+        obj->setIndexCount(fillerIndices.size());
+        obj->setVertexCount(fillerVerts.size());
+        obj->setLocalBounds(fillerBounds);
+        obj->setPrimitiveType(PrimitiveType::Cube);
+        obj->setPrimitiveSize(1.0f);
+        obj->setPrimitiveColor(fillerColor);
+        obj->setBuildingType("filesystem_void");
+        obj->getTransform().setPosition({0, 0, 0});
+        obj->getTransform().setScale({1, 1, 1});
+        m_sceneObjects->push_back(std::move(obj));
+    }
+
+    std::cout << "[Void] " << cubes.size() << " sponge positions: "
+              << itemIdx << " files, " << (cubes.size() - itemIdx) << " fillers" << std::endl;
 }
 
 // ── Spawn Objects ──────────────────────────────────────────────────────
@@ -1810,30 +2071,28 @@ void FilesystemBrowser::spawnObjects(const std::string& dirPath) {
     // Use cached baseY so silo stays aligned with persistent basement across navigations.
     // Only recompute from terrain when no cached value exists (first spawn or new level).
     if (!m_basementBaseYValid) {
-        m_basementBaseY = 100.0f;  // Fixed Y — silo complex sits at 100m
+        m_basementBaseY = 100.0f;
         m_basementBaseYValid = true;
     }
     float baseY = m_basementBaseY;
     glm::vec3 center = m_spawnOrigin;
     center.y = baseY;
 
+    std::cout << "[FilesystemBrowser] Entry counts — folders: " << folders.size()
+              << ", images: " << images.size() << ", videos: " << videos.size()
+              << ", models: " << models.size() << ", others: " << others.size() << std::endl;
+    for (size_t i = 0; i < folders.size() && i < 5; ++i)
+        std::cout << "  folder[" << i << "]: " << folders[i].name << std::endl;
+
     bool hasRing = !folders.empty() || !images.empty() || !videos.empty() || !models.empty();
 
-    // Count how many ring levels we need
-    int nextLevel = 1; // level 0 = app ring
-    auto countLevels = [&](const std::vector<EntryInfo>& items, int start) -> int {
-        if (items.empty()) return start;
-        int levels = (static_cast<int>(items.size()) + gallerySides() - 1) / gallerySides();
-        return start + levels;
-    };
-    nextLevel = countLevels(folders, nextLevel);
-    nextLevel = countLevels(images, nextLevel);
-    nextLevel = countLevels(videos, nextLevel);
-    nextLevel = countLevels(models, nextLevel);
+    // Fixed 16-ring silo — always the same size regardless of content.
+    // 16 * 16m = 256m, matching FIXED_PLATFORM_HEIGHT so ringBaseY == basementBaseY.
+    static constexpr int FIXED_RING_LEVELS = 16;
+    int nextLevel = FIXED_RING_LEVELS;
 
-    // Platform is ALWAYS at a fixed Y (100m above terrain).
-    // Silo rings grow downward from the platform.
-    static constexpr float FIXED_PLATFORM_HEIGHT = 100.0f;
+    // Platform height matches ring total so silo bottom aligns with basement ceiling.
+    static constexpr float FIXED_PLATFORM_HEIGHT = 256.0f;
     m_platformY = baseY + FIXED_PLATFORM_HEIGHT;
 
     // Gallery rings stack downward from the platform
@@ -1844,6 +2103,39 @@ void FilesystemBrowser::spawnObjects(const std::string& dirPath) {
     // Reserve level 0 for the app launcher ring in every silo
     int spawnLevel = 1;
 
+    // Cap items to fit in the silo (15 content rings × gallerySides() items each)
+    // Overflow goes to the Menger sponge void below the basement
+    int maxSiloItems = (FIXED_RING_LEVELS - 1) * gallerySides(); // 15 * 20 = 300
+    std::vector<EntryInfo> overflowItems;
+
+    // Flatten all items, take first maxSiloItems for silo, rest for void
+    {
+        std::vector<EntryInfo> allItems;
+        auto moveItems = [&](std::vector<EntryInfo>& src) {
+            for (auto& e : src) allItems.push_back(std::move(e));
+            src.clear();
+        };
+        moveItems(folders);
+        moveItems(images);
+        moveItems(videos);
+        moveItems(models);
+
+        // Re-split: first maxSiloItems go back to categories, rest to overflow
+        for (size_t i = 0; i < allItems.size(); ++i) {
+            if (static_cast<int>(i) < maxSiloItems) {
+                switch (allItems[i].category) {
+                    case FileCategory::Folder:  folders.push_back(std::move(allItems[i])); break;
+                    case FileCategory::Image:   images.push_back(std::move(allItems[i]));  break;
+                    case FileCategory::Video:   videos.push_back(std::move(allItems[i]));  break;
+                    case FileCategory::Model3D: models.push_back(std::move(allItems[i]));  break;
+                    default:                    overflowItems.push_back(std::move(allItems[i])); break;
+                }
+            } else {
+                overflowItems.push_back(std::move(allItems[i]));
+            }
+        }
+    }
+
     // Spawn app launcher ring at level 0 (base of silo, just below platform)
     spawnAppRing(center, ringBaseY);
     spawnLevel = spawnGalleryRing(folders, center, ringBaseY, spawnLevel);
@@ -1851,9 +2143,50 @@ void FilesystemBrowser::spawnObjects(const std::string& dirPath) {
     spawnLevel = spawnGalleryRing(videos,  center, ringBaseY, spawnLevel);
     spawnLevel = spawnGalleryRing(models,  center, ringBaseY, spawnLevel);
 
+    // Spawn empty walls for remaining unfilled ring levels
+    {
+        float radius = galleryRadius();
+        float segmentAngle = 2.0f * M_PI / gallerySides();
+        float segmentWidth = 2.0f * radius * sinf(segmentAngle / 2.0f);
+        glm::vec4 wallColor = m_siloConfig.wallColor;
+
+        for (int level = spawnLevel; level < FIXED_RING_LEVELS; ++level) {
+            float levelY = ringBaseY + level * GALLERY_WALL_HEIGHT;
+            for (int s = 0; s < gallerySides(); ++s) {
+                float angle = s * segmentAngle;
+                float wallX = center.x + radius * cosf(angle);
+                float wallZ = center.z + radius * sinf(angle);
+                float yawDeg = -angle * 180.0f / M_PI + 90.0f;
+
+                auto wallMesh = PrimitiveMeshBuilder::createCube(1.0f, wallColor);
+                uint32_t wallHandle = m_modelRenderer->createModel(
+                    wallMesh.vertices, wallMesh.indices, nullptr, 0, 0);
+
+                auto wallObj = std::make_unique<SceneObject>("FSWall_" + std::to_string(level) + "_" + std::to_string(s));
+                wallObj->setBufferHandle(wallHandle);
+                wallObj->setIndexCount(static_cast<uint32_t>(wallMesh.indices.size()));
+                wallObj->setVertexCount(static_cast<uint32_t>(wallMesh.vertices.size()));
+                wallObj->setLocalBounds(wallMesh.bounds);
+                wallObj->setMeshData(wallMesh.vertices, wallMesh.indices);
+                wallObj->setPrimitiveType(PrimitiveType::Cube);
+                wallObj->setPrimitiveSize(1.0f);
+                wallObj->setPrimitiveColor(wallColor);
+                wallObj->setBuildingType("filesystem_wall");
+                wallObj->setAABBCollision(true);
+                wallObj->setDescription("wall_empty");
+
+                wallObj->getTransform().setPosition({wallX, levelY, wallZ});
+                wallObj->getTransform().setScale({segmentWidth, GALLERY_WALL_HEIGHT, 0.15f});
+                wallObj->setEulerRotation({0.0f, yawDeg, 0.0f});
+
+                m_sceneObjects->push_back(std::move(wallObj));
+            }
+        }
+    }
+
     // Spawn vertical columns between panel sections
-    if (spawnLevel > 0) {
-        float totalHeight = spawnLevel * GALLERY_WALL_HEIGHT;
+    {
+        float totalHeight = FIXED_RING_LEVELS * GALLERY_WALL_HEIGHT;
         float radius = galleryRadius();
         float segmentAngle = 2.0f * M_PI / gallerySides();
         glm::vec4 colColor = m_siloConfig.columnColor;
@@ -1887,27 +2220,15 @@ void FilesystemBrowser::spawnObjects(const std::string& dirPath) {
         }
     }
 
-    // Spawn silo floor at the bottom of the rings
-    if (spawnLevel > 0) {
-        float floorSize = galleryRadius() * 2.2f; // slightly wider than silo
-        glm::vec4 floorColor{0.12f, 0.12f, 0.14f, 1.0f};
-        auto floorMesh = PrimitiveMeshBuilder::createCube(1.0f, floorColor);
-        uint32_t floorHandle = m_modelRenderer->createModel(floorMesh.vertices, floorMesh.indices, nullptr, 0, 0);
-        auto floorObj = std::make_unique<SceneObject>("FSSiloFloor");
-        floorObj->setBufferHandle(floorHandle);
-        floorObj->setIndexCount(floorMesh.indices.size());
-        floorObj->setVertexCount(floorMesh.vertices.size());
-        floorObj->setLocalBounds(floorMesh.bounds);
-        floorObj->setMeshData(floorMesh.vertices, floorMesh.indices);
-        floorObj->setPrimitiveType(PrimitiveType::Cube);
-        floorObj->setPrimitiveSize(1.0f);
-        floorObj->setPrimitiveColor(floorColor);
-        floorObj->setBuildingType("filesystem_wall");
-        floorObj->setAABBCollision(true);
-        // Thin slab at the bottom of the silo
-        floorObj->getTransform().setPosition({center.x, ringBaseY - 0.5f, center.z});
-        floorObj->getTransform().setScale({floorSize, 0.5f, floorSize});
-        m_sceneObjects->push_back(std::move(floorObj));
+    // Silo floor is now the basement ceiling (shared geometry with hole) — spawned in spawnBasement()
+
+    // Spawn Menger sponge void for overflow items below the basement
+    // Include "others" category in overflow too (not shown in silo)
+    for (auto& e : others) overflowItems.push_back(std::move(e));
+    if (!overflowItems.empty()) {
+        // Void starts below the basement floor
+        float basementFloorY = baseY - basementHeight();
+        spawnVoid(center, basementFloorY, overflowItems);
     }
 
     m_platformGrid.loadAndBuild(dirPath, center, m_platformY,
@@ -1927,6 +2248,8 @@ void FilesystemBrowser::spawnObjects(const std::string& dirPath) {
         float s = static_cast<float>(fr.size);
         bool isModel = (cat == FileCategory::Model3D);
         bool isDoor = (cat == FileCategory::Folder);
+        bool isFloor = (fr.normalX == 0.0f && fr.normalZ == 0.0f);
+
         // Cube mesh is 1.5 units, so divide by 1.5 to get actual meters
         glm::vec3 scale;
         if (isDoor) {
@@ -1934,23 +2257,50 @@ void FilesystemBrowser::spawnObjects(const std::string& dirPath) {
         } else if (isModel) {
             float uniformSize = s * 0.8f / 1.5f;
             scale = glm::vec3(uniformSize);
+        } else if (isFloor) {
+            scale = {s / 1.5f, 0.03f, s / 1.5f};
         } else {
             scale = {s / 1.5f, s / 1.5f, 0.03f};
         }
 
         float yawRad = fr.yawDeg * static_cast<float>(M_PI) / 180.0f;
-        float frameY = fr.worldY;
-        if (isModel) {
-            frameY += s * 0.5f; // lift 3D models up by 50% of frame size
+        glm::vec3 spawnPos;
+        if (isFloor) {
+            spawnPos = {fr.worldX, fr.worldY, fr.worldZ};
+            if (!isModel) {
+                spawnPos.y += 0.15f;
+            }
+        } else {
+            float frameY = fr.worldY;
+            if (isModel) {
+                frameY += s * 0.5f;
+            }
+            spawnPos = {fr.worldX + sinf(yawRad) * 0.15f,
+                        frameY,
+                        fr.worldZ + cosf(yawRad) * 0.15f};
         }
-        glm::vec3 spawnPos{fr.worldX + sinf(yawRad) * 0.15f,
-                           frameY,
-                           fr.worldZ + cosf(yawRad) * 0.15f};
 
         if (!m_cancelExtraction) {
             m_cancelExtraction = std::make_shared<std::atomic<bool>>(false);
         }
         spawnOneObject(entry, m_sceneObjects->size(), spawnPos, scale, fr.yawDeg);
+
+        // For floor models: lift by half their actual height so they sit on the surface
+        if (isFloor && isModel && !m_sceneObjects->empty()) {
+            auto& spawned = m_sceneObjects->back();
+            if (spawned) {
+                AABB wb = spawned->getWorldBounds();
+                float modelHeight = wb.max.y - wb.min.y;
+                glm::vec3 pos = spawned->getTransform().getPosition();
+                pos.y = fr.worldY + modelHeight * 0.5f;
+                spawned->getTransform().setPosition(pos);
+            }
+        }
+
+        // Apply saved spin pause state
+        if (fr.spinPaused && isModel && !m_modelSpins.empty()) {
+            m_modelSpins.back().paused = true;
+        }
     }
 
     // Place remaining "other" entries on the silo floor

@@ -47,6 +47,7 @@ void TerrainChunk::generate(const TerrainConfig& config) {
     m_texIndicesmap.resize(resolution * resolution, glm::uvec4(0, 1, 2, 3));  // Default texture indices 0,1,2,3
     m_selectionmap.resize(resolution * resolution, 0.0f);  // No selection by default
     m_texHSBmap.resize(resolution * resolution, glm::vec3(0.0f, 1.0f, 1.0f));  // Default: no hue shift, normal sat/bright
+    m_holemap.resize(resolution * resolution, 0.0f);  // No holes by default
     for (int z = 0; z < resolution; z++) {
         for (int x = 0; x < resolution; x++) {
             float worldX = worldOffsetX + x * tileSize;
@@ -129,6 +130,9 @@ void TerrainChunk::rebuildVerticesFromHeightmap() {
 
             // Texture color adjustment (HSB)
             vertex.texHSB = m_texHSBmap[idx];
+
+            // Hole mask
+            vertex.holeMask = m_holemap[idx];
         }
     }
 
@@ -846,6 +850,16 @@ float Terrain::getHeightAt(float worldX, float worldZ) const {
         glm::vec3 chunkPos = chunk->getWorldPosition();
         int localX = static_cast<int>((worldX - chunkPos.x) / chunk->getTileSize());
         int localZ = static_cast<int>((worldZ - chunkPos.z) / chunk->getTileSize());
+
+        // Check if this vertex is a hole — return very low height so player falls through
+        int res = chunk->getResolution();
+        localX = std::clamp(localX, 0, res - 1);
+        localZ = std::clamp(localZ, 0, res - 1);
+        int idx = localZ * res + localX;
+        if (idx < static_cast<int>(chunk->m_holemap.size()) && chunk->m_holemap[idx] > 0.5f) {
+            return -100000.0f;
+        }
+
         return chunk->getHeightAtLocal(localX, localZ);
     }
 
@@ -1153,6 +1167,39 @@ void Terrain::tiltSelection(float tiltX, float tiltZ) {
     }
     if (anyModified) {
         updateSelectionCache();
+    }
+}
+
+void Terrain::setHoleRect(float worldMinX, float worldMinZ, float worldMaxX, float worldMaxZ, bool isHole) {
+    float holeVal = isHole ? 1.0f : 0.0f;
+    for (auto& [coord, chunk] : m_chunks) {
+        float chunkWorldX = coord.x * (chunk->getResolution() - 1) * chunk->getTileSize();
+        float chunkWorldZ = coord.y * (chunk->getResolution() - 1) * chunk->getTileSize();
+        float chunkSize = (chunk->getResolution() - 1) * chunk->getTileSize();
+
+        // Skip chunks that don't overlap the rectangle
+        if (chunkWorldX + chunkSize < worldMinX || chunkWorldX > worldMaxX) continue;
+        if (chunkWorldZ + chunkSize < worldMinZ || chunkWorldZ > worldMaxZ) continue;
+
+        int res = chunk->getResolution();
+        float tileSize = chunk->getTileSize();
+        bool modified = false;
+
+        for (int z = 0; z < res; z++) {
+            for (int x = 0; x < res; x++) {
+                float wx = chunkWorldX + x * tileSize;
+                float wz = chunkWorldZ + z * tileSize;
+                if (wx >= worldMinX && wx <= worldMaxX && wz >= worldMinZ && wz <= worldMaxZ) {
+                    int idx = z * res + x;
+                    chunk->m_holemap[idx] = holeVal;
+                    modified = true;
+                }
+            }
+        }
+        if (modified) {
+            chunk->rebuildVerticesFromHeightmap();
+            chunk->m_needsUpload = true;
+        }
     }
 }
 

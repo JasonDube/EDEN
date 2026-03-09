@@ -9,6 +9,7 @@ layout(location = 5) in float fragDistance;
 layout(location = 6) in float fragSelection;
 layout(location = 7) in float fragPaintAlpha;
 layout(location = 8) in vec3 fragTexHSB;  // Per-vertex HSB (hue, saturation, brightness)
+layout(location = 9) in float fragHoleMask;
 
 // Texture array (all terrain textures in a single 2D array)
 layout(set = 0, binding = 0) uniform sampler2DArray terrainTextures;
@@ -50,6 +51,9 @@ vec3 adjustColor(vec3 color, float hueShift, float satMult, float brightMult) {
 }
 
 void main() {
+    // Discard terrain fragments marked as holes
+    if (fragHoleMask > 0.5) discard;
+
     // Simple directional lighting
     vec3 lightDir = normalize(vec3(0.5, 1.0, 0.3));
     float ambient = 0.3;

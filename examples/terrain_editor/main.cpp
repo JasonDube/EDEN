@@ -73,8 +73,10 @@
 
 #include "grove_host.hpp"
 #include "MCPServer.hpp"
+#include "ServerManager.hpp"
+#include "AIBehaviorSystem.hpp"
 #include "Terminal/EdenTerminal.hpp"
-#include "../../examples/model_editor/Hunyuan3DClient.hpp"
+#include "../../src/Network/Hunyuan3DClient.hpp"
 #include "Forge/WallMachine.hpp"
 #include <httplib.h>
 
@@ -120,9 +122,101 @@ struct TerrainPushConstants {
 
 enum class TransformMode { Select, Move, Rotate, Scale };
 
-class TerrainEditor : public VulkanApplicationBase {
+class TerrainEditor : public VulkanApplicationBase, public AIBehaviorHost {
 public:
     TerrainEditor() : VulkanApplicationBase(1280, 720, "EDEN - Terrain Editor") {}
+
+    // ── AIBehaviorHost interface ──
+    std::vector<std::unique_ptr<SceneObject>>& getSceneObjects() override { return m_sceneObjects; }
+    Camera& getCamera() override { return m_camera; }
+    AsyncHttpClient* getHttpClient() override { return m_httpClient.get(); }
+    void updateNPCTexture(SceneObject* npc) override {
+        if (npc && m_modelRenderer) {
+            auto& tex = npc->getTextureData();
+            m_modelRenderer->updateTexture(npc->getBufferHandle(), tex.data(),
+                npc->getTextureWidth(), npc->getTextureHeight());
+        }
+    }
+    bool evalGroveScript(const std::string& script, std::string& output, std::string& error) override {
+        if (!m_groveVm) { error = "Grove VM not initialized"; return false; }
+        m_groveOutputAccum.clear();
+        int32_t ret = grove_eval(m_groveVm, script.c_str());
+        if (ret != 0) {
+            const char* err = grove_last_error(m_groveVm);
+            int line = static_cast<int>(grove_last_error_line(m_groveVm));
+            error = std::string("Error (line ") + std::to_string(line) + "): " + (err ? err : "unknown");
+            return false;
+        }
+        output = m_groveOutputAccum;
+        return true;
+    }
+    void programAlgoBot(SceneObject* bot) override {
+        m_groveBotTarget = bot;
+    }
+    void setShowMindMap(bool show) override {
+        m_editorUI.showMindMap() = show;
+    }
+    void updateSpatialGrid(const nlohmann::json& data) override {
+        m_editorUI.updateSpatialGrid(data);
+    }
+    bool isPlayMode() const override { return m_isPlayMode; }
+    bool isInConversation() const override { return m_inConversation; }
+    SceneObject* getCurrentInteractObject() const override { return m_currentInteractObject; }
+    void setCurrentInteractObject(SceneObject* obj) override { m_currentInteractObject = obj; }
+
+    std::string getSelectedObjectInfo() const override {
+        // Find object with yellow outline (isSelected), or fall back to editor selection index
+        const SceneObject* obj = nullptr;
+        for (const auto& o : m_sceneObjects) {
+            if (o && o->isSelected()) { obj = o.get(); break; }
+        }
+        if (!obj && m_selectedObjectIndex >= 0 && m_selectedObjectIndex < static_cast<int>(m_sceneObjects.size()))
+            obj = m_sceneObjects[m_selectedObjectIndex].get();
+        if (!obj) return "";
+        std::string info = "[Player's selected object: " + obj->getName();
+        if (!obj->getDescription().empty())
+            info += ", description: " + obj->getDescription();
+        auto pos = obj->getTransform().getPosition();
+        info += ", pos: (" + std::to_string(int(pos.x)) + "," + std::to_string(int(pos.y)) + "," + std::to_string(int(pos.z)) + ")";
+        if (!obj->getTargetLevel().empty())
+            info += ", path: " + obj->getTargetLevel();
+        info += "]";
+        return info;
+    }
+
+    std::string getSelectedImagePath() const override {
+        const SceneObject* obj = nullptr;
+        for (const auto& o : m_sceneObjects) {
+            if (o && o->isSelected()) { obj = o.get(); break; }
+        }
+        if (!obj) return "";
+        std::string path = obj->getTargetLevel();
+        // Strip fs:// prefix to get absolute path
+        if (path.rfind("fs://", 0) == 0) path = path.substr(5);
+        // Check if it's an image file
+        std::string lower = path;
+        std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
+        auto endsWith = [](const std::string& s, const std::string& suffix) {
+            return s.size() >= suffix.size() && s.compare(s.size() - suffix.size(), suffix.size(), suffix) == 0;
+        };
+        if (endsWith(lower, ".png") || endsWith(lower, ".jpg") || endsWith(lower, ".jpeg") ||
+            endsWith(lower, ".bmp") || endsWith(lower, ".webp") || endsWith(lower, ".gif"))
+            return path;
+        return "";
+    }
+
+    std::string getHotbarSlotInfo(int slot) const override {
+        if (slot < 0 || slot >= TOOLBAR_SLOT_COUNT) return "";
+        const auto& s = m_toolbarSlots[slot];
+        if (!s.occupied) return "[Hotbar slot " + std::to_string(slot) + ": empty]";
+        std::string info = "[Hotbar slot " + std::to_string(slot) + ": " + s.displayName;
+        if (!s.filePath.empty())
+            info += ", path: " + s.filePath;
+        if (s.is3DModel)
+            info += " (3D model)";
+        info += "]";
+        return info;
+    }
 
     void setSessionMode(bool enabled) { m_sessionMode = enabled; }
 
@@ -137,6 +231,7 @@ protected:
         m_pipeline = std::make_unique<TerrainPipeline>(
             getContext(), getSwapchain().getRenderPass(), getSwapchain().getExtent(),
             m_textureManager->getDescriptorSetLayout());
+        m_editorUI.setTerrainPipeline(m_pipeline.get());
 
         m_chunkManager = std::make_unique<ChunkManager>(getBufferManager());
         m_brushTool = std::make_unique<TerrainBrushTool>(m_terrain, m_camera);
@@ -148,6 +243,7 @@ protected:
             getContext(), getSwapchain().getRenderPass(), getSwapchain().getExtent());
 
         m_editorUI.setSkyParameters(&m_skybox->getParameters());
+        m_editorUI.setSkybox(m_skybox.get());
         m_editorUI.setSkyChangedCallback([this](const SkyParameters& params) {
             m_skybox->updateParameters(params);
         });
@@ -262,7 +358,7 @@ protected:
         m_physicsWorld = std::make_unique<PhysicsWorld>();
 
         float startHeight = 20.0f;
-        m_camera.setPosition({0, startHeight, 0});
+        m_camera.setPosition({50, startHeight, 50});
         m_camera.setSpeed(15.0f);
 
         m_camera.setEyeHeight(1.7f);
@@ -290,6 +386,22 @@ protected:
             // (sendCommand will queue it — shell processes it when ready)
             m_terminal.sendCommand("claude");
             std::cout << "[EDEN OS] Session mode: terminal + claude auto-launched" << std::endl;
+        }
+
+        // Auto-load default level on startup
+        {
+            const char* home = getenv("HOME");
+            if (home) {
+                std::string defaultLevel = std::string(home) + "/.eden/default_level/xenk2.eden";
+                if (std::filesystem::exists(defaultLevel)) {
+                    std::cout << "[EDEN] Auto-loading default level: " << defaultLevel << std::endl;
+                    loadLevel(defaultLevel);
+                    preloadAdjacentLevels();
+                    // Override saved camera position — offset from origin to avoid hole
+                    float terrainY = m_terrain.getHeightAt(50.0f, 50.0f);
+                    m_camera.setPosition({50.0f, terrainY + 5.0f, 50.0f});
+                }
+            }
         }
     }
 
@@ -938,17 +1050,6 @@ protected:
             std::cout << "Terrain loaded! Total chunks: " << totalChunks << "\n";
         }
 
-        // Auto-load xenk.eden from Desktop if it exists
-        {
-            const char* home = getenv("HOME");
-            if (home) {
-                std::string defaultLevel = std::string(home) + "/Desktop/xenk.eden";
-                if (std::filesystem::exists(defaultLevel)) {
-                    std::cout << "Auto-loading " << defaultLevel << std::endl;
-                    loadLevel(defaultLevel);
-                }
-            }
-        }
     }
 
     void onCleanup() override {
@@ -957,6 +1058,9 @@ protected:
         if (m_aiGenerateThread.joinable()) {
             m_aiGenerateThread.join();
         }
+
+        // Stop all managed servers
+        m_serverManager.stopAll();
 
         // Stop Hunyuan server if running
         stopHunyuanServer();
@@ -980,6 +1084,7 @@ protected:
         getContext().waitIdle();
 
         saveEditorConfig();
+        dumpSessionLogs();
         Audio::getInstance().shutdown();
         NFD_Quit();
         cleanupInventoryThumbnails();
@@ -1065,10 +1170,13 @@ protected:
         // Teleport to silo center after navigation completes
         if (hadPending && m_pendingTeleportToPlatform && m_filesystemBrowser.isActive()) {
             m_pendingTeleportToPlatform = false;
-            float ringBase = m_filesystemBrowser.getRingBaseY();
             glm::vec3 origin = m_filesystemBrowser.getSpawnOrigin();
-            // Standing on silo floor (ringBaseY) + eye height, at silo center
-            glm::vec3 camPos(origin.x, ringBase + 1.7f, origin.z);
+            float spawnY = m_spawnAtPlatformTop
+                ? m_filesystemBrowser.getPlatformY() + 1.7f
+                : m_filesystemBrowser.getRingBaseY() + 1.7f;
+            // Offset X when spawning on platform to avoid center hole
+            float offsetX = m_spawnAtPlatformTop ? 10.0f : 0.0f;
+            glm::vec3 camPos(origin.x + offsetX, spawnY, origin.z);
             m_camera.setPosition(camPos);
             if (m_characterController) {
                 m_characterController->setPosition(camPos);
@@ -1200,96 +1308,99 @@ protected:
         // Poll for AI backend responses
         if (m_httpClient) {
             m_httpClient->pollResponses();
+
+            // Periodic reconnection: if not connected, retry health check every 5s
+            if (!m_httpClient->isConnected()) {
+                m_backendReconnectTimer += deltaTime;
+                if (m_backendReconnectTimer >= 5.0f) {
+                    m_backendReconnectTimer = 0.0f;
+                    m_httpClient->checkHealth([](const AsyncHttpClient::Response& resp) {
+                        if (resp.success) {
+                            std::cout << "AI Backend connected!" << std::endl;
+                        }
+                    });
+                }
+            } else {
+                m_backendReconnectTimer = 0.0f;
+            }
         }
 
-        // Update TTS cooldown timer
-        if (m_ttsCooldown > 0.0f) m_ttsCooldown -= deltaTime;
+        // Poll server manager output pipes
+        m_serverManager.pollOutput();
 
-        // Heartbeat: passive perception for all EDEN companions in scene (play mode only)
-        // Skip heartbeat while chat TTS is playing or pending to prevent audio overlap
-        if (m_heartbeatEnabled && m_isPlayMode && m_httpClient && m_httpClient->isConnected()
-            && !m_heartbeatInFlight && !m_ttsInFlight && m_ttsCooldown <= 0.0f) {
-            m_heartbeatTimer += deltaTime;
-            if (m_heartbeatTimer >= m_heartbeatInterval) {
-                m_heartbeatTimer = 0.0f;
+        // Poll AI context sizes (every 3s when connected)
+        if (m_httpClient && m_httpClient->isConnected()) {
+            m_contextPollTimer += deltaTime;
+            if (m_contextPollTimer >= 3.0f) {
+                m_contextPollTimer = 0.0f;
+                m_httpClient->sendGet("/sessions/context",
+                    [this](const AsyncHttpClient::Response& resp) {
+                        if (!resp.success) return;
+                        try {
+                            auto json = nlohmann::json::parse(resp.body);
+                            std::vector<ServerManager::ContextSession> sessions;
+                            for (auto& [sid, info] : json.items()) {
+                                ServerManager::ContextSession cs;
+                                cs.npcName = info.value("npc_name", "?");
+                                cs.messages = info.value("messages", 0);
+                                cs.estTokens = info.value("est_tokens", 0);
+                                cs.provider = info.value("provider", "?");
+                                cs.totalInputTokens = info.value("total_input_tokens", 0);
+                                cs.totalOutputTokens = info.value("total_output_tokens", 0);
+                                sessions.push_back(std::move(cs));
+                            }
+                            m_serverManager.updateContextSessions(sessions);
+                            m_aiContextSessions = sessions;
+                        } catch (...) {}
+                    });
+            }
 
-                // Find first EDEN companion in the scene
-                SceneObject* companion = nullptr;
-                for (const auto& obj : m_sceneObjects) {
-                    if (obj && obj->getBeingType() == BeingType::EDEN_COMPANION) {
-                        companion = obj.get();
-                        break;
-                    }
-                }
-
-                if (companion) {
-                    m_heartbeatInFlight = true;
-                    PerceptionData perception = performScanCone(companion, 360.0f, 50.0f);
-                    std::string npcName = companion->getName();
-                    int beingType = static_cast<int>(companion->getBeingType());
-
-                    // Use quick chat session for this NPC (persists across heartbeats)
-                    std::string sessionId = m_quickChatSessionIds.count(npcName) ?
-                                            m_quickChatSessionIds[npcName] : "";
-
-                    m_httpClient->sendHeartbeat(sessionId, npcName, beingType, perception,
-                        [this, npcName, companion](const AsyncHttpClient::Response& resp) {
-                            m_heartbeatInFlight = false;
+            // Poll full context (every 2s, only when viewer is open)
+            if (m_showAIContextViewer) {
+                m_contextFullPollTimer += deltaTime;
+                if (m_contextFullPollTimer >= 2.0f) {
+                    m_contextFullPollTimer = 0.0f;
+                    m_httpClient->sendGet("/sessions/context/full",
+                        [this](const AsyncHttpClient::Response& resp) {
                             if (!resp.success) return;
-
                             try {
                                 auto json = nlohmann::json::parse(resp.body);
-
-                                // Track session ID
-                                if (json.contains("session_id") && !json["session_id"].is_null()) {
-                                    m_quickChatSessionIds[npcName] = json["session_id"].get<std::string>();
-                                }
-
-                                // Extract response text
-                                std::string responseText;
-                                if (json.contains("response") && !json["response"].is_null()) {
-                                    responseText = json["response"].get<std::string>();
-                                }
-
-                                // If NPC has something to say, show in chat log and speak
-                                if (!responseText.empty()) {
-                                    addChatMessage(npcName, responseText);
-
-                                    // Also add to conversation history if we're talking to this NPC
-                                    if (m_inConversation && m_currentInteractObject == companion) {
-                                        m_conversationHistory.push_back({npcName, responseText, false});
-                                        m_scrollToBottom = true;
+                                std::vector<AIContextSession> sessions;
+                                for (auto& [sid, info] : json.items()) {
+                                    AIContextSession s;
+                                    s.sessionId = sid;
+                                    s.npcName = info.value("npc_name", "?");
+                                    s.provider = info.value("provider", "?");
+                                    if (info.contains("messages")) {
+                                        for (auto& m : info["messages"]) {
+                                            s.messages.push_back({
+                                                m.value("role", "?"),
+                                                m.value("content", "")
+                                            });
+                                        }
                                     }
-
-                                    // speakTTS internally blocks if another TTS is playing
-                                    speakTTS(responseText, npcName);
-
-                                    // Cycle expression on each response
-                                    cycleExpression(companion);
+                                    sessions.push_back(std::move(s));
                                 }
-
-                                // Handle action if present (needs m_currentInteractObject)
-                                if (json.contains("action") && !json["action"].is_null()) {
-                                    SceneObject* prevTarget = m_currentInteractObject;
-                                    m_currentInteractObject = companion;
-                                    executeAIAction(json["action"]);
-                                    if (!m_inConversation) {
-                                        m_currentInteractObject = prevTarget;
-                                    }
+                                // Keep only the latest session per NPC (most messages)
+                                std::unordered_map<std::string, size_t> bestIdx;
+                                for (size_t i = 0; i < sessions.size(); i++) {
+                                    auto it = bestIdx.find(sessions[i].npcName);
+                                    if (it == bestIdx.end() || sessions[i].messages.size() > sessions[it->second].messages.size())
+                                        bestIdx[sessions[i].npcName] = i;
                                 }
-
-                                // Parse spatial analysis for mind map
-                                if (json.contains("spatial_analysis") && !json["spatial_analysis"].is_null()) {
-                                    m_editorUI.updateSpatialGrid(json["spatial_analysis"]);
-                                }
-
-                            } catch (const std::exception& e) {
-                                std::cerr << "[Heartbeat] Parse error: " << e.what() << std::endl;
-                            }
+                                std::vector<AIContextSession> deduped;
+                                for (auto& [name, idx] : bestIdx)
+                                    deduped.push_back(std::move(sessions[idx]));
+                                m_aiContextFull = std::move(deduped);
+                            } catch (...) {}
                         });
                 }
             }
         }
+
+        // AI behavior system: TTS cooldown + heartbeat perception
+        m_aiBehavior.tickTimers(deltaTime);
+        m_aiBehavior.updateHeartbeat(deltaTime);
 
         // Process MCP server commands
         if (m_mcpServer) {
@@ -1353,6 +1464,9 @@ protected:
                     m_terminal.renderImGui(&m_editorUI.showTerminal(), m_monoFont);
                 }
             }
+
+            // Server Manager window
+            if (m_editorUI.showServerManager()) m_serverManager.renderImGui(&m_editorUI.showServerManager());
 
             // Wall draw / foundation preview (green wireframe box)
             if (m_wallDrawing) {
@@ -1482,6 +1596,7 @@ protected:
 
         // Render persistent world chat history window (Tab to toggle)
         renderWorldChatHistory();
+        renderAIContextViewer();
 
         // Render clipboard history window (Ctrl+Shift+V to toggle)
         renderClipboardHistory();
@@ -1740,7 +1855,7 @@ protected:
             for (auto& obj : m_sceneObjects) {
                 if (!obj || !obj->isSelected()) continue;
                 const auto& bt = obj->getBuildingType();
-                if (bt != "filesystem" && bt != "filesystem_wall" && bt != "wall_frame" && bt != "wall_widget") continue;
+                if (bt != "filesystem" && bt != "filesystem_wall" && bt != "wall_frame" && bt != "wall_widget" && bt != "platform_wall") continue;
                 bool isDragHover = (m_fsDragActive && obj.get() == m_fsDragHoverWall);
                 const AABB& lb = obj->getLocalBounds();
                 if (lb.getSize().x > 0.001f || lb.getSize().y > 0.001f || lb.getSize().z > 0.001f) {
@@ -1831,52 +1946,103 @@ protected:
             }
         }
 
-        // Draw 1m grid wireframe on platform walls when in frame placement mode
-        if (m_framePlacementMode && m_filesystemBrowser.isActive()) {
+        // Draw 1m grid wireframe on platform walls when in frame placement or wall brush mode
+        if ((m_framePlacementMode || m_wallBrushMode) && m_filesystemBrowser.isActive()) {
             std::vector<glm::vec3> gridLines;
             float platY = m_filesystemBrowser.getPlatformY();
             for (auto& obj : m_sceneObjects) {
                 if (!obj || obj->getBuildingType() != "platform_wall") continue;
                 glm::vec3 pos = obj->getTransform().getPosition();
                 glm::vec3 sc = obj->getTransform().getScale();
-                float halfW = sc.x * 0.5f;
-                float halfZ = sc.z * 0.5f;
-                // Grid spans from platform surface to wall top (+1m for wall center offset)
-                float botY = platY;
-                float topY = platY + sc.y + 1.0f;
+                glm::mat4 mat = obj->getTransform().getMatrix();
+                float halfW = sc.x * 0.5f;  // local X half-extent
+                float halfZ = sc.z * 0.5f;  // local Z half-extent
+                float botY = 0.0f;           // local Y bottom (cube starts at Y=0)
+                float topY = sc.y;           // local Y top
 
-                // +/-Z faces (front/back of walls running along X)
+                // Helper: transform local point through wall's model matrix
+                auto toWorld = [&](float lx, float ly, float lz) -> glm::vec3 {
+                    // Cube vertices are in [-0.5..0.5] range, scale is applied by matrix
+                    // But we work in scaled local space, so divide by scale to get unit coords
+                    float ux = (sc.x > 0.001f) ? lx / sc.x : 0.0f;
+                    float uy = (sc.y > 0.001f) ? ly / sc.y : 0.0f;
+                    float uz = (sc.z > 0.001f) ? lz / sc.z : 0.0f;
+                    return glm::vec3(mat * glm::vec4(ux, uy, uz, 1.0f));
+                };
+
+                // +/-Z faces (front/back)
                 for (int face = 0; face < 2; face++) {
-                    float z = pos.z + (face == 0 ? 1.0f : -1.0f) * (halfZ + 0.06f);
-                    float startX = pos.x - halfW;
-                    float endX = pos.x + halfW;
-
-                    for (float x = std::ceil(startX); x <= endX + 0.001f; x += 1.0f) {
-                        gridLines.push_back({x, botY, z});
-                        gridLines.push_back({x, topY, z});
+                    float fz = (face == 0 ? 1.0f : -1.0f) * (halfZ + 0.06f);
+                    for (float lx = std::ceil(-halfW); lx <= halfW + 0.001f; lx += 1.0f) {
+                        gridLines.push_back(toWorld(lx, botY, fz));
+                        gridLines.push_back(toWorld(lx, topY, fz));
                     }
-                    for (float y = std::ceil(botY); y <= topY + 0.001f; y += 1.0f) {
-                        gridLines.push_back({startX, y, z});
-                        gridLines.push_back({endX, y, z});
+                    for (float ly = std::ceil(botY); ly <= topY + 0.001f; ly += 1.0f) {
+                        gridLines.push_back(toWorld(-halfW, ly, fz));
+                        gridLines.push_back(toWorld(halfW, ly, fz));
                     }
                 }
 
-                // +/-X faces (sides — visible on walls perpendicular to camera)
+                // +/-X faces (sides)
                 for (int face = 0; face < 2; face++) {
-                    float x = pos.x + (face == 0 ? 1.0f : -1.0f) * (halfW + 0.06f);
-                    float startZ = pos.z - halfZ;
-                    float endZ = pos.z + halfZ;
-
-                    for (float z = std::ceil(startZ); z <= endZ + 0.001f; z += 1.0f) {
-                        gridLines.push_back({x, botY, z});
-                        gridLines.push_back({x, topY, z});
+                    float fx = (face == 0 ? 1.0f : -1.0f) * (halfW + 0.06f);
+                    for (float lz = std::ceil(-halfZ); lz <= halfZ + 0.001f; lz += 1.0f) {
+                        gridLines.push_back(toWorld(fx, botY, lz));
+                        gridLines.push_back(toWorld(fx, topY, lz));
                     }
-                    for (float y = std::ceil(botY); y <= topY + 0.001f; y += 1.0f) {
-                        gridLines.push_back({x, y, startZ});
-                        gridLines.push_back({x, y, endZ});
+                    for (float ly = std::ceil(botY); ly <= topY + 0.001f; ly += 1.0f) {
+                        gridLines.push_back(toWorld(fx, ly, -halfZ));
+                        gridLines.push_back(toWorld(fx, ly, halfZ));
                     }
                 }
             }
+            // Floor grid on platform slab (horizontal lines at top of slab)
+            {
+                glm::vec3 origin = m_filesystemBrowser.getSpawnOrigin();
+                auto& pg = m_filesystemBrowser.getPlatformGrid().grid();
+                float halfW = (pg.width * pg.cellSize) / 2.0f;
+                float halfD = (pg.depth * pg.cellSize) / 2.0f;
+                float floorY = platY + 1.02f; // slightly above slab top to avoid z-fighting
+                float hh = 8.0f; // hole half-size, matches PlatformGrid.cpp
+
+                float minX = origin.x - halfW;
+                float maxX = origin.x + halfW;
+                float minZ = origin.z - halfD;
+                float maxZ = origin.z + halfD;
+                float holeMinX = origin.x - hh;
+                float holeMaxX = origin.x + hh;
+                float holeMinZ = origin.z - hh;
+                float holeMaxZ = origin.z + hh;
+
+                // X-parallel lines (varying Z, spanning X)
+                for (float z = std::ceil(minZ); z <= maxZ + 0.001f; z += 1.0f) {
+                    bool inHoleZ = (z > holeMinZ && z < holeMaxZ);
+                    if (inHoleZ) {
+                        // Split line: left segment and right segment, skip hole
+                        gridLines.push_back({minX, floorY, z});
+                        gridLines.push_back({holeMinX, floorY, z});
+                        gridLines.push_back({holeMaxX, floorY, z});
+                        gridLines.push_back({maxX, floorY, z});
+                    } else {
+                        gridLines.push_back({minX, floorY, z});
+                        gridLines.push_back({maxX, floorY, z});
+                    }
+                }
+                // Z-parallel lines (varying X, spanning Z)
+                for (float x = std::ceil(minX); x <= maxX + 0.001f; x += 1.0f) {
+                    bool inHoleX = (x > holeMinX && x < holeMaxX);
+                    if (inHoleX) {
+                        gridLines.push_back({x, floorY, minZ});
+                        gridLines.push_back({x, floorY, holeMinZ});
+                        gridLines.push_back({x, floorY, holeMaxZ});
+                        gridLines.push_back({x, floorY, maxZ});
+                    } else {
+                        gridLines.push_back({x, floorY, minZ});
+                        gridLines.push_back({x, floorY, maxZ});
+                    }
+                }
+            }
+
             if (!gridLines.empty())
                 m_modelRenderer->renderLines(cmd, vp, gridLines, glm::vec3(0.3f, 0.6f, 1.0f));
 
@@ -1884,44 +2050,103 @@ protected:
             if (m_framePreviewValid) {
                 float fs = m_framePreviewSize;
                 float hs = fs * 0.5f;
-                // Push preview slightly in front of the wall grid to avoid z-fighting
-                glm::vec3 normal = {m_framePreviewNX, 0.0f, m_framePreviewNZ};
-                glm::vec3 p = m_framePreviewPos + normal * 0.1f;
                 std::vector<glm::vec3> previewLines;
-                float yawRad = m_framePreviewYaw * static_cast<float>(M_PI) / 180.0f;
 
-                glm::vec3 right = {cosf(yawRad), 0.0f, -sinf(yawRad)};
-                glm::vec3 up = {0.0f, 1.0f, 0.0f};
+                if (m_framePreviewNY > 0.5f) {
+                    // Floor frame — horizontal rectangle on XZ plane
+                    glm::vec3 p = m_framePreviewPos + glm::vec3(0, 0.05f, 0);
+                    glm::vec3 c0 = p + glm::vec3(-hs, 0, -hs);
+                    glm::vec3 c1 = p + glm::vec3( hs, 0, -hs);
+                    glm::vec3 c2 = p + glm::vec3( hs, 0,  hs);
+                    glm::vec3 c3 = p + glm::vec3(-hs, 0,  hs);
 
-                // Cube mesh is bottom-aligned (Y from 0 to size), X centered
-                // p.y = bottom of frame, p.x/z = center horizontally
-                glm::vec3 c0 = p + right * (-hs);                  // bottom-left
-                glm::vec3 c1 = p + right * ( hs);                  // bottom-right
-                glm::vec3 c2 = p + right * ( hs) + up * fs;        // top-right
-                glm::vec3 c3 = p + right * (-hs) + up * fs;        // top-left
+                    previewLines.insert(previewLines.end(), {
+                        c0, c1, c1, c2, c2, c3, c3, c0
+                    });
+                    previewLines.push_back(c0); previewLines.push_back(c2);
+                    previewLines.push_back(c1); previewLines.push_back(c3);
 
-                // Outer rectangle (draw twice for thickness)
-                previewLines.insert(previewLines.end(), {
-                    c0, c1, c1, c2, c2, c3, c3, c0
-                });
+                    for (float t = -hs + 1.0f; t < hs - 0.001f; t += 1.0f) {
+                        previewLines.push_back(p + glm::vec3(t, 0, -hs));
+                        previewLines.push_back(p + glm::vec3(t, 0,  hs));
+                        previewLines.push_back(p + glm::vec3(-hs, 0, t));
+                        previewLines.push_back(p + glm::vec3( hs, 0, t));
+                    }
+                } else {
+                    // Wall frame — vertical rectangle
+                    glm::vec3 normal = {m_framePreviewNX, 0.0f, m_framePreviewNZ};
+                    glm::vec3 p = m_framePreviewPos + normal * 0.1f;
+                    float yawRad = m_framePreviewYaw * static_cast<float>(M_PI) / 180.0f;
 
-                // Cross lines for visibility
-                previewLines.push_back(c0); previewLines.push_back(c2);
-                previewLines.push_back(c1); previewLines.push_back(c3);
+                    glm::vec3 right = {cosf(yawRad), 0.0f, -sinf(yawRad)};
+                    glm::vec3 up = {0.0f, 1.0f, 0.0f};
 
-                // Inner grid at 1m intervals
-                for (float t = 1.0f; t < fs - 0.001f; t += 1.0f) {
-                    // Horizontal lines
-                    previewLines.push_back(p + right * (-hs) + up * t);
-                    previewLines.push_back(p + right * ( hs) + up * t);
-                }
-                for (float t = -hs + 1.0f; t < hs - 0.001f; t += 1.0f) {
-                    // Vertical lines
-                    previewLines.push_back(p + right * t);
-                    previewLines.push_back(p + right * t + up * fs);
+                    glm::vec3 c0 = p + right * (-hs);
+                    glm::vec3 c1 = p + right * ( hs);
+                    glm::vec3 c2 = p + right * ( hs) + up * fs;
+                    glm::vec3 c3 = p + right * (-hs) + up * fs;
+
+                    previewLines.insert(previewLines.end(), {
+                        c0, c1, c1, c2, c2, c3, c3, c0
+                    });
+                    previewLines.push_back(c0); previewLines.push_back(c2);
+                    previewLines.push_back(c1); previewLines.push_back(c3);
+
+                    for (float t = 1.0f; t < fs - 0.001f; t += 1.0f) {
+                        previewLines.push_back(p + right * (-hs) + up * t);
+                        previewLines.push_back(p + right * ( hs) + up * t);
+                    }
+                    for (float t = -hs + 1.0f; t < hs - 0.001f; t += 1.0f) {
+                        previewLines.push_back(p + right * t);
+                        previewLines.push_back(p + right * t + up * fs);
+                    }
                 }
 
                 m_modelRenderer->renderLines(cmd, vp, previewLines, glm::vec3(1.0f, 1.0f, 0.0f));
+            }
+        }
+
+        // Wall brush preview — orange wireframe box showing where wall will be placed
+        if (m_wallBrushPreviewValid && m_wallBrushDrawing) {
+            float dx = std::abs(m_wallBrushEnd.x - m_wallBrushStart.x);
+            float dz = std::abs(m_wallBrushEnd.z - m_wallBrushStart.z);
+            float wallLen = std::round(std::max(dx, dz));
+            if (wallLen >= 1.0f) {
+                float wallHeight = 8.0f;
+                float wallThick = 1.0f;
+                float minX = std::min(m_wallBrushStart.x, m_wallBrushEnd.x);
+                float minZ = std::min(m_wallBrushStart.z, m_wallBrushEnd.z);
+                float cx, cz;
+                float hw, hd;
+                if (dx >= dz) {
+                    cx = minX + wallLen * 0.5f;
+                    cz = m_wallBrushStart.z + 0.5f;
+                    hw = wallLen * 0.5f;
+                    hd = wallThick * 0.5f;
+                } else {
+                    cx = m_wallBrushStart.x + 0.5f;
+                    cz = minZ + wallLen * 0.5f;
+                    hw = wallThick * 0.5f;
+                    hd = wallLen * 0.5f;
+                }
+                float platY = m_filesystemBrowser.getPlatformY();
+                float baseY = platY + 1.0f;
+
+                glm::vec3 c000 = {cx - hw, baseY, cz - hd};
+                glm::vec3 c100 = {cx + hw, baseY, cz - hd};
+                glm::vec3 c110 = {cx + hw, baseY, cz + hd};
+                glm::vec3 c010 = {cx - hw, baseY, cz + hd};
+                glm::vec3 c001 = {cx - hw, baseY + wallHeight, cz - hd};
+                glm::vec3 c101 = {cx + hw, baseY + wallHeight, cz - hd};
+                glm::vec3 c111 = {cx + hw, baseY + wallHeight, cz + hd};
+                glm::vec3 c011 = {cx - hw, baseY + wallHeight, cz + hd};
+
+                std::vector<glm::vec3> wbLines = {
+                    c000, c100, c100, c110, c110, c010, c010, c000, // bottom
+                    c001, c101, c101, c111, c111, c011, c011, c001, // top
+                    c000, c001, c100, c101, c110, c111, c010, c011  // verticals
+                };
+                m_modelRenderer->renderLines(cmd, vp, wbLines, glm::vec3(1.0f, 0.6f, 0.2f)); // orange
             }
         }
 
@@ -2201,12 +2426,14 @@ protected:
         m_pipeline = std::make_unique<TerrainPipeline>(
             getContext(), getSwapchain().getRenderPass(), getSwapchain().getExtent(),
             m_textureManager->getDescriptorSetLayout());
+        m_editorUI.setTerrainPipeline(m_pipeline.get());
 
         SkyParameters savedParams = m_skybox->getParameters();
         m_skybox = std::make_unique<ProceduralSkybox>(
             getContext(), getSwapchain().getRenderPass(), getSwapchain().getExtent());
         m_skybox->updateParameters(savedParams);
         m_editorUI.setSkyParameters(&m_skybox->getParameters());
+        m_editorUI.setSkybox(m_skybox.get());
 
         m_brushRing = std::make_unique<BrushRing>(
             getContext(), getSwapchain().getRenderPass(), getSwapchain().getExtent());
@@ -3023,6 +3250,7 @@ private:
                 return &forge->getWidgetKit();
             return nullptr;
         };
+        m_groveContext.serverManager = &m_serverManager;
 
         registerGroveHostFunctions(m_groveVm, &m_groveContext);
 
@@ -5070,7 +5298,11 @@ private:
         {
             static bool wasF9 = false;
             bool f9 = Input::isKeyDown(298); // GLFW_KEY_F9 = 298
-            if (f9 && !wasF9 && m_isPlayMode) {
+            if (f9 && !wasF9) {
+                // Auto-enter play mode if not already in it
+                if (!m_isPlayMode) {
+                    enterPlayMode();
+                }
                 if (m_filesystemBrowser.isActive()) {
                     m_filesystemBrowser.clearFilesystemObjects();
                     clearOSLevelObjects();
@@ -5085,27 +5317,60 @@ private:
                         loadOSLevelObjects(osLevelPath);
                     }
 
-                    // Spawn the silo at origin
+                    // Spawn the silo and basement at origin, on the terrain
                     glm::vec3 spawnPos(0.0f, 0.0f, 0.0f);
                     float terrainY = m_terrain.getHeightAt(spawnPos.x, spawnPos.z);
                     spawnPos.y = terrainY;
                     m_filesystemBrowser.setSpawnOrigin(spawnPos);
+
+                    // Basement floor raised slightly above terrain to avoid z-fighting
+                    float basementBaseY = terrainY + m_filesystemBrowser.getBasementHeight() + 0.5f;
+                    m_filesystemBrowser.spawnBasement(spawnPos, basementBaseY);
 
                     std::string homePath = home ? home : "/";
                     syncExcludedPaths(); // ensure hotbar files are excluded from gallery
                     m_filesystemBrowser.navigate(homePath);
                     m_filesystemBrowser.processNavigation();
 
-                    // Teleport to silo center (standing on silo floor at bottom of gallery rings)
-                    float ringBase = m_filesystemBrowser.getRingBaseY();
-                    glm::vec3 galleryCam(spawnPos.x, ringBase + 1.7f, spawnPos.z);
+                    // Teleport to silo — always offset from center to avoid hole
+                    float spawnY = m_spawnAtPlatformTop
+                        ? m_filesystemBrowser.getPlatformY() + 1.7f
+                        : m_filesystemBrowser.getRingBaseY() + 1.7f;
+                    glm::vec3 galleryCam(spawnPos.x + 10.0f, spawnY, spawnPos.z);
                     m_camera.setPosition(galleryCam);
                     if (m_characterController) {
                         m_characterController->setPosition(galleryCam);
                     }
+                    m_insideSilo = true;
+                    updateSiloShellVisibility();
                 }
             }
             wasF9 = f9;
+        }
+
+        // PgUp/PgDn — instant teleport to platform top / silo floor
+        if (m_isPlayMode && m_filesystemBrowser.isActive() && !ImGui::GetIO().WantTextInput) {
+            static bool wasPgUp = false, wasPgDn = false;
+            bool pgUp = Input::isKeyDown(266);  // GLFW_KEY_PAGE_UP
+            bool pgDn = Input::isKeyDown(267);  // GLFW_KEY_PAGE_DOWN
+
+            if (pgUp && !wasPgUp) {
+                glm::vec3 origin = m_filesystemBrowser.getSpawnOrigin();
+                float platY = m_filesystemBrowser.getPlatformY() + 1.7f;
+                // Offset from center hole (hole is 8m half-size, land on solid platform edge)
+                glm::vec3 pos(origin.x + 10.0f, platY, origin.z);
+                m_camera.setPosition(pos);
+                if (m_characterController) m_characterController->setPosition(pos);
+            }
+            if (pgDn && !wasPgDn) {
+                glm::vec3 origin = m_filesystemBrowser.getSpawnOrigin();
+                float floorY = m_filesystemBrowser.getRingBaseY() + 1.7f;
+                glm::vec3 pos(origin.x, floorY, origin.z);
+                m_camera.setPosition(pos);
+                if (m_characterController) m_characterController->setPosition(pos);
+            }
+            wasPgUp = pgUp;
+            wasPgDn = pgDn;
         }
 
         // V key: push-to-talk (hold to record, release to transcribe + send to nearest NPC)
@@ -5113,23 +5378,23 @@ private:
         if (m_isPlayMode && !ImGui::GetIO().WantTextInput && !m_inPanelFocusMode &&
             !Input::isKeyDown(Input::KEY_LEFT_CONTROL) && !Input::isKeyDown(Input::KEY_RIGHT_CONTROL)) {
             bool vDown = Input::isKeyDown(Input::KEY_V);
-            if (vDown && !m_pttRecording && !m_pttProcessing) {
+            if (vDown && !m_aiBehavior.pttRecording() && !m_aiBehavior.pttProcessing()) {
                 // Start recording
                 if (Audio::getInstance().startRecording()) {
-                    m_pttRecording = true;
+                    m_aiBehavior.pttRecording() = true;
                     std::cout << "[PTT] Recording started (hold V to talk)" << std::endl;
                 }
-            } else if (!vDown && m_pttRecording) {
+            } else if (!vDown && m_aiBehavior.pttRecording()) {
                 // Stop recording and transcribe
-                m_pttRecording = false;
+                m_aiBehavior.pttRecording() = false;
                 std::string wavPath = "/tmp/eden_ptt.wav";
                 if (Audio::getInstance().stopRecording(wavPath)) {
-                    m_pttProcessing = true;
+                    m_aiBehavior.pttProcessing() = true;
                     std::cout << "[PTT] Transcribing..." << std::endl;
 
                     m_httpClient->requestSTT(wavPath,
                         [this](const AsyncHttpClient::Response& resp) {
-                            m_pttProcessing = false;
+                            m_aiBehavior.pttProcessing() = false;
                             if (!resp.success) {
                                 std::cerr << "[PTT] STT request failed" << std::endl;
                                 return;
@@ -5144,7 +5409,7 @@ private:
                                 std::cout << "[PTT] You said: \"" << text << "\"" << std::endl;
 
                                 // Send as quick chat to nearest NPC
-                                handleVoiceMessage(text);
+                                m_aiBehavior.handleVoiceMessage(text);
                             } catch (const std::exception& e) {
                                 std::cerr << "[PTT] Parse error: " << e.what() << std::endl;
                             }
@@ -5175,6 +5440,15 @@ private:
             m_showWorldChatHistory = !m_showWorldChatHistory;
         }
         wasTabKeyDown = tabKeyDown;
+
+        // Ctrl+1 to toggle AI context viewer
+        static bool was1KeyDown = false;
+        bool key1Down = Input::isKeyDown(Input::KEY_1);
+        if (key1Down && !was1KeyDown && !ImGui::GetIO().WantTextInput &&
+            (Input::isKeyDown(Input::KEY_LEFT_CONTROL) || Input::isKeyDown(Input::KEY_RIGHT_CONTROL))) {
+            m_showAIContextViewer = !m_showAIContextViewer;
+        }
+        was1KeyDown = key1Down;
 
         // E key to start conversation (only when not already in one)
         static bool wasEKeyDown = false;
@@ -5355,11 +5629,39 @@ private:
         bool deleteDown = Input::isKeyDown(Input::KEY_DELETE);
         if (deleteDown && !wasDeleteDown && !ImGui::GetIO().WantTextInput) {
             if (m_isPlayMode && m_filesystemBrowser.isActive()) {
+                // Check for selected wall_frame objects — delete from grid
+                bool deletedFrames = false;
+                for (auto& obj : m_sceneObjects) {
+                    if (!obj || !obj->isSelected()) continue;
+                    if (obj->getBuildingType() == "wall_frame") {
+                        glm::vec3 fp = obj->getTransform().getPosition();
+                        auto& pg = m_filesystemBrowser.getPlatformGrid();
+                        auto& frames = pg.grid().frames;
+                        for (auto it = frames.begin(); it != frames.end(); ++it) {
+                            if (std::abs(it->worldX - fp.x) < 0.1f &&
+                                std::abs(it->worldY - fp.y) < 0.1f &&
+                                std::abs(it->worldZ - fp.z) < 0.1f) {
+                                frames.erase(it);
+                                deletedFrames = true;
+                                break;
+                            }
+                        }
+                    }
+                }
+                if (deletedFrames) {
+                    auto& pg = m_filesystemBrowser.getPlatformGrid();
+                    pg.spawnFrameObjects(m_filesystemBrowser.getSpawnOrigin(),
+                                         m_filesystemBrowser.getPlatformY());
+                    pg.saveConfig(m_filesystemBrowser.getCurrentPath());
+                    syncExcludedPaths();
+                }
+
                 // Silo mode: trash files on disk, then refresh silo
+                bool trashedFiles = false;
                 for (auto& obj : m_sceneObjects) {
                     if (!obj || !obj->isSelected()) continue;
                     const auto& bt = obj->getBuildingType();
-                    if (bt != "filesystem" && bt != "filesystem_wall" && bt != "wall_frame" && bt != "wall_widget") continue;
+                    if (bt != "filesystem" && bt != "filesystem_wall" && bt != "wall_widget") continue;
                     std::string target = obj->getTargetLevel();
                     if (target.rfind("fs://", 0) == 0 && target.size() > 5) {
                         std::string path = target.substr(5);
@@ -5367,11 +5669,15 @@ private:
                         int ret = system(cmd.c_str());
                         if (ret != 0) {
                             std::cerr << "[FS] Trash failed: " << path << std::endl;
+                        } else {
+                            trashedFiles = true;
                         }
                     }
                 }
-                // Refresh silo to rebuild without trashed files
-                m_filesystemBrowser.navigate(m_filesystemBrowser.getCurrentPath());
+                if (trashedFiles) {
+                    // Refresh silo to rebuild without trashed files
+                    m_filesystemBrowser.navigate(m_filesystemBrowser.getCurrentPath());
+                }
             } else if (m_selectedObjectIndices.size() > 1) {
                 // Multi-delete: delete all selected objects (highest index first to preserve indices)
                 std::vector<int> toDelete(m_selectedObjectIndices.begin(), m_selectedObjectIndices.end());
@@ -5390,6 +5696,75 @@ private:
             }
         }
         wasDeleteDown = deleteDown;
+
+        // Arrow keys: nudge or rotate selected platform walls (wall brush mode)
+        if (m_wallBrushMode && m_isPlayMode && !ImGui::GetIO().WantTextInput &&
+            !m_inConversation && !m_quickChatMode && m_filesystemBrowser.isActive()) {
+            bool ctrlHeld = Input::isKeyDown(Input::KEY_LEFT_CONTROL) || Input::isKeyDown(Input::KEY_RIGHT_CONTROL);
+
+            // Ctrl+Left/Right: rotate by 15 degrees around wall center
+            if (ctrlHeld && (Input::isKeyPressed(Input::KEY_LEFT) || Input::isKeyPressed(Input::KEY_RIGHT))) {
+                float rotDeg = Input::isKeyPressed(Input::KEY_LEFT) ? -15.0f : 15.0f;
+                bool rotated = false;
+                for (auto& obj : m_sceneObjects) {
+                    if (!obj || !obj->isSelected()) continue;
+                    if (obj->getBuildingType() != "platform_wall") continue;
+                    obj->getTransform().rotate(rotDeg, {0, 1, 0});
+                    // Update matching brush wall yaw
+                    glm::vec3 pos = obj->getTransform().getPosition();
+                    auto& bws = m_filesystemBrowser.getPlatformGrid().grid().brushWalls;
+                    for (auto& bw : bws) {
+                        if (std::abs(bw.posX - pos.x) < 0.01f &&
+                            std::abs(bw.posY - pos.y) < 0.01f &&
+                            std::abs(bw.posZ - pos.z) < 0.01f) {
+                            bw.yawDeg += rotDeg;
+                            break;
+                        }
+                    }
+                    rotated = true;
+                }
+                if (rotated) {
+                    m_filesystemBrowser.getPlatformGrid().saveConfig(m_filesystemBrowser.getCurrentPath());
+                }
+            }
+
+            // Plain arrow keys: nudge by 1m
+            if (!ctrlHeld) {
+                float nudgeX = 0.0f, nudgeZ = 0.0f;
+                if (Input::isKeyPressed(Input::KEY_UP))    nudgeZ = -1.0f;
+                if (Input::isKeyPressed(Input::KEY_DOWN))  nudgeZ =  1.0f;
+                if (Input::isKeyPressed(Input::KEY_LEFT))  nudgeX = -1.0f;
+                if (Input::isKeyPressed(Input::KEY_RIGHT)) nudgeX =  1.0f;
+                if (nudgeX != 0.0f || nudgeZ != 0.0f) {
+                    bool moved = false;
+                    for (auto& obj : m_sceneObjects) {
+                        if (!obj || !obj->isSelected()) continue;
+                        if (obj->getBuildingType() != "platform_wall") continue;
+                        glm::vec3 oldPos = obj->getTransform().getPosition();
+                        glm::vec3 newPos = oldPos;
+                        newPos.x += nudgeX;
+                        newPos.z += nudgeZ;
+                        obj->getTransform().setPosition(newPos);
+                        // Update matching brush wall
+                        auto& bws = m_filesystemBrowser.getPlatformGrid().grid().brushWalls;
+                        for (auto& bw : bws) {
+                            if (std::abs(bw.posX - oldPos.x) < 0.01f &&
+                                std::abs(bw.posY - oldPos.y) < 0.01f &&
+                                std::abs(bw.posZ - oldPos.z) < 0.01f) {
+                                bw.posX = newPos.x;
+                                bw.posY = newPos.y;
+                                bw.posZ = newPos.z;
+                                break;
+                            }
+                        }
+                        moved = true;
+                    }
+                    if (moved) {
+                        m_filesystemBrowser.getPlatformGrid().saveConfig(m_filesystemBrowser.getCurrentPath());
+                    }
+                }
+            }
+        }
 
         // Number keys 1-0: toolbar slot selection + pick up filesystem objects
         if (m_isPlayMode && !ImGui::GetIO().WantTextInput && !m_quickChatMode && !m_inConversation) {
@@ -5430,10 +5805,16 @@ private:
                                     break;
                                 }
                             }
-                            // Also check if it's placed on a wall frame
+                            // Also check if it's placed on a DIFFERENT wall frame
+                            // (skip the frame the selected object is sitting on — that's a pickup)
                             if (!alreadyInHotbar && m_filesystemBrowser.isActive()) {
+                                glm::vec3 selPos = selectedFS->getTransform().getPosition();
                                 for (const auto& fr : m_filesystemBrowser.getPlatformGrid().grid().frames) {
-                                    if (fr.filePath == path) {
+                                    if (fr.filePath != path) continue;
+                                    glm::vec3 fp(fr.worldX, fr.worldY, fr.worldZ);
+                                    float dist = glm::length(selPos - fp);
+                                    if (dist > 20.0f) {
+                                        // File is on a frame far from the selected object — true duplicate
                                         alreadyInHotbar = true;
                                         break;
                                     }
@@ -5494,6 +5875,8 @@ private:
                                 m_toolbarSlots[i].gpuHandle = selectedFS->getBufferHandle();
                                 m_toolbarSlots[i].modelIndexCount = selectedFS->getIndexCount();
                                 m_toolbarSlots[i].is3DModel = true;
+                                // Remove from model spin list before erasing
+                                m_filesystemBrowser.removeModelSpin(selectedFS);
                                 // Remove scene object without destroying GPU resources
                                 selectedFS->setSelected(false);
                                 m_sceneObjects.erase(m_sceneObjects.begin() + selectedIdx);
@@ -5511,6 +5894,57 @@ private:
                             syncExcludedPaths();
                             } // end duplicate check
                         } else if (m_toolbarSlots[i].occupied && count == 0) {
+                            // Check if a wall panel or frame is selected (yellow outline) — drop onto it
+                            {
+                                SceneObject* selectedWall = nullptr;
+                                bool selectedIsFrame = false;
+                                for (auto& obj : m_sceneObjects) {
+                                    if (!obj || !obj->isSelected()) continue;
+                                    const auto& bt = obj->getBuildingType();
+                                    if (bt == "filesystem_wall" || bt == "wall_frame") {
+                                        selectedWall = obj.get();
+                                        selectedIsFrame = (bt == "wall_frame");
+                                        break;
+                                    }
+                                }
+                                if (selectedWall && m_filesystemBrowser.isActive()) {
+                                    std::string srcPath = m_toolbarSlots[i].filePath;
+                                    if (selectedIsFrame) {
+                                        auto& pg = m_filesystemBrowser.getPlatformGrid();
+                                        glm::vec3 fp = selectedWall->getTransform().getPosition();
+                                        for (auto& fr : pg.grid().frames) {
+                                            if (std::abs(fr.worldX - fp.x) < 0.1f &&
+                                                std::abs(fr.worldY - fp.y) < 0.1f &&
+                                                std::abs(fr.worldZ - fp.z) < 0.1f) {
+                                                fr.filePath = srcPath;
+                                                std::string fname = srcPath;
+                                                auto sp = fname.rfind('/');
+                                                if (sp != std::string::npos) fname = fname.substr(sp + 1);
+                                                FilesystemBrowser::parseFrameType(fname, fr);
+                                                break;
+                                            }
+                                        }
+                                        m_filesystemBrowser.spawnFileAtFrame(srcPath, selectedWall);
+                                        pg.saveConfig(m_filesystemBrowser.getCurrentPath());
+                                    } else {
+                                        glm::vec3 wallPos = selectedWall->getTransform().getPosition();
+                                        glm::vec3 wallScale = selectedWall->getTransform().getScale();
+                                        float wallYaw = selectedWall->getEulerRotation().y;
+                                        selectedWall->setTargetLevel("fs://" + srcPath);
+                                        m_filesystemBrowser.spawnFileAtWall(srcPath, wallPos, wallScale, wallYaw);
+                                    }
+                                    destroySlotThumbnail(i);
+                                    m_toolbarSlots[i].occupied = false;
+                                    m_toolbarSlots[i].filePath.clear();
+                                    m_toolbarSlots[i].displayName.clear();
+                                    saveInventorySlot(i);
+                                    syncExcludedPaths();
+                                    selectedWall->setSelected(false);
+                                    if (selectedIsFrame) m_pendingFrameRebuild = true;
+                                    std::cout << "[FS] Dropped '" << srcPath << "' onto selected " << (selectedIsFrame ? "frame" : "wall") << std::endl;
+                                    break;
+                                }
+                            }
                             // Ctrl+Number: functional placement on any collidable surface
                             bool ctrlHeldForDrop = Input::isKeyDown(Input::KEY_LEFT_CONTROL) || Input::isKeyDown(Input::KEY_RIGHT_CONTROL);
                             if (ctrlHeldForDrop) {
@@ -5549,8 +5983,7 @@ private:
                                 }
                                 continue; // skip Ctrl+drop logic below
                             }
-                            // Number key without Ctrl just selects the hotbar slot (no auto wall-drop)
-                            // But still check for machine_slot / hitbox slot / widget slot hits
+                            // Number key: check crosshair for wall panels, frames, machine slots, widget slots
                             {
                                 float slotAspect = static_cast<float>(getWindow().getWidth()) / getWindow().getHeight();
                                 glm::mat4 slotProj = m_camera.getProjectionMatrix(slotAspect, 0.1f, 5000.0f);
@@ -5564,31 +5997,47 @@ private:
                                 SceneObject* hitSlot = nullptr;
                                 float slotDist = std::numeric_limits<float>::max();
                                 bool hitWidgetSlot = false;
+                                SceneObject* hitWall = nullptr;
+                                float wallDist = std::numeric_limits<float>::max();
+                                bool hitIsFrame = false;
                                 for (auto& obj : m_sceneObjects) {
                                     if (!obj) continue;
-                                    bool isSlot = obj->getBuildingType() == "machine_slot";
-                                    if (!isSlot && obj->getBuildingType() == "hitbox") {
+                                    const auto& bt = obj->getBuildingType();
+                                    bool isSlot = bt == "machine_slot";
+                                    if (!isSlot && bt == "hitbox") {
                                         const auto& desc = obj->getDescription();
                                         isSlot = (desc.rfind("slot_", 0) == 0);
                                     }
                                     // Check widget slots
                                     bool isWidgetSlotObj = false;
-                                    if (!isSlot && obj->getBuildingType() == "widget") {
+                                    if (!isSlot && bt == "widget") {
                                         const auto& desc = obj->getDescription();
                                         isWidgetSlotObj = (desc.rfind("slot:", 0) == 0);
                                         isSlot = isWidgetSlotObj;
                                     }
-                                    if (!isSlot) continue;
-                                    // Skip already-filled machine slots
-                                    if (!isWidgetSlotObj) {
-                                        const auto& tl = obj->getTargetLevel();
-                                        if (!tl.empty()) continue;
-                                    }
+                                    // Check wall panels and gallery frames
+                                    bool isWallOrFrame = (bt == "filesystem_wall" || bt == "wall_frame");
+                                    if (!isSlot && !isWallOrFrame) continue;
+
                                     float dist = obj->getWorldBounds().intersect(slotRayO, slotRayD);
-                                    if (dist >= 0 && dist < 200.0f && dist < slotDist) {
-                                        slotDist = dist;
-                                        hitSlot = obj.get();
-                                        hitWidgetSlot = isWidgetSlotObj;
+                                    if (dist < 0 || dist >= 200.0f) continue;
+
+                                    if (isSlot) {
+                                        // Skip already-filled machine slots
+                                        if (!isWidgetSlotObj) {
+                                            const auto& tl = obj->getTargetLevel();
+                                            if (!tl.empty()) continue;
+                                        }
+                                        if (dist < slotDist) {
+                                            slotDist = dist;
+                                            hitSlot = obj.get();
+                                            hitWidgetSlot = isWidgetSlotObj;
+                                        }
+                                    }
+                                    if (isWallOrFrame && dist < wallDist) {
+                                        wallDist = dist;
+                                        hitWall = obj.get();
+                                        hitIsFrame = (bt == "wall_frame");
                                     }
                                 }
                                 if (hitSlot) {
@@ -5625,6 +6074,45 @@ private:
                                             syncExcludedPaths();
                                         }
                                     }
+                                }
+                                // Drop onto wall panel or gallery frame under crosshair
+                                if (!hitSlot && hitWall && m_filesystemBrowser.isActive()) {
+                                    std::string srcPath = m_toolbarSlots[i].filePath;
+                                    if (hitIsFrame) {
+                                        // Gallery frame — find matching WallFrame and assign file
+                                        auto& pg = m_filesystemBrowser.getPlatformGrid();
+                                        glm::vec3 fp = hitWall->getTransform().getPosition();
+                                        for (auto& fr : pg.grid().frames) {
+                                            if (std::abs(fr.worldX - fp.x) < 0.1f &&
+                                                std::abs(fr.worldY - fp.y) < 0.1f &&
+                                                std::abs(fr.worldZ - fp.z) < 0.1f) {
+                                                fr.filePath = srcPath;
+                                                std::string fname = srcPath;
+                                                auto sp = fname.rfind('/');
+                                                if (sp != std::string::npos) fname = fname.substr(sp + 1);
+                                                FilesystemBrowser::parseFrameType(fname, fr);
+                                                break;
+                                            }
+                                        }
+                                        m_filesystemBrowser.spawnFileAtFrame(srcPath, hitWall);
+                                        pg.saveConfig(m_filesystemBrowser.getCurrentPath());
+                                    } else {
+                                        // Regular wall panel — spawn file on the wall
+                                        glm::vec3 wallPos = hitWall->getTransform().getPosition();
+                                        glm::vec3 wallScale = hitWall->getTransform().getScale();
+                                        float wallYaw = hitWall->getEulerRotation().y;
+                                        hitWall->setTargetLevel("fs://" + srcPath);
+                                        m_filesystemBrowser.spawnFileAtWall(srcPath, wallPos, wallScale, wallYaw);
+                                    }
+                                    // Clear hotbar slot
+                                    destroySlotThumbnail(i);
+                                    m_toolbarSlots[i].occupied = false;
+                                    m_toolbarSlots[i].filePath.clear();
+                                    m_toolbarSlots[i].displayName.clear();
+                                    saveInventorySlot(i);
+                                    syncExcludedPaths();
+                                    if (hitIsFrame) m_pendingFrameRebuild = true;
+                                    std::cout << "[FS] Dropped '" << srcPath << "' onto " << (hitIsFrame ? "frame" : "wall") << std::endl;
                                 }
                             }
                         }
@@ -5904,45 +6392,12 @@ private:
             m_gameModule->setPlayerPosition(m_camera.getPosition());
         }
         
-        // Update AI motor control actions (look_around, turn_to, etc.)
-        updateAIAction(deltaTime);
+        // Update AI motor control actions (look_around, turn_to, etc.) + auto-face player
+        m_aiBehavior.updateAIAction(deltaTime);
+        m_aiBehavior.updateAutoFacePlayer(deltaTime);
 
         // Update player avatar position to track camera
         updatePlayerAvatar();
-
-        // EDEN companions track the player — turn to face camera
-        {
-            glm::vec3 playerPos = m_camera.getPosition();
-            for (auto& obj : m_sceneObjects) {
-                if (!obj || obj->getBeingType() != BeingType::EDEN_COMPANION) continue;
-                // Skip if NPC is doing a motor action (look_around, move_to, etc.)
-                if (m_aiActionActive && m_currentInteractObject == obj.get()) continue;
-
-                glm::vec3 npcPos = obj->getTransform().getPosition();
-                glm::vec3 toPlayer = playerPos - npcPos;
-                toPlayer.y = 0.0f;  // only rotate on Y axis
-
-                if (glm::length(toPlayer) < 0.1f) continue;  // too close, skip
-
-                float targetYaw = glm::degrees(atan2(toPlayer.x, toPlayer.z));
-                glm::vec3 euler = obj->getEulerRotation();
-
-                // Smooth rotation towards player
-                float diff = targetYaw - euler.y;
-                // Normalize to [-180, 180]
-                while (diff > 180.0f) diff -= 360.0f;
-                while (diff < -180.0f) diff += 360.0f;
-
-                float rotSpeed = 90.0f; // degrees per second
-                float step = rotSpeed * deltaTime;
-                if (std::abs(diff) < step) {
-                    euler.y = targetYaw;
-                } else {
-                    euler.y += (diff > 0 ? step : -step);
-                }
-                obj->setEulerRotation(euler);
-            }
-        }
 
         // Update game time
         int previousMinute = static_cast<int>(m_gameTimeMinutes);
@@ -5969,7 +6424,7 @@ private:
             if (!objPtr) continue;
 
             // Skip all behavior/patrol updates for any AI follow target (follow system manages them)
-            bool isFollowTarget = std::any_of(m_aiFollowers.begin(), m_aiFollowers.end(),
+            bool isFollowTarget = std::any_of(m_aiBehavior.followers().begin(), m_aiBehavior.followers().end(),
                 [&objPtr](const AIFollowState& fs) { return fs.npc == objPtr.get(); });
 
             // Always update behaviors (even for invisible objects - they may SET_VISIBLE themselves)
@@ -6000,7 +6455,7 @@ private:
         processPendingDestroys();
 
         // Update AI follow AFTER scene loop so follow position isn't overwritten by patrol/behaviors
-        updateAIFollow(deltaTime);
+        m_aiBehavior.updateAIFollow(deltaTime);
 
         // Update carried items (position on NPC shoulder)
         updateCarriedItems();
@@ -6077,6 +6532,185 @@ private:
                 return closestHit;
             };
 
+            // Wall brush mode — click+drag on platform floor to draw walls
+            m_wallBrushPreviewValid = false;
+            if (m_wallBrushMode && m_filesystemBrowser.isActive() && !ImGui::GetIO().WantCaptureMouse) {
+                glm::vec3 rayO, rayD;
+                doCrosshairRay(rayO, rayD);
+
+                float platSurface = m_filesystemBrowser.getPlatformY();
+                float floorY = platSurface + 1.0f;
+
+                // Ray-plane intersection with platform floor
+                glm::vec3 floorHitPt{0.0f};
+                bool floorHit = false;
+                if (rayD.y < -0.001f) {
+                    float t = (floorY - rayO.y) / rayD.y;
+                    if (t > 0 && t < 500.0f) {
+                        glm::vec3 hp = rayO + rayD * t;
+                        glm::vec3 platOrigin = m_filesystemBrowser.getSpawnOrigin();
+                        auto& pgrid = m_filesystemBrowser.getPlatformGrid().grid();
+                        float platHalfW = (pgrid.width * pgrid.cellSize) / 2.0f;
+                        float platHalfD = (pgrid.depth * pgrid.cellSize) / 2.0f;
+                        float fdx = hp.x - platOrigin.x;
+                        float fdz = hp.z - platOrigin.z;
+                        if (std::abs(fdx) < platHalfW && std::abs(fdz) < platHalfD) {
+                            floorHit = true;
+                            floorHitPt = hp;
+                            floorHitPt.x = std::round(hp.x);
+                            floorHitPt.z = std::round(hp.z);
+                        }
+                    }
+                }
+
+                // Check if click hits an existing platform_wall (select it instead of drawing)
+                SceneObject* hitExistingWall = nullptr;
+                if (leftPressed && !m_wallBrushDrawing) {
+                    float bestDist = std::numeric_limits<float>::max();
+                    for (auto& obj : m_sceneObjects) {
+                        if (!obj || obj->getBuildingType() != "platform_wall") continue;
+                        float dist = obj->getWorldBounds().intersect(rayO, rayD);
+                        if (dist >= 0 && dist < 200.0f && dist < bestDist) {
+                            bestDist = dist;
+                            hitExistingWall = obj.get();
+                        }
+                    }
+                    if (hitExistingWall) {
+                        // Deselect all, then select this wall
+                        for (auto& obj : m_sceneObjects) {
+                            if (obj && obj->getBuildingType() == "platform_wall")
+                                obj->setSelected(false);
+                        }
+                        hitExistingWall->setSelected(true);
+                    }
+                }
+
+                if (floorHit && !hitExistingWall) {
+                    if (leftPressed && !m_wallBrushDrawing) {
+                        m_wallBrushStart = floorHitPt;
+                        m_wallBrushEnd = floorHitPt;
+                        m_wallBrushDrawing = true;
+                    }
+                    if (m_wallBrushDrawing) {
+                        m_wallBrushEnd = floorHitPt;
+
+                        // Constrain to 1m thick: snap to dominant axis
+                        float dx = std::abs(m_wallBrushEnd.x - m_wallBrushStart.x);
+                        float dz = std::abs(m_wallBrushEnd.z - m_wallBrushStart.z);
+                        if (dx >= dz) {
+                            // Wall runs along X, 1m thick in Z
+                            m_wallBrushEnd.z = m_wallBrushStart.z;
+                        } else {
+                            // Wall runs along Z, 1m thick in X
+                            m_wallBrushEnd.x = m_wallBrushStart.x;
+                        }
+                        m_wallBrushPreviewValid = true;
+                    }
+                }
+
+                // Right-click to delete a wall under crosshair
+                if (Input::isMouseButtonPressed(Input::MOUSE_RIGHT) && !m_wallBrushDrawing) {
+                    glm::vec3 rO, rD;
+                    doCrosshairRay(rO, rD);
+                    float bestDist = std::numeric_limits<float>::max();
+                    int bestIdx = -1;
+                    for (int wi = 0; wi < (int)m_sceneObjects.size(); wi++) {
+                        auto& obj = m_sceneObjects[wi];
+                        if (!obj || obj->getBuildingType() != "platform_wall") continue;
+                        float dist = obj->getWorldBounds().intersect(rO, rD);
+                        if (dist >= 0 && dist < 200.0f && dist < bestDist) {
+                            bestDist = dist;
+                            bestIdx = wi;
+                        }
+                    }
+                    if (bestIdx >= 0) {
+                        // Remove matching brush wall from grid
+                        auto pos = m_sceneObjects[bestIdx]->getTransform().getPosition();
+                        auto& bws = m_filesystemBrowser.getPlatformGrid().grid().brushWalls;
+                        for (auto it = bws.begin(); it != bws.end(); ++it) {
+                            if (std::abs(it->posX - pos.x) < 0.01f &&
+                                std::abs(it->posY - pos.y) < 0.01f &&
+                                std::abs(it->posZ - pos.z) < 0.01f) {
+                                bws.erase(it);
+                                break;
+                            }
+                        }
+                        uint32_t h = m_sceneObjects[bestIdx]->getBufferHandle();
+                        if (h) m_modelRenderer->destroyModel(h);
+                        m_sceneObjects.erase(m_sceneObjects.begin() + bestIdx);
+                        if (m_selectedObjectIndex == bestIdx) m_selectedObjectIndex = -1;
+                        else if (m_selectedObjectIndex > bestIdx) m_selectedObjectIndex--;
+                        m_filesystemBrowser.getPlatformGrid().saveConfig(m_filesystemBrowser.getCurrentPath());
+                    }
+                }
+
+                // On mouse release — place the wall
+                if (m_wallBrushDrawing && !Input::isMouseButtonDown(Input::MOUSE_LEFT)) {
+                    m_wallBrushDrawing = false;
+                    float dx = std::abs(m_wallBrushEnd.x - m_wallBrushStart.x);
+                    float dz = std::abs(m_wallBrushEnd.z - m_wallBrushStart.z);
+                    float wallLen = std::max(dx, dz);
+                    // Round length to whole meters for clean grid alignment
+                    wallLen = std::round(wallLen);
+                    if (wallLen >= 1.0f) {
+                        float wallHeight = 8.0f;
+                        float wallThick = 1.0f;
+
+                        // Snap center so wall edges land on grid lines
+                        float minX = std::min(m_wallBrushStart.x, m_wallBrushEnd.x);
+                        float minZ = std::min(m_wallBrushStart.z, m_wallBrushEnd.z);
+                        float cx, cz;
+                        glm::vec3 wallScale;
+                        // Compute wall center — long axis centered between endpoints,
+                        // thin axis offset by +0.5 so the 1m-thick faces land on integer grid lines
+                        bool alongX = (dx >= dz);
+                        if (alongX) {
+                            cx = minX + wallLen * 0.5f;
+                            cz = m_wallBrushStart.z + 0.5f;
+                            wallScale = {wallLen, wallHeight, wallThick};
+                        } else {
+                            cx = m_wallBrushStart.x + 0.5f;
+                            cz = minZ + wallLen * 0.5f;
+                            wallScale = {wallThick, wallHeight, wallLen};
+                        }
+
+                        glm::vec4 wallColor = m_filesystemBrowser.siloConfig().wallColor;
+                        auto mesh = PrimitiveMeshBuilder::createCube(1.0f, wallColor);
+                        uint32_t handle = m_modelRenderer->createModel(mesh.vertices, mesh.indices);
+
+                        auto obj = std::make_unique<SceneObject>(
+                            "PlatWall_" + std::to_string(m_sceneObjects.size()));
+                        obj->setBufferHandle(handle);
+                        obj->setIndexCount(static_cast<uint32_t>(mesh.indices.size()));
+                        obj->setVertexCount(static_cast<uint32_t>(mesh.vertices.size()));
+                        obj->setLocalBounds(mesh.bounds);
+                        obj->setMeshData(mesh.vertices, mesh.indices);
+                        obj->setPrimitiveType(PrimitiveType::Cube);
+                        obj->setPrimitiveSize(1.0f);
+                        obj->setPrimitiveColor(wallColor);
+                        obj->setBuildingType("platform_wall");
+                        obj->setAABBCollision(true);
+
+                        float platY = m_filesystemBrowser.getPlatformY();
+                        // Apply position with the half-cell offset already in cx/cz
+                        obj->getTransform().setPosition({cx, platY + 1.0f, cz});
+                        obj->getTransform().setScale(wallScale);
+
+                        m_sceneObjects.push_back(std::move(obj));
+
+                        // Save brush wall to grid for persistence
+                        BrushWall bw;
+                        bw.posX = cx; bw.posY = platY + 1.0f; bw.posZ = cz;
+                        bw.scaleX = wallScale.x; bw.scaleY = wallScale.y; bw.scaleZ = wallScale.z;
+                        auto& pg = m_filesystemBrowser.getPlatformGrid();
+                        pg.grid().brushWalls.push_back(bw);
+                        pg.saveConfig(m_filesystemBrowser.getCurrentPath());
+                    }
+                }
+            } else {
+                m_wallBrushDrawing = false;
+            }
+
             // Frame placement mode — continuous preview + click to place
             m_framePreviewValid = false;
             if (m_framePlacementMode) {
@@ -6093,6 +6727,32 @@ private:
                     if (dist >= 0 && dist < 200.0f && dist < closestDist) {
                         closestDist = dist;
                         hitWall = obj.get();
+                    }
+                }
+
+                // Also check floor plane intersection
+                bool floorHit = false;
+                glm::vec3 floorHitPt{0.0f};
+                float platSurface = m_filesystemBrowser.getPlatformY();
+                float floorY = platSurface + 1.0f;
+                if (rayD.y < -0.001f) {
+                    float t = (floorY - rayO.y) / rayD.y;
+                    if (t > 0 && t < 200.0f && t < closestDist) {
+                        glm::vec3 hp = rayO + rayD * t;
+                        glm::vec3 platOrigin = m_filesystemBrowser.getSpawnOrigin();
+                        auto& pgrid = m_filesystemBrowser.getPlatformGrid().grid();
+                        float platHalfW = (pgrid.width * pgrid.cellSize) / 2.0f;
+                        float platHalfD = (pgrid.depth * pgrid.cellSize) / 2.0f;
+                        float hh = 8.0f;
+                        float fdx = hp.x - platOrigin.x;
+                        float fdz = hp.z - platOrigin.z;
+                        if (std::abs(fdx) < platHalfW && std::abs(fdz) < platHalfD &&
+                            !(std::abs(fdx) < hh && std::abs(fdz) < hh)) {
+                            closestDist = t;
+                            hitWall = nullptr;
+                            floorHit = true;
+                            floorHitPt = hp;
+                        }
                     }
                 }
 
@@ -6128,7 +6788,6 @@ private:
                     float snappedH, snappedY, frameX, frameZ;
                     float faceMinH, faceMaxH;
                     // Frame Y bounds: platform surface to wallHeight above it
-                    float platSurface = m_filesystemBrowser.getPlatformY();
                     float wallMinY = platSurface;
                     float wallMaxY = platSurface + wallScale.y + 1.0f;
 
@@ -6163,6 +6822,7 @@ private:
                         m_framePreviewYaw = yawDeg;
                         m_framePreviewSize = frameSize;
                         m_framePreviewNX = nx;
+                        m_framePreviewNY = 0.0f;
                         m_framePreviewNZ = nz_val;
 
                         // On click — actually place the frame (skip if ImGui wants the mouse)
@@ -6193,6 +6853,65 @@ private:
                                 newFrame.normalX = nx;
                                 newFrame.normalZ = nz_val;
                                 newFrame.yawDeg = yawDeg;
+                                pg.grid().frames.push_back(newFrame);
+
+                                pg.spawnFrameObjects(m_filesystemBrowser.getSpawnOrigin(),
+                                                     m_filesystemBrowser.getPlatformY());
+                                pg.saveConfig(m_filesystemBrowser.getCurrentPath());
+                            }
+                            m_shootCooldown = 0.2f;
+                        }
+                    }
+                } else if (floorHit) {
+                    float frameSize = static_cast<float>(m_frameSizeSetting);
+                    float halfFrame = frameSize * 0.5f;
+
+                    // Snap to 1m grid (frame center)
+                    float snappedX = std::round(floorHitPt.x - halfFrame) + halfFrame;
+                    float snappedZ = std::round(floorHitPt.z - halfFrame) + halfFrame;
+
+                    // Check frame doesn't overlap the center hole
+                    glm::vec3 platOrigin = m_filesystemBrowser.getSpawnOrigin();
+                    float hh = 8.0f;
+                    bool overlapsHole = (snappedX + halfFrame > platOrigin.x - hh &&
+                                         snappedX - halfFrame < platOrigin.x + hh &&
+                                         snappedZ + halfFrame > platOrigin.z - hh &&
+                                         snappedZ - halfFrame < platOrigin.z + hh);
+
+                    if (!overlapsHole) {
+                        m_framePreviewValid = true;
+                        m_framePreviewPos = {snappedX, floorY, snappedZ};
+                        m_framePreviewYaw = 0.0f;
+                        m_framePreviewSize = frameSize;
+                        m_framePreviewNX = 0.0f;
+                        m_framePreviewNY = 1.0f;
+                        m_framePreviewNZ = 0.0f;
+
+                        // On click — place floor frame
+                        if (leftPressed && m_shootCooldown <= 0.0f && !ImGui::GetIO().WantCaptureMouse) {
+                            auto& pg = m_filesystemBrowser.getPlatformGrid();
+                            bool overlaps = false;
+                            for (const auto& ef : pg.grid().frames) {
+                                // Only check against other floor frames (normalX==0 && normalZ==0)
+                                if (ef.normalX != 0.0f || ef.normalZ != 0.0f) continue;
+                                float eHalf = ef.size * 0.5f;
+                                bool overlapX = std::abs(snappedX - ef.worldX) < (halfFrame + eHalf - 0.01f);
+                                bool overlapZ = std::abs(snappedZ - ef.worldZ) < (halfFrame + eHalf - 0.01f);
+                                if (overlapX && overlapZ) {
+                                    overlaps = true;
+                                    break;
+                                }
+                            }
+
+                            if (!overlaps) {
+                                eden::WallFrame newFrame;
+                                newFrame.worldX = snappedX;
+                                newFrame.worldY = floorY;
+                                newFrame.worldZ = snappedZ;
+                                newFrame.size = m_frameSizeSetting;
+                                newFrame.normalX = 0.0f;
+                                newFrame.normalZ = 0.0f;
+                                newFrame.yawDeg = 0.0f;
                                 pg.grid().frames.push_back(newFrame);
 
                                 pg.spawnFrameObjects(m_filesystemBrowser.getSpawnOrigin(),
@@ -6286,7 +7005,20 @@ private:
                 if (hit && hit->isDoor()) {
                     // Door — navigate immediately
                     std::string target = hit->getTargetLevel();
-                    if (target.rfind("fs://", 0) == 0) {
+                    if (target.rfind("exit://", 0) == 0) {
+                        // Exit silo — teleport to terrain just outside the shell
+                        glm::vec3 siloCenter = m_filesystemBrowser.getSpawnOrigin();
+                        float exitRadius = 30.0f;
+                        float terrainY = m_terrain.getHeightAt(siloCenter.x + exitRadius, siloCenter.z + exitRadius);
+                        glm::vec3 exitPos(siloCenter.x + exitRadius, terrainY + 1.7f, siloCenter.z + exitRadius);
+                        m_camera.setPosition(exitPos);
+                        if (m_characterController) m_characterController->setPosition(exitPos);
+                        m_insideSilo = false;
+                        updateSiloShellVisibility();
+                    } else if (target.rfind("app://", 0) == 0) {
+                        // App launcher navigation
+                        m_filesystemBrowser.navigate(target);
+                    } else if (target.rfind("fs://", 0) == 0) {
                         // Keep spawn origin unchanged — silo rebuilds at same center
                         m_filesystemBrowser.navigate(target.substr(5));
                         m_pendingTeleportToPlatform = true;
@@ -6601,8 +7333,9 @@ private:
         // Update dogfight AI (handles combat)
         updateDogfighters(deltaTime);
 
-        // E key for interaction
-        if (Input::isKeyPressed(Input::KEY_E) && !m_inConversation) {
+        // E key or left-click for interaction
+        if ((Input::isKeyPressed(Input::KEY_E) || Input::isMouseButtonPressed(Input::MOUSE_LEFT))
+            && !m_inConversation && !ImGui::GetIO().WantCaptureMouse) {
             interactWithCrosshair();
         }
 
@@ -8313,7 +9046,7 @@ private:
 
                 if (placeTarget && obj->isCarrying()) {
                     std::string carriedName = obj->getCarriedItemName();
-                    placeCarriedItemAt(obj, placeTarget);
+                    m_aiBehavior.placeCarriedItemAt(obj, placeTarget);
                     std::cout << "PLACE_VERTICAL: Placed '" << carriedName
                               << "' into '" << placeName << "'" << std::endl;
                 } else if (!obj->isCarrying()) {
@@ -8890,10 +9623,10 @@ private:
                 }
 
                 // Remove from followers if destroyed
-                m_aiFollowers.erase(
-                    std::remove_if(m_aiFollowers.begin(), m_aiFollowers.end(),
+                m_aiBehavior.followers().erase(
+                    std::remove_if(m_aiBehavior.followers().begin(), m_aiBehavior.followers().end(),
                         [obj](const AIFollowState& fs) { return fs.npc == obj; }),
-                    m_aiFollowers.end());
+                    m_aiBehavior.followers().end());
 
                 std::cout << "Destroyed: " << (*it)->getName() << std::endl;
                 m_sceneObjects.erase(it);
@@ -9570,7 +10303,7 @@ private:
 
             ImGui::BeginChild("ChatHistory", ImVec2(0, historyHeight), true);
 
-            for (const auto& msg : m_conversationHistory) {
+            for (const auto& msg : m_aiBehavior.conversationHistory()) {
                 if (msg.isPlayer) {
                     // Player messages - green color
                     ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.6f, 0.9f, 0.6f, 1.0f));
@@ -9586,16 +10319,16 @@ private:
             }
 
             // Show thinking indicator when waiting for AI
-            if (m_waitingForAIResponse) {
+            if (m_aiBehavior.waitingForAIResponse()) {
                 ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.7f, 0.7f, 0.7f, 1.0f));
                 ImGui::TextWrapped("...");
                 ImGui::PopStyleColor();
             }
 
             // Auto-scroll to bottom when new messages added
-            if (m_scrollToBottom) {
+            if (m_aiBehavior.scrollToBottom()) {
                 ImGui::SetScrollHereY(1.0f);
-                m_scrollToBottom = false;
+                m_aiBehavior.scrollToBottom() = false;
             }
 
             ImGui::EndChild();
@@ -9603,7 +10336,7 @@ private:
             ImGui::Separator();
 
             // Input area
-            if (m_waitingForAIResponse) {
+            if (m_aiBehavior.waitingForAIResponse()) {
                 ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.3f, 1.0f), "Waiting for response...");
             } else {
                 ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f), "Your message:");
@@ -9611,13 +10344,13 @@ private:
 
             // Auto-focus the input
             static bool needsFocus = true;
-            if (needsFocus && !m_waitingForAIResponse) {
+            if (needsFocus && !m_aiBehavior.waitingForAIResponse()) {
                 ImGui::SetKeyboardFocusHere();
                 needsFocus = false;
             }
 
             // Disable input while waiting
-            if (m_waitingForAIResponse) {
+            if (m_aiBehavior.waitingForAIResponse()) {
                 ImGui::BeginDisabled();
             }
 
@@ -9628,11 +10361,11 @@ private:
             ImGui::SameLine();
             bool sendClicked = ImGui::Button("Send", ImVec2(60, 0));
 
-            if (m_waitingForAIResponse) {
+            if (m_aiBehavior.waitingForAIResponse()) {
                 ImGui::EndDisabled();
             }
 
-            if ((enterPressed || sendClicked) && m_responseBuffer[0] != '\0' && !m_waitingForAIResponse) {
+            if ((enterPressed || sendClicked) && m_responseBuffer[0] != '\0' && !m_aiBehavior.waitingForAIResponse()) {
                 sendPlayerResponse();
                 needsFocus = true;
             }
@@ -9644,18 +10377,18 @@ private:
 
     void sendPlayerResponse() {
         if (!m_currentInteractObject) return;
-        if (m_waitingForAIResponse) return;  // Don't send while waiting
+        if (m_aiBehavior.waitingForAIResponse()) return;  // Don't send while waiting
 
         std::string playerMessage = m_responseBuffer;
         std::string npcName = m_currentInteractObject->getName();
 
         // Add player message to history
-        m_conversationHistory.push_back({
+        m_aiBehavior.conversationHistory().push_back({
             "You",
             playerMessage,
             true
         });
-        m_scrollToBottom = true;
+        m_aiBehavior.scrollToBottom() = true;
 
         // Clear input buffer
         m_responseBuffer[0] = '\0';
@@ -9683,7 +10416,7 @@ private:
 
         // Send to AI backend
         if (m_httpClient && m_httpClient->isConnected()) {
-            m_waitingForAIResponse = true;
+            m_aiBehavior.waitingForAIResponse() = true;
             // (TTS overlap prevented by m_ttsInFlight + m_ttsCooldown in speakTTS)
             int beingType = static_cast<int>(m_currentInteractObject->getBeingType());
             
@@ -9693,18 +10426,18 @@ private:
                 m_currentInteractObject->getBeingType() == BeingType::ROBOT) {
                 // Use full scan results if available from recent look_around, otherwise do fresh scan
                 PerceptionData perception;
-                if (m_hasFullScanResult) {
-                    perception = m_lastFullScanResult;
-                    m_hasFullScanResult = false;  // Clear after use
+                if (m_aiBehavior.hasFullScanResult()) {
+                    perception = m_aiBehavior.lastFullScanResult();
+                    m_aiBehavior.hasFullScanResult() = false;  // Clear after use
                     std::cout << "  Using full scan result: " << perception.visibleObjects.size() << " objects" << std::endl;
                 } else {
-                    perception = performScanCone(m_currentInteractObject, 120.0f, 50.0f);
+                    perception = m_aiBehavior.performScanCone(m_currentInteractObject, 120.0f, 50.0f);
                     std::cout << "  Fresh scan: " << perception.visibleObjects.size() << " objects" << std::endl;
                 }
                 m_httpClient->sendChatMessageWithPerception(m_currentSessionId, playerMessage,
                     npcName, "", beingType, perception,
                     [this, npcName](const AsyncHttpClient::Response& resp) {
-                        m_waitingForAIResponse = false;
+                        m_aiBehavior.waitingForAIResponse() = false;
                         if (resp.success) {
                             try {
                                 auto json = nlohmann::json::parse(resp.body);
@@ -9712,42 +10445,50 @@ private:
                                     m_currentSessionId = json["session_id"].get<std::string>();
                                 }
                                 std::string response = json.value("response", "...");
-                                m_conversationHistory.push_back({npcName, response, false});
-                                std::cout << npcName << " responded: " << response << std::endl;
+                                std::string emotion = json.value("emotion", "neutral");
+                                m_aiBehavior.npcEmotions()[npcName] = emotion;
+                                std::string model = json.value("model", "?");
+                                std::string chatMsg = "[" + emotion + "] " + response;
+                                m_aiBehavior.conversationHistory().push_back({npcName, chatMsg, false});
+                                std::cout << "[" << npcName << "] (" << emotion << ") [" << model << "] " << response << std::endl;
 
                                 // Speak the response via TTS
-                                speakTTS(response, npcName);
+                                m_aiBehavior.speakTTS(response, npcName);
 
                                 // Cycle expression on each response
                                 if (m_currentInteractObject) {
-                                    cycleExpression(m_currentInteractObject);
+                                    m_aiBehavior.cycleExpression(m_currentInteractObject);
                                 }
 
                                 // Check for and execute AI action
                                 if (json.contains("action") && !json["action"].is_null()) {
                                     std::cout << "[AI] Action received: " << json["action"].value("type", "?") << std::endl;
-                                    executeAIAction(json["action"]);
+                                    m_aiBehavior.executeAIAction(json["action"]);
                                 } else {
                                     std::cout << "[AI] No action in response (dialogue only)" << std::endl;
                                 }
                             } catch (const std::exception& e) {
                                 std::cerr << "[AI] Exception in response handler: " << e.what() << std::endl;
-                                m_conversationHistory.push_back({npcName, "...", false});
+                                m_aiBehavior.conversationHistory().push_back({npcName, "...", false});
                             } catch (...) {
                                 std::cerr << "[AI] Unknown exception in response handler" << std::endl;
-                                m_conversationHistory.push_back({npcName, "...", false});
+                                m_aiBehavior.conversationHistory().push_back({npcName, "...", false});
                             }
                         } else {
-                            m_conversationHistory.push_back({npcName, "(Connection lost)", false});
+                            std::cerr << "[Chat] Backend error: " << resp.error
+                                      << " (status " << resp.statusCode << ")" << std::endl;
+                            if (!resp.body.empty())
+                                std::cerr << "[Chat] Body: " << resp.body.substr(0, 200) << std::endl;
+                            m_aiBehavior.conversationHistory().push_back({npcName, "(Connection lost)", false});
                         }
-                        m_scrollToBottom = true;
+                        m_aiBehavior.scrollToBottom() = true;
                     });
             } else {
                 // Standard NPCs without perception
                 m_httpClient->sendChatMessage(m_currentSessionId, playerMessage,
                     npcName, "", beingType,
                     [this, npcName](const AsyncHttpClient::Response& resp) {
-                        m_waitingForAIResponse = false;
+                        m_aiBehavior.waitingForAIResponse() = false;
                         if (resp.success) {
                             try {
                                 auto json = nlohmann::json::parse(resp.body);
@@ -9755,177 +10496,66 @@ private:
                                     m_currentSessionId = json["session_id"].get<std::string>();
                                 }
                                 std::string response = json.value("response", "...");
-                                m_conversationHistory.push_back({npcName, response, false});
+                                m_aiBehavior.conversationHistory().push_back({npcName, response, false});
                                 std::cout << npcName << " responded: " << response << std::endl;
                             } catch (...) {
-                                m_conversationHistory.push_back({npcName, "...", false});
+                                m_aiBehavior.conversationHistory().push_back({npcName, "...", false});
                             }
                         } else {
-                            m_conversationHistory.push_back({npcName, "(Connection lost)", false});
+                            m_aiBehavior.conversationHistory().push_back({npcName, "(Connection lost)", false});
                         }
-                        m_scrollToBottom = true;
+                        m_aiBehavior.scrollToBottom() = true;
                     });
             }
         } else {
             // Fallback response when backend not available
-            m_conversationHistory.push_back({npcName, "(AI backend not connected)", false});
-            m_scrollToBottom = true;
+            m_aiBehavior.conversationHistory().push_back({npcName, "(AI backend not connected)", false});
+            m_aiBehavior.scrollToBottom() = true;
         }
     }
 
     // Add a message to the Minecraft-style chat log + persistent history
-    void addChatMessage(const std::string& sender, const std::string& message) {
-        m_chatLog.push_back({sender, message, CHAT_MESSAGE_DURATION});
+    void addChatMessage(const std::string& sender, const std::string& message) override {
+        // Filter out empty, "NOTHING", and think-tag-only messages
+        std::string cleaned = message;
+        // Strip <think>...</think> blocks
+        {
+            size_t start;
+            while ((start = cleaned.find("<think>")) != std::string::npos) {
+                size_t end = cleaned.find("</think>", start);
+                if (end != std::string::npos)
+                    cleaned.erase(start, end + 8 - start);
+                else
+                    cleaned.erase(start);  // unclosed tag, remove to end
+            }
+            // Trim whitespace
+            size_t first = cleaned.find_first_not_of(" \t\n\r");
+            if (first == std::string::npos) return;  // empty after cleaning
+            cleaned = cleaned.substr(first);
+            size_t last = cleaned.find_last_not_of(" \t\n\r");
+            if (last != std::string::npos) cleaned = cleaned.substr(0, last + 1);
+        }
+        if (cleaned.empty() || cleaned == "NOTHING") return;
+
+        m_chatLog.push_back({sender, cleaned, CHAT_MESSAGE_DURATION});
         while (m_chatLog.size() > MAX_CHAT_LOG_ENTRIES) {
             m_chatLog.erase(m_chatLog.begin());
         }
+
+        // Generate timestamp
+        auto now = std::chrono::system_clock::now();
+        auto t = std::chrono::system_clock::to_time_t(now);
+        struct tm tm_buf;
+        localtime_r(&t, &tm_buf);
+        char timeBuf[16];
+        snprintf(timeBuf, sizeof(timeBuf), "%02d:%02d:%02d", tm_buf.tm_hour, tm_buf.tm_min, tm_buf.tm_sec);
+
         // Also add to persistent world chat history
-        m_worldChatHistory.push_back({sender, message});
+        m_worldChatHistory.push_back({sender, cleaned, std::string(timeBuf)});
         m_worldChatScrollToBottom = true;
     }
 
-    // Handle transcribed voice message — find nearest NPC and send as quick chat
-    void handleVoiceMessage(const std::string& text) {
-        glm::vec3 playerPos = m_camera.getPosition();
 
-        // Find nearest sentient NPC
-        SceneObject* nearestNPC = nullptr;
-        float nearestDist = 100.0f;
-        for (auto& obj : m_sceneObjects) {
-            if (!obj || !obj->isVisible() || !obj->isSentient()) continue;
-            if (obj.get() == m_playerAvatar) continue;
-            float dist = glm::length(obj->getTransform().getPosition() - playerPos);
-            if (dist < nearestDist) {
-                nearestDist = dist;
-                nearestNPC = obj.get();
-            }
-        }
-
-        if (!nearestNPC) {
-            addChatMessage("System", "No one nearby to hear you.");
-            return;
-        }
-
-        // Show player message in chat log
-        addChatMessage("You", text);
-
-        std::string npcName = nearestNPC->getName();
-        int beingType = static_cast<int>(nearestNPC->getBeingType());
-        m_currentInteractObject = nearestNPC;
-
-        // Reuse session
-        std::string sessionId;
-        auto it = m_quickChatSessionIds.find(npcName);
-        if (it != m_quickChatSessionIds.end()) sessionId = it->second;
-
-        // Send with perception
-        PerceptionData perception = performScanCone(nearestNPC, 120.0f, 50.0f);
-        m_httpClient->sendChatMessageWithPerception(sessionId, text,
-            npcName, "", beingType, perception,
-            [this, npcName, nearestNPC](const AsyncHttpClient::Response& resp) {
-                if (resp.success) {
-                    try {
-                        auto json = nlohmann::json::parse(resp.body);
-                        if (json.contains("session_id")) {
-                            m_quickChatSessionIds[npcName] = json["session_id"].get<std::string>();
-                        }
-                        std::string response = json.value("response", "...");
-                        addChatMessage(npcName, response);
-                        speakTTS(response, npcName);
-
-                        m_currentInteractObject = nearestNPC;
-                        if (json.contains("action") && !json["action"].is_null()) {
-                            executeAIAction(json["action"]);
-                        }
-                    } catch (...) {
-                        addChatMessage(npcName, "...");
-                    }
-                } else {
-                    addChatMessage(npcName, "(No response)");
-                }
-            });
-    }
-
-    // Cycle to the next expression texture on an NPC (for testing)
-    void cycleExpression(SceneObject* npc) {
-        if (!npc || npc->getExpressionCount() == 0) return;
-        int next = (npc->getCurrentExpression() + 1) % npc->getExpressionCount();
-        if (npc->setExpression(next)) {
-            auto& tex = npc->getTextureData();
-            m_modelRenderer->updateTexture(
-                npc->getBufferHandle(), tex.data(),
-                npc->getTextureWidth(), npc->getTextureHeight());
-            std::cout << "[Expression] " << npc->getName() << " -> '"
-                      << npc->getExpressionName(next) << "'" << std::endl;
-        }
-    }
-
-    // Request TTS audio and play it via miniaudio
-    // Only one TTS can be in-flight or playing at a time — all others are dropped
-    void speakTTS(const std::string& text, const std::string& npcName) {
-        if (!m_httpClient || text.empty()) return;
-
-        // Block if another TTS is still in-flight or playing
-        if (m_ttsInFlight || m_ttsCooldown > 0.0f) {
-            std::cout << "[TTS] Skipped (already playing): \"" << text.substr(0, 40) << "...\"" << std::endl;
-            return;
-        }
-
-        // Pick voice based on NPC
-        std::string voice = "en-US-AvaNeural";  // Liora default
-        std::string rate;
-        bool useRobotVoice = false;
-        if (npcName == "Eve") voice = "en-GB-SoniaNeural";
-        else if (npcName == "Xenk") voice = "en-US-GuyNeural";
-        else if (npcName.find("Robot") != std::string::npos) voice = "en-US-GuyNeural";
-        else if ([&]() { std::string lower = npcName; std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower); return lower.find("lionel") != std::string::npos || lower.find("unit") != std::string::npos; }()) {
-            useRobotVoice = true;
-        }
-
-        m_ttsInFlight = true;
-        std::cout << "[TTS] Requesting: \"" << text.substr(0, 60) << "...\" (" << (useRobotVoice ? "robot" : voice) << ")" << std::endl;
-
-        m_httpClient->requestTTS(text, voice,
-            [this](const AsyncHttpClient::Response& resp) {
-                m_ttsInFlight = false;
-                if (!resp.success) {
-                    std::cerr << "[TTS] Request failed: " << resp.error << " (status " << resp.statusCode << ")" << std::endl;
-                    return;
-                }
-                if (resp.body.empty()) {
-                    std::cerr << "[TTS] Empty audio response" << std::endl;
-                    return;
-                }
-
-                // Estimate audio duration: WAV ~32kB/s (16-bit mono 16kHz), MP3 ~16kB/s
-                bool isWav = resp.body.size() >= 4 && resp.body[0] == 'R' && resp.body[1] == 'I' && resp.body[2] == 'F' && resp.body[3] == 'F';
-                float estimatedDuration = isWav
-                    ? static_cast<float>(resp.body.size()) / 32000.0f
-                    : static_cast<float>(resp.body.size()) / 16000.0f;
-
-                // Write audio to temp file and play
-                std::string ext = isWav ? ".wav" : ".mp3";
-                std::string tempPath = "/tmp/eden_tts_" + std::to_string(m_ttsFileCounter++) + ext;
-                std::ofstream out(tempPath, std::ios::binary);
-                if (out) {
-                    out.write(resp.body.data(), resp.body.size());
-                    out.close();
-
-                    if (!m_lastTTSFile.empty()) {
-                        std::remove(m_lastTTSFile.c_str());
-                    }
-                    m_lastTTSFile = tempPath;
-
-                    std::cout << "[TTS] Playing: " << tempPath << " (~" << estimatedDuration << "s)" << std::endl;
-                    Audio::getInstance().playSound(tempPath, 0.8f);
-
-                    // Set cooldown — no new TTS until this one finishes
-                    m_ttsCooldown = estimatedDuration + 0.5f;
-                } else {
-                    std::cerr << "[TTS] Failed to write temp file: " << tempPath << std::endl;
-                }
-            }, rate, useRobotVoice);
-    }
 
     // Update chat log timers (call from update loop)
     void updateChatLog(float deltaTime) {
@@ -9961,7 +10591,7 @@ private:
     // Render the chat log overlay (bottom-left, Minecraft style)
     void renderChatLog() {
         // PTT recording/processing indicator
-        if (m_pttRecording || m_pttProcessing) {
+        if (m_aiBehavior.pttRecording() || m_aiBehavior.pttProcessing()) {
             float windowWidth = static_cast<float>(getWindow().getWidth());
             float windowHeight = static_cast<float>(getWindow().getHeight());
             ImGui::SetNextWindowPos(ImVec2(windowWidth * 0.5f - 80.0f, windowHeight - 120.0f));
@@ -9970,7 +10600,7 @@ private:
                 ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
                 ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings |
                 ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoFocusOnAppearing)) {
-                if (m_pttRecording) {
+                if (m_aiBehavior.pttRecording()) {
                     ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.3f, 0.3f, 1.0f));
                     ImGui::Text("  Recording...  ");
                     ImGui::PopStyleColor();
@@ -10040,15 +10670,42 @@ private:
         if (ImGui::Begin("World Chat", &m_showWorldChatHistory,
             ImGuiWindowFlags_NoFocusOnAppearing)) {
 
+            // TTS toggle
+            ImGui::Checkbox("TTS", &m_aiBehavior.ttsEnabled());
+            ImGui::Separator();
+
             // Scrollable child region
-            ImGui::BeginChild("##ChatScroll", ImVec2(0, 0), false);
+            ImGui::BeginChild("##ChatScroll", ImVec2(0, -1), false);
             ImGui::PushTextWrapPos(ImGui::GetContentRegionAvail().x);
 
             for (const auto& entry : m_worldChatHistory) {
+                // Timestamp in dim gray
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.5f, 0.5f, 0.5f, 1.0f));
+                ImGui::Text("[%s]", entry.timestamp.c_str());
+                ImGui::PopStyleColor();
+                ImGui::SameLine();
+                // Sender + message in color
                 ImVec4 color = getChatColor(entry.sender);
                 ImGui::PushStyleColor(ImGuiCol_Text, color);
                 ImGui::TextWrapped("<%s> %s", entry.sender.c_str(), entry.message.c_str());
                 ImGui::PopStyleColor();
+            }
+
+            // Inline AI context info (appended at bottom, updates every poll)
+            if (!m_aiContextSessions.empty()) {
+                ImGui::Separator();
+                for (const auto& s : m_aiContextSessions) {
+                    ImVec4 col = s.estTokens < 2000 ? ImVec4(0.2f, 0.9f, 0.2f, 1.0f) :
+                                 s.estTokens < 4000 ? ImVec4(0.9f, 0.9f, 0.2f, 1.0f) :
+                                                      ImVec4(0.9f, 0.3f, 0.3f, 1.0f);
+                    int totalTok = s.totalInputTokens + s.totalOutputTokens;
+                    if (totalTok > 0)
+                        ImGui::TextColored(col, "  [%s] %d msgs ~%d ctx | %d session tokens (%s)",
+                            s.npcName.c_str(), s.messages, s.estTokens, totalTok, s.provider.c_str());
+                    else
+                        ImGui::TextColored(col, "  [%s] %d msgs ~%d tokens (%s)",
+                            s.npcName.c_str(), s.messages, s.estTokens, s.provider.c_str());
+                }
             }
 
             ImGui::PopTextWrapPos();
@@ -10060,6 +10717,95 @@ private:
             }
 
             ImGui::EndChild();
+        }
+        ImGui::End();
+    }
+
+    void renderAIContextViewer() {
+        if (!m_showAIContextViewer) return;
+
+        float windowWidth = static_cast<float>(getWindow().getWidth());
+        float windowHeight = static_cast<float>(getWindow().getHeight());
+
+        ImGui::SetNextWindowPos(ImVec2(10.0f, 60.0f), ImGuiCond_FirstUseEver);
+        ImGui::SetNextWindowSize(ImVec2(std::min(700.0f, windowWidth * 0.5f),
+                                        std::min(600.0f, windowHeight * 0.7f)), ImGuiCond_FirstUseEver);
+        ImGui::SetNextWindowBgAlpha(0.92f);
+
+        if (ImGui::Begin("AI Context Viewer (Ctrl+1)", &m_showAIContextViewer)) {
+            if (m_aiContextFull.empty()) {
+                ImGui::TextDisabled("No active AI sessions");
+            } else {
+                // Session tabs
+                if (ImGui::BeginTabBar("##CtxSessions")) {
+                    for (const auto& session : m_aiContextFull) {
+                        std::string tabLabel = session.npcName + " (" +
+                            std::to_string(session.messages.size()) + " msgs)";
+                        if (ImGui::BeginTabItem(tabLabel.c_str())) {
+                            // Find matching context session for token totals
+                            int sessionInTok = 0, sessionOutTok = 0;
+                            for (const auto& cs : m_aiContextSessions) {
+                                if (cs.npcName == session.npcName) {
+                                    sessionInTok = cs.totalInputTokens;
+                                    sessionOutTok = cs.totalOutputTokens;
+                                    break;
+                                }
+                            }
+                            int totalTok = sessionInTok + sessionOutTok;
+                            ImGui::Text("Provider: %s  |  Session: %s",
+                                session.provider.c_str(), session.sessionId.substr(0, 8).c_str());
+                            if (totalTok > 0) {
+                                ImGui::SameLine();
+                                ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.3f, 1.0f),
+                                    "  |  Tokens: %d in + %d out = %d total",
+                                    sessionInTok, sessionOutTok, totalTok);
+                            }
+                            ImGui::Separator();
+
+                            ImGui::BeginChild("##CtxMsgs", ImVec2(0, 0), true);
+                            ImGui::PushTextWrapPos(ImGui::GetContentRegionAvail().x);
+
+                            for (size_t i = 0; i < session.messages.size(); i++) {
+                                const auto& msg = session.messages[i];
+
+                                // Role color
+                                ImVec4 roleCol;
+                                if (msg.role == "system")
+                                    roleCol = ImVec4(0.6f, 0.4f, 0.8f, 1.0f);  // purple
+                                else if (msg.role == "user")
+                                    roleCol = ImVec4(0.3f, 0.7f, 1.0f, 1.0f);  // blue
+                                else if (msg.role == "assistant")
+                                    roleCol = ImVec4(0.2f, 0.9f, 0.4f, 1.0f);  // green
+                                else
+                                    roleCol = ImVec4(0.7f, 0.7f, 0.7f, 1.0f);  // gray
+
+                                // Message index + role header
+                                ImGui::PushStyleColor(ImGuiCol_Text, roleCol);
+                                ImGui::Text("[%zu] %s:", i, msg.role.c_str());
+                                ImGui::PopStyleColor();
+
+                                // Content (dimmer)
+                                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.8f, 0.8f, 0.8f, 1.0f));
+                                // Truncate very long messages in display
+                                if (msg.content.size() > 500) {
+                                    std::string truncated = msg.content.substr(0, 500) + "...";
+                                    ImGui::TextWrapped("%s", truncated.c_str());
+                                } else {
+                                    ImGui::TextWrapped("%s", msg.content.c_str());
+                                }
+                                ImGui::PopStyleColor();
+
+                                ImGui::Spacing();
+                            }
+
+                            ImGui::PopTextWrapPos();
+                            ImGui::EndChild();
+                            ImGui::EndTabItem();
+                        }
+                    }
+                    ImGui::EndTabBar();
+                }
+            }
         }
         ImGui::End();
     }
@@ -10359,8 +11105,8 @@ private:
         if (m_httpClient && m_httpClient->isConnected()) {
             // Reuse session for same NPC, or start fresh
             std::string sessionId = "";
-            auto it = m_quickChatSessionIds.find(npcName);
-            if (it != m_quickChatSessionIds.end()) {
+            auto it = m_aiBehavior.sessionIds().find(npcName);
+            if (it != m_aiBehavior.sessionIds().end()) {
                 sessionId = it->second;
             }
 
@@ -10370,48 +11116,74 @@ private:
                 closestSentient->getBeingType() == BeingType::ROBOT ||
                 closestSentient->getBeingType() == BeingType::EDEN_COMPANION) {
                 PerceptionData perception;
-                if (m_hasFullScanResult) {
-                    perception = m_lastFullScanResult;
-                    m_hasFullScanResult = false;
+                if (m_aiBehavior.hasFullScanResult()) {
+                    perception = m_aiBehavior.lastFullScanResult();
+                    m_aiBehavior.hasFullScanResult() = false;
                     std::cout << "  Quick chat using full scan result: " << perception.visibleObjects.size() << " objects" << std::endl;
                 } else {
-                    perception = performScanCone(closestSentient, 120.0f, 50.0f);
+                    perception = m_aiBehavior.performScanCone(closestSentient, 120.0f, 50.0f);
                     std::cout << "  Quick chat fresh scan: " << perception.visibleObjects.size() << " objects" << std::endl;
                 }
 
-                m_httpClient->sendChatMessageWithPerception(sessionId, message,
-                    npcName, "", beingType, perception,
-                    [this, npcName, closestSentient](const AsyncHttpClient::Response& resp) {
+                // Check if player wants image description
+                std::string lowerText = message;
+                std::transform(lowerText.begin(), lowerText.end(), lowerText.begin(), ::tolower);
+                std::string imagePath;
+                if (lowerText.find("describe") != std::string::npos || lowerText.find("image") != std::string::npos ||
+                    lowerText.find("picture") != std::string::npos || lowerText.find("photo") != std::string::npos ||
+                    lowerText.find("look at") != std::string::npos || lowerText.find("what is") != std::string::npos ||
+                    lowerText.find("what do you see") != std::string::npos) {
+                    imagePath = getSelectedImagePath();
+                    if (!imagePath.empty())
+                        std::cout << "[AI] Sending image to vision model: " << imagePath << std::endl;
+                }
+
+                auto chatCallback = [this, npcName, closestSentient](const AsyncHttpClient::Response& resp) {
                         if (resp.success) {
                             try {
                                 auto json = nlohmann::json::parse(resp.body);
                                 if (json.contains("session_id")) {
-                                    m_quickChatSessionIds[npcName] = json["session_id"].get<std::string>();
+                                    m_aiBehavior.sessionIds()[npcName] = json["session_id"].get<std::string>();
                                 }
                                 std::string response = json.value("response", "...");
-                                addChatMessage(npcName, response);
-                                std::cout << npcName << " says: " << response << std::endl;
+                                std::string emotion = json.value("emotion", "neutral");
+                                std::string model = json.value("model", "?");
+                                m_aiBehavior.npcEmotions()[npcName] = emotion;
+                                addChatMessage(npcName, "[" + emotion + "] " + response);
+                                std::cout << "[" << npcName << "] (" << emotion << ") [" << model << "] " << response << std::endl;
 
                                 // Speak the response via TTS
-                                speakTTS(response, npcName);
+                                m_aiBehavior.speakTTS(response, npcName);
 
                                 // Cycle expression on each response
-                                cycleExpression(closestSentient);
+                                m_aiBehavior.cycleExpression(closestSentient);
 
                                 // Restore interact object for this NPC (may have been cleared since send)
                                 m_currentInteractObject = closestSentient;
 
                                 // Execute AI action if present
                                 if (json.contains("action") && !json["action"].is_null()) {
-                                    executeAIAction(json["action"]);
+                                    m_aiBehavior.executeAIAction(json["action"]);
                                 }
                             } catch (...) {
                                 addChatMessage(npcName, "...");
                             }
                         } else {
+                            std::cerr << "[QuickChat] Backend error: " << resp.error
+                                      << " (status " << resp.statusCode << ")" << std::endl;
+                            if (!resp.body.empty())
+                                std::cerr << "[QuickChat] Body: " << resp.body.substr(0, 200) << std::endl;
                             addChatMessage(npcName, "(No response)");
                         }
-                    });
+                    };
+
+                if (!imagePath.empty()) {
+                    m_httpClient->sendChatMessageWithPerception(sessionId, message,
+                        npcName, "", beingType, perception, imagePath, chatCallback);
+                } else {
+                    m_httpClient->sendChatMessageWithPerception(sessionId, message,
+                        npcName, "", beingType, perception, chatCallback);
+                }
             } else {
                 // Standard NPCs without perception
                 m_httpClient->sendChatMessage(sessionId, message,
@@ -10421,11 +11193,14 @@ private:
                             try {
                                 auto json = nlohmann::json::parse(resp.body);
                                 if (json.contains("session_id")) {
-                                    m_quickChatSessionIds[npcName] = json["session_id"].get<std::string>();
+                                    m_aiBehavior.sessionIds()[npcName] = json["session_id"].get<std::string>();
                                 }
                                 std::string response = json.value("response", "...");
-                                addChatMessage(npcName, response);
-                                std::cout << npcName << " says: " << response << std::endl;
+                                std::string emotion = json.value("emotion", "neutral");
+                                std::string model = json.value("model", "?");
+                                m_aiBehavior.npcEmotions()[npcName] = emotion;
+                                addChatMessage(npcName, "[" + emotion + "] " + response);
+                                std::cout << "[" << npcName << "] (" << emotion << ") [" << model << "] " << response << std::endl;
                             } catch (...) {
                                 addChatMessage(npcName, "...");
                             }
@@ -10725,6 +11500,8 @@ private:
                     m_showSiloConfig = !m_showSiloConfig;
                 if (ImGui::MenuItem("Performance", nullptr, m_showPerfWindow))
                     m_showPerfWindow = !m_showPerfWindow;
+                if (ImGui::MenuItem("Servers", nullptr, m_showServerManager))
+                    m_showServerManager = !m_showServerManager;
                 ImGui::EndMenu();
             }
             ImGui::EndMainMenuBar();
@@ -10745,14 +11522,34 @@ private:
             ImGui::ColorEdit4("Wall Color", &cfg.wallColor.x);
             ImGui::ColorEdit4("Column Color", &cfg.columnColor.x);
 
+            ImGui::Separator();
+            ImGui::Checkbox("Spawn at Platform Top", &m_spawnAtPlatformTop);
+            if (m_spawnAtPlatformTop)
+                ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), "Entering folders teleports to platform");
+            else
+                ImGui::TextDisabled("Entering folders teleports to silo floor");
+            ImGui::TextDisabled("PgUp = platform top, PgDn = silo floor");
+
             if (m_filesystemBrowser.isActive()) {
                 auto& pg = m_filesystemBrowser.getPlatformGrid();
+
+                ImGui::Separator();
+                ImGui::Text("Wall Building");
+                ImGui::Checkbox("Wall Brush", &m_wallBrushMode);
+                if (m_wallBrushMode) {
+                    m_framePlacementMode = false; // mutually exclusive
+                    ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.2f, 1.0f),
+                        "Click+drag on platform floor to draw walls (1m thick, 8m tall)");
+                    ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.2f, 1.0f),
+                        "Right-click a wall to delete it");
+                }
 
                 ImGui::Separator();
                 ImGui::Text("Wall Frames");
                 ImGui::SliderInt("Frame Size", &m_frameSizeSetting, 1, 16, "%dm");
                 ImGui::Checkbox("Frame Placement Mode", &m_framePlacementMode);
                 if (m_framePlacementMode) {
+                    m_wallBrushMode = false; // mutually exclusive
                     ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f),
                         "Click on a platform wall to place a %dm frame", m_frameSizeSetting);
                 }
@@ -11116,6 +11913,7 @@ private:
         renderSiloConfigWindow();
         renderPlatformMapMode();
         renderPerfWindow();
+        if (m_showServerManager) m_serverManager.renderImGui(&m_showServerManager);
         renderToolbarUI();
 
         // SAM2 segmentation progress overlay
@@ -12826,6 +13624,53 @@ private:
         }
     }
 
+    void dumpSessionLogs() {
+        // Create timestamped log directory
+        auto now = std::chrono::system_clock::now();
+        auto t = std::chrono::system_clock::to_time_t(now);
+        char timeBuf[64];
+        std::strftime(timeBuf, sizeof(timeBuf), "%Y%m%d_%H%M%S", std::localtime(&t));
+
+        std::string logDir = std::string(getenv("HOME") ? getenv("HOME") : ".") + "/.eden/logs";
+        std::filesystem::create_directories(logDir);
+
+        // ── Dump World Chat ──
+        if (!m_worldChatHistory.empty()) {
+            std::string chatPath = logDir + "/chat_" + timeBuf + ".txt";
+            std::ofstream chatFile(chatPath);
+            if (chatFile.is_open()) {
+                chatFile << "=== EDEN World Chat Log — " << timeBuf << " ===\n\n";
+                for (const auto& entry : m_worldChatHistory) {
+                    chatFile << "[" << entry.timestamp << "] <" << entry.sender << "> " << entry.message << "\n";
+                }
+                chatFile.close();
+                std::cout << "[Session] Chat log saved: " << chatPath << std::endl;
+            }
+        }
+
+        // ── Dump AI Context (full message history per NPC) ──
+        if (!m_aiContextFull.empty()) {
+            std::string ctxPath = logDir + "/context_" + timeBuf + ".txt";
+            std::ofstream ctxFile(ctxPath);
+            if (ctxFile.is_open()) {
+                ctxFile << "=== EDEN AI Context Dump — " << timeBuf << " ===\n\n";
+                for (const auto& session : m_aiContextFull) {
+                    ctxFile << "── " << session.npcName << " (" << session.provider << ") ──\n";
+                    ctxFile << "Session ID: " << session.sessionId << "\n";
+                    ctxFile << "Messages: " << session.messages.size() << "\n\n";
+                    for (size_t i = 0; i < session.messages.size(); i++) {
+                        const auto& msg = session.messages[i];
+                        ctxFile << "[" << i << "] " << msg.role << ":\n";
+                        ctxFile << msg.content << "\n\n";
+                    }
+                    ctxFile << "\n";
+                }
+                ctxFile.close();
+                std::cout << "[Session] Context log saved: " << ctxPath << std::endl;
+            }
+        }
+    }
+
     void saveEditorConfig() {
         // Save EditorUI config (window visibility, brush settings)
         m_editorUI.saveConfig("editor_ui_config.json");
@@ -13981,6 +14826,20 @@ private:
         m_editorUI.setSelectedObjectIndex(-1);
         m_editorUI.setSelectedAINodeIndex(-1);
 
+        // Reset all raw SceneObject* pointers to avoid dangling references
+        m_aiBehavior.resetAll();
+        m_currentInteractObject = nullptr;
+        m_inConversation = false;
+        m_playerAvatar = nullptr;
+        m_groveBotTarget = nullptr;
+        m_terminalScreenObject = nullptr;
+        m_focusedPanel = nullptr;
+        m_inPanelFocusMode = false;
+        m_fsDragObject = nullptr;
+        m_fsDragHoverWall = nullptr;
+        m_fsDblClickTarget = nullptr;
+        m_objectsToDestroy.clear();
+
         // Reset test level state
         m_isTestLevel = false;
         m_editorUI.setTestLevelMode(false);
@@ -13998,6 +14857,10 @@ private:
         }
 
         m_currentLevelPath.clear();
+
+        // Sync EditorUI with the now-empty scene objects list
+        updateSceneObjectsList();
+
         std::cout << "New level created" << std::endl;
     }
 
@@ -14100,22 +14963,27 @@ private:
     }
 
     void newEdenOSLevel() {
+        std::cerr << "[EDEN OS] Step 1: newLevel()..." << std::endl;
         // Start with a fresh level
         newLevel();
 
-        // Place the basement at world origin (0, 0)
-        glm::vec3 spawnPos(0.0f, 0.0f, 0.0f);
-        float terrainY = m_terrain.getHeightAt(spawnPos.x, spawnPos.z);
-        spawnPos.y = terrainY;
+        // Flatten terrain first — Eden OS has no terrain
+        m_isEdenOSLevel = true;
+        m_terrain.getConfigMutable().heightScale = 0.0f;
 
+        std::cerr << "[EDEN OS] Step 2: setting spawn origin..." << std::endl;
+        glm::vec3 spawnPos(0.0f, 0.0f, 0.0f);
         m_filesystemBrowser.setSpawnOrigin(spawnPos);
 
-        // Only spawn the basement — no silo. The silo appears at runtime via F9.
-        float baseY = 100.0f;
-        m_filesystemBrowser.spawnBasement(spawnPos, baseY);
+        std::cerr << "[EDEN OS] Step 3: spawnBasement()..." << std::endl;
+        // Basement floor raised slightly above terrain to avoid z-fighting
+        float basementBaseY = m_filesystemBrowser.getBasementHeight() + 0.5f;
+        m_filesystemBrowser.spawnBasement(spawnPos, basementBaseY);
 
-        // Teleport camera into the basement
-        glm::vec3 camPos(0.0f, baseY - 8.0f, 0.0f); // center of basement (16m tall, so midpoint is baseY - 8)
+        std::cerr << "[EDEN OS] Step 4: teleporting camera..." << std::endl;
+        // Teleport camera into the basement (halfway down from ceiling)
+        float basementMidY = basementBaseY - m_filesystemBrowser.getBasementHeight() * 0.5f;
+        glm::vec3 camPos(0.0f, basementMidY, 0.0f);
         m_camera.setPosition(camPos);
         m_camera.setYaw(0.0f);
         m_camera.setPitch(0.0f);
@@ -14124,17 +14992,15 @@ private:
             m_characterController->setPosition(camPos);
         }
 
-        m_isEdenOSLevel = true;
-        // Zero out terrain height so getHeightAt() always returns 0
-        m_terrain.getConfigMutable().heightScale = 0.0f;
-
         // Default save path for OS levels
         const char* home = getenv("HOME");
         std::string edenDir = std::string(home ? home : "/tmp") + "/.eden";
         std::filesystem::create_directories(edenDir);
         m_currentLevelPath = edenDir + "/os_level.eden";
 
-        std::cout << "EDEN OS level created — basement at origin (build around it, F9 spawns silo in play mode)" << std::endl;
+        // Auto-save the fresh level
+        saveLevel(m_currentLevelPath);
+        std::cerr << "[EDEN OS] Done — saved to " << m_currentLevelPath << std::endl;
     }
 
     void loadEdenOSLevel() {
@@ -14148,8 +15014,21 @@ private:
 
         loadLevel(osLevelPath);
         m_isEdenOSLevel = true;
+        m_terrain.getConfigMutable().heightScale = 0.0f;
         m_currentLevelPath = osLevelPath;
         std::cout << "Loaded EDEN OS level from " << osLevelPath << std::endl;
+    }
+
+    // Hide/show the silo exterior shell model based on whether the player is inside
+    void updateSiloShellVisibility() {
+        for (auto& obj : m_sceneObjects) {
+            if (!obj) continue;
+            // Match any .lime model that isn't a filesystem/silo-spawned object
+            const std::string& mp = obj->getModelPath();
+            if (mp.find("silo") != std::string::npos && mp.find(".lime") != std::string::npos) {
+                obj->setVisible(!m_insideSilo);
+            }
+        }
     }
 
     // Load scene objects from an .eden file and append them to the current scene.
@@ -15154,11 +16033,24 @@ private:
                 return;
             }
             // Check if this is a door - handle level transition or teleport
+            std::cerr << "[CLICK] Hit: " << closestObj->getName() << " bt=" << closestObj->getBuildingType()
+                      << " isDoor=" << closestObj->isDoor() << " target=" << closestObj->getTargetLevel() << std::endl;
             if (closestObj->isDoor()) {
                 std::string targetLevel = closestObj->getTargetLevel();
                 std::string targetDoorId = closestObj->getTargetDoorId();
 
-                if (!targetLevel.empty() && targetLevel.rfind("app://", 0) == 0) {
+                if (!targetLevel.empty() && targetLevel.rfind("exit://", 0) == 0) {
+                    std::cerr << "[EXIT DOOR] Teleporting outside!" << std::endl;
+                    // Exit silo — teleport to terrain just outside the shell
+                    glm::vec3 siloCenter = m_filesystemBrowser.getSpawnOrigin();
+                    float exitRadius = 30.0f;
+                    float terrainY = m_terrain.getHeightAt(siloCenter.x + exitRadius, siloCenter.z + exitRadius);
+                    glm::vec3 exitPos(siloCenter.x + exitRadius, terrainY + 1.7f, siloCenter.z + exitRadius);
+                    m_camera.setPosition(exitPos);
+                    if (m_characterController) m_characterController->setPosition(exitPos);
+                    m_insideSilo = false;
+                    updateSiloShellVisibility();
+                } else if (!targetLevel.empty() && targetLevel.rfind("app://", 0) == 0) {
                     // App launcher navigation — pass full app:// path
                     m_filesystemBrowser.navigate(targetLevel);
                 } else if (!targetLevel.empty() && targetLevel.rfind("fs://", 0) == 0) {
@@ -17156,834 +18048,6 @@ private:
         }
     }
 
-    /**
-     * Perform a scan cone perception from an NPC's position/facing.
-     * Returns a PerceptionData struct with all visible objects within FOV and range.
-     */
-    PerceptionData performScanCone(SceneObject* npc, float fovDegrees = 120.0f, float range = 50.0f) {
-        PerceptionData perception;
-        if (!npc) return perception;
-        
-        glm::vec3 npcPos = npc->getTransform().getPosition();
-        perception.posX = npcPos.x;
-        perception.posY = npcPos.y;
-        perception.posZ = npcPos.z;
-        perception.fov = fovDegrees;
-        perception.range = range;
-
-        // Include player (camera) position so spatial analysis can show it
-        glm::vec3 camPos = m_camera.getPosition();
-        perception.playerX = camPos.x;
-        perception.playerY = camPos.y;
-        perception.playerZ = camPos.z;
-        
-        // Get NPC facing direction from Y rotation (euler angles)
-        glm::vec3 euler = npc->getEulerRotation();
-        float yawRad = glm::radians(euler.y);
-        glm::vec3 facing(sin(yawRad), 0.0f, cos(yawRad));
-        facing = glm::normalize(facing);
-        perception.facingX = facing.x;
-        perception.facingY = facing.y;
-        perception.facingZ = facing.z;
-        
-        float halfFov = fovDegrees * 0.5f;
-        
-        // Scan all scene objects
-        for (const auto& obj : m_sceneObjects) {
-            if (!obj || !obj->isVisible()) continue;
-            if (obj.get() == npc) continue;  // Skip self
-            
-            glm::vec3 objPos = obj->getTransform().getPosition();
-            glm::vec3 toObj = objPos - npcPos;
-            float dist = glm::length(toObj);
-            
-            // Skip if out of range
-            if (dist > range || dist < 0.1f) continue;
-            
-            // Calculate angle from facing direction
-            glm::vec3 toObjNorm = glm::normalize(toObj);
-            float dotProduct = glm::dot(facing, glm::vec3(toObjNorm.x, 0, toObjNorm.z));
-            dotProduct = glm::clamp(dotProduct, -1.0f, 1.0f);
-            float angleDeg = glm::degrees(acos(dotProduct));
-            
-            // Skip if outside FOV
-            if (angleDeg > halfFov) continue;
-            
-            // Determine bearing (left/right/ahead)
-            glm::vec3 right(facing.z, 0, -facing.x);  // Perpendicular to facing
-            float rightDot = glm::dot(right, glm::vec3(toObjNorm.x, 0, toObjNorm.z));
-            
-            std::string bearing;
-            if (angleDeg < 15.0f) {
-                bearing = "directly ahead";
-            } else if (angleDeg < 45.0f) {
-                bearing = rightDot > 0 ? "ahead-right" : "ahead-left";
-            } else {
-                bearing = rightDot > 0 ? "right" : "left";
-            }
-            
-            // Determine object type
-            std::string objType;
-            switch (obj->getPrimitiveType()) {
-                case PrimitiveType::Cube: objType = "cube"; break;
-                case PrimitiveType::Cylinder: objType = "cylinder"; break;
-                case PrimitiveType::SpawnMarker: objType = "spawn_marker"; break;
-                case PrimitiveType::Door: objType = "door"; break;
-                default: objType = "model"; break;
-            }
-            
-            VisibleObject visObj;
-            visObj.name = obj->getName();
-            visObj.type = objType;
-            visObj.distance = dist;
-            visObj.angle = angleDeg;
-            visObj.bearing = bearing;
-            visObj.posX = objPos.x;
-            visObj.posY = objPos.y;
-            visObj.posZ = objPos.z;
-            visObj.isSentient = obj->isSentient();
-            if (visObj.isSentient) {
-                visObj.beingType = getBeingTypeName(obj->getBeingType());
-            }
-            visObj.description = obj->getDescription();
-
-            // Append control point info so AI knows about connectable parts
-            if (obj->hasControlPoints()) {
-                std::string cpInfo = "CPs: ";
-                for (size_t ci = 0; ci < obj->getControlPoints().size(); ci++) {
-                    if (ci > 0) cpInfo += ", ";
-                    cpInfo += obj->getControlPoints()[ci].name;
-                }
-                if (visObj.description.empty()) {
-                    visObj.description = cpInfo;
-                } else {
-                    visObj.description += " | " + cpInfo;
-                }
-            }
-
-            perception.visibleObjects.push_back(visObj);
-        }
-        
-        // Sort by distance (closest first)
-        std::sort(perception.visibleObjects.begin(), perception.visibleObjects.end(),
-            [](const VisibleObject& a, const VisibleObject& b) {
-                return a.distance < b.distance;
-            });
-        
-        return perception;
-    }
-
-    /**
-     * Execute an AI motor control action (look_around, turn_to, move_to, etc.)
-     */
-    // Send a completion message to the AI after a move_to finishes,
-    // so it can issue the next action in a multi-step sequence.
-    void sendActionCompleteCallback(SceneObject* npc, const std::string& actionType,
-                                     float x, float z) {
-        if (!npc || !m_httpClient) return;
-
-        std::string npcName = npc->getName();
-        int beingType = static_cast<int>(npc->getBeingType());
-
-        std::string sessionId;
-        auto it = m_quickChatSessionIds.find(npcName);
-        if (it != m_quickChatSessionIds.end()) sessionId = it->second;
-        if (sessionId.empty()) return;  // No active session, nothing to callback
-
-        // Fresh perception from the arrival location
-        PerceptionData perception = performScanCone(npc, 360.0f, 50.0f);
-
-        std::string msg = "[ACTION COMPLETE] " + actionType + " finished at ("
-                        + std::to_string(x) + ", " + std::to_string(z)
-                        + "). If you have a pending task (e.g. a return trip), "
-                          "issue the next action now. If not, simply acknowledge.";
-
-        m_httpClient->sendChatMessageWithPerception(sessionId, msg,
-            npcName, "", beingType, perception,
-            [this, npcName, npc](const AsyncHttpClient::Response& resp) {
-                if (!resp.success) return;
-                try {
-                    auto json = nlohmann::json::parse(resp.body);
-                    if (json.contains("session_id")) {
-                        m_quickChatSessionIds[npcName] = json["session_id"].get<std::string>();
-                    }
-                    std::string response = json.value("response", "");
-                    if (!response.empty()) {
-                        addChatMessage(npcName, response);
-                        speakTTS(response, npcName);
-                    }
-                    // Execute follow-up action if the AI issued one
-                    if (json.contains("action") && !json["action"].is_null()) {
-                        m_currentInteractObject = npc;
-                        executeAIAction(json["action"]);
-                    }
-                } catch (const std::exception& e) {
-                    std::cerr << "[ActionComplete] Parse error: " << e.what() << std::endl;
-                }
-            });
-    }
-
-    void executeAIAction(const nlohmann::json& action) {
-        if (!m_currentInteractObject) return;
-        
-        std::string actionType = action.value("type", "");
-        float duration = action.value("duration", 2.0f);
-        
-        std::cout << "[AI Action] Type: " << actionType << ", Duration: " << duration << "s" << std::endl;
-        
-        if (actionType == "look_around") {
-            // Start a 360-degree scan rotation
-            m_aiActionActive = true;
-            m_aiActionType = "look_around";
-            m_aiActionDuration = duration;
-            m_aiActionTimer = 0.0f;
-            m_aiActionStartYaw = m_currentInteractObject->getEulerRotation().y;
-            std::cout << "[AI Action] Starting 360-degree scan from yaw " << m_aiActionStartYaw << std::endl;
-        }
-        else if (actionType == "turn_to") {
-            // Turn to face a specific direction or target
-            if (action.contains("target") && action["target"].is_array()) {
-                auto target = action["target"];
-                glm::vec3 targetPos(target[0].get<float>(), target[1].get<float>(), target[2].get<float>());
-                glm::vec3 npcPos = m_currentInteractObject->getTransform().getPosition();
-                glm::vec3 toTarget = targetPos - npcPos;
-                toTarget.y = 0;
-                if (glm::length(toTarget) > 0.01f) {
-                    toTarget = glm::normalize(toTarget);
-                    float targetYaw = glm::degrees(atan2(toTarget.x, toTarget.z));
-                    m_aiActionActive = true;
-                    m_aiActionType = "turn_to";
-                    m_aiActionDuration = duration;
-                    m_aiActionTimer = 0.0f;
-                    m_aiActionStartYaw = m_currentInteractObject->getEulerRotation().y;
-                    m_aiActionTargetYaw = targetYaw;
-                    std::cout << "[AI Action] Turning from " << m_aiActionStartYaw << " to " << targetYaw << std::endl;
-                }
-            }
-            else if (action.contains("angle")) {
-                float targetYaw = action["angle"].get<float>();
-                m_aiActionActive = true;
-                m_aiActionType = "turn_to";
-                m_aiActionDuration = duration;
-                m_aiActionTimer = 0.0f;
-                m_aiActionStartYaw = m_currentInteractObject->getEulerRotation().y;
-                m_aiActionTargetYaw = targetYaw;
-            }
-        }
-        // move_to: Move toward a target position at specified speed
-        else if (actionType == "move_to") {
-            if (action.contains("target")) {
-                auto& target = action["target"];
-                float x = target.value("x", 0.0f);
-                float y = target.value("y", m_currentInteractObject->getTransform().getPosition().y); // default: maintain current height
-                float z = target.value("z", 0.0f);
-                float speed = action.value("speed", 5.0f);  // units per second
-                
-                m_aiActionStartPos = m_currentInteractObject->getTransform().getPosition();
-                m_aiActionTargetPos = glm::vec3(x, y, z);
-                m_aiActionSpeed = speed;
-                
-                float distance = glm::length(m_aiActionTargetPos - m_aiActionStartPos);
-                m_aiActionDuration = distance / speed;  // time = distance / speed
-                
-                if (m_aiActionDuration > 0.01f) {  // Only move if there's meaningful distance
-                    m_aiActionActive = true;
-                    m_aiActionType = "move_to";
-                    m_aiActionTimer = 0.0f;
-                    
-                    // Calculate yaw to face movement direction
-                    glm::vec3 direction = glm::normalize(m_aiActionTargetPos - m_aiActionStartPos);
-                    m_aiActionTargetYaw = glm::degrees(atan2(direction.x, direction.z));
-                    m_aiActionStartYaw = m_currentInteractObject->getEulerRotation().y;
-                    
-                    std::cout << "[AI Action] Moving from (" << m_aiActionStartPos.x << ", " << m_aiActionStartPos.z 
-                              << ") to (" << x << ", " << z << ") at speed " << speed 
-                              << " (ETA: " << m_aiActionDuration << "s)" << std::endl;
-                } else {
-                    std::cout << "[AI Action] Already at target position" << std::endl;
-                }
-            }
-        }
-        else if (actionType == "follow") {
-            float dist = action.value("distance", 4.0f);
-            float spd = action.value("speed", 5.0f);
-            // Update existing entry or add new one
-            bool found = false;
-            for (auto& fs : m_aiFollowers) {
-                if (fs.npc == m_currentInteractObject) {
-                    fs.distance = dist;
-                    fs.speed = spd;
-                    found = true;
-                    break;
-                }
-            }
-            if (!found) {
-                m_aiFollowers.push_back({m_currentInteractObject, dist, spd});
-            }
-            std::cout << "[AI Action] Follow mode activated for " << m_currentInteractObject->getName()
-                      << " (distance: " << dist << ", speed: " << spd
-                      << ", total followers: " << m_aiFollowers.size() << ")" << std::endl;
-        }
-        else if (actionType == "pickup") {
-            // Pick up a nearby world object
-            std::string targetName = action.value("target", "");
-            if (targetName.empty()) {
-                std::cout << "[AI Action] pickup: no target specified" << std::endl;
-            } else if (m_currentInteractObject->isCarrying()) {
-                std::cout << "[AI Action] pickup: already carrying " << m_currentInteractObject->getCarriedItemName() << std::endl;
-            } else {
-                // Find target object by name
-                SceneObject* target = nullptr;
-                for (auto& obj : m_sceneObjects) {
-                    if (obj && obj->getName() == targetName && obj->isVisible()) {
-                        target = obj.get();
-                        break;
-                    }
-                }
-                if (!target) {
-                    std::cout << "[AI Action] pickup: target '" << targetName << "' not found" << std::endl;
-                } else {
-                    // Navigate to object then pick up (reuse move_to logic)
-                    glm::vec3 targetPos = target->getTransform().getPosition();
-                    float speed = 5.0f;
-                    m_aiActionStartPos = m_currentInteractObject->getTransform().getPosition();
-                    m_aiActionTargetPos = targetPos;
-                    m_aiActionTargetPos.y = m_aiActionStartPos.y;  // Maintain height
-                    m_aiActionSpeed = speed;
-
-                    float distance = glm::length(m_aiActionTargetPos - m_aiActionStartPos);
-                    m_aiActionDuration = distance / speed;
-
-                    // Store pickup target for completion callback
-                    m_aiPickupTarget = target;
-                    m_aiPickupTargetName = targetName;
-
-                    if (m_aiActionDuration > 0.01f) {
-                        m_aiActionActive = true;
-                        m_aiActionType = "pickup";
-                        m_aiActionTimer = 0.0f;
-
-                        glm::vec3 direction = glm::normalize(m_aiActionTargetPos - m_aiActionStartPos);
-                        m_aiActionTargetYaw = glm::degrees(atan2(direction.x, direction.z));
-                        m_aiActionStartYaw = m_currentInteractObject->getEulerRotation().y;
-
-                        std::cout << "[AI Action] Moving to pick up '" << targetName << "'" << std::endl;
-                    } else {
-                        // Already at target — pick up immediately
-                        target->setVisible(false);
-                        m_currentInteractObject->setCarriedItem(targetName, target);
-                        std::cout << "[AI Action] Picked up '" << targetName << "' (was already nearby)" << std::endl;
-                    }
-                }
-            }
-        }
-        else if (actionType == "drop") {
-            // Drop carried item at bot's feet
-            if (!m_currentInteractObject->isCarrying()) {
-                std::cout << "[AI Action] drop: not carrying anything" << std::endl;
-            } else {
-                SceneObject* carried = m_currentInteractObject->getCarriedItemObject();
-                if (carried) {
-                    glm::vec3 dropPos = m_currentInteractObject->getTransform().getPosition();
-                    // Place slightly in front of the NPC
-                    float yawRad = glm::radians(m_currentInteractObject->getEulerRotation().y);
-                    glm::vec3 forward(sin(yawRad), 0.0f, cos(yawRad));
-                    dropPos += forward * 1.5f;
-                    dropPos.y = carried->getTransform().getPosition().y;  // Restore original height
-                    carried->getTransform().setPosition(dropPos);
-                    carried->setVisible(true);
-                    std::cout << "[AI Action] Dropped '" << m_currentInteractObject->getCarriedItemName()
-                              << "' at (" << dropPos.x << ", " << dropPos.z << ")" << std::endl;
-                }
-                m_currentInteractObject->clearCarriedItem();
-            }
-        }
-        else if (actionType == "place") {
-            // Place carried item into a target object (e.g. timber into posthole)
-            std::string targetName = action.value("target", "");
-            if (targetName.empty()) {
-                std::cout << "[AI Action] place: no target specified" << std::endl;
-            } else if (!m_currentInteractObject->isCarrying()) {
-                std::cout << "[AI Action] place: not carrying anything" << std::endl;
-            } else {
-                // Find target object by name
-                SceneObject* target = nullptr;
-                for (auto& obj : m_sceneObjects) {
-                    if (obj && obj->getName() == targetName && obj->isVisible()) {
-                        target = obj.get();
-                        break;
-                    }
-                }
-                if (!target) {
-                    std::cout << "[AI Action] place: target '" << targetName << "' not found" << std::endl;
-                } else {
-                    // Navigate to target, then place on arrival
-                    glm::vec3 targetPos = target->getTransform().getPosition();
-                    float speed = 5.0f;
-                    m_aiActionStartPos = m_currentInteractObject->getTransform().getPosition();
-                    m_aiActionTargetPos = targetPos;
-                    m_aiActionTargetPos.y = m_aiActionStartPos.y;
-                    m_aiActionSpeed = speed;
-
-                    float distance = glm::length(m_aiActionTargetPos - m_aiActionStartPos);
-                    m_aiActionDuration = distance / speed;
-
-                    m_aiPlaceTarget = target;
-                    m_aiPlaceTargetName = targetName;
-
-                    if (m_aiActionDuration > 0.01f) {
-                        m_aiActionActive = true;
-                        m_aiActionType = "place";
-                        m_aiActionTimer = 0.0f;
-
-                        glm::vec3 direction = glm::normalize(m_aiActionTargetPos - m_aiActionStartPos);
-                        m_aiActionTargetYaw = glm::degrees(atan2(direction.x, direction.z));
-                        m_aiActionStartYaw = m_currentInteractObject->getEulerRotation().y;
-
-                        std::cout << "[AI Action] Moving to place item at '" << targetName << "'" << std::endl;
-                    } else {
-                        // Already at target — place immediately
-                        placeCarriedItemAt(m_currentInteractObject, target);
-                    }
-                }
-            }
-        }
-        else if (actionType == "run_script") {
-            // Execute a Grove script directly (for economy, zone queries, etc.)
-            std::string script = action.value("script", "");
-            if (script.empty()) {
-                std::cout << "[AI Action] run_script: no script provided" << std::endl;
-            } else {
-                std::cout << "[AI Action] run_script: executing " << script.size() << " bytes" << std::endl;
-                std::cout << "[AI Action] script first 200 chars: " << script.substr(0, 200) << std::endl;
-                m_groveOutputAccum.clear();
-                int32_t ret = grove_eval(m_groveVm, script.c_str());
-                std::cout << "[AI Action] grove_eval returned: " << ret << std::endl;
-                if (ret != 0) {
-                    const char* err = grove_last_error(m_groveVm);
-                    int line = static_cast<int>(grove_last_error_line(m_groveVm));
-                    std::string errMsg = std::string("Script error (line ") + std::to_string(line) + "): " + (err ? err : "unknown");
-                    std::cout << "[AI Action] " << errMsg << std::endl;
-                    addChatMessage("System", errMsg);
-                } else if (!m_groveOutputAccum.empty()) {
-                    // Show Grove output in chat as a system message
-                    std::cout << "[Grove output] " << m_groveOutputAccum << std::endl;
-                    // Add to conversation so player can see the result
-                    std::string output = m_groveOutputAccum;
-                    // Trim trailing newline
-                    while (!output.empty() && output.back() == '\n') output.pop_back();
-                    addChatMessage(m_currentInteractObject ? m_currentInteractObject->getName() : "System", output);
-                } else {
-                    std::cout << "[AI Action] Script succeeded but produced no output" << std::endl;
-                }
-            }
-        }
-        else if (actionType == "program_bot") {
-            // Xenk (or another LLM NPC) is programming an AlgoBot with a Grove script
-            std::string targetName = action.value("target", "");
-            std::string script = action.value("script", "");
-
-            if (targetName.empty() || script.empty()) {
-                std::cout << "[AI Action] program_bot: missing target or script" << std::endl;
-            } else {
-                // Find the target AlgoBot
-                SceneObject* targetBot = nullptr;
-                for (auto& obj : m_sceneObjects) {
-                    if (obj->getName() == targetName) {
-                        targetBot = obj.get();
-                        break;
-                    }
-                }
-
-                if (!targetBot) {
-                    std::cout << "[AI Action] program_bot: target '" << targetName << "' not found" << std::endl;
-                } else if (targetBot->getBeingType() != BeingType::ALGOBOT) {
-                    std::cout << "[AI Action] program_bot: '" << targetName << "' is not an AlgoBot (type="
-                              << getBeingTypeName(targetBot->getBeingType()) << ")" << std::endl;
-                } else {
-                    std::cout << "[AI Action] program_bot: programming '" << targetName << "' with "
-                              << script.size() << " bytes of Grove code" << std::endl;
-
-                    // Execute the Grove script — it will queue actions via bot_target/move_to/bot_run/etc.
-                    m_groveOutputAccum.clear();
-                    int32_t ret = grove_eval(m_groveVm, script.c_str());
-                    if (ret != 0) {
-                        const char* err = grove_last_error(m_groveVm);
-                        int line = static_cast<int>(grove_last_error_line(m_groveVm));
-                        std::string errMsg = std::string("Script error (line ") + std::to_string(line) + "): " + (err ? err : "unknown");
-                        std::cout << "[AI Action] " << errMsg << std::endl;
-                        addChatMessage("System", errMsg);
-                    } else {
-                        if (!m_groveOutputAccum.empty()) {
-                            std::cout << "[AI Action] Grove output: " << m_groveOutputAccum;
-                        }
-
-                        // If we're in play mode, immediately start the last non-empty behavior
-                        // (the one the script just created — name may vary depending on run_file)
-                        if (m_isPlayMode && targetBot->hasBehaviors()) {
-                            auto& behaviors = targetBot->getBehaviors();
-                            for (int i = static_cast<int>(behaviors.size()) - 1; i >= 0; i--) {
-                                if (!behaviors[i].actions.empty()) {
-                                    targetBot->setActiveBehaviorIndex(i);
-                                    targetBot->setActiveActionIndex(0);
-                                    targetBot->resetPathComplete();
-                                    targetBot->clearPathWaypoints();
-
-                                    // If first action is FOLLOW_PATH, load it
-                                    if (behaviors[i].actions[0].type == ActionType::FOLLOW_PATH) {
-                                        loadPathForAction(targetBot, behaviors[i].actions[0]);
-                                    }
-
-                                    std::cout << "[AI Action] AlgoBot '" << targetName
-                                              << "' program started behavior '" << behaviors[i].name
-                                              << "' (" << behaviors[i].actions.size()
-                                              << " actions, loop=" << (behaviors[i].loop ? "yes" : "no") << ")" << std::endl;
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        else if (actionType == "stop") {
-            // Remove this NPC from followers
-            m_aiFollowers.erase(
-                std::remove_if(m_aiFollowers.begin(), m_aiFollowers.end(),
-                    [this](const AIFollowState& fs) { return fs.npc == m_currentInteractObject; }),
-                m_aiFollowers.end());
-            m_aiActionActive = false;
-            std::cout << "[AI Action] Stopped for " << m_currentInteractObject->getName()
-                      << " (remaining followers: " << m_aiFollowers.size() << ")" << std::endl;
-        }
-        else if (actionType == "set_expression") {
-            // Swap NPC's face texture to a named expression
-            std::string exprName = action.value("expression", "");
-            if (exprName.empty()) {
-                std::cout << "[AI Action] set_expression: no expression name provided" << std::endl;
-            } else if (m_currentInteractObject->getExpressionCount() == 0) {
-                std::cout << "[AI Action] set_expression: NPC has no expressions loaded" << std::endl;
-            } else {
-                if (m_currentInteractObject->setExpressionByName(exprName)) {
-                    auto& tex = m_currentInteractObject->getTextureData();
-                    m_modelRenderer->updateTexture(
-                        m_currentInteractObject->getBufferHandle(),
-                        tex.data(),
-                        m_currentInteractObject->getTextureWidth(),
-                        m_currentInteractObject->getTextureHeight());
-                    std::cout << "[AI Action] Expression changed to '" << exprName << "'" << std::endl;
-                } else {
-                    std::cout << "[AI Action] set_expression: '" << exprName << "' not found or already active" << std::endl;
-                }
-            }
-        }
-        else if (actionType == "show_mind_map") {
-            m_editorUI.showMindMap() = true;
-            std::cout << "[AI Action] Mind map opened by " << m_currentInteractObject->getName() << std::endl;
-        }
-        else if (actionType == "hide_mind_map") {
-            m_editorUI.showMindMap() = false;
-            std::cout << "[AI Action] Mind map closed by " << m_currentInteractObject->getName() << std::endl;
-        }
-        else {
-            std::cout << "[AI Action] Unknown action type: '" << actionType << "'" << std::endl;
-        }
-    }
-
-    /**
-     * Update AI follow mode for all following NPCs (called each frame)
-     */
-    void updateAIFollow(float deltaTime) {
-        if (m_aiFollowers.empty()) return;
-
-        // Periodic debug log (every ~2 seconds at 60fps)
-        static int followDebugCount = 0;
-        if (followDebugCount++ % 120 == 0) {
-            std::cout << "[AI Follow] " << m_aiFollowers.size() << " NPC(s) following" << std::endl;
-        }
-
-        // Get player position and facing (shared for all followers)
-        glm::vec3 playerPos = m_camera.getPosition();
-        float yawRad = glm::radians(m_camera.getYaw());
-        glm::vec3 camDir(sin(yawRad), 0.0f, cos(yawRad));
-        glm::vec3 camRight(camDir.z, 0.0f, -camDir.x);
-
-        for (size_t i = 0; i < m_aiFollowers.size(); i++) {
-            auto& fs = m_aiFollowers[i];
-            if (!fs.npc) continue;
-
-            glm::vec3 npcPlayerPos = playerPos;
-            npcPlayerPos.y = fs.npc->getTransform().getPosition().y; // Stay on same Y
-
-            // Offset followers laterally so they don't stack on top of each other
-            // First follower: directly behind. Additional: offset left/right
-            glm::vec3 lateralOffset(0.0f);
-            if (m_aiFollowers.size() > 1) {
-                float spread = 2.5f;
-                float side = (i % 2 == 0) ? -1.0f : 1.0f;
-                float idx = static_cast<float>((i + 1) / 2);
-                lateralOffset = camRight * side * idx * spread;
-            }
-
-            glm::vec3 targetPos = npcPlayerPos - camDir * fs.distance + lateralOffset;
-
-            glm::vec3 npcPos = fs.npc->getTransform().getPosition();
-            glm::vec3 toTarget = targetPos - npcPos;
-            toTarget.y = 0;
-            float dist = glm::length(toTarget);
-
-            if (dist > 1.0f) {
-                glm::vec3 moveDir = glm::normalize(toTarget);
-                float moveAmount = std::min(fs.speed * deltaTime, dist);
-                glm::vec3 newPos = npcPos + moveDir * moveAmount;
-                fs.npc->getTransform().setPosition(newPos);
-
-                float targetYaw = glm::degrees(atan2(moveDir.x, moveDir.z));
-                glm::vec3 euler = fs.npc->getEulerRotation();
-                float yawDiff = targetYaw - euler.y;
-                while (yawDiff > 180.0f) yawDiff -= 360.0f;
-                while (yawDiff < -180.0f) yawDiff += 360.0f;
-                euler.y += yawDiff * std::min(deltaTime * 8.0f, 1.0f);
-                fs.npc->setEulerRotation(euler);
-            } else {
-                glm::vec3 euler = fs.npc->getEulerRotation();
-                float targetYaw = glm::degrees(atan2(camDir.x, camDir.z));
-                float yawDiff = targetYaw - euler.y;
-                while (yawDiff > 180.0f) yawDiff -= 360.0f;
-                while (yawDiff < -180.0f) yawDiff += 360.0f;
-                euler.y += yawDiff * std::min(deltaTime * 4.0f, 1.0f);
-                fs.npc->setEulerRotation(euler);
-            }
-        }
-    }
-
-    /**
-     * Update active AI action (called each frame)
-     */
-    void updateAIAction(float deltaTime) {
-        if (!m_aiActionActive || !m_currentInteractObject) return;
-        
-        m_aiActionTimer += deltaTime;
-        float t = std::min(m_aiActionTimer / m_aiActionDuration, 1.0f);
-        
-        // Smooth easing
-        float easedT = t * t * (3.0f - 2.0f * t);
-        
-        if (m_aiActionType == "look_around") {
-            // Rotate 360 degrees
-            float currentYaw = m_aiActionStartYaw + easedT * 360.0f;
-            glm::vec3 euler = m_currentInteractObject->getEulerRotation();
-            euler.y = currentYaw;
-            m_currentInteractObject->setEulerRotation(euler);
-            
-            if (t >= 1.0f) {
-                // Action complete - do final scan and report
-                m_aiActionActive = false;
-                std::cout << "[AI Action] look_around complete" << std::endl;
-                
-                // Perform a full 360 scan (no FOV filter)
-                PerceptionData fullScan = performScanCone(m_currentInteractObject, 360.0f, 50.0f);
-                std::cout << "[AI Action] Full scan found " << fullScan.visibleObjects.size() << " objects" << std::endl;
-                
-                // Store for next response
-                m_lastFullScanResult = fullScan;
-                m_hasFullScanResult = true;
-            }
-        }
-        else if (m_aiActionType == "turn_to") {
-            // Interpolate to target yaw
-            float currentYaw = glm::mix(m_aiActionStartYaw, m_aiActionTargetYaw, easedT);
-            glm::vec3 euler = m_currentInteractObject->getEulerRotation();
-            euler.y = currentYaw;
-            m_currentInteractObject->setEulerRotation(euler);
-            
-            if (t >= 1.0f) {
-                m_aiActionActive = false;
-                std::cout << "[AI Action] turn_to complete" << std::endl;
-            }
-        }
-        else if (m_aiActionType == "move_to") {
-            // First 15% of time: turn to face target
-            // Remaining 85%: move toward target
-            const float turnPhase = 0.15f;
-            
-            if (t < turnPhase) {
-                // Turn phase: interpolate yaw to face movement direction
-                float turnT = t / turnPhase;
-                float turnEased = turnT * turnT * (3.0f - 2.0f * turnT);
-                float currentYaw = glm::mix(m_aiActionStartYaw, m_aiActionTargetYaw, turnEased);
-                glm::vec3 euler = m_currentInteractObject->getEulerRotation();
-                euler.y = currentYaw;
-                m_currentInteractObject->setEulerRotation(euler);
-            } else {
-                // Move phase: linear interpolation of position
-                float moveT = (t - turnPhase) / (1.0f - turnPhase);
-                glm::vec3 currentPos = glm::mix(m_aiActionStartPos, m_aiActionTargetPos, moveT);
-                m_currentInteractObject->getTransform().setPosition(currentPos);
-                
-                // Ensure facing direction is locked
-                glm::vec3 euler = m_currentInteractObject->getEulerRotation();
-                euler.y = m_aiActionTargetYaw;
-                m_currentInteractObject->setEulerRotation(euler);
-            }
-            
-            if (t >= 1.0f) {
-                // Snap to exact target position
-                m_currentInteractObject->getTransform().setPosition(m_aiActionTargetPos);
-                m_aiActionActive = false;
-                std::cout << "[AI Action] move_to complete at ("
-                          << m_aiActionTargetPos.x << ", " << m_aiActionTargetPos.z << ")" << std::endl;
-
-                // Send completion callback so the AI can issue the next action
-                // in a multi-step sequence (e.g. "go to door then come back")
-                sendActionCompleteCallback(m_currentInteractObject, "move_to",
-                    m_aiActionTargetPos.x, m_aiActionTargetPos.z);
-            }
-        }
-        else if (m_aiActionType == "pickup") {
-            // Same movement logic as move_to
-            const float turnPhase = 0.15f;
-
-            if (t < turnPhase) {
-                float turnT = t / turnPhase;
-                float turnEased = turnT * turnT * (3.0f - 2.0f * turnT);
-                float currentYaw = glm::mix(m_aiActionStartYaw, m_aiActionTargetYaw, turnEased);
-                glm::vec3 euler = m_currentInteractObject->getEulerRotation();
-                euler.y = currentYaw;
-                m_currentInteractObject->setEulerRotation(euler);
-            } else {
-                float moveT = (t - turnPhase) / (1.0f - turnPhase);
-                glm::vec3 currentPos = glm::mix(m_aiActionStartPos, m_aiActionTargetPos, moveT);
-                m_currentInteractObject->getTransform().setPosition(currentPos);
-
-                glm::vec3 euler = m_currentInteractObject->getEulerRotation();
-                euler.y = m_aiActionTargetYaw;
-                m_currentInteractObject->setEulerRotation(euler);
-            }
-
-            if (t >= 1.0f) {
-                m_currentInteractObject->getTransform().setPosition(m_aiActionTargetPos);
-                m_aiActionActive = false;
-
-                // Pick up the target object
-                if (m_aiPickupTarget && !m_currentInteractObject->isCarrying()) {
-                    m_aiPickupTarget->setVisible(false);
-                    m_currentInteractObject->setCarriedItem(m_aiPickupTargetName, m_aiPickupTarget);
-                    std::cout << "[AI Action] Picked up '" << m_aiPickupTargetName << "'" << std::endl;
-                }
-                m_aiPickupTarget = nullptr;
-                m_aiPickupTargetName.clear();
-            }
-        }
-        else if (m_aiActionType == "place") {
-            // Same movement logic as move_to
-            const float turnPhase = 0.15f;
-
-            if (t < turnPhase) {
-                float turnT = t / turnPhase;
-                float turnEased = turnT * turnT * (3.0f - 2.0f * turnT);
-                float currentYaw = glm::mix(m_aiActionStartYaw, m_aiActionTargetYaw, turnEased);
-                glm::vec3 euler = m_currentInteractObject->getEulerRotation();
-                euler.y = currentYaw;
-                m_currentInteractObject->setEulerRotation(euler);
-            } else {
-                float moveT = (t - turnPhase) / (1.0f - turnPhase);
-                glm::vec3 currentPos = glm::mix(m_aiActionStartPos, m_aiActionTargetPos, moveT);
-                m_currentInteractObject->getTransform().setPosition(currentPos);
-
-                glm::vec3 euler = m_currentInteractObject->getEulerRotation();
-                euler.y = m_aiActionTargetYaw;
-                m_currentInteractObject->setEulerRotation(euler);
-            }
-
-            if (t >= 1.0f) {
-                m_currentInteractObject->getTransform().setPosition(m_aiActionTargetPos);
-                m_aiActionActive = false;
-
-                // Place carried item into target
-                if (m_aiPlaceTarget && m_currentInteractObject->isCarrying()) {
-                    placeCarriedItemAt(m_currentInteractObject, m_aiPlaceTarget);
-                }
-                m_aiPlaceTarget = nullptr;
-                m_aiPlaceTargetName.clear();
-            }
-        }
-    }
-
-    /**
-     * Place a carried item vertically into a target object (e.g. timber into posthole).
-     * Measures both objects via AABB, rotates timber upright, sinks to posthole bottom.
-     */
-    void placeCarriedItemAt(SceneObject* npc, SceneObject* target) {
-        SceneObject* carried = npc->getCarriedItemObject();
-        if (!carried) return;
-
-        // Ensure local bounds exist — compute from mesh vertices if needed
-        AABB localBounds = carried->getLocalBounds();
-        glm::vec3 localSize = localBounds.getSize();
-        if (localSize.x <= 0 && localSize.y <= 0 && localSize.z <= 0 && carried->hasMeshData()) {
-            const auto& verts = carried->getVertices();
-            glm::vec3 vmin(INFINITY), vmax(-INFINITY);
-            for (const auto& v : verts) {
-                vmin = glm::min(vmin, v.position);
-                vmax = glm::max(vmax, v.position);
-            }
-            localBounds = {vmin, vmax};
-            carried->setLocalBounds(localBounds);  // Cache for future use
-            localSize = localBounds.getSize();
-            std::cout << "[AI Place] Computed bounds from " << verts.size() << " vertices: ("
-                      << localSize.x << "," << localSize.y << "," << localSize.z << ")" << std::endl;
-        }
-
-        // Apply scale to find actual dimensions
-        glm::vec3 scale = carried->getTransform().getScale();
-        glm::vec3 scaledSize = localSize * glm::abs(scale);
-
-        // Find longest axis
-        int longestAxis = 0;
-        float longestLen = scaledSize[0];
-        for (int i = 1; i < 3; i++) {
-            if (scaledSize[i] > longestLen) {
-                longestLen = scaledSize[i];
-                longestAxis = i;
-            }
-        }
-
-        std::cout << "[AI Place] Local=(" << localSize.x << "," << localSize.y << "," << localSize.z
-                  << ") Scale=(" << scale.x << "," << scale.y << "," << scale.z
-                  << ") Scaled=(" << scaledSize.x << "," << scaledSize.y << "," << scaledSize.z
-                  << ") longest axis=" << longestAxis << std::endl;
-
-        // Rotation to make longest axis vertical (Y-up)
-        glm::vec3 rotation(0.0f);
-        if (longestAxis == 0) {
-            rotation.z = 90.0f;   // Roll: X → Y
-        } else if (longestAxis == 2) {
-            rotation.x = 90.0f;   // Pitch: Z → Y
-        }
-        // longestAxis == 1: already vertical
-
-        // Get posthole's world position and bounds
-        glm::vec3 postholePos = target->getTransform().getPosition();
-        AABB postholeBounds = target->getWorldBounds();
-        float postholeBottom = postholeBounds.min.y;
-
-        // Position timber so its bottom is at the posthole's bottom
-        float timberHalfLength = longestLen * 0.5f;
-        glm::vec3 placePos(postholePos.x, postholeBottom + timberHalfLength, postholePos.z);
-
-        carried->setVisible(true);
-        carried->setEulerRotation(rotation);
-        carried->getTransform().setPosition(placePos);
-
-        std::string itemName = npc->getCarriedItemName();
-        npc->clearCarriedItem();
-
-        std::cout << "[AI Action] Placed '" << itemName << "' vertically in '" << target->getName()
-                  << "' (longest axis=" << longestAxis << ", len=" << longestLen
-                  << ", rotation=(" << rotation.x << "," << rotation.y << "," << rotation.z
-                  << "), base Y=" << postholeBottom << ")" << std::endl;
-    }
 
     /**
      * Place a carried item horizontally between two corner positions (top rail beam).
@@ -18127,9 +18191,8 @@ private:
         if (closestObject) {
             m_currentInteractObject = closestObject;
             m_inConversation = true;
-            m_waitingForAIResponse = true;
-            m_heartbeatTimer = 0.0f;
-            m_heartbeatInFlight = false;
+            m_aiBehavior.waitingForAIResponse() = true;
+            m_aiBehavior.resetHeartbeat();
 
             // Free the mouse for conversation (cursor visible for chat UI)
             m_playModeCursorVisible = true;
@@ -18151,7 +18214,7 @@ private:
             }
 
             // Clear previous conversation
-            m_conversationHistory.clear();
+            m_aiBehavior.conversationHistory().clear();
             m_currentSessionId.clear();
 
             std::string npcName = closestObject->getName();
@@ -18165,53 +18228,53 @@ private:
                 if (closestObject->getBeingType() == BeingType::AI_ARCHITECT ||
                     closestObject->getBeingType() == BeingType::EVE ||
                     closestObject->getBeingType() == BeingType::ROBOT) {
-                    PerceptionData perception = performScanCone(closestObject, 120.0f, 50.0f);
+                    PerceptionData perception = m_aiBehavior.performScanCone(closestObject, 120.0f, 50.0f);
                     std::cout << "  Scan cone: " << perception.visibleObjects.size() << " objects visible" << std::endl;
 
                     m_httpClient->sendChatMessageWithPerception("", "The player approaches you. Greet them in character.",
                         npcName, "", beingType, perception,
                         [this, npcName](const AsyncHttpClient::Response& resp) {
-                            m_waitingForAIResponse = false;
+                            m_aiBehavior.waitingForAIResponse() = false;
                             if (resp.success) {
                                 try {
                                     auto json = nlohmann::json::parse(resp.body);
                                     m_currentSessionId = json.value("session_id", "");
                                     std::string greeting = json.value("response", "Hello there.");
-                                    m_conversationHistory.push_back({npcName, greeting, false});
+                                    m_aiBehavior.conversationHistory().push_back({npcName, greeting, false});
                                 } catch (...) {
-                                    m_conversationHistory.push_back({npcName, "...", false});
+                                    m_aiBehavior.conversationHistory().push_back({npcName, "...", false});
                                 }
                             } else {
-                                m_conversationHistory.push_back({npcName, "(AI unavailable) Greetings, human!", false});
+                                m_aiBehavior.conversationHistory().push_back({npcName, "(AI unavailable) Greetings, human!", false});
                             }
-                            m_scrollToBottom = true;
+                            m_aiBehavior.scrollToBottom() = true;
                         });
                 } else {
                     // Standard NPCs without perception
                     m_httpClient->sendChatMessage("", "The player approaches you. Greet them in character.",
                         npcName, "", beingType,
                         [this, npcName](const AsyncHttpClient::Response& resp) {
-                            m_waitingForAIResponse = false;
+                            m_aiBehavior.waitingForAIResponse() = false;
                             if (resp.success) {
                                 try {
                                     auto json = nlohmann::json::parse(resp.body);
                                     m_currentSessionId = json.value("session_id", "");
                                     std::string greeting = json.value("response", "Hello there.");
-                                    m_conversationHistory.push_back({npcName, greeting, false});
+                                    m_aiBehavior.conversationHistory().push_back({npcName, greeting, false});
                                 } catch (...) {
-                                    m_conversationHistory.push_back({npcName, "...", false});
+                                    m_aiBehavior.conversationHistory().push_back({npcName, "...", false});
                                 }
                             } else {
-                                m_conversationHistory.push_back({npcName, "(AI unavailable) Greetings, human!", false});
+                                m_aiBehavior.conversationHistory().push_back({npcName, "(AI unavailable) Greetings, human!", false});
                             }
-                            m_scrollToBottom = true;
+                            m_aiBehavior.scrollToBottom() = true;
                         });
                 }
             } else {
                 // Fallback when backend not available
-                m_waitingForAIResponse = false;
-                m_conversationHistory.push_back({npcName, "Greetings, human!", false});
-                m_scrollToBottom = true;
+                m_aiBehavior.waitingForAIResponse() = false;
+                m_aiBehavior.conversationHistory().push_back({npcName, "Greetings, human!", false});
+                m_aiBehavior.scrollToBottom() = true;
             }
         }
     }
@@ -18242,9 +18305,9 @@ private:
         m_hasConversationTargetYaw = false;  // Clear target so patrol rotation takes over
         m_currentInteractObject = nullptr;
         m_responseBuffer[0] = '\0';
-        m_conversationHistory.clear();
+        m_aiBehavior.conversationHistory().clear();
         m_currentSessionId.clear();
-        m_waitingForAIResponse = false;
+        m_aiBehavior.waitingForAIResponse() = false;
 
         // Restore mouse look after conversation (in play mode)
         if (m_isPlayMode) {
@@ -18685,74 +18748,21 @@ private:
     struct WorldChatEntry {
         std::string sender;
         std::string message;
+        std::string timestamp;
     };
     std::vector<WorldChatEntry> m_worldChatHistory;
     bool m_showWorldChatHistory = false;
     bool m_worldChatScrollToBottom = false;
 
-    // Conversation history
-    struct ChatMessage {
-        std::string sender;     // "Player" or NPC name
-        std::string text;
-        bool isPlayer;
-    };
-    std::vector<ChatMessage> m_conversationHistory;
-    bool m_scrollToBottom = false;
-
     // AI Backend
     std::unique_ptr<AsyncHttpClient> m_httpClient;
     std::string m_currentSessionId;
-    std::unordered_map<std::string, std::string> m_quickChatSessionIds;  // npcName -> session_id
-    bool m_waitingForAIResponse = false;
-
-    // Heartbeat (passive perception for EDEN companions)
-    float m_heartbeatTimer = 0.0f;
-    float m_heartbeatInterval = 5.0f;   // seconds between heartbeat polls
-    bool m_heartbeatEnabled = true;
-    bool m_heartbeatInFlight = false;    // prevent stacking requests
-
-    // TTS (text-to-speech)
-    int m_ttsFileCounter = 0;
-    std::string m_lastTTSFile;
-    float m_ttsCooldown = 0.0f;        // seconds until next TTS can play (prevents overlap)
-    bool m_ttsInFlight = false;        // a TTS request is waiting for audio from backend
-
-    // Push-to-talk (speech-to-text)
-    bool m_pttRecording = false;
-    bool m_pttProcessing = false;
 
     // MCP Server (Claude Code integration)
     std::unique_ptr<MCPServer> m_mcpServer;
-    
-    // AI Motor Control Actions
-    bool m_aiActionActive = false;
-    std::string m_aiActionType;
-    float m_aiActionDuration = 2.0f;
-    float m_aiActionTimer = 0.0f;
 
-    // AI Follow Mode — multi-NPC support (independent of conversation state)
-    struct AIFollowState {
-        SceneObject* npc = nullptr;
-        float distance = 4.0f;
-        float speed = 5.0f;
-    };
-    std::vector<AIFollowState> m_aiFollowers;
-    float m_aiActionStartYaw = 0.0f;
-    float m_aiActionTargetYaw = 0.0f;
-    // Movement action state
-    glm::vec3 m_aiActionStartPos{0.0f};
-    glm::vec3 m_aiActionTargetPos{0.0f};
-    float m_aiActionSpeed = 5.0f;  // units per second
-    // Pickup action state
-    SceneObject* m_aiPickupTarget = nullptr;
-    std::string m_aiPickupTargetName;
-
-    // Place action state
-    SceneObject* m_aiPlaceTarget = nullptr;
-    std::string m_aiPlaceTargetName;
-
-    PerceptionData m_lastFullScanResult;
-    bool m_hasFullScanResult = false;
+    // AI Behavior System (heartbeat, actions, TTS, PTT, perception, follow)
+    AIBehaviorSystem m_aiBehavior{*this};
 
 
     Gizmo m_gizmo;
@@ -19093,6 +19103,7 @@ private:
     bool m_isTestLevel = false;
     bool m_isSpaceLevel = false;
     bool m_isEdenOSLevel = false;
+    bool m_insideSilo = false;
     float m_testFloorSize = 100.0f;
     PhysicsBackend m_physicsBackend = PhysicsBackend::Jolt;  // Physics backend for this level
     float m_editorCameraYaw = 0.0f;
@@ -19137,7 +19148,29 @@ private:
     bool m_worldGenerated = false;
     bool m_showPlanetInfo = false;
     bool m_showSiloConfig = false;
+    bool m_spawnAtPlatformTop = false; // true = teleport to platform top on folder nav
     bool m_showPerfWindow = false;
+    bool m_showServerManager = false;
+    ServerManager m_serverManager{CMAKE_SOURCE_DIR};
+    float m_backendReconnectTimer = 4.0f;  // start near 5s so first retry is quick
+    bool m_backendReconnectInFlight = false;
+    float m_contextPollTimer = 0.0f;
+    std::vector<ServerManager::ContextSession> m_aiContextSessions;
+
+    // Full AI context viewer (Ctrl+1)
+    bool m_showAIContextViewer = false;
+    float m_contextFullPollTimer = 0.0f;
+    struct AIContextMessage {
+        std::string role;
+        std::string content;
+    };
+    struct AIContextSession {
+        std::string npcName;
+        std::string provider;
+        std::string sessionId;
+        std::vector<AIContextMessage> messages;
+    };
+    std::vector<AIContextSession> m_aiContextFull;
 
     // Wall frame placement
     int m_frameSizeSetting = 4;
@@ -19147,7 +19180,15 @@ private:
     float m_framePreviewYaw = 0.0f;
     float m_framePreviewSize = 4.0f;
     float m_framePreviewNX = 0.0f;
+    float m_framePreviewNY = 0.0f;
     float m_framePreviewNZ = 1.0f;
+
+    // Wall brush mode (direct wall drawing on platform)
+    bool m_wallBrushMode = false;
+    bool m_wallBrushDrawing = false;
+    glm::vec3 m_wallBrushStart{0.0f};
+    glm::vec3 m_wallBrushEnd{0.0f};
+    bool m_wallBrushPreviewValid = false;
 
     // Platform grid map mode
     bool m_mapModeActive = false;

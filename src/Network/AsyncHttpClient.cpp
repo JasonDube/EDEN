@@ -83,7 +83,7 @@ AsyncHttpClient::Response AsyncHttpClient::executeRequest(const Request& request
 
     httplib::Client client(host, port);
     client.set_connection_timeout(5);  // 5 seconds to connect
-    client.set_read_timeout(60);       // 60 seconds for LLM response
+    client.set_read_timeout(120);      // 120 seconds — vision model can be slow
 
     httplib::Result result;
 
@@ -118,8 +118,18 @@ AsyncHttpClient::Response AsyncHttpClient::executeRequest(const Request& request
         m_connected = true;
     } else {
         response.success = false;
-        response.error = "Connection failed";
-        m_connected = false;
+        // Distinguish connection refused (server down) from read timeout (slow LLM)
+        auto err = result.error();
+        if (err == httplib::Error::Connection || err == httplib::Error::ConnectionTimeout) {
+            response.error = "Connection failed";
+            m_connected = false;
+        } else if (err == httplib::Error::Read) {
+            response.error = "Request timed out (slow inference?)";
+            // Don't mark disconnected — server is up, just slow
+        } else {
+            response.error = "Request failed";
+            m_connected = false;
+        }
     }
 
     return response;
@@ -162,6 +172,36 @@ void AsyncHttpClient::sendChatMessageWithPerception(const std::string& sessionId
     body["npc_personality"] = npcPersonality;
     body["being_type"] = beingType;
     body["perception"] = perception.toJson();
+
+    Request request;
+    request.method = "POST";
+    request.path = "/chat";
+    request.body = body.dump();
+    request.callback = callback;
+
+    {
+        std::lock_guard<std::mutex> lock(m_requestMutex);
+        m_requestQueue.push(std::move(request));
+    }
+}
+
+void AsyncHttpClient::sendChatMessageWithPerception(const std::string& sessionId, const std::string& message,
+                                                     const std::string& npcName, const std::string& npcPersonality,
+                                                     int beingType, const PerceptionData& perception,
+                                                     const std::string& imagePath,
+                                                     ResponseCallback callback) {
+    nlohmann::json body;
+    if (!sessionId.empty()) {
+        body["session_id"] = sessionId;
+    }
+    body["message"] = message;
+    body["npc_name"] = npcName;
+    body["npc_personality"] = npcPersonality;
+    body["being_type"] = beingType;
+    body["perception"] = perception.toJson();
+    if (!imagePath.empty()) {
+        body["image_path"] = imagePath;
+    }
 
     Request request;
     request.method = "POST";
@@ -269,9 +309,13 @@ void AsyncHttpClient::requestSTT(const std::string& wavFilePath, ResponseCallbac
 }
 
 void AsyncHttpClient::checkHealth(ResponseCallback callback) {
+    sendGet("/health", callback);
+}
+
+void AsyncHttpClient::sendGet(const std::string& path, ResponseCallback callback) {
     Request request;
     request.method = "GET";
-    request.path = "/health";
+    request.path = path;
     request.callback = callback;
 
     {

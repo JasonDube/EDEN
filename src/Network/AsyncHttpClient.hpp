@@ -102,10 +102,15 @@ public:
                          const std::string& npcName, const std::string& npcPersonality,
                          int beingType, ResponseCallback callback);
     
-    // Chat API with perception data
+    // Chat API with perception data (optional image path for vision analysis)
     void sendChatMessageWithPerception(const std::string& sessionId, const std::string& message,
                                         const std::string& npcName, const std::string& npcPersonality,
                                         int beingType, const PerceptionData& perception,
+                                        ResponseCallback callback);
+    void sendChatMessageWithPerception(const std::string& sessionId, const std::string& message,
+                                        const std::string& npcName, const std::string& npcPersonality,
+                                        int beingType, const PerceptionData& perception,
+                                        const std::string& imagePath,
                                         ResponseCallback callback);
 
     // Create a new session
@@ -130,6 +135,9 @@ public:
 
     // Health check
     void checkHealth(ResponseCallback callback);
+
+    // Generic GET request
+    void sendGet(const std::string& path, ResponseCallback callback);
 
     // Process completed requests (call from main thread)
     void pollResponses();

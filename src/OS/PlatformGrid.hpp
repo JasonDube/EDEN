@@ -29,11 +29,18 @@ struct WallFrame {
     FrameType frameType = FrameType::None;
     std::string machineName;                    // e.g. "hunyuan3d" for mach_ frames
     std::string paramName;                      // e.g. "image" for inp_image.png
+    bool spinPaused = false;                    // true = model rotation stopped by user
 };
 
 struct WireConnection {
     int fromFrame = -1;   // index into PlatformGrid::frames
     int toFrame = -1;
+};
+
+struct BrushWall {
+    float posX = 0, posY = 0, posZ = 0;
+    float scaleX = 1, scaleY = 8, scaleZ = 1;
+    float yawDeg = 0; // rotation around Y axis (degrees)
 };
 
 struct PlatformGrid {
@@ -44,6 +51,7 @@ struct PlatformGrid {
     std::vector<bool> walls;  // width*depth, true = wall cell
     std::vector<WallFrame> frames; // user-placed frames on wall surfaces
     std::vector<WireConnection> wires; // connections between frames
+    std::vector<BrushWall> brushWalls; // user-drawn walls (wall brush mode)
 
     PlatformGrid() : walls(width * depth, false) {}
 
@@ -85,6 +93,9 @@ public:
 
     // Remove everything (platform + walls + frames)
     void clearAll();
+
+    // Spawn brush walls from saved data
+    void spawnBrushWalls(const glm::vec4& wallColor);
 
     // Spawn/clear wall frame objects
     void spawnFrameObjects(const glm::vec3& center, float baseY);

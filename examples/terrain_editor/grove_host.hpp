@@ -61,6 +61,9 @@ struct GroveContext {
     // Widget Kit accessor (lazy resolve through forge room)
     std::function<eden::WidgetKit*()> getWidgetKit;
 
+    // Server Manager (for grove server_start/stop/status bindings)
+    class ServerManager* serverManager = nullptr;
+
     // Method callbacks (call TerrainEditor methods without knowing the class)
     std::function<void(int, int)> spawnPlotPosts;
     std::function<void(int, int)> removePlotPosts;

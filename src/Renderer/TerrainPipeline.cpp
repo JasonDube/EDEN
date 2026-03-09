@@ -18,6 +18,9 @@ TerrainPipeline::TerrainPipeline(VulkanContext& context, VkRenderPass renderPass
 TerrainPipeline::~TerrainPipeline() {
     VkDevice device = m_context.getDevice();
 
+    if (m_wireframePipeline != VK_NULL_HANDLE) {
+        vkDestroyPipeline(device, m_wireframePipeline, nullptr);
+    }
     if (m_pipeline != VK_NULL_HANDLE) {
         vkDestroyPipeline(device, m_pipeline, nullptr);
     }
@@ -78,7 +81,7 @@ void TerrainPipeline::createPipeline(VkRenderPass renderPass, VkExtent2D extent)
     bindingDescription.stride = sizeof(Vertex3D);
     bindingDescription.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
 
-    std::array<VkVertexInputAttributeDescription, 9> attributeDescriptions{};
+    std::array<VkVertexInputAttributeDescription, 10> attributeDescriptions{};
     // Position
     attributeDescriptions[0].binding = 0;
     attributeDescriptions[0].location = 0;
@@ -124,6 +127,11 @@ void TerrainPipeline::createPipeline(VkRenderPass renderPass, VkExtent2D extent)
     attributeDescriptions[8].location = 8;
     attributeDescriptions[8].format = VK_FORMAT_R32G32B32_SFLOAT;
     attributeDescriptions[8].offset = offsetof(Vertex3D, texHSB);
+    // Hole mask
+    attributeDescriptions[9].binding = 0;
+    attributeDescriptions[9].location = 9;
+    attributeDescriptions[9].format = VK_FORMAT_R32_SFLOAT;
+    attributeDescriptions[9].offset = offsetof(Vertex3D, holeMask);
 
     VkPipelineVertexInputStateCreateInfo vertexInputInfo{};
     vertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
@@ -208,6 +216,13 @@ void TerrainPipeline::createPipeline(VkRenderPass renderPass, VkExtent2D extent)
 
     if (vkCreateGraphicsPipelines(m_context.getDevice(), VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &m_pipeline) != VK_SUCCESS) {
         throw std::runtime_error("Failed to create terrain graphics pipeline");
+    }
+
+    // Create wireframe variant
+    rasterizer.polygonMode = VK_POLYGON_MODE_LINE;
+    rasterizer.cullMode = VK_CULL_MODE_NONE;
+    if (vkCreateGraphicsPipelines(m_context.getDevice(), VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &m_wireframePipeline) != VK_SUCCESS) {
+        m_wireframePipeline = VK_NULL_HANDLE;
     }
 
     vkDestroyShaderModule(m_context.getDevice(), fragShaderModule, nullptr);

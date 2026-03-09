@@ -62,6 +62,7 @@ public:
     PlatformGridBuilder& getPlatformGrid() { return m_platformGrid; }
     float getPlatformY() const { return m_platformY; }
     float getRingBaseY() const { return m_ringBaseY; }
+    float getBasementHeight() const { return basementHeight(); }
 
     // Emanation rendering — call from render loop after scene objects
     // Returns line pairs and color (with alpha) for each batch
@@ -160,6 +161,10 @@ private:
                          const glm::vec3& center, float baseY,
                          int startLevel);
 
+    // Menger sponge void — fractal overflow space below the basement
+    void spawnVoid(const glm::vec3& center, float topY,
+                   const std::vector<EntryInfo>& overflowItems);
+
     static glm::vec4 colorForCategory(FileCategory cat);
 
     // Render a filename label onto a 256x256 RGBA buffer
@@ -245,6 +250,8 @@ private:
 public:
     // Toggle spin on/off for a given scene object; returns true if it was found
     bool toggleSpin(SceneObject* obj);
+    // Remove a scene object from the spin list (call before erasing the object)
+    void removeModelSpin(SceneObject* obj);
 private:
 
     // Image focus state
@@ -323,7 +330,7 @@ private:
     static constexpr float EMANATION_SPEED = 2.5f;       // meters per second
     static constexpr float EMANATION_SPAWN_INTERVAL = 0.6f; // seconds between rings
 
-    static constexpr int MAX_ENTRIES = 300;
+    static constexpr int MAX_ENTRIES = 1000;
     static constexpr int MAX_VIDEO_FRAMES = 20;
     static constexpr float GRID_SPACING = 16.0f;
     static constexpr int GRID_COLUMNS = 10;

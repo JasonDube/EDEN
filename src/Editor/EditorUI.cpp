@@ -1,5 +1,7 @@
 #include "EditorUI.hpp"
 #include "SceneObject.hpp"
+#include "Renderer/ProceduralSkybox.hpp"
+#include "Renderer/TerrainPipeline.hpp"
 #include "AINode.hpp"
 #include "AIPath.hpp"
 #include "Zone/ZoneSystem.hpp"
@@ -194,6 +196,7 @@ void EditorUI::renderMenuBar() {
             ImGui::MenuItem("AI Mind Map", nullptr, &m_showMindMap);
             ImGui::MenuItem("Building Textures", nullptr, &m_showBuildingTextures);
             ImGui::MenuItem("Terminal", "Ctrl+`", &m_showTerminal);
+            ImGui::MenuItem("Servers", nullptr, &m_showServerManager);
             ImGui::Separator();
             if (ImGui::MenuItem("Show All")) {
                 m_showTerrainEditor = true;
@@ -695,6 +698,14 @@ void EditorUI::renderSkySettings() {
         if (ImGui::SliderFloat("Red", &m_skyParams->starRedPercent, 0.0f, 100.0f, "%.0f%%")) {
             normalizeColors();
             changed = true;
+        }
+    }
+
+    ImGui::Separator();
+    if (m_skyboxPtr) {
+        bool wf = m_skyboxPtr->isWireframe();
+        if (ImGui::Checkbox("Show Wireframe", &wf)) {
+            m_skyboxPtr->setWireframe(wf);
         }
     }
 
@@ -2224,6 +2235,14 @@ void EditorUI::renderTerrainInfo() {
     // Camera position
     ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), "Camera: (%.1f, %.1f, %.1f)",
         m_cameraPos.x, m_cameraPos.y, m_cameraPos.z);
+
+    ImGui::Separator();
+    if (m_terrainPipelinePtr) {
+        bool wf = m_terrainPipelinePtr->isWireframe();
+        if (ImGui::Checkbox("Show Wireframe", &wf)) {
+            m_terrainPipelinePtr->setWireframe(wf);
+        }
+    }
 
     ImGui::End();
 }

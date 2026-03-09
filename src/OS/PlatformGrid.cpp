@@ -86,6 +86,9 @@ bool PlatformGridBuilder::saveConfig(const std::string& folderPath) {
             }
             f << "\"";
         }
+        if (fr.spinPaused) {
+            f << ",\"sp\":1";
+        }
         f << "}";
     }
     f << "\n  ],\n";
@@ -97,7 +100,19 @@ bool PlatformGridBuilder::saveConfig(const std::string& folderPath) {
         f << "{\"from\":" << m_grid.wires[i].fromFrame
           << ",\"to\":" << m_grid.wires[i].toFrame << "}";
     }
-    f << "]\n}\n";
+    f << "],\n";
+
+    // Serialize brush walls
+    f << "  \"brushWalls\": [";
+    for (size_t i = 0; i < m_grid.brushWalls.size(); ++i) {
+        const auto& bw = m_grid.brushWalls[i];
+        if (i > 0) f << ",";
+        f << "\n    {\"px\":" << bw.posX << ",\"py\":" << bw.posY
+          << ",\"pz\":" << bw.posZ << ",\"sx\":" << bw.scaleX
+          << ",\"sy\":" << bw.scaleY << ",\"sz\":" << bw.scaleZ
+          << ",\"yd\":" << bw.yawDeg << "}";
+    }
+    f << "\n  ]\n}\n";
     return f.good();
 }
 
@@ -263,6 +278,8 @@ bool PlatformGridBuilder::loadConfig(const std::string& folderPath) {
                     }
                 }
 
+                fr.spinPaused = (static_cast<int>(parseField("sp")) != 0);
+
                 m_grid.frames.push_back(fr);
             }
         }
@@ -303,6 +320,48 @@ bool PlatformGridBuilder::loadConfig(const std::string& folderPath) {
                 if (wire.fromFrame >= 0 && wire.toFrame >= 0) {
                     m_grid.wires.push_back(wire);
                 }
+            }
+        }
+    }
+
+    // Parse brush walls array
+    m_grid.brushWalls.clear();
+    auto bwKey = content.find("\"brushWalls\"");
+    if (bwKey != std::string::npos) {
+        auto bwArr = content.find('[', bwKey);
+        if (bwArr != std::string::npos) {
+            size_t pos = bwArr + 1;
+            while (pos < content.size()) {
+                while (pos < content.size() && (content[pos] == ' ' || content[pos] == ',' ||
+                       content[pos] == '\n' || content[pos] == '\r' || content[pos] == '\t'))
+                    pos++;
+                if (pos >= content.size() || content[pos] == ']') break;
+                if (content[pos] != '{') break;
+                auto objEnd = content.find('}', pos);
+                if (objEnd == std::string::npos) break;
+                std::string obj = content.substr(pos, objEnd - pos + 1);
+                pos = objEnd + 1;
+
+                auto parseBW = [&](const std::string& key) -> float {
+                    std::string needle = "\"" + key + "\"";
+                    auto p = obj.find(needle);
+                    if (p == std::string::npos) return 0.0f;
+                    p = obj.find(':', p);
+                    if (p == std::string::npos) return 0.0f;
+                    p++;
+                    while (p < obj.size() && obj[p] == ' ') p++;
+                    return std::stof(obj.substr(p));
+                };
+
+                BrushWall bw;
+                bw.posX = parseBW("px");
+                bw.posY = parseBW("py");
+                bw.posZ = parseBW("pz");
+                bw.scaleX = parseBW("sx");
+                bw.scaleY = parseBW("sy");
+                bw.scaleZ = parseBW("sz");
+                bw.yawDeg = parseBW("yd");
+                m_grid.brushWalls.push_back(bw);
             }
         }
     }
@@ -457,6 +516,40 @@ void PlatformGridBuilder::buildWallsFromGrid(const glm::vec3& center, float base
     }
 }
 
+// ── Spawn brush walls from saved data ──────────────────────────────────
+
+void PlatformGridBuilder::spawnBrushWalls(const glm::vec4& wallColor) {
+    if (!m_renderer || !m_sceneObjects) return;
+
+    auto mesh = PrimitiveMeshBuilder::createCube(1.0f, wallColor);
+    int wallNum = 0;
+    for (const auto& bw : m_grid.brushWalls) {
+        uint32_t handle = m_renderer->createModel(mesh.vertices, mesh.indices);
+
+        auto obj = std::make_unique<SceneObject>(
+            "PlatWall_brush_" + std::to_string(wallNum++));
+        obj->setBufferHandle(handle);
+        obj->setIndexCount(static_cast<uint32_t>(mesh.indices.size()));
+        obj->setVertexCount(static_cast<uint32_t>(mesh.vertices.size()));
+        obj->setLocalBounds(mesh.bounds);
+        obj->setMeshData(mesh.vertices, mesh.indices);
+        obj->setPrimitiveType(PrimitiveType::Cube);
+        obj->setPrimitiveSize(1.0f);
+        obj->setPrimitiveColor(wallColor);
+        obj->setBuildingType("platform_wall");
+        obj->setAABBCollision(true);
+
+        obj->getTransform().setPosition({bw.posX, bw.posY, bw.posZ});
+        obj->getTransform().setScale({bw.scaleX, bw.scaleY, bw.scaleZ});
+        if (std::abs(bw.yawDeg) > 0.01f)
+            obj->getTransform().setRotation(bw.yawDeg, {0, 1, 0});
+
+        SceneObject* raw = obj.get();
+        m_sceneObjects->push_back(std::move(obj));
+        m_spawnedWalls.push_back(raw);
+    }
+}
+
 // ── Clear walls ────────────────────────────────────────────────────────
 
 void PlatformGridBuilder::clearWalls() {
@@ -518,11 +611,17 @@ void PlatformGridBuilder::spawnFrameObjects(const glm::vec3& center, float baseY
         obj->setBuildingType("wall_frame");
         obj->setAABBCollision(false);
 
-        // Position flush against wall surface
+        // Position flush against wall surface (or flat on floor)
         float s = static_cast<float>(fr.size);
         obj->getTransform().setPosition({fr.worldX, fr.worldY, fr.worldZ});
-        obj->getTransform().setScale({s, s, 0.1f});
-        obj->setEulerRotation({0.0f, fr.yawDeg, 0.0f});
+        if (fr.normalX == 0.0f && fr.normalZ == 0.0f) {
+            // Floor frame — flat on ground
+            obj->getTransform().setScale({s, 0.1f, s});
+            obj->setEulerRotation({0.0f, 0.0f, 0.0f});
+        } else {
+            obj->getTransform().setScale({s, s, 0.1f});
+            obj->setEulerRotation({0.0f, fr.yawDeg, 0.0f});
+        }
 
         SceneObject* raw = obj.get();
         m_sceneObjects->push_back(std::move(obj));
@@ -595,6 +694,11 @@ void PlatformGridBuilder::loadAndBuild(const std::string& folderPath,
     }
     if (hasWalls) {
         buildWallsFromGrid(center, baseY, wallHeight, wallColor);
+    }
+
+    // Spawn brush walls
+    if (!m_grid.brushWalls.empty()) {
+        spawnBrushWalls(wallColor);
     }
 
     // Spawn wall frame objects (empty frames only — occupied ones get files via FilesystemBrowser)

@@ -9,6 +9,7 @@ layout(location = 5) in uvec4 inTexIndices;
 layout(location = 6) in float inSelection;
 layout(location = 7) in float inPaintAlpha;
 layout(location = 8) in vec3 inTexHSB;
+layout(location = 9) in float inHoleMask;
 
 layout(push_constant) uniform PushConstants {
     mat4 mvp;
@@ -26,6 +27,7 @@ layout(location = 5) out float fragDistance;
 layout(location = 6) out float fragSelection;
 layout(location = 7) out float fragPaintAlpha;
 layout(location = 8) out vec3 fragTexHSB;
+layout(location = 9) out float fragHoleMask;
 
 void main() {
     gl_Position = pc.mvp * vec4(inPosition, 1.0);
@@ -38,4 +40,5 @@ void main() {
     fragSelection = inSelection;
     fragPaintAlpha = inPaintAlpha;
     fragTexHSB = inTexHSB;
+    fragHoleMask = inHoleMask;
 }

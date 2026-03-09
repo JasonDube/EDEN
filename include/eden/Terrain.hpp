@@ -20,6 +20,7 @@ struct Vertex3D {
     float selection;       // Selection weight (0 = not selected, 1 = selected)
     float paintAlpha;      // Paint intensity (0 = texture only, 1 = painted color only)
     glm::vec3 texHSB;      // Per-vertex texture color adjustment (hue, saturation, brightness)
+    float holeMask;        // Terrain hole (0 = solid, 1 = discarded/invisible)
 };
 
 enum class BrushMode { Raise, Lower, Smooth, Flatten, Paint, Crack, Texture, Plateau, LevelMin, Grab, Select, Deselect, MoveObject, Spire, Ridged, Trench, PathMode, Terrace, FlattenToY, WallDraw, Foundation };
@@ -127,6 +128,7 @@ public:
                       const std::vector<glm::uvec4>& texIndicesmap,
                       const std::vector<glm::vec3>& texHSBmap);
 
+    friend class Terrain;
 private:
     void generate(const TerrainConfig& config);
     void rebuildVerticesFromHeightmap();
@@ -146,6 +148,7 @@ private:
     std::vector<glm::uvec4> m_texIndicesmap;  // Per-vertex texture indices (which 4 textures to blend)
     std::vector<float> m_selectionmap;  // Per-vertex selection weight (0-1)
     std::vector<glm::vec3> m_texHSBmap;  // Per-vertex texture color adjustment (hue, saturation, brightness)
+    std::vector<float> m_holemap;  // Per-vertex hole mask (0 = solid, 1 = hole)
     std::vector<Vertex3D> m_vertices;
     std::vector<uint32_t> m_indices;
     uint32_t m_bufferHandle = UINT32_MAX;
@@ -228,6 +231,9 @@ public:
 
     // Triangulation mode (affects cliff visual quality)
     void setTriangulationMode(TriangulationMode mode);
+
+    // Punch a rectangular hole in the terrain (sets holeMask on vertices)
+    void setHoleRect(float worldMinX, float worldMinZ, float worldMaxX, float worldMaxZ, bool isHole = true);
 
     // Export terrain to OBJ file
     bool exportToOBJ(const std::string& filepath) const;

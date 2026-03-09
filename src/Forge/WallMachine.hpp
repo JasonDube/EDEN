@@ -1,7 +1,7 @@
 #pragma once
 
 #include "OS/PlatformGrid.hpp"
-#include "../../examples/model_editor/Hunyuan3DClient.hpp"
+#include "../Network/Hunyuan3DClient.hpp"
 #include <string>
 #include <vector>
 #include <thread>

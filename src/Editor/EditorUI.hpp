@@ -14,6 +14,9 @@
 
 namespace eden {
 
+class ProceduralSkybox;
+class TerrainPipeline;
+
 class SceneObject;
 class AINode;
 class AIPath;
@@ -253,6 +256,7 @@ public:
     bool& showMindMap() { return m_showMindMap; }
     bool& showBuildingTextures() { return m_showBuildingTextures; }
     bool& showTerminal() { return m_showTerminal; }
+    bool& showServerManager() { return m_showServerManager; }
 
     // Spatial analysis / mind map
     struct SpatialGrid {
@@ -391,6 +395,8 @@ public:
     // Sky parameters
     void setSkyParameters(SkyParameters* params) { m_skyParams = params; }
     SkyParameters* getSkyParameters() { return m_skyParams; }
+    void setSkybox(ProceduralSkybox* skybox) { m_skyboxPtr = skybox; }
+    void setTerrainPipeline(TerrainPipeline* tp) { m_terrainPipelinePtr = tp; }
 
     // Terrain info
     void setTerrainInfo(const TerrainInfo& info) { m_terrainInfo = info; }
@@ -589,6 +595,7 @@ private:
     bool m_showMindMap = false;
     bool m_showBuildingTextures = false;
     bool m_showTerminal = false;
+    bool m_showServerManager = false;
 
     // Grove script editor state
     char m_groveSource[16384] = "";  // 16KB source buffer
@@ -657,6 +664,8 @@ private:
 
     // Sky parameters (external, not owned)
     SkyParameters* m_skyParams = nullptr;
+    ProceduralSkybox* m_skyboxPtr = nullptr;
+    TerrainPipeline* m_terrainPipelinePtr = nullptr;
 
     // Terrain info
     TerrainInfo m_terrainInfo;

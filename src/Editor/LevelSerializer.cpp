@@ -1033,10 +1033,7 @@ void LevelSerializer::applyToTerrain(const LevelData& data, Terrain& terrain) {
     for (const auto& chunkData : data.chunks) {
         auto chunk = terrain.getChunkByCoord(chunkData.coord);
         if (!chunk) {
-            // Chunk doesn't exist yet - this could happen if terrain bounds changed
-            std::cout << "[LevelSerializer] Warning: chunk (" << chunkData.coord.x
-                      << ", " << chunkData.coord.y << ") not found in terrain" << std::endl;
-            continue;
+            continue;  // Chunk outside current terrain bounds — skip silently
         }
 
         chunk->setChunkData(

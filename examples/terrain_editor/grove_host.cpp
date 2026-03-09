@@ -1,4 +1,5 @@
 #include "grove_host.hpp"
+#include "ServerManager.hpp"
 #include "Editor/SceneObject.hpp"
 #include "Editor/GLBLoader.hpp"
 #include "Editor/LimeLoader.hpp"
@@ -2351,6 +2352,104 @@ static int32_t groveWidgetSetState(const GroveValue* args, uint32_t argc, GroveV
 
 // ─── Registration ───
 
+// ── Server Manager bindings ──────────────────────
+
+// Helper: find server index by name (case-insensitive partial match)
+static int findServerIndex(ServerManager* sm, const std::string& name) {
+    if (!sm) return -1;
+    std::string lower = name;
+    std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
+    for (size_t i = 0; i < sm->servers().size(); i++) {
+        std::string srvName = sm->servers()[i].name;
+        std::transform(srvName.begin(), srvName.end(), srvName.begin(), ::tolower);
+        if (srvName == lower || srvName.find(lower) != std::string::npos) return (int)i;
+    }
+    return -1;
+}
+
+// server_start(name) → bool (true if started or already running)
+static int32_t groveServerStart(const GroveValue* args, uint32_t argc, GroveValue* result, void* ud) {
+    auto* ctx = static_cast<GroveContext*>(ud);
+    result->tag = GROVE_BOOL;
+    result->data.bool_val = 0;
+    if (argc < 1 || args[0].tag != GROVE_STRING || !ctx->serverManager) return 0;
+    std::string name(args[0].data.string_val.ptr, args[0].data.string_val.len);
+    int idx = findServerIndex(ctx->serverManager, name);
+    if (idx >= 0) {
+        ctx->serverManager->start(idx);
+        result->data.bool_val = 1;
+    }
+    return 0;
+}
+
+// server_stop(name) → bool (true if stopped)
+static int32_t groveServerStop(const GroveValue* args, uint32_t argc, GroveValue* result, void* ud) {
+    auto* ctx = static_cast<GroveContext*>(ud);
+    result->tag = GROVE_BOOL;
+    result->data.bool_val = 0;
+    if (argc < 1 || args[0].tag != GROVE_STRING || !ctx->serverManager) return 0;
+    std::string name(args[0].data.string_val.ptr, args[0].data.string_val.len);
+    int idx = findServerIndex(ctx->serverManager, name);
+    if (idx >= 0) {
+        ctx->serverManager->stop(idx);
+        result->data.bool_val = 1;
+    }
+    return 0;
+}
+
+// server_status(name) → string ("stopped", "starting", "running", "error")
+static int32_t groveServerStatus(const GroveValue* args, uint32_t argc, GroveValue* result, void* ud) {
+    auto* ctx = static_cast<GroveContext*>(ud);
+    static thread_local std::string s_statusBuf;
+    result->tag = GROVE_STRING;
+    s_statusBuf = "unknown";
+    if (argc >= 1 && args[0].tag == GROVE_STRING && ctx->serverManager) {
+        std::string name(args[0].data.string_val.ptr, args[0].data.string_val.len);
+        int idx = findServerIndex(ctx->serverManager, name);
+        if (idx >= 0) {
+            switch (ctx->serverManager->servers()[idx].status) {
+                case ServerEntry::Stopped:  s_statusBuf = "stopped"; break;
+                case ServerEntry::Starting: s_statusBuf = "starting"; break;
+                case ServerEntry::Running:  s_statusBuf = "running"; break;
+                case ServerEntry::Error:    s_statusBuf = "error"; break;
+            }
+        }
+    }
+    result->data.string_val.ptr = s_statusBuf.c_str();
+    result->data.string_val.len = static_cast<uint32_t>(s_statusBuf.size());
+    return 0;
+}
+
+// server_start_all() → nil (starts all servers in dependency order)
+static int32_t groveServerStartAll(const GroveValue*, uint32_t, GroveValue* result, void* ud) {
+    auto* ctx = static_cast<GroveContext*>(ud);
+    result->tag = GROVE_NIL;
+    if (ctx->serverManager) ctx->serverManager->startAll();
+    return 0;
+}
+
+// server_list() → string (comma-separated list of server names)
+static int32_t groveServerList(const GroveValue*, uint32_t, GroveValue* result, void* ud) {
+    auto* ctx = static_cast<GroveContext*>(ud);
+    static thread_local std::string s_listBuf;
+    s_listBuf.clear();
+    if (ctx->serverManager) {
+        for (size_t i = 0; i < ctx->serverManager->servers().size(); i++) {
+            if (i > 0) s_listBuf += ", ";
+            const auto& srv = ctx->serverManager->servers()[i];
+            s_listBuf += srv.name + " (" +
+                (srv.status == ServerEntry::Running ? "running" :
+                 srv.status == ServerEntry::Starting ? "starting" :
+                 srv.status == ServerEntry::Error ? "error" : "stopped") + ")";
+        }
+    }
+    result->tag = GROVE_STRING;
+    result->data.string_val.ptr = s_listBuf.c_str();
+    result->data.string_val.len = static_cast<uint32_t>(s_listBuf.size());
+    return 0;
+}
+
+
 void registerGroveHostFunctions(GroveVm* vm, GroveContext* ctx) {
     grove_register_fn(vm, "log", groveLogFn, ctx->groveOutputAccum);
     grove_register_fn(vm, "terrain_height", groveTerrainHeightFn, ctx);
@@ -2437,4 +2536,11 @@ void registerGroveHostFunctions(GroveVm* vm, GroveContext* ctx) {
     grove_register_fn(vm, "widget_state", groveWidgetState, ctx);
     grove_register_fn(vm, "widget_slot_value", groveWidgetSlotValue, ctx);
     grove_register_fn(vm, "widget_set_state", groveWidgetSetState, ctx);
+
+    // Server Manager functions
+    grove_register_fn(vm, "server_start", groveServerStart, ctx);
+    grove_register_fn(vm, "server_stop", groveServerStop, ctx);
+    grove_register_fn(vm, "server_status", groveServerStatus, ctx);
+    grove_register_fn(vm, "server_start_all", groveServerStartAll, ctx);
+    grove_register_fn(vm, "server_list", groveServerList, ctx);
 }
