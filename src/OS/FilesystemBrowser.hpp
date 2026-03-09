@@ -45,6 +45,7 @@ public:
 
     // Animate video preview textures — call every frame with deltaTime
     void updateAnimations(float deltaTime);
+    void setPlayerPosition(const glm::vec3& pos) { m_playerPos = pos; }
 
     // Remove all filesystem objects and free GPU resources
     void clearFilesystemObjects();
@@ -63,6 +64,9 @@ public:
     float getPlatformY() const { return m_platformY; }
     float getRingBaseY() const { return m_ringBaseY; }
     float getBasementHeight() const { return basementHeight(); }
+    float getBasementFloorY() const { return m_basementBaseY - basementHeight(); }
+    bool hasVoid() const { return m_hasVoid; }
+    const glm::vec3& getVoidCenter() const { return m_voidCenter; }
 
     // Emanation rendering — call from render loop after scene objects
     // Returns line pairs and color (with alpha) for each batch
@@ -71,6 +75,9 @@ public:
         glm::vec4 color;  // RGBA with alpha for fade
     };
     std::vector<EmanationBatch> getEmanationRenderData() const;
+
+    // Void wireframe — light wireframe around every cube in the structure
+    std::vector<glm::vec3> getVoidWireframeLines() const;
 
     // Image focus: reload at full resolution with correct aspect ratio
     void focusImage(SceneObject* panel);
@@ -252,6 +259,8 @@ public:
     bool toggleSpin(SceneObject* obj);
     // Remove a scene object from the spin list (call before erasing the object)
     void removeModelSpin(SceneObject* obj);
+    // Remove a scene object from the void file tracking (call before erasing the object)
+    void removeVoidFileObj(SceneObject* obj);
 private:
 
     // Image focus state
@@ -300,6 +309,27 @@ private:
     PlatformGridBuilder m_platformGrid;
     float m_platformY = 100.0f;  // Y of the platform (top of silo)
     float m_ringBaseY = 100.0f;  // Y of the bottom of gallery rings (silo floor)
+
+    // Void (Menger sponge) — spawned at a distant location, accessed via portal door
+    bool m_hasVoid = false;
+    glm::vec3 m_voidCenter{0.0f};  // center of the void structure (for teleportation)
+    glm::vec3 m_voidRotSpeed{0.0f}; // random rotation speed (degrees/sec) per axis
+    float m_voidRotAngleX = 0.0f;
+    float m_voidRotAngleY = 0.0f;
+    float m_voidRotAngleZ = 0.0f;
+    struct VoidFileObj {
+        SceneObject* obj;
+        glm::vec3 localOffset; // position relative to voidCenter
+        glm::vec3 baseScale{1.0f}; // original scale for pulse animation
+    };
+    std::vector<VoidFileObj> m_voidFileObjs;
+    struct VoidCubeInfo {
+        glm::vec3 localCenter; // relative to voidCenter
+        float halfSize;
+    };
+    std::vector<VoidCubeInfo> m_voidCubeInfos; // all cube positions for wireframe
+    glm::vec3 m_playerPos{0.0f};
+    float m_voidPulseTimer = 0.0f; // timer for selection pulse animation
 
     // Folder visit tracking (attention system)
     std::unordered_map<std::string, int> m_folderVisits;

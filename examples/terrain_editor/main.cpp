@@ -1165,6 +1165,7 @@ protected:
         bool hadPending = m_filesystemBrowser.hasPendingNavigation();
         if (hadPending) syncExcludedPaths(); // ensure hotbar/frame files are excluded before rebuild
         m_filesystemBrowser.processNavigation();
+        m_filesystemBrowser.setPlayerPosition(m_camera.getPosition());
         m_filesystemBrowser.updateAnimations(deltaTime);
 
         // Teleport to silo center after navigation completes
@@ -1886,6 +1887,14 @@ protected:
         // Draw folder attention emanations (wireframe squares expanding outward)
         for (const auto& batch : m_filesystemBrowser.getEmanationRenderData()) {
             m_modelRenderer->renderLines(cmd, vp, batch.lines, batch.color);
+        }
+
+        // Draw void structure wireframe
+        {
+            auto voidLines = m_filesystemBrowser.getVoidWireframeLines();
+            if (!voidLines.empty()) {
+                m_modelRenderer->renderLines(cmd, vp, voidLines, glm::vec3(0.7f, 0.8f, 1.0f));
+            }
         }
 
         // Draw wall machine wires between frames
@@ -4205,34 +4214,37 @@ private:
             // Check for right-click to toggle cursor (and open filesystem context menu)
             static bool wasRightClickDown = false;
             bool rightClickDown = Input::isMouseButtonDown(Input::MOUSE_RIGHT);
+            bool altHeld = Input::isKeyDown(Input::KEY_LEFT_ALT) || Input::isKeyDown(Input::KEY_RIGHT_ALT);
             if (rightClickDown && !wasRightClickDown) {
-                if (m_filesystemBrowser.isActive()) {
-                    // In filesystem mode: toggle cursor for menu bar / UI interaction
-                    if (!m_playModeCursorVisible) {
-                        m_playModeCursorVisible = true;
-                        Input::setMouseCaptured(false);
-                        // If something is selected, open context menu for it
-                        bool hasSelection = false;
-                        for (auto& obj : m_sceneObjects) {
-                            if (obj && obj->isSelected() &&
-                                (obj->getBuildingType() == "filesystem" ||
-                                 obj->getBuildingType() == "filesystem_wall" ||
-                                 obj->getBuildingType() == "wall_frame" ||
-                                 obj->getBuildingType() == "wall_widget")) {
-                                hasSelection = true;
-                                break;
+                if (altHeld) {
+                    // Alt+Right-click: toggle cursor for menu bar / UI interaction
+                    if (m_filesystemBrowser.isActive()) {
+                        if (!m_playModeCursorVisible) {
+                            m_playModeCursorVisible = true;
+                            Input::setMouseCaptured(false);
+                            // If something is selected, open context menu for it
+                            bool hasSelection = false;
+                            for (auto& obj : m_sceneObjects) {
+                                if (obj && obj->isSelected() &&
+                                    (obj->getBuildingType() == "filesystem" ||
+                                     obj->getBuildingType() == "filesystem_wall" ||
+                                     obj->getBuildingType() == "wall_frame" ||
+                                     obj->getBuildingType() == "wall_widget")) {
+                                    hasSelection = true;
+                                    break;
+                                }
                             }
-                        }
-                        if (hasSelection) {
-                            m_fsContextMenuOpen = true;
+                            if (hasSelection) {
+                                m_fsContextMenuOpen = true;
+                            }
+                        } else {
+                            m_playModeCursorVisible = false;
+                            Input::setMouseCaptured(true);
                         }
                     } else {
-                        m_playModeCursorVisible = false;
-                        Input::setMouseCaptured(true);
+                        m_playModeCursorVisible = !m_playModeCursorVisible;
+                        Input::setMouseCaptured(!m_playModeCursorVisible);
                     }
-                } else {
-                    m_playModeCursorVisible = !m_playModeCursorVisible;
-                    Input::setMouseCaptured(!m_playModeCursorVisible);
                 }
             }
             wasRightClickDown = rightClickDown;
@@ -5341,8 +5353,8 @@ private:
                     if (m_characterController) {
                         m_characterController->setPosition(galleryCam);
                     }
-                    m_insideSilo = true;
-                    updateSiloShellVisibility();
+                    m_playerZone = PlayerZone::Silo;
+                    updateZoneVisibility();
                 }
             }
             wasF9 = f9;
@@ -5543,15 +5555,18 @@ private:
         }
         wasF3Down = f3Down;
 
-        // Home key — navigate to home directory
+        // Home key — teleport to silo floor
         static bool wasHomeDown = false;
         bool homeDown = Input::isKeyDown(Input::KEY_HOME);
         if (homeDown && !wasHomeDown && m_isPlayMode && m_filesystemBrowser.isActive()
             && !ImGui::GetIO().WantTextInput) {
-            const char* homeEnv = getenv("HOME");
-            if (homeEnv) {
-                m_filesystemBrowser.navigate(std::string(homeEnv));
-            }
+            glm::vec3 siloCenter = m_filesystemBrowser.getSpawnOrigin();
+            float returnY = m_filesystemBrowser.getRingBaseY() + 1.7f;
+            glm::vec3 returnPos(siloCenter.x + 10.0f, returnY, siloCenter.z);
+            m_camera.setPosition(returnPos);
+            if (m_characterController) m_characterController->setPosition(returnPos);
+            m_playerZone = PlayerZone::Silo;
+            updateZoneVisibility();
         }
         wasHomeDown = homeDown;
 
@@ -5785,7 +5800,7 @@ private:
                             auto& obj = m_sceneObjects[si];
                             if (!obj || !obj->isSelected()) continue;
                             const auto& bt = obj->getBuildingType();
-                            if ((bt == "filesystem" || bt == "wall_widget") && !obj->isDoor()) {
+                            if ((bt == "filesystem" || bt == "filesystem_void" || bt == "wall_widget") && !obj->isDoor()) {
                                 selectedFS = obj.get();
                                 selectedIdx = si;
                                 count++;
@@ -5875,8 +5890,9 @@ private:
                                 m_toolbarSlots[i].gpuHandle = selectedFS->getBufferHandle();
                                 m_toolbarSlots[i].modelIndexCount = selectedFS->getIndexCount();
                                 m_toolbarSlots[i].is3DModel = true;
-                                // Remove from model spin list before erasing
+                                // Remove from model spin list and void tracking before erasing
                                 m_filesystemBrowser.removeModelSpin(selectedFS);
+                                m_filesystemBrowser.removeVoidFileObj(selectedFS);
                                 // Remove scene object without destroying GPU resources
                                 selectedFS->setSelected(false);
                                 m_sceneObjects.erase(m_sceneObjects.begin() + selectedIdx);
@@ -5887,6 +5903,7 @@ private:
                                 m_editorUI.setSelectedObjectIndex(m_selectedObjectIndex);
                             } else {
                                 createSlotThumbnail(i);
+                                m_filesystemBrowser.removeVoidFileObj(selectedFS);
                                 selectedFS->setSelected(false);
                                 deleteObject(selectedIdx);
                             }
@@ -6517,9 +6534,11 @@ private:
                     if (!obj) continue;
                     const auto& bt = obj->getBuildingType();
                     if (bt != "filesystem" && bt != "filesystem_wall" && bt != "image_desc" &&
-                        bt != "platform_wall" && bt != "wall_frame" && bt != "wall_widget") continue;
+                        bt != "platform_wall" && bt != "wall_frame" && bt != "wall_widget" &&
+                        bt != "filesystem_void") continue;
                     float dist = obj->getWorldBounds().intersect(rayO, rayD);
-                    if (dist < 0 || dist >= 200.0f) continue;
+                    float maxRange = (bt == "filesystem_void") ? 2000.0f : 200.0f;
+                    if (dist < 0 || dist >= maxRange) continue;
                     // Walls' rotated AABBs inflate and can shadow doors behind them.
                     // Penalize wall hits so doors/files at similar distances always win.
                     float effectiveDist = dist;
@@ -7002,29 +7021,8 @@ private:
                     }
                 }
 
-                if (hit && hit->isDoor()) {
-                    // Door — navigate immediately
-                    std::string target = hit->getTargetLevel();
-                    if (target.rfind("exit://", 0) == 0) {
-                        // Exit silo — teleport to terrain just outside the shell
-                        glm::vec3 siloCenter = m_filesystemBrowser.getSpawnOrigin();
-                        float exitRadius = 30.0f;
-                        float terrainY = m_terrain.getHeightAt(siloCenter.x + exitRadius, siloCenter.z + exitRadius);
-                        glm::vec3 exitPos(siloCenter.x + exitRadius, terrainY + 1.7f, siloCenter.z + exitRadius);
-                        m_camera.setPosition(exitPos);
-                        if (m_characterController) m_characterController->setPosition(exitPos);
-                        m_insideSilo = false;
-                        updateSiloShellVisibility();
-                    } else if (target.rfind("app://", 0) == 0) {
-                        // App launcher navigation
-                        m_filesystemBrowser.navigate(target);
-                    } else if (target.rfind("fs://", 0) == 0) {
-                        // Keep spawn origin unchanged — silo rebuilds at same center
-                        m_filesystemBrowser.navigate(target.substr(5));
-                        m_pendingTeleportToPlatform = true;
-                    }
-                    m_shootCooldown = 0.2f;
-                } else if (hit && ((hit->getBuildingType() == "filesystem" && !hit->isDoor()) ||
+                if (hit && (hit->getBuildingType() == "filesystem" ||
+                                    hit->getBuildingType() == "filesystem_void" ||
                                     hit->getBuildingType() == "filesystem_wall" ||
                                     hit->getBuildingType() == "wall_frame" ||
                                     hit->getBuildingType() == "wall_widget")) {
@@ -7060,7 +7058,7 @@ private:
                     for (auto& obj : m_sceneObjects) {
                         if (!obj) continue;
                         const auto& bt = obj->getBuildingType();
-                        if (bt == "filesystem" || bt == "filesystem_wall" || bt == "wall_frame" || bt == "wall_widget")
+                        if (bt == "filesystem" || bt == "filesystem_void" || bt == "filesystem_wall" || bt == "wall_frame" || bt == "wall_widget")
                             obj->setSelected(false);
                     }
                     m_shootCooldown = 0.2f;
@@ -7233,7 +7231,7 @@ private:
                         for (auto& obj : m_sceneObjects) {
                             if (!obj) continue;
                             const auto& bt = obj->getBuildingType();
-                            if (bt == "filesystem" || bt == "filesystem_wall" || bt == "wall_frame" || bt == "wall_widget")
+                            if (bt == "filesystem" || bt == "filesystem_void" || bt == "filesystem_wall" || bt == "wall_frame" || bt == "wall_widget")
                                 obj->setSelected(false);
                         }
                     }
@@ -7257,6 +7255,56 @@ private:
                 m_fsDragHoverWall = nullptr;
                 m_fsDragActive = false;
             }
+            // Right-click: unified navigation (doors, folders, silo, void)
+            if (Input::isMouseButtonPressed(Input::MOUSE_RIGHT) && m_shootCooldown <= 0.0f &&
+                !(Input::isKeyDown(Input::KEY_LEFT_ALT) || Input::isKeyDown(Input::KEY_RIGHT_ALT))) {
+                glm::vec3 rayO, rayD;
+                doCrosshairRay(rayO, rayD);
+
+                // Check filesystem objects via raycastFS
+                SceneObject* rhit = raycastFS(rayO, rayD);
+
+                // Void objects → always teleport to sponge (don't navigate their fs:// target)
+                if (rhit && rhit->getBuildingType() == "filesystem_void") {
+                    glm::vec3 vc = m_filesystemBrowser.getVoidCenter();
+                    glm::vec3 aboveVoid(vc.x, vc.y + 74.0f, vc.z);
+                    m_camera.setPosition(aboveVoid);
+                    if (m_characterController) m_characterController->setPosition(aboveVoid);
+                    m_playerZone = PlayerZone::Void;
+                    updateZoneVisibility();
+                    m_shootCooldown = 0.2f;
+                }
+                // Doors/folders with targets → navigate
+                else if (rhit && !rhit->getTargetLevel().empty()) {
+                    handleTargetNavigation(rhit->getTargetLevel());
+                }
+                // Extended raycast for silo shell and void filler
+                else {
+                    for (auto& obj : m_sceneObjects) {
+                        if (!obj) continue;
+                        const std::string& mp = obj->getModelPath();
+                        const std::string& bt = obj->getBuildingType();
+                        bool isSilo = mp.find("silo") != std::string::npos && mp.find(".lime") != std::string::npos;
+                        bool isVoid = (bt == "filesystem_void" || bt == "filesystem_void_filler");
+                        if (!isSilo && !isVoid) continue;
+                        float dist = obj->getWorldBounds().intersect(rayO, rayD);
+                        if (dist < 0 || dist >= 2000.0f) continue;
+                        if (isSilo) {
+                            handleTargetNavigation("home://silo");
+                        } else {
+                            glm::vec3 vc = m_filesystemBrowser.getVoidCenter();
+                            glm::vec3 aboveVoid(vc.x, vc.y + 74.0f, vc.z);
+                            m_camera.setPosition(aboveVoid);
+                            if (m_characterController) m_characterController->setPosition(aboveVoid);
+                            m_playerZone = PlayerZone::Void;
+                            updateZoneVisibility();
+                            m_shootCooldown = 0.2f;
+                        }
+                        break;
+                    }
+                }
+            }
+
             // Per-frame hover raycast for filename preview under crosshair
             if (!m_fsDragActive && !m_playModeCursorVisible) {
                 glm::vec3 rayO, rayD;
@@ -7277,6 +7325,7 @@ private:
                     }
                 }
                 if (hover && (hover->getBuildingType() == "filesystem" ||
+                             hover->getBuildingType() == "filesystem_void" ||
                              hover->getBuildingType() == "image_desc" ||
                              hover->getBuildingType() == "machine_slot" ||
                              hover->getBuildingType() == "machine_lever" ||
@@ -15019,14 +15068,90 @@ private:
         std::cout << "Loaded EDEN OS level from " << osLevelPath << std::endl;
     }
 
-    // Hide/show the silo exterior shell model based on whether the player is inside
-    void updateSiloShellVisibility() {
+    // ── Unified navigation handler ──────────────────────────────────────
+    // Routes all protocol-based targets (right-click on doors, folders, silo, void, etc.)
+    // Returns true if the target was handled.
+    bool handleTargetNavigation(const std::string& target) {
+        if (target.empty()) return false;
+
+        glm::vec3 siloCenter = m_filesystemBrowser.getSpawnOrigin();
+
+        auto teleportTo = [&](const glm::vec3& pos, PlayerZone zone) {
+            m_camera.setPosition(pos);
+            if (m_characterController) m_characterController->setPosition(pos);
+            m_playerZone = zone;
+            updateZoneVisibility();
+        };
+
+        if (target.rfind("basement://", 0) == 0) {
+            float floorY = m_filesystemBrowser.getBasementFloorY() + 1.7f;
+            teleportTo({siloCenter.x + 10.0f, floorY, siloCenter.z}, PlayerZone::Basement);
+        } else if (target.rfind("exit://", 0) == 0) {
+            float exitRadius = 30.0f;
+            float terrainY = m_terrain.getHeightAt(siloCenter.x + exitRadius, siloCenter.z + exitRadius);
+            teleportTo({siloCenter.x + exitRadius, terrainY + 1.7f, siloCenter.z + exitRadius}, PlayerZone::Outside);
+        } else if (target.rfind("void://", 0) == 0) {
+            float tx = siloCenter.x + 600.0f;
+            float tz = siloCenter.z + 600.0f;
+            float terrainY = m_terrain.getHeightAt(tx, tz);
+            teleportTo({tx, terrainY + 1.7f, tz}, PlayerZone::Outside);
+        } else if (target.rfind("home://", 0) == 0) {
+            float returnY = m_filesystemBrowser.getRingBaseY() + 1.7f;
+            teleportTo({siloCenter.x + 10.0f, returnY, siloCenter.z}, PlayerZone::Silo);
+        } else if (target.rfind("app://", 0) == 0) {
+            m_filesystemBrowser.navigate(target);
+        } else if (target.rfind("fs://", 0) == 0) {
+            m_filesystemBrowser.navigate(target.substr(5));
+            m_pendingTeleportToPlatform = true;
+        } else {
+            return false; // not a known protocol
+        }
+        m_shootCooldown = 0.2f;
+        return true;
+    }
+
+    // Zone-based visibility — hide geometry the player can't see
+    void updateZoneVisibility() {
         for (auto& obj : m_sceneObjects) {
             if (!obj) continue;
-            // Match any .lime model that isn't a filesystem/silo-spawned object
+            const std::string& bt = obj->getBuildingType();
             const std::string& mp = obj->getModelPath();
-            if (mp.find("silo") != std::string::npos && mp.find(".lime") != std::string::npos) {
-                obj->setVisible(!m_insideSilo);
+
+            // Silo shell model (silo.lime) — hide when inside silo
+            bool isSiloShell = mp.find("silo") != std::string::npos && mp.find(".lime") != std::string::npos;
+            if (isSiloShell) {
+                obj->setVisible(m_playerZone != PlayerZone::Silo);
+                continue;
+            }
+
+            // Silo interior objects
+            bool isSiloObj = (bt == "filesystem" || bt == "filesystem_wall" ||
+                              bt == "platform_wall" || bt == "platform_slab" ||
+                              bt == "wall_frame" || bt == "wall_widget" ||
+                              bt == "eden_app_ring");
+            if (isSiloObj) {
+                obj->setVisible(m_playerZone == PlayerZone::Silo);
+                continue;
+            }
+
+            // Basement ceiling slab — shared floor between silo and basement
+            if (bt == "eden_basement_ceil") {
+                obj->setVisible(m_playerZone == PlayerZone::Silo || m_playerZone == PlayerZone::Basement);
+                continue;
+            }
+
+            // Basement objects (walls, floor — not ceiling)
+            bool isBasementObj = (bt == "eden_basement" || bt == "eden_basement_wall");
+            if (isBasementObj) {
+                obj->setVisible(m_playerZone == PlayerZone::Basement);
+                continue;
+            }
+
+            // Void objects stay visible from outside and void zones
+            bool isVoidObj = (bt == "filesystem_void" || bt == "filesystem_void_filler");
+            if (isVoidObj) {
+                obj->setVisible(m_playerZone == PlayerZone::Outside || m_playerZone == PlayerZone::Void);
+                continue;
             }
         }
     }
@@ -15937,6 +16062,8 @@ private:
         glm::vec3 rayOrigin = glm::vec3(nearPoint);
         glm::vec3 rayDir = glm::normalize(glm::vec3(farPoint - nearPoint));
 
+        // Edit mode: no right-click navigation changes
+
         float closestDist = std::numeric_limits<float>::max();
         SceneObject* closestObj = nullptr;
         float closestDoorDist = std::numeric_limits<float>::max();
@@ -15970,7 +16097,17 @@ private:
             AABB worldBounds = obj->getWorldBounds();
             float dist = worldBounds.intersect(rayOrigin, rayDir);
 
-            if (dist >= 0 && dist < closestDist && dist < 50.0f) {
+            // Extended range for silo model and void structure (clickable from far away)
+            bool isSiloModel = false;
+            {
+                const std::string& mp = obj->getModelPath();
+                if (mp.find("silo") != std::string::npos && mp.find(".lime") != std::string::npos)
+                    isSiloModel = true;
+            }
+            bool isVoidObj = (obj->getBuildingType() == "filesystem_void");
+            float maxRange = (isSiloModel || isVoidObj) ? 2000.0f : 50.0f;
+
+            if (dist >= 0 && dist < closestDist && dist < maxRange) {
                 closestDist = dist;
                 closestObj = obj.get();
             }
@@ -16039,30 +16176,14 @@ private:
                 std::string targetLevel = closestObj->getTargetLevel();
                 std::string targetDoorId = closestObj->getTargetDoorId();
 
-                if (!targetLevel.empty() && targetLevel.rfind("exit://", 0) == 0) {
-                    std::cerr << "[EXIT DOOR] Teleporting outside!" << std::endl;
-                    // Exit silo — teleport to terrain just outside the shell
-                    glm::vec3 siloCenter = m_filesystemBrowser.getSpawnOrigin();
-                    float exitRadius = 30.0f;
-                    float terrainY = m_terrain.getHeightAt(siloCenter.x + exitRadius, siloCenter.z + exitRadius);
-                    glm::vec3 exitPos(siloCenter.x + exitRadius, terrainY + 1.7f, siloCenter.z + exitRadius);
-                    m_camera.setPosition(exitPos);
-                    if (m_characterController) m_characterController->setPosition(exitPos);
-                    m_insideSilo = false;
-                    updateSiloShellVisibility();
-                } else if (!targetLevel.empty() && targetLevel.rfind("app://", 0) == 0) {
-                    // App launcher navigation — pass full app:// path
-                    m_filesystemBrowser.navigate(targetLevel);
-                } else if (!targetLevel.empty() && targetLevel.rfind("fs://", 0) == 0) {
-                    // Filesystem navigation — keep spawn origin unchanged so silo stays centered
-                    std::string fsPath = targetLevel.substr(5);
-                    m_filesystemBrowser.navigate(fsPath);
-                } else if (!targetLevel.empty()) {
-                    // Level transition - load new level
-                    transitionToLevel(targetLevel, targetDoorId);
-                } else if (!targetDoorId.empty()) {
-                    // Teleport within same level - find target door
-                    teleportToDoor(targetDoorId);
+                // Protocol doors use unified handler
+                if (!handleTargetNavigation(targetLevel)) {
+                    // Non-protocol doors: level transitions and door-to-door teleports
+                    if (!targetLevel.empty()) {
+                        transitionToLevel(targetLevel, targetDoorId);
+                    } else if (!targetDoorId.empty()) {
+                        teleportToDoor(targetDoorId);
+                    }
                 }
                 return;
             }
@@ -19103,7 +19224,8 @@ private:
     bool m_isTestLevel = false;
     bool m_isSpaceLevel = false;
     bool m_isEdenOSLevel = false;
-    bool m_insideSilo = false;
+    enum class PlayerZone { Silo, Basement, Outside, Void };
+    PlayerZone m_playerZone = PlayerZone::Outside;
     float m_testFloorSize = 100.0f;
     PhysicsBackend m_physicsBackend = PhysicsBackend::Jolt;  // Physics backend for this level
     float m_editorCameraYaw = 0.0f;

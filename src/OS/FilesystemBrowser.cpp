@@ -447,6 +447,42 @@ void FilesystemBrowser::updateAnimations(float deltaTime) {
         spin.obj->setEulerRotation({0.0f, spin.baseYaw + spin.angle, 0.0f});
     }
 
+    // Rotate void structure slowly on random axes around voidCenter
+    // Void structure animation (rotation + selection pulse)
+    if (m_hasVoid && m_sceneObjects) {
+        m_voidPulseTimer += deltaTime * 3.0f; // 3 Hz pulse
+        float distToVoid = glm::length(m_playerPos - m_voidCenter);
+        if (distToVoid > 150.0f) {
+            m_voidRotAngleX += m_voidRotSpeed.x * deltaTime;
+            m_voidRotAngleY += m_voidRotSpeed.y * deltaTime;
+            m_voidRotAngleZ += m_voidRotSpeed.z * deltaTime;
+        }
+
+        glm::quat rot = glm::quat(glm::radians(glm::vec3(m_voidRotAngleX, m_voidRotAngleY, m_voidRotAngleZ)));
+
+        // Filler mesh: vertices are local to voidCenter, just set rotation
+        for (auto& obj : *m_sceneObjects) {
+            if (!obj || obj->getName() != "FSVoid_Filler") continue;
+            obj->getTransform().setRotation(rot);
+        }
+
+        // File cubes: compute world position from local offset rotated around voidCenter
+        for (auto& vf : m_voidFileObjs) {
+            if (!vf.obj) continue;
+            glm::vec3 rotated = rot * vf.localOffset;
+            vf.obj->getTransform().setPosition(m_voidCenter + rotated);
+            vf.obj->getTransform().setRotation(rot);
+
+            // Selection pulse: breathe scale 1.0 → 1.15 at 3Hz
+            if (vf.obj->isSelected()) {
+                float pulse = 1.0f + 0.15f * sinf(m_voidPulseTimer * 6.2832f);
+                vf.obj->getTransform().setScale(vf.baseScale * pulse);
+            } else {
+                vf.obj->getTransform().setScale(vf.baseScale);
+            }
+        }
+    }
+
     // Emanation system: spawn expanding wireframe rings from hot folders
     for (auto& em : m_emanations) {
         em.timer += deltaTime;
@@ -493,8 +529,10 @@ void FilesystemBrowser::clearFilesystemObjects() {
     auto it = m_sceneObjects->begin();
     while (it != m_sceneObjects->end()) {
         const auto& bt = (*it) ? (*it)->getBuildingType() : "";
-        if (*it && (bt == "filesystem" || bt == "filesystem_wall" || bt == "image_desc" ||
-                    bt == "platform_wall" || bt == "platform_slab" || bt == "wall_frame" || bt == "wall_widget")) {
+        if (*it && (bt == "filesystem" || bt == "filesystem_wall" || bt == "filesystem_void" ||
+                    bt == "filesystem_void_filler" ||
+                    bt == "image_desc" || bt == "platform_wall" || bt == "platform_slab" ||
+                    bt == "wall_frame" || bt == "wall_widget")) {
             uint32_t handle = (*it)->getBufferHandle();
             if (handle != 0) {
                 handles.push_back(handle);
@@ -505,6 +543,9 @@ void FilesystemBrowser::clearFilesystemObjects() {
         }
     }
     m_modelRenderer->destroyModels(handles);
+    m_hasVoid = false;
+    m_voidFileObjs.clear();
+    m_voidCubeInfos.clear();
 }
 
 // ── Categorize ─────────────────────────────────────────────────────────
@@ -1011,6 +1052,13 @@ void FilesystemBrowser::removeModelSpin(SceneObject* obj) {
         m_modelSpins.end());
 }
 
+void FilesystemBrowser::removeVoidFileObj(SceneObject* obj) {
+    m_voidFileObjs.erase(
+        std::remove_if(m_voidFileObjs.begin(), m_voidFileObjs.end(),
+                        [obj](const VoidFileObj& v) { return v.obj == obj; }),
+        m_voidFileObjs.end());
+}
+
 void FilesystemBrowser::parseFrameType(const std::string& filename, WallFrame& frame) {
     // Extract prefix from filename to determine frame type
     struct PrefixMap {
@@ -1482,7 +1530,7 @@ void FilesystemBrowser::spawnAppRing(const glm::vec3& center, float baseY) {
                 doorObj->setBuildingType("filesystem");
                 doorObj->setDescription("Home");
                 doorObj->setDoorId("appdoor_home");
-                doorObj->setTargetLevel("fs://" + std::string(homeEnv));
+                doorObj->setTargetLevel("home://silo");
 
                 glm::vec3 doorScale = {segmentWidth * 0.5f / 2.0f, (GALLERY_WALL_HEIGHT - 1.0f) / 2.0f, 2.0f};
                 doorObj->getTransform().setPosition({doorX, doorY, doorZ});
@@ -1563,7 +1611,7 @@ void FilesystemBrowser::spawnAppRing(const glm::vec3& center, float baseY) {
             m_sceneObjects->push_back(std::move(doorObj));
         }
 
-        // Place Exit door on segment 3
+        // Place Basement door on segment 3
         if (s == 3) {
             float inset = 2.4f;
             float doorX = center.x + (radius - inset) * cosf(angle);
@@ -1571,9 +1619,47 @@ void FilesystemBrowser::spawnAppRing(const glm::vec3& center, float baseY) {
             float doorY = levelY;
 
             glm::vec4 exitColor{0.2f, 0.6f, 0.9f, 0.8f}; // blue
+            std::vector<unsigned char> texPixels;
+            renderLabel(texPixels, "Basement", FileCategory::Folder, exitColor);
             auto doorMesh = PrimitiveMeshBuilder::createCube(2.0f, exitColor);
             uint32_t doorHandle = m_modelRenderer->createModel(
-                doorMesh.vertices, doorMesh.indices, nullptr, 0, 0);
+                doorMesh.vertices, doorMesh.indices, texPixels.data(), LABEL_SIZE, LABEL_SIZE);
+
+            auto doorObj = std::make_unique<SceneObject>("FSBasementDoor");
+            doorObj->setBufferHandle(doorHandle);
+            doorObj->setIndexCount(static_cast<uint32_t>(doorMesh.indices.size()));
+            doorObj->setVertexCount(static_cast<uint32_t>(doorMesh.vertices.size()));
+            doorObj->setLocalBounds(doorMesh.bounds);
+            doorObj->setMeshData(doorMesh.vertices, doorMesh.indices);
+            doorObj->setPrimitiveType(PrimitiveType::Door);
+            doorObj->setPrimitiveSize(2.0f);
+            doorObj->setPrimitiveColor(exitColor);
+            doorObj->setBuildingType("filesystem");
+            doorObj->setDescription("Basement — descend below the silo");
+            doorObj->setDoorId("appdoor_basement");
+            doorObj->setTargetLevel("basement://enter");
+
+            glm::vec3 doorScale = {segmentWidth * 0.5f / 2.0f, (GALLERY_WALL_HEIGHT - 1.0f) / 2.0f, 2.0f};
+            doorObj->getTransform().setPosition({doorX, doorY, doorZ});
+            doorObj->getTransform().setScale(doorScale);
+            doorObj->setEulerRotation({0.0f, yawDeg, 0.0f});
+
+            m_sceneObjects->push_back(std::move(doorObj));
+        }
+
+        // Place Void door on segment 4 (next to Exit)
+        if (s == 4 && m_hasVoid) {
+            float inset = 2.4f;
+            float doorX = center.x + (radius - inset) * cosf(angle);
+            float doorZ = center.z + (radius - inset) * sinf(angle);
+            float doorY = levelY;
+
+            glm::vec4 exitColor{0.15f, 0.1f, 0.25f, 1.0f}; // dark purple
+            std::vector<unsigned char> texPixels;
+            renderLabel(texPixels, "Exit", FileCategory::Other, exitColor);
+            auto doorMesh = PrimitiveMeshBuilder::createCube(2.0f, exitColor);
+            uint32_t doorHandle = m_modelRenderer->createModel(
+                doorMesh.vertices, doorMesh.indices, texPixels.data(), LABEL_SIZE, LABEL_SIZE);
 
             auto doorObj = std::make_unique<SceneObject>("FSExitDoor");
             doorObj->setBufferHandle(doorHandle);
@@ -1585,9 +1671,9 @@ void FilesystemBrowser::spawnAppRing(const glm::vec3& center, float baseY) {
             doorObj->setPrimitiveSize(2.0f);
             doorObj->setPrimitiveColor(exitColor);
             doorObj->setBuildingType("filesystem");
-            doorObj->setDescription("Exit");
-            doorObj->setDoorId("appdoor_exit");
-            doorObj->setTargetLevel("exit://terrain");
+            doorObj->setDescription("Exit — teleport to the open world");
+            doorObj->setDoorId("appdoor_void");
+            doorObj->setTargetLevel("void://enter");
 
             glm::vec3 doorScale = {segmentWidth * 0.5f / 2.0f, (GALLERY_WALL_HEIGHT - 1.0f) / 2.0f, 2.0f};
             doorObj->getTransform().setPosition({doorX, doorY, doorZ});
@@ -1777,81 +1863,56 @@ void FilesystemBrowser::spawnBasement(const glm::vec3& center, float baseY) {
     spawnPanel({center.x - halfSize, lintelBottom, center.z},
                {1.0f, lintelHeight, doorWidth}, "eden_basement_wall");
 
-    // Floor with central square hole (access to void below)
-    // Same 16x16 hole as ceiling
+    // Solid floor slab (no hole — void is accessed via portal door)
     {
-        float floorHoleSize = 16.0f;
-        float floorHoleHalf = floorHoleSize / 2.0f;
-        float floorSlabEdge = (basementSize() - floorHoleSize) / 2.0f;
         float fy = floorY - 1.0f; // bottom edge of floor slab
-
-        // North slab
-        spawnPanel({center.x, fy, center.z + floorHoleHalf + floorSlabEdge / 2.0f},
-                   {basementSize(), 1.0f, floorSlabEdge});
-        // South slab
-        spawnPanel({center.x, fy, center.z - floorHoleHalf - floorSlabEdge / 2.0f},
-                   {basementSize(), 1.0f, floorSlabEdge});
-        // East slab
-        spawnPanel({center.x + floorHoleHalf + floorSlabEdge / 2.0f, fy, center.z},
-                   {floorSlabEdge, 1.0f, floorHoleSize});
-        // West slab
-        spawnPanel({center.x - floorHoleHalf - floorSlabEdge / 2.0f, fy, center.z},
-                   {floorSlabEdge, 1.0f, floorHoleSize});
+        spawnPanel({center.x, fy, center.z},
+                   {basementSize(), 1.0f, basementSize()});
     }
 
-    // Ceiling with central square hole (shared silo floor / basement ceiling)
-    // Hole is 16x16 units centered, ceiling slab is 1 unit thick
-    // Bottom at baseY, top at baseY + 1
-    float holeSize = 16.0f;
-    float holeHalf = holeSize / 2.0f;
-    float slabEdge = (basementSize() - holeSize) / 2.0f;
-
-    // Slab top surface must align with baseY (ringBaseY), so bottom edge at baseY - 1
+    // Solid ceiling slab (shared silo floor / basement ceiling, no hole)
+    // Slab top surface aligns with baseY (ringBaseY), so bottom edge at baseY - 1
+    // Tagged eden_basement_ceil so it's visible from both silo and basement zones
     float ceilY = baseY - 1.0f;
-
-    // North slab
-    spawnPanel({center.x, ceilY, center.z + holeHalf + slabEdge / 2.0f},
-               {basementSize(), 1.0f, slabEdge});
-    // South slab
-    spawnPanel({center.x, ceilY, center.z - holeHalf - slabEdge / 2.0f},
-               {basementSize(), 1.0f, slabEdge});
-    // East slab (between hole edges, only spanning the hole width in Z)
-    spawnPanel({center.x + holeHalf + slabEdge / 2.0f, ceilY, center.z},
-               {slabEdge, 1.0f, holeSize});
-    // West slab
-    spawnPanel({center.x - holeHalf - slabEdge / 2.0f, ceilY, center.z},
-               {slabEdge, 1.0f, holeSize});
-
-    // Punch a hole in the terrain covering the entire void footprint (128m)
-    // so the player doesn't get snapped back to terrain height while exploring
-    if (m_terrain) {
-        float voidHoleHalf = 64.0f; // 128x128 hole centered
-        m_terrain->setHoleRect(
-            center.x - voidHoleHalf, center.z - voidHoleHalf,
-            center.x + voidHoleHalf, center.z + voidHoleHalf);
-    }
+    spawnPanel({center.x, ceilY, center.z},
+               {basementSize(), 1.0f, basementSize()}, "eden_basement_ceil");
 }
 
 // ── Menger Sponge Void ────────────────────────────────────────────────
 
 void FilesystemBrowser::spawnVoid(const glm::vec3& center, float topY,
                                    const std::vector<EntryInfo>& overflowItems) {
-    if (!m_modelRenderer || !m_sceneObjects || overflowItems.empty()) return;
+    if (!m_modelRenderer || !m_sceneObjects) return;
 
     // Menger sponge where the files ARE the structure.
     // Each kept cube position is either a file object or a dark filler.
     // Removed cubes are void (tunnels you fly through).
+    // Spawned at a distant location — accessed via portal door on the app ring.
 
     struct VoidCube {
         glm::vec3 center;
         float halfSize;
     };
 
-    // Initial cube: 128m wide, below the basement floor
+    // Spawn 300m from the silo
+    float VOID_OFFSET_X = center.x + 300.0f;
+    float VOID_OFFSET_Z = center.z + 300.0f;
     float initialSize = 128.0f;
     float initialHalf = initialSize / 2.0f;
-    float voidTopY = topY - initialSize / 3.0f;
-    glm::vec3 voidCenter = {center.x, voidTopY - initialHalf, center.z};
+    float voidTopY = 580.0f; // raised 380m above terrain
+    glm::vec3 voidCenter = {VOID_OFFSET_X, voidTopY - initialHalf, VOID_OFFSET_Z};
+
+    // Store void center for teleportation
+    m_voidCenter = voidCenter;
+    m_hasVoid = true;
+
+    // Random slow rotation speeds: 2-8 degrees/sec per axis, random sign
+    auto randSpeed = []() {
+        float speed = 2.0f + (rand() % 60) / 10.0f; // 2.0 to 8.0
+        return (rand() % 2 == 0) ? speed : -speed;
+    };
+    m_voidRotSpeed = {randSpeed(), randSpeed(), randSpeed()};
+    m_voidRotAngleX = m_voidRotAngleY = m_voidRotAngleZ = 0.0f;
 
     // Subdivide twice: 27 → keep 20 → each 20 subdivides → keep 20 = 400 positions
     std::vector<VoidCube> cubes;
@@ -1889,6 +1950,12 @@ void FilesystemBrowser::spawnVoid(const glm::vec3& center, float topY,
         return a.center.y > b.center.y;
     });
 
+    // Store cube positions for wireframe rendering
+    m_voidCubeInfos.clear();
+    for (const auto& cube : cubes) {
+        m_voidCubeInfos.push_back({cube.center - voidCenter, cube.halfSize});
+    }
+
     // Fill with file objects first, then filler cubes for the rest.
     size_t itemIdx = 0;
     glm::vec4 fillerColor = {0.08f, 0.08f, 0.12f, 1.0f};
@@ -1911,10 +1978,14 @@ void FilesystemBrowser::spawnVoid(const glm::vec3& center, float topY,
             bool isFolder = (overflowItems[itemIdx].category == FileCategory::Folder);
             float meshSize = isFolder ? 2.0f : 1.5f;
             float cubeScale = s / meshSize;
-            glm::vec3 pos = cube.center;
+            glm::vec3 pos = cube.center - voidCenter; // local to voidCenter
             pos.y -= s / 2.0f; // shift down so cube centers on the sponge position
             glm::vec3 scale(cubeScale);
             spawnOneObject(overflowItems[itemIdx], itemIdx, pos, scale, 0.0f);
+            // Override: tag as void, track for rotation
+            auto* lastObj = m_sceneObjects->back().get();
+            lastObj->setBuildingType("filesystem_void");
+            m_voidFileObjs.push_back({lastObj, pos, scale});
             itemIdx++;
         } else {
             // Filler cube — add to batched mesh
@@ -1925,7 +1996,7 @@ void FilesystemBrowser::spawnVoid(const glm::vec3& center, float topY,
                 ModelVertex mv = v;
                 glm::vec3 centered = v.position;
                 centered.y -= 0.5f; // center Y
-                mv.position = cube.center + centered * s;
+                mv.position = (cube.center - voidCenter) + centered * s;
                 fillerVerts.push_back(mv);
                 fillerBounds.min = glm::min(fillerBounds.min, mv.position);
                 fillerBounds.max = glm::max(fillerBounds.max, mv.position);
@@ -1947,14 +2018,15 @@ void FilesystemBrowser::spawnVoid(const glm::vec3& center, float topY,
         obj->setPrimitiveType(PrimitiveType::Cube);
         obj->setPrimitiveSize(1.0f);
         obj->setPrimitiveColor(fillerColor);
-        obj->setBuildingType("filesystem_void");
-        obj->getTransform().setPosition({0, 0, 0});
+        obj->setBuildingType("filesystem_void_filler");
+        obj->getTransform().setPosition(voidCenter);
         obj->getTransform().setScale({1, 1, 1});
         m_sceneObjects->push_back(std::move(obj));
     }
 
     std::cout << "[Void] " << cubes.size() << " sponge positions: "
-              << itemIdx << " files, " << (cubes.size() - itemIdx) << " fillers" << std::endl;
+              << itemIdx << " files, " << (cubes.size() - itemIdx) << " fillers"
+              << " at (" << voidCenter.x << ", " << voidCenter.y << ", " << voidCenter.z << ")" << std::endl;
 }
 
 // ── Spawn Objects ──────────────────────────────────────────────────────
@@ -2136,6 +2208,14 @@ void FilesystemBrowser::spawnObjects(const std::string& dirPath) {
         }
     }
 
+    // Spawn Menger sponge void for overflow items at a distant location
+    // Must happen before spawnAppRing so the Void door knows whether to appear
+    for (auto& e : others) overflowItems.push_back(std::move(e));
+    others.clear();
+    // Always spawn the void structure (even with 0 overflow items — all filler cubes)
+    // so the Void door is always available on the app ring
+    spawnVoid(center, 0.0f /*unused — void picks its own location*/, overflowItems);
+
     // Spawn app launcher ring at level 0 (base of silo, just below platform)
     spawnAppRing(center, ringBaseY);
     spawnLevel = spawnGalleryRing(folders, center, ringBaseY, spawnLevel);
@@ -2220,16 +2300,7 @@ void FilesystemBrowser::spawnObjects(const std::string& dirPath) {
         }
     }
 
-    // Silo floor is now the basement ceiling (shared geometry with hole) — spawned in spawnBasement()
-
-    // Spawn Menger sponge void for overflow items below the basement
-    // Include "others" category in overflow too (not shown in silo)
-    for (auto& e : others) overflowItems.push_back(std::move(e));
-    if (!overflowItems.empty()) {
-        // Void starts below the basement floor
-        float basementFloorY = baseY - basementHeight();
-        spawnVoid(center, basementFloorY, overflowItems);
-    }
+    // Silo floor is now the basement ceiling (solid) — spawned in spawnBasement()
 
     m_platformGrid.loadAndBuild(dirPath, center, m_platformY,
                                 GALLERY_WALL_HEIGHT, m_siloConfig.wallColor);
@@ -3084,6 +3155,41 @@ FilesystemBrowser::getEmanationRenderData() const {
     }
 
     return batches;
+}
+
+std::vector<glm::vec3> FilesystemBrowser::getVoidWireframeLines() const {
+    std::vector<glm::vec3> lines;
+    if (!m_hasVoid || m_voidCubeInfos.empty()) return lines;
+
+    glm::quat rot = glm::quat(glm::radians(glm::vec3(m_voidRotAngleX, m_voidRotAngleY, m_voidRotAngleZ)));
+
+    // 12 edges per cube, 2 points per edge = 24 vec3 per cube
+    lines.reserve(m_voidCubeInfos.size() * 24);
+
+    for (const auto& ci : m_voidCubeInfos) {
+        float h = ci.halfSize;
+        // 8 corners of the cube (centered on localCenter)
+        glm::vec3 corners[8] = {
+            {-h, -h, -h}, {+h, -h, -h}, {+h, +h, -h}, {-h, +h, -h},
+            {-h, -h, +h}, {+h, -h, +h}, {+h, +h, +h}, {-h, +h, +h}
+        };
+        // Transform: rotate around voidCenter, then translate to world
+        glm::vec3 world[8];
+        for (int i = 0; i < 8; i++) {
+            world[i] = m_voidCenter + rot * (ci.localCenter + corners[i]);
+        }
+        // 12 edges
+        static const int edges[12][2] = {
+            {0,1},{1,2},{2,3},{3,0},  // front face
+            {4,5},{5,6},{6,7},{7,4},  // back face
+            {0,4},{1,5},{2,6},{3,7}   // connecting edges
+        };
+        for (auto& e : edges) {
+            lines.push_back(world[e[0]]);
+            lines.push_back(world[e[1]]);
+        }
+    }
+    return lines;
 }
 
 } // namespace eden
