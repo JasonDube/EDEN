@@ -65,6 +65,7 @@ public:
     float getRingBaseY() const { return m_ringBaseY; }
     float getBasementHeight() const { return basementHeight(); }
     float getBasementFloorY() const { return m_basementBaseY - basementHeight(); }
+    float getCeilingTopY() const { return m_basementBaseY - 0.5f; } // top surface of basement ceiling slab
     bool hasVoid() const { return m_hasVoid; }
     const glm::vec3& getVoidCenter() const { return m_voidCenter; }
 
@@ -121,6 +122,9 @@ public:
 
     // Spawn a file object onto a wall frame (uses frame's exact position/size/yaw)
     void spawnFileAtFrame(const std::string& filePath, SceneObject* frame);
+
+    // Re-spawn files for all occupied wall frames (call after spawnFrameObjects)
+    void respawnFrameFiles();
 
     // Spawn a file as a functional freestanding object at a world position (Ctrl+Number)
     void spawnFileAtPosition(const std::string& filePath, const glm::vec3& position);

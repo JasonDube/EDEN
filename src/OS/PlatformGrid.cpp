@@ -579,8 +579,6 @@ void PlatformGridBuilder::spawnFrameObjects(const glm::vec3& center, float baseY
 
     int frameNum = 0;
     for (auto& fr : m_grid.frames) {
-        // Skip frames that have a file placed on them
-        if (!fr.filePath.empty()) continue;
 
         // Color-code by frame type
         glm::vec4 frameColor;
@@ -635,7 +633,7 @@ void PlatformGridBuilder::clearFrames() {
     std::vector<uint32_t> handles;
     auto it = m_sceneObjects->begin();
     while (it != m_sceneObjects->end()) {
-        if (*it && (*it)->getBuildingType() == "wall_frame") {
+        if (*it && ((*it)->getBuildingType() == "wall_frame" || (*it)->getBuildingType() == "wall_widget")) {
             uint32_t h = (*it)->getBufferHandle();
             if (h) handles.push_back(h);
             it = m_sceneObjects->erase(it);
@@ -683,9 +681,7 @@ void PlatformGridBuilder::loadAndBuild(const std::string& folderPath,
     // Platform Y is fixed — just record it for reference
     m_grid.savedPlatformY = baseY;
 
-    // Always spawn platform slab
-    float holeHalfSize = 8.0f; // matching basement door opening half-width
-    spawnPlatform(center, baseY, holeHalfSize, wallHeight);
+    // No platform slab — the basement floor already exists as eden_basement
 
     // Build walls if any are set
     bool hasWalls = false;

@@ -122,6 +122,28 @@ void Camera::resolveAABBCollision(const glm::vec3& oldPos, glm::vec3& newPos) {
             }
         }
     }
+
+    // Cylinder collision (silo shell etc.)
+    for (const auto& cyl : m_collisionCylinders) {
+        float feetY = newPos.y - m_eyeHeight;
+        float headY = newPos.y + 0.2f;
+        if (feetY > cyl.maxY || headY < cyl.minY) continue;
+
+        float dx = newPos.x - cyl.centerX;
+        float dz = newPos.z - cyl.centerZ;
+        float distSq = dx * dx + dz * dz;
+        float pushR = cyl.radius + m_collisionRadius;
+
+        if (distSq < pushR * pushR) {
+            float dist = sqrtf(distSq);
+            if (dist < 0.001f) { newPos.x += pushR; continue; }
+            // Push outward radially
+            float nx = dx / dist;
+            float nz = dz / dist;
+            newPos.x = cyl.centerX + nx * pushR;
+            newPos.z = cyl.centerZ + nz * pushR;
+        }
+    }
 }
 
 void Camera::updateMovement(float deltaTime, bool forward, bool backward, bool left, bool right,

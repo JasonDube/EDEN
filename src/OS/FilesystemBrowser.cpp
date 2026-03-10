@@ -1256,17 +1256,19 @@ void FilesystemBrowser::spawnFileAtFrame(const std::string& filePath, SceneObjec
     bool isModel = (cat == FileCategory::Model3D);
     bool isDoor = (cat == FileCategory::Folder);
 
-    // Cube mesh is 1.5 units, so divide by 1.5 to get actual meters
+    // Door mesh is 2.0 units, other meshes are 1.5 units.
+    // Scale so the object fills the frame (s meters square) exactly.
+    float meshSize = isDoor ? 2.0f : 1.5f;
+    float fit = s / meshSize;
     glm::vec3 scale;
-    if (isDoor) {
-        scale = {s * 0.55f / 1.5f, s / 1.5f, 2.0f};
-    } else if (isModel) {
-        float uniformSize = s * 0.8f / 1.5f;
-        scale = glm::vec3(uniformSize);
+    if (isModel) {
+        // 3D models: uniform scale to fit frame
+        scale = glm::vec3(s * 0.8f / 1.5f);
     } else if (isFloorFrame) {
-        scale = {s / 1.5f, 0.03f, s / 1.5f}; // flat on floor
+        scale = {fit, 0.03f, fit};
     } else {
-        scale = {s / 1.5f, s / 1.5f, 0.03f};
+        // Wall frame: width and height fill the frame, thin depth
+        scale = {fit, fit, 0.1f};
     }
 
     // Offset slightly in front of frame surface
@@ -1291,6 +1293,11 @@ void FilesystemBrowser::spawnFileAtFrame(const std::string& filePath, SceneObjec
 
     spawnOneObject(entry, m_sceneObjects->size(), spawnPos, scale, frameYaw);
 
+    // Re-tag as wall_widget so zone visibility keeps it visible in both Silo and Basement
+    if (!m_sceneObjects->empty() && m_sceneObjects->back()) {
+        m_sceneObjects->back()->setBuildingType("wall_widget");
+    }
+
     // For floor models: lift by half their actual height so they sit on the surface
     if (isFloorFrame && isModel && !m_sceneObjects->empty()) {
         auto& spawned = m_sceneObjects->back();
@@ -1308,6 +1315,49 @@ void FilesystemBrowser::spawnFileAtFrame(const std::string& filePath, SceneObjec
     frame->getTransform().setScale({0, 0, 0});
 
     std::cout << "[FilesystemBrowser] Placed " << name << " at wall frame" << std::endl;
+}
+
+void FilesystemBrowser::respawnFrameFiles() {
+    if (!m_modelRenderer || !m_sceneObjects) return;
+
+    auto& frames = m_platformGrid.grid().frames;
+    int totalFrames = 0, occupiedFrames = 0, matched = 0;
+    for (auto& fr : frames) {
+        totalFrames++;
+        if (fr.filePath.empty()) continue;
+        occupiedFrames++;
+
+        // Find the corresponding frame SceneObject by matching position
+        SceneObject* frameObj = nullptr;
+        for (auto& obj : *m_sceneObjects) {
+            if (!obj || obj->getBuildingType() != "wall_frame") continue;
+            glm::vec3 pos = obj->getTransform().getPosition();
+            float dx = pos.x - fr.worldX;
+            float dy = pos.y - fr.worldY;
+            float dz = pos.z - fr.worldZ;
+            if (dx * dx + dy * dy + dz * dz < 0.5f) {
+                frameObj = obj.get();
+                break;
+            }
+        }
+
+        if (frameObj) {
+            matched++;
+            printf("[respawnFrameFiles] Respawning '%s' at frame (%.1f, %.1f, %.1f)\n",
+                   fr.filePath.c_str(), fr.worldX, fr.worldY, fr.worldZ);
+            spawnFileAtFrame(fr.filePath, frameObj);
+
+            // Apply saved spin pause state for 3D models
+            if (fr.spinPaused && !m_modelSpins.empty()) {
+                m_modelSpins.back().paused = true;
+            }
+        } else {
+            printf("[respawnFrameFiles] NO frame SceneObject found for '%s' at (%.1f, %.1f, %.1f)\n",
+                   fr.filePath.c_str(), fr.worldX, fr.worldY, fr.worldZ);
+        }
+    }
+    printf("[respawnFrameFiles] %d total frames, %d occupied, %d matched\n",
+           totalFrames, occupiedFrames, matched);
 }
 
 void FilesystemBrowser::spawnFileAtPosition(const std::string& filePath, const glm::vec3& position) {
@@ -1530,7 +1580,11 @@ void FilesystemBrowser::spawnAppRing(const glm::vec3& center, float baseY) {
                 doorObj->setBuildingType("filesystem");
                 doorObj->setDescription("Home");
                 doorObj->setDoorId("appdoor_home");
-                doorObj->setTargetLevel("home://silo");
+                {
+                    const char* home = getenv("HOME");
+                    std::string homePath = home ? home : "/";
+                    doorObj->setTargetLevel("fs://" + homePath);
+                }
 
                 glm::vec3 doorScale = {segmentWidth * 0.5f / 2.0f, (GALLERY_WALL_HEIGHT - 1.0f) / 2.0f, 2.0f};
                 doorObj->getTransform().setPosition({doorX, doorY, doorZ});
@@ -1821,47 +1875,22 @@ void FilesystemBrowser::spawnBasement(const glm::vec3& center, float baseY) {
     float wallBottom = floorY - 1.0f;
     float wallHeight = baseY - wallBottom;
 
-    // 4 walls — each split into 3 panels around a centered door opening
-    // Door opening: 16 units wide, 14 units tall from floor
-    const float doorWidth  = 16.0f;
-    const float doorHeight = 14.0f;
-    const float doorHalfW  = doorWidth / 2.0f;
-    // Each side segment: (basementSize() - doorWidth) / 2 = 20
-    const float segWidth   = (basementSize() - doorWidth) / 2.0f;
-    const float lintelBottom = floorY - 1.0f + doorHeight; // wallBottom + doorHeight
-    const float lintelHeight = wallHeight - doorHeight;
-
+    // 4 solid walls — no door openings
     // North wall (positive Z face, stretches along X)
-    spawnPanel({center.x - doorHalfW - segWidth / 2.0f, wallBottom, center.z + halfSize},
-               {segWidth, wallHeight, 1.0f}, "eden_basement_wall");
-    spawnPanel({center.x + doorHalfW + segWidth / 2.0f, wallBottom, center.z + halfSize},
-               {segWidth, wallHeight, 1.0f}, "eden_basement_wall");
-    spawnPanel({center.x, lintelBottom, center.z + halfSize},
-               {doorWidth, lintelHeight, 1.0f}, "eden_basement_wall");
+    spawnPanel({center.x, wallBottom, center.z + halfSize},
+               {basementSize(), wallHeight, 1.0f}, "eden_basement_wall");
 
     // South wall (negative Z face, stretches along X)
-    spawnPanel({center.x - doorHalfW - segWidth / 2.0f, wallBottom, center.z - halfSize},
-               {segWidth, wallHeight, 1.0f}, "eden_basement_wall");
-    spawnPanel({center.x + doorHalfW + segWidth / 2.0f, wallBottom, center.z - halfSize},
-               {segWidth, wallHeight, 1.0f}, "eden_basement_wall");
-    spawnPanel({center.x, lintelBottom, center.z - halfSize},
-               {doorWidth, lintelHeight, 1.0f}, "eden_basement_wall");
+    spawnPanel({center.x, wallBottom, center.z - halfSize},
+               {basementSize(), wallHeight, 1.0f}, "eden_basement_wall");
 
     // East wall (positive X face, stretches along Z)
-    spawnPanel({center.x + halfSize, wallBottom, center.z - doorHalfW - segWidth / 2.0f},
-               {1.0f, wallHeight, segWidth}, "eden_basement_wall");
-    spawnPanel({center.x + halfSize, wallBottom, center.z + doorHalfW + segWidth / 2.0f},
-               {1.0f, wallHeight, segWidth}, "eden_basement_wall");
-    spawnPanel({center.x + halfSize, lintelBottom, center.z},
-               {1.0f, lintelHeight, doorWidth}, "eden_basement_wall");
+    spawnPanel({center.x + halfSize, wallBottom, center.z},
+               {1.0f, wallHeight, basementSize()}, "eden_basement_wall");
 
     // West wall (negative X face, stretches along Z)
-    spawnPanel({center.x - halfSize, wallBottom, center.z - doorHalfW - segWidth / 2.0f},
-               {1.0f, wallHeight, segWidth}, "eden_basement_wall");
-    spawnPanel({center.x - halfSize, wallBottom, center.z + doorHalfW + segWidth / 2.0f},
-               {1.0f, wallHeight, segWidth}, "eden_basement_wall");
-    spawnPanel({center.x - halfSize, lintelBottom, center.z},
-               {1.0f, lintelHeight, doorWidth}, "eden_basement_wall");
+    spawnPanel({center.x - halfSize, wallBottom, center.z},
+               {1.0f, wallHeight, basementSize()}, "eden_basement_wall");
 
     // Solid floor slab (no hole — void is accessed via portal door)
     {
@@ -2302,77 +2331,13 @@ void FilesystemBrowser::spawnObjects(const std::string& dirPath) {
 
     // Silo floor is now the basement ceiling (solid) — spawned in spawnBasement()
 
-    m_platformGrid.loadAndBuild(dirPath, center, m_platformY,
-                                GALLERY_WALL_HEIGHT, m_siloConfig.wallColor);
+    // Build platform grid in the basement (walls, frames on basement walls/floor)
+    float basementFloorY = m_basementBaseY - basementHeight();
+    m_platformGrid.loadAndBuild(dirPath, center, basementFloorY,
+                                basementHeight(), m_siloConfig.wallColor);
 
-    // Spawn files for occupied wall frames
-    for (const auto& fr : m_platformGrid.grid().frames) {
-        if (fr.filePath.empty()) continue;
-        if (!std::filesystem::exists(fr.filePath)) continue;
-        namespace fs = std::filesystem;
-        fs::path p(fr.filePath);
-        std::string name = p.filename().string();
-        fs::directory_entry dirEntry(p);
-        FileCategory cat = categorize(dirEntry);
-        EntryInfo entry{name, fr.filePath, cat};
-
-        float s = static_cast<float>(fr.size);
-        bool isModel = (cat == FileCategory::Model3D);
-        bool isDoor = (cat == FileCategory::Folder);
-        bool isFloor = (fr.normalX == 0.0f && fr.normalZ == 0.0f);
-
-        // Cube mesh is 1.5 units, so divide by 1.5 to get actual meters
-        glm::vec3 scale;
-        if (isDoor) {
-            scale = {s * 0.55f / 1.5f, s / 1.5f, 2.0f};
-        } else if (isModel) {
-            float uniformSize = s * 0.8f / 1.5f;
-            scale = glm::vec3(uniformSize);
-        } else if (isFloor) {
-            scale = {s / 1.5f, 0.03f, s / 1.5f};
-        } else {
-            scale = {s / 1.5f, s / 1.5f, 0.03f};
-        }
-
-        float yawRad = fr.yawDeg * static_cast<float>(M_PI) / 180.0f;
-        glm::vec3 spawnPos;
-        if (isFloor) {
-            spawnPos = {fr.worldX, fr.worldY, fr.worldZ};
-            if (!isModel) {
-                spawnPos.y += 0.15f;
-            }
-        } else {
-            float frameY = fr.worldY;
-            if (isModel) {
-                frameY += s * 0.5f;
-            }
-            spawnPos = {fr.worldX + sinf(yawRad) * 0.15f,
-                        frameY,
-                        fr.worldZ + cosf(yawRad) * 0.15f};
-        }
-
-        if (!m_cancelExtraction) {
-            m_cancelExtraction = std::make_shared<std::atomic<bool>>(false);
-        }
-        spawnOneObject(entry, m_sceneObjects->size(), spawnPos, scale, fr.yawDeg);
-
-        // For floor models: lift by half their actual height so they sit on the surface
-        if (isFloor && isModel && !m_sceneObjects->empty()) {
-            auto& spawned = m_sceneObjects->back();
-            if (spawned) {
-                AABB wb = spawned->getWorldBounds();
-                float modelHeight = wb.max.y - wb.min.y;
-                glm::vec3 pos = spawned->getTransform().getPosition();
-                pos.y = fr.worldY + modelHeight * 0.5f;
-                spawned->getTransform().setPosition(pos);
-            }
-        }
-
-        // Apply saved spin pause state
-        if (fr.spinPaused && isModel && !m_modelSpins.empty()) {
-            m_modelSpins.back().paused = true;
-        }
-    }
+    // Spawn files for occupied wall frames (reuses spawnFileAtFrame for consistent sizing/hiding)
+    respawnFrameFiles();
 
     // Place remaining "other" entries on the silo floor
     if (!others.empty()) {

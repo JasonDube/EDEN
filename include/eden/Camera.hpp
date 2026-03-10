@@ -106,7 +106,15 @@ public:
     void addCollisionBox(const glm::vec3& bmin, const glm::vec3& bmax) {
         m_collisionBoxes.push_back({bmin, bmax});
     }
-    void clearCollisionBoxes() { m_collisionBoxes.clear(); }
+    void clearCollisionBoxes() { m_collisionBoxes.clear(); m_collisionCylinders.clear(); }
+
+    // Cylinder collision (e.g. silo shell)
+    struct CollisionCylinder {
+        float centerX, centerZ, radius, minY, maxY;
+    };
+    void addCollisionCylinder(float cx, float cz, float radius, float minY, float maxY) {
+        m_collisionCylinders.push_back({cx, cz, radius, minY, maxY});
+    }
 
 private:
     void resolveAABBCollision(const glm::vec3& oldPos, glm::vec3& newPos);
@@ -152,6 +160,7 @@ private:
 
     // AABB wall collision boxes
     std::vector<CollisionBox> m_collisionBoxes;
+    std::vector<CollisionCylinder> m_collisionCylinders;
 };
 
 } // namespace eden
