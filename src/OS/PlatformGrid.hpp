@@ -17,7 +17,8 @@ enum class FrameType {
     Button,     // btn_
     Checkbox,   // ckbx_
     Slider,     // sldr_
-    Log         // log_
+    Log,        // log_
+    Relay       // "relay" anywhere in filename
 };
 
 struct WallFrame {
@@ -26,15 +27,25 @@ struct WallFrame {
     float normalX = 0, normalZ = 1;            // outward face normal (which side of wall)
     float yawDeg = 0;                          // rotation to face outward
     std::string filePath;                       // "" = empty, path = occupied
+    std::string texturePath;                    // custom door image path (optional)
     FrameType frameType = FrameType::None;
     std::string machineName;                    // e.g. "hunyuan3d" for mach_ frames
     std::string paramName;                      // e.g. "image" for inp_image.png
     bool spinPaused = false;                    // true = model rotation stopped by user
+    float spinAngle = 0.0f;                     // persisted rotation angle (degrees)
 };
 
 struct WireConnection {
     int fromFrame = -1;   // index into PlatformGrid::frames
     int toFrame = -1;
+    std::string fromCP;   // control point name on source widget (e.g. "wire_out_0")
+    std::string toCP;     // control point name on dest widget (e.g. "wire_in_0")
+};
+
+struct FileSlotAssignment {
+    int frameIndex = -1;        // which frame the widget is on
+    std::string cpName;         // e.g. "file_slot_0A" (the A corner identifies the slot)
+    std::string filePath;       // assigned file path
 };
 
 struct BrushWall {
@@ -51,6 +62,7 @@ struct PlatformGrid {
     std::vector<bool> walls;  // width*depth, true = wall cell
     std::vector<WallFrame> frames; // user-placed frames on wall surfaces
     std::vector<WireConnection> wires; // connections between frames
+    std::vector<FileSlotAssignment> fileSlots; // file_slot CP assignments
     std::vector<BrushWall> brushWalls; // user-drawn walls (wall brush mode)
 
     PlatformGrid() : walls(width * depth, false) {}
@@ -99,6 +111,7 @@ public:
 
     // Spawn/clear wall frame objects
     void spawnFrameObjects(const glm::vec3& center, float baseY);
+    void spawnSingleFrame(int frameIndex);  // incremental — add one frame without rebuilding all
     void clearFrames();
 
     // Save/load grid config for a folder path

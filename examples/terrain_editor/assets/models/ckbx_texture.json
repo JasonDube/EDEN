@@ -1,6 +1,0 @@
-{
-    "widget": "checkbox",
-    "param": "texture",
-    "default": true,
-    "description": "Toggle texture generation on/off"
-}

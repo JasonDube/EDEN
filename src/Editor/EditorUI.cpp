@@ -111,8 +111,11 @@ void EditorUI::render() {
     bool inBuildMode = (m_brushMode == BrushMode::WallDraw || m_brushMode == BrushMode::Foundation);
     bool hasBuildingSelected = false;
     if (m_selectedObjectIndex >= 0 && m_selectedObjectIndex < static_cast<int>(m_sceneObjects.size())) {
-        const auto& name = m_sceneObjects[m_selectedObjectIndex]->getName();
-        hasBuildingSelected = (name.find("Building_") == 0 || name.find("Foundation_") == 0);
+        const auto& obj = m_sceneObjects[m_selectedObjectIndex];
+        const auto& name = obj->getName();
+        const auto& bt = obj->getBuildingType();
+        hasBuildingSelected = (name.find("Building_") == 0 || name.find("Foundation_") == 0 ||
+                               bt == "platform_slab" || bt == "platform_wall" || bt == "wall_frame");
     }
     if (m_showBuildingTextures || inBuildMode || hasBuildingSelected) {
         renderBuildingTextureWindow();
@@ -136,6 +139,9 @@ void EditorUI::renderMenuBar() {
             }
             if (ImGui::MenuItem("Save...", "Ctrl+S")) {
                 if (m_onFileSave) m_onFileSave();
+            }
+            if (ImGui::MenuItem("Set as Default Project")) {
+                if (m_onSetDefaultProject) m_onSetDefaultProject();
             }
             ImGui::Separator();
             if (ImGui::MenuItem("Export Terrain OBJ...")) {
@@ -940,7 +946,7 @@ void EditorUI::renderModelsWindow() {
             ImGui::Text("Being Type");
             ImGui::PushItemWidth(-1);
             int currentType = static_cast<int>(selected->getBeingType());
-            const char* beingTypes[] = { "Static", "Human", "Clone", "Robot", "Android", "Cyborg", "Alien", "Eve", "AI Architect", "AlgoBot", "EDEN Companion" };
+            const char* beingTypes[] = { "Static", "Human", "Clone", "Robot", "Android", "Cyborg", "Alien", "Eve", "AI Architect", "AlgoBot", "EDEN Companion", "Interaction" };
             if (ImGui::Combo("##beingtype", &currentType, beingTypes, IM_ARRAYSIZE(beingTypes))) {
                 selected->setBeingType(static_cast<BeingType>(currentType));
             }
@@ -2724,68 +2730,92 @@ void EditorUI::renderAINodesWindow() {
 
 void EditorUI::renderHelpWindow() {
     ImGui::SetNextWindowSize(ImVec2(400, 500), ImGuiCond_FirstUseEver);
-    if (!ImGui::Begin("Keyboard Shortcuts", &m_showHelp)) {
+    ImGui::SetNextWindowSize(ImVec2(520, 680), ImGuiCond_FirstUseEver);
+    if (!ImGui::Begin("EDEN Help  (F1)", &m_showHelp)) {
         ImGui::End();
         return;
     }
 
-    ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.2f, 1.0f), "Camera Movement");
-    ImGui::Separator();
-    ImGui::BulletText("W/A/S/D - Move forward/left/back/right");
-    ImGui::BulletText("Space - Move up (fly mode)");
-    ImGui::BulletText("Left Shift - Move down (fly mode)");
-    ImGui::BulletText("Left Ctrl - Speed boost");
-    ImGui::BulletText("Right Mouse + Drag - Look around");
+    if (ImGui::CollapsingHeader("Movement & Camera", ImGuiTreeNodeFlags_DefaultOpen)) {
+        ImGui::BulletText("W/A/S/D        Move forward/left/back/right");
+        ImGui::BulletText("Space          Jump (walk) / Fly up (fly mode)");
+        ImGui::BulletText("Double-Space   Toggle fly / walk mode");
+        ImGui::BulletText("Left Ctrl      Sprint (hold for speed boost)");
+        ImGui::BulletText("Mouse          Look around");
+        ImGui::BulletText("Alt+Right-Click  Toggle cursor visibility");
+    }
 
-    ImGui::Spacing();
-    ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.2f, 1.0f), "File Operations");
-    ImGui::Separator();
-    ImGui::BulletText("Ctrl+N - New level");
-    ImGui::BulletText("Ctrl+O - Open level");
-    ImGui::BulletText("Ctrl+S - Save level");
+    if (ImGui::CollapsingHeader("Filesystem Navigation (Play Mode)", ImGuiTreeNodeFlags_DefaultOpen)) {
+        ImGui::BulletText("F9             Open/close EDEN OS (filesystem silo)");
+        ImGui::BulletText("Right-Click    Navigate through doors/folders");
+        ImGui::BulletText("Left-Click     Select objects (does NOT navigate)");
+        ImGui::BulletText("Alt+Right-Click  Context menu (Rename/Copy/Cut/Delete)");
+        ImGui::BulletText("Home           Teleport to silo floor");
+        ImGui::BulletText("PageUp/Down    Teleport to platform top / silo floor");
+    }
 
-    ImGui::Spacing();
-    ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.2f, 1.0f), "Transform Tools");
-    ImGui::Separator();
-    ImGui::BulletText("Q - Select mode");
-    ImGui::BulletText("W - Move mode");
-    ImGui::BulletText("E - Rotate mode");
-    ImGui::BulletText("R - Scale mode");
+    if (ImGui::CollapsingHeader("Hotbar & Inventory (Play Mode)")) {
+        ImGui::BulletText("1-0            Select hotbar slot / pick up object");
+        ImGui::BulletText("Shift+1-0      Copy selected to hotbar (original stays)");
+        ImGui::BulletText("Ctrl+1-0       Place from hotbar onto surface");
+        ImGui::BulletText("Drop on Frame  Select frame, press number key to place");
+        ImGui::BulletText("Delete         Remove file from frame (doesn't trash)");
+        ImGui::BulletText("Delete (silo)  Trash selected file to recycle bin");
+    }
 
-    ImGui::Spacing();
-    ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.2f, 1.0f), "Editor");
-    ImGui::Separator();
-    ImGui::BulletText("F5 - Toggle play mode");
-    ImGui::BulletText("Delete - Delete selected object");
-    ImGui::BulletText("Ctrl+D - Duplicate selected object");
-    ImGui::BulletText("F - Focus camera on selected object");
-    ImGui::BulletText("Enter - Send message (during conversation)");
-    ImGui::BulletText("Escape - End conversation / Exit play mode");
+    if (ImGui::CollapsingHeader("Basement & Frames (Play Mode)")) {
+        ImGui::BulletText("Left-Click     Place wall frames on basement walls/floor");
+        ImGui::BulletText("Right-Click    Delete wall (wall brush mode)");
+        ImGui::BulletText("M              Toggle zone map / platform grid editor");
+        ImGui::BulletText("Arrow Keys     Nudge selected platform wall");
+        ImGui::BulletText("Ctrl+Arrows    Rotate selected wall (15 deg)");
+        ImGui::BulletText("T              Wire mode (connect two frames)");
+        ImGui::Separator();
+        ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.0f, 1.0f), "Machines:");
+        ImGui::BulletText("Place *_machine.lime on frame → auto-creates I/O frames");
+        ImGui::BulletText("Place image on blue input frame");
+        ImGui::BulletText("E              Activate machine (aim at orange frame)");
+        ImGui::TextColored(ImVec4(0.5f, 0.8f, 1.0f, 1.0f), "Algobots:");
+        ImGui::BulletText("Place *robot* model on frame → assign job & territory");
+    }
 
-    ImGui::Spacing();
-    ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.2f, 1.0f), "Object Snapping");
-    ImGui::Separator();
-    ImGui::BulletText("C - Snap selected object to terrain surface");
-    ImGui::BulletText("X - Snap horizontal edges (left/right/front/back)");
-    ImGui::BulletText("Y - Snap vertical (stack on top/below)");
-    ImGui::BulletText("Z - Full 3D surface alignment");
+    if (ImGui::CollapsingHeader("AI & Communication (Play Mode)")) {
+        ImGui::BulletText("V (hold)       Push-to-Talk (record voice)");
+        ImGui::BulletText("E              Talk to nearby NPC");
+        ImGui::BulletText("/              Quick chat (type to nearest NPC)");
+        ImGui::BulletText("Tab            Toggle world chat history");
+        ImGui::BulletText("Enter          Send message (in conversation)");
+        ImGui::BulletText("Escape         End conversation");
+    }
 
-    ImGui::Spacing();
-    ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.2f, 1.0f), "Terrain Editing");
-    ImGui::Separator();
-    ImGui::BulletText("Left Mouse - Apply brush (when tools enabled)");
-    ImGui::BulletText("[ / ] - Decrease/Increase brush size");
-    ImGui::BulletText("1-9 - Select brush mode");
+    if (ImGui::CollapsingHeader("Image & Focus Mode (Play Mode)")) {
+        ImGui::BulletText("F              Enter/exit panel focus mode");
+        ImGui::BulletText("[ / ]          Brush size (segmentation erase/restore)");
+        ImGui::BulletText("Ctrl+`         Toggle terminal");
+    }
 
-    ImGui::Spacing();
-    ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.2f, 1.0f), "AI Nodes");
-    ImGui::Separator();
-    ImGui::BulletText("N - Drop AI node below camera");
+    if (ImGui::CollapsingHeader("Editor Mode (F5 to toggle)")) {
+        ImGui::BulletText("F5             Toggle play/edit mode");
+        ImGui::BulletText("Q/W/E/R        Select / Move / Rotate / Scale tool");
+        ImGui::BulletText("F              Focus camera on selected object");
+        ImGui::BulletText("Delete         Delete selected object");
+        ImGui::BulletText("Ctrl+D         Duplicate selected object");
+        ImGui::BulletText("C              Snap to terrain surface");
+        ImGui::BulletText("X              Snap horizontal edges");
+        ImGui::BulletText("Y              Snap vertical (stack)");
+        ImGui::BulletText("Z              Full 3D surface snap");
+        ImGui::BulletText("G              Group selected objects");
+        ImGui::BulletText("N              Place AI node below camera");
+        ImGui::BulletText("Ctrl+N/O/S     New / Open / Save level");
+    }
 
-    ImGui::Spacing();
-    ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.2f, 1.0f), "Help");
-    ImGui::Separator();
-    ImGui::BulletText("F1 - Toggle this help window");
+    if (ImGui::CollapsingHeader("Debug & Misc")) {
+        ImGui::BulletText("F1             Toggle this help window");
+        ImGui::BulletText("F3             Toggle debug visuals");
+        ImGui::BulletText("F10            Toggle AABB hitbox visualization");
+        ImGui::BulletText("P              Toggle planet info panel");
+        ImGui::BulletText("Ctrl+1         Toggle AI context viewer");
+    }
 
     ImGui::End();
 }
@@ -3591,9 +3621,9 @@ void EditorUI::renderBuildingTextureWindow() {
 
     // Apply button — supports face selection (Alt+click) or single object selection
     bool hasFaceSelection = !m_faceSelectedIndices.empty() && m_selectedBuildingTexture >= 0;
-    bool hasSingleSelection = m_selectedBuildingTexture >= 0 &&
-                              m_selectedObjectIndex >= 0 &&
-                              m_selectedObjectIndex < static_cast<int>(m_sceneObjects.size());
+    bool hasObjectSelected = m_selectedObjectIndex >= 0 &&
+                             m_selectedObjectIndex < static_cast<int>(m_sceneObjects.size());
+    bool hasTexture = m_selectedBuildingTexture >= 0;
 
     if (hasFaceSelection) {
         std::string label = "Apply to " + std::to_string(m_faceSelectedIndices.size()) + " face-selected blocks";
@@ -3603,10 +3633,13 @@ void EditorUI::renderBuildingTextureWindow() {
                                      m_buildingTexScaleU, m_buildingTexScaleV);
             }
         }
-    } else if (hasSingleSelection) {
-        const auto& objName = m_sceneObjects[m_selectedObjectIndex]->getName();
-        bool isBuildingPart = (objName.find("Building_") == 0 || objName.find("Foundation_") == 0);
-        if (isBuildingPart) {
+    } else if (hasObjectSelected) {
+        const auto& selObj = m_sceneObjects[m_selectedObjectIndex];
+        const auto& objName = selObj->getName();
+        const auto& objBt = selObj->getBuildingType();
+        bool isBuildingPart = (objName.find("Building_") == 0 || objName.find("Foundation_") == 0 ||
+                               objBt == "platform_slab" || objBt == "platform_wall" || objBt == "wall_frame");
+        if (isBuildingPart && hasTexture) {
             if (ImGui::Button("Apply to Selected", ImVec2(-1, 0))) {
                 if (m_onApplyBuildingTexture) {
                     m_onApplyBuildingTexture(m_sceneObjects[m_selectedObjectIndex],
@@ -3614,6 +3647,8 @@ void EditorUI::renderBuildingTextureWindow() {
                                             m_buildingTexScaleU, m_buildingTexScaleV);
                 }
             }
+        } else if (isBuildingPart) {
+            ImGui::TextDisabled("Click a texture swatch above to apply");
         } else {
             ImGui::TextDisabled("Select a building part to apply");
         }

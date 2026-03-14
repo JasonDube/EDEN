@@ -89,6 +89,18 @@ bool PlatformGridBuilder::saveConfig(const std::string& folderPath) {
         if (fr.spinPaused) {
             f << ",\"sp\":1";
         }
+        if (fr.spinAngle != 0.0f) {
+            f << ",\"sa\":" << fr.spinAngle;
+        }
+        if (!fr.texturePath.empty()) {
+            f << ",\"tex\":\"";
+            for (char c : fr.texturePath) {
+                if (c == '"') f << "\\\"";
+                else if (c == '\\') f << "\\\\";
+                else f << c;
+            }
+            f << "\"";
+        }
         f << "}";
     }
     f << "\n  ],\n";
@@ -98,7 +110,23 @@ bool PlatformGridBuilder::saveConfig(const std::string& folderPath) {
     for (size_t i = 0; i < m_grid.wires.size(); ++i) {
         if (i > 0) f << ",";
         f << "{\"from\":" << m_grid.wires[i].fromFrame
-          << ",\"to\":" << m_grid.wires[i].toFrame << "}";
+          << ",\"to\":" << m_grid.wires[i].toFrame;
+        if (!m_grid.wires[i].fromCP.empty())
+            f << ",\"fromCP\":\"" << m_grid.wires[i].fromCP << "\"";
+        if (!m_grid.wires[i].toCP.empty())
+            f << ",\"toCP\":\"" << m_grid.wires[i].toCP << "\"";
+        f << "}";
+    }
+    f << "],\n";
+
+    // Serialize file slot assignments
+    f << "  \"fileSlots\": [";
+    for (size_t i = 0; i < m_grid.fileSlots.size(); ++i) {
+        if (i > 0) f << ",";
+        const auto& fs = m_grid.fileSlots[i];
+        f << "{\"frame\":" << fs.frameIndex
+          << ",\"cp\":\"" << fs.cpName << "\""
+          << ",\"file\":\"" << fs.filePath << "\"}";
     }
     f << "],\n";
 
@@ -279,6 +307,22 @@ bool PlatformGridBuilder::loadConfig(const std::string& folderPath) {
                 }
 
                 fr.spinPaused = (static_cast<int>(parseField("sp")) != 0);
+                fr.spinAngle = parseField("sa");
+
+                // Parse texturePath string
+                auto texKey = obj.find("\"tex\"");
+                if (texKey != std::string::npos) {
+                    auto tq1 = obj.find('"', obj.find(':', texKey) + 1);
+                    if (tq1 != std::string::npos) {
+                        std::string tex;
+                        for (size_t ti = tq1 + 1; ti < obj.size(); ti++) {
+                            if (obj[ti] == '\\' && ti + 1 < obj.size()) { tex += obj[ti + 1]; ti++; }
+                            else if (obj[ti] == '"') break;
+                            else tex += obj[ti];
+                        }
+                        fr.texturePath = tex;
+                    }
+                }
 
                 m_grid.frames.push_back(fr);
             }
@@ -317,8 +361,75 @@ bool PlatformGridBuilder::loadConfig(const std::string& folderPath) {
                 WireConnection wire;
                 wire.fromFrame = parseWF("from");
                 wire.toFrame = parseWF("to");
+                // Parse optional CP name strings
+                auto parseStr = [&](const std::string& key) -> std::string {
+                    std::string needle = "\"" + key + "\"";
+                    auto p = obj.find(needle);
+                    if (p == std::string::npos) return "";
+                    p = obj.find(':', p);
+                    if (p == std::string::npos) return "";
+                    p = obj.find('"', p + 1);
+                    if (p == std::string::npos) return "";
+                    auto e = obj.find('"', p + 1);
+                    if (e == std::string::npos) return "";
+                    return obj.substr(p + 1, e - p - 1);
+                };
+                wire.fromCP = parseStr("fromCP");
+                wire.toCP = parseStr("toCP");
                 if (wire.fromFrame >= 0 && wire.toFrame >= 0) {
                     m_grid.wires.push_back(wire);
+                }
+            }
+        }
+    }
+
+    // Parse file slot assignments
+    m_grid.fileSlots.clear();
+    auto fsKey = content.find("\"fileSlots\"");
+    if (fsKey != std::string::npos) {
+        auto fsArr = content.find('[', fsKey);
+        if (fsArr != std::string::npos) {
+            size_t pos = fsArr + 1;
+            while (pos < content.size()) {
+                while (pos < content.size() && (content[pos] == ' ' || content[pos] == ',' ||
+                       content[pos] == '\n' || content[pos] == '\r' || content[pos] == '\t'))
+                    pos++;
+                if (pos >= content.size() || content[pos] == ']') break;
+                if (content[pos] != '{') break;
+                auto objEnd = content.find('}', pos);
+                if (objEnd == std::string::npos) break;
+                std::string obj = content.substr(pos, objEnd - pos + 1);
+                pos = objEnd + 1;
+
+                auto parseInt = [&](const std::string& key) -> int {
+                    std::string needle = "\"" + key + "\"";
+                    auto p = obj.find(needle);
+                    if (p == std::string::npos) return -1;
+                    p = obj.find(':', p);
+                    if (p == std::string::npos) return -1;
+                    p++;
+                    while (p < obj.size() && obj[p] == ' ') p++;
+                    return std::stoi(obj.substr(p));
+                };
+                auto parseStr = [&](const std::string& key) -> std::string {
+                    std::string needle = "\"" + key + "\"";
+                    auto p = obj.find(needle);
+                    if (p == std::string::npos) return "";
+                    p = obj.find(':', p);
+                    if (p == std::string::npos) return "";
+                    p = obj.find('"', p + 1);
+                    if (p == std::string::npos) return "";
+                    auto e = obj.find('"', p + 1);
+                    if (e == std::string::npos) return "";
+                    return obj.substr(p + 1, e - p - 1);
+                };
+
+                FileSlotAssignment fsa;
+                fsa.frameIndex = parseInt("frame");
+                fsa.cpName = parseStr("cp");
+                fsa.filePath = parseStr("file");
+                if (fsa.frameIndex >= 0 && !fsa.cpName.empty() && !fsa.filePath.empty()) {
+                    m_grid.fileSlots.push_back(fsa);
                 }
             }
         }
@@ -560,7 +671,7 @@ void PlatformGridBuilder::clearWalls() {
     while (it != m_sceneObjects->end()) {
         if (*it && (*it)->getBuildingType() == "platform_wall") {
             uint32_t h = (*it)->getBufferHandle();
-            if (h) handles.push_back(h);
+            if (h != UINT32_MAX) handles.push_back(h);
             it = m_sceneObjects->erase(it);
         } else {
             ++it;
@@ -590,6 +701,7 @@ void PlatformGridBuilder::spawnFrameObjects(const glm::vec3& center, float baseY
             case FrameType::Checkbox: frameColor = {0.2f, 0.8f, 0.2f, 0.9f}; break; // green
             case FrameType::Slider:   frameColor = {0.6f, 0.2f, 0.8f, 0.9f}; break; // purple
             case FrameType::Log:      frameColor = {0.5f, 0.5f, 0.5f, 0.9f}; break; // gray
+            case FrameType::Relay:    frameColor = {0.0f, 0.8f, 0.8f, 0.9f}; break; // cyan
             default:                  frameColor = {0.3f, 0.5f, 0.7f, 0.9f}; break; // blue-gray
         }
         auto mesh = PrimitiveMeshBuilder::createCube(1.0f, frameColor);
@@ -627,6 +739,54 @@ void PlatformGridBuilder::spawnFrameObjects(const glm::vec3& center, float baseY
     }
 }
 
+void PlatformGridBuilder::spawnSingleFrame(int frameIndex) {
+    if (!m_renderer || !m_sceneObjects) return;
+    if (frameIndex < 0 || frameIndex >= static_cast<int>(m_grid.frames.size())) return;
+
+    auto& fr = m_grid.frames[frameIndex];
+
+    glm::vec4 frameColor;
+    switch (fr.frameType) {
+        case FrameType::Machine:  frameColor = {1.0f, 0.5f, 0.0f, 0.9f}; break;
+        case FrameType::Input:    frameColor = {0.2f, 0.5f, 1.0f, 0.9f}; break;
+        case FrameType::Output:   frameColor = {1.0f, 0.85f, 0.0f, 0.9f}; break;
+        case FrameType::Button:   frameColor = {1.0f, 0.2f, 0.2f, 0.9f}; break;
+        case FrameType::Checkbox: frameColor = {0.2f, 0.8f, 0.2f, 0.9f}; break;
+        case FrameType::Slider:   frameColor = {0.6f, 0.2f, 0.8f, 0.9f}; break;
+        case FrameType::Log:      frameColor = {0.5f, 0.5f, 0.5f, 0.9f}; break;
+        default:                  frameColor = {0.3f, 0.5f, 0.7f, 0.9f}; break;
+    }
+    auto mesh = PrimitiveMeshBuilder::createCube(1.0f, frameColor);
+    uint32_t handle = m_renderer->createModel(mesh.vertices, mesh.indices);
+
+    auto obj = std::make_unique<SceneObject>(
+        "FSWallFrame_" + std::to_string(frameIndex));
+    obj->setBufferHandle(handle);
+    obj->setIndexCount(static_cast<uint32_t>(mesh.indices.size()));
+    obj->setVertexCount(static_cast<uint32_t>(mesh.vertices.size()));
+    obj->setLocalBounds(mesh.bounds);
+    obj->setMeshData(mesh.vertices, mesh.indices);
+    obj->setPrimitiveType(PrimitiveType::Cube);
+    obj->setPrimitiveSize(1.0f);
+    obj->setPrimitiveColor(frameColor);
+    obj->setBuildingType("wall_frame");
+    obj->setAABBCollision(false);
+
+    float s = static_cast<float>(fr.size);
+    obj->getTransform().setPosition({fr.worldX, fr.worldY, fr.worldZ});
+    if (fr.normalX == 0.0f && fr.normalZ == 0.0f) {
+        obj->getTransform().setScale({s, 0.1f, s});
+        obj->setEulerRotation({0.0f, 0.0f, 0.0f});
+    } else {
+        obj->getTransform().setScale({s, s, 0.1f});
+        obj->setEulerRotation({0.0f, fr.yawDeg, 0.0f});
+    }
+
+    SceneObject* raw = obj.get();
+    m_sceneObjects->push_back(std::move(obj));
+    m_spawnedFrames.push_back(raw);
+}
+
 void PlatformGridBuilder::clearFrames() {
     if (!m_renderer || !m_sceneObjects) return;
 
@@ -635,7 +795,7 @@ void PlatformGridBuilder::clearFrames() {
     while (it != m_sceneObjects->end()) {
         if (*it && ((*it)->getBuildingType() == "wall_frame" || (*it)->getBuildingType() == "wall_widget")) {
             uint32_t h = (*it)->getBufferHandle();
-            if (h) handles.push_back(h);
+            if (h != UINT32_MAX) handles.push_back(h);
             it = m_sceneObjects->erase(it);
         } else {
             ++it;
@@ -657,7 +817,7 @@ void PlatformGridBuilder::clearAll() {
     while (it != m_sceneObjects->end()) {
         if (*it && (*it)->getBuildingType() == "platform_slab") {
             uint32_t h = (*it)->getBufferHandle();
-            if (h) handles.push_back(h);
+            if (h != UINT32_MAX) handles.push_back(h);
             it = m_sceneObjects->erase(it);
         } else {
             ++it;

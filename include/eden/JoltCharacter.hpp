@@ -247,6 +247,20 @@ public:
     // Raycast against the physics world (uses ICharacterController::RaycastResult)
     RaycastResult raycast(const glm::vec3& from, const glm::vec3& to) const override;
 
+    // Dynamic bodies
+    DynamicBodyResult addDynamicBox(const glm::vec3& halfExtents,
+                                    const glm::vec3& position,
+                                    const glm::vec3& velocity = glm::vec3(0),
+                                    float mass = 1.0f,
+                                    float friction = 0.5f,
+                                    float restitution = 0.3f) override;
+    void removeDynamicBody(uint32_t bodyId) override;
+    bool isDynamicBodySleeping(uint32_t bodyId) const override;
+    glm::vec3 getDynamicBodyPosition(uint32_t bodyId) const override;
+    glm::vec3 getDynamicBodyVelocity(uint32_t bodyId) const override;
+    glm::quat getDynamicBodyRotation(uint32_t bodyId) const override;
+    void stepPhysics(float deltaTime) override;
+
     // Clear all bodies (for level reset)
     void clearBodies() override;
 
@@ -283,6 +297,7 @@ private:
     // Track bodies for cleanup
     std::vector<JPH::BodyID> m_staticBodies;
     std::vector<JPH::BodyID> m_kinematicBodies;
+    std::vector<JPH::BodyID> m_dynamicBodies;
 
     // Our own platform tracking (like Homebrew) - don't rely on Jolt's ground detection
     struct TrackedPlatform {

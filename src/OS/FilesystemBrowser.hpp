@@ -120,8 +120,15 @@ public:
                          const glm::vec3& wallScale,
                          float wallYawDeg);
 
+    // Spawn a file object directly at a file_slot CP position (no gallery offsets)
+    void spawnFileAtSlot(const std::string& filePath,
+                         const glm::vec3& pos,
+                         const glm::vec3& scale,
+                         float yawDeg);
+
     // Spawn a file object onto a wall frame (uses frame's exact position/size/yaw)
-    void spawnFileAtFrame(const std::string& filePath, SceneObject* frame);
+    void spawnFileAtFrame(const std::string& filePath, SceneObject* frame,
+                          const std::string& texturePath = "");
 
     // Re-spawn files for all occupied wall frames (call after spawnFrameObjects)
     void respawnFrameFiles();
@@ -254,6 +261,7 @@ private:
         SceneObject* obj = nullptr;
         float baseYaw = 0.0f;   // original yaw from gallery wall
         float angle = 0.0f;     // current spin angle (degrees)
+        float sideAngle = 0.0f; // arrow key rotation on secondary axis (degrees)
         bool paused = false;
     };
     std::vector<ModelSpin> m_modelSpins;
@@ -261,6 +269,10 @@ private:
 public:
     // Toggle spin on/off for a given scene object; returns true if it was found
     bool toggleSpin(SceneObject* obj);
+    // Rotate a paused spin by the given degrees (e.g. 45 or -45); returns true if handled
+    bool rotateSpinIncrement(SceneObject* obj, float degrees);
+    // Check if a scene object has a spin entry (for suppressing movement keys)
+    bool hasSpinEntry(SceneObject* obj) const;
     // Remove a scene object from the spin list (call before erasing the object)
     void removeModelSpin(SceneObject* obj);
     // Remove a scene object from the void file tracking (call before erasing the object)

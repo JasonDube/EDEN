@@ -1,6 +1,0 @@
-{
-    "widget": "checkbox",
-    "param": "remove_bg",
-    "default": true,
-    "description": "Toggle background removal on/off"
-}

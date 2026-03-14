@@ -99,6 +99,24 @@ public:
     // Raycast against the physics world
     virtual RaycastResult raycast(const glm::vec3& from, const glm::vec3& to) const = 0;
 
+    // Dynamic bodies (physics-simulated objects that fall and settle)
+    struct DynamicBodyResult {
+        uint32_t bodyId = UINT32_MAX;
+        bool valid = false;
+    };
+    virtual DynamicBodyResult addDynamicBox(const glm::vec3& halfExtents,
+                                            const glm::vec3& position,
+                                            const glm::vec3& velocity = glm::vec3(0),
+                                            float mass = 1.0f,
+                                            float friction = 0.5f,
+                                            float restitution = 0.3f) { return {}; }
+    virtual void removeDynamicBody(uint32_t bodyId) {}
+    virtual bool isDynamicBodySleeping(uint32_t bodyId) const { return false; }
+    virtual glm::vec3 getDynamicBodyPosition(uint32_t bodyId) const { return glm::vec3(0); }
+    virtual glm::vec3 getDynamicBodyVelocity(uint32_t bodyId) const { return glm::vec3(0); }
+    virtual glm::quat getDynamicBodyRotation(uint32_t bodyId) const { return glm::quat(1,0,0,0); }
+    virtual void stepPhysics(float deltaTime) {}
+
     // Clear all bodies (for level reset)
     virtual void clearBodies() = 0;
 

@@ -326,6 +326,16 @@ void ForgeRoom::rejectBot() {
     }
 }
 
+void ForgeRoom::addDeployedBot(const std::string& modelPath, const std::string& job, const std::string& territory) {
+    DeployedBot bot;
+    bot.modelPath = modelPath;
+    bot.job = job;
+    bot.territory = territory;
+    m_deployedBots.push_back(bot);
+    saveRegistry();
+    std::cout << "[ForgeRoom] Deployed " << job << " (" << modelPath << ") to " << territory << std::endl;
+}
+
 // ── Registry ───────────────────────────────────────────────────────────
 
 std::string ForgeRoom::getRegistryPath() {

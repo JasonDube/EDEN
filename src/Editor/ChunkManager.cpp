@@ -1,5 +1,6 @@
 #include "ChunkManager.hpp"
 #include "Renderer/Buffer.hpp"
+#include <iostream>
 
 namespace eden {
 
@@ -28,18 +29,36 @@ void ChunkManager::preloadAllChunks(Terrain& terrain, LoadProgressCallback progr
 
     // Upload all chunks to GPU
     float chunkSize = (config.chunkResolution - 1) * config.tileSize;
+    int uploaded = 0;
+    bool vramExhausted = false;
 
-    for (int z = config.minChunk.y; z <= config.maxChunk.y; z++) {
-        for (int x = config.minChunk.x; x <= config.maxChunk.x; x++) {
+    for (int z = config.minChunk.y; z <= config.maxChunk.y && !vramExhausted; z++) {
+        for (int x = config.minChunk.x; x <= config.maxChunk.x && !vramExhausted; x++) {
             glm::vec3 chunkCenter((x + 0.5f) * chunkSize, 0, (z + 0.5f) * chunkSize);
             terrain.update(chunkCenter);
 
             for (auto& vc : terrain.getVisibleChunks()) {
                 if (vc.chunk->needsUpload()) {
-                    uploadChunk(*vc.chunk);
+                    try {
+                        uploadChunk(*vc.chunk);
+                        uploaded++;
+                    } catch (const std::runtime_error& e) {
+                        int64_t usedMB = Buffer::getVramUsedBytes() / (1024 * 1024);
+                        std::cerr << "[ChunkManager] VRAM exhausted after uploading "
+                                  << uploaded << " chunks (" << usedMB << " MB used). "
+                                  << "Remaining chunks will load on-demand." << std::endl;
+                        vramExhausted = true;
+                        break;
+                    }
                 }
             }
         }
+    }
+
+    if (!vramExhausted) {
+        int64_t usedMB = Buffer::getVramUsedBytes() / (1024 * 1024);
+        std::cout << "[ChunkManager] All " << uploaded << " chunks uploaded ("
+                  << usedMB << " MB VRAM used)" << std::endl;
     }
 
     m_isLoading = false;
@@ -48,7 +67,13 @@ void ChunkManager::preloadAllChunks(Terrain& terrain, LoadProgressCallback progr
 void ChunkManager::uploadPendingChunks(Terrain& terrain) {
     for (auto& vc : terrain.getVisibleChunks()) {
         if (vc.chunk->needsUpload()) {
-            uploadChunk(*vc.chunk);
+            try {
+                uploadChunk(*vc.chunk);
+            } catch (const std::runtime_error&) {
+                // VRAM exhausted — skip this chunk, will retry next frame
+                // (other chunks may have been freed by then)
+                break;
+            }
         }
     }
 }

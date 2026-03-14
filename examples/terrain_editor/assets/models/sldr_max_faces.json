@@ -1,9 +1,0 @@
-{
-    "widget": "slider",
-    "param": "max_faces",
-    "type": "int",
-    "min": 1000,
-    "max": 100000,
-    "default": 10000,
-    "description": "Maximum face count for mesh reduction"
-}

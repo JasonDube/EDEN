@@ -1,6 +1,0 @@
-{
-    "widget": "input",
-    "param": "image",
-    "type": "image",
-    "description": "Image input slot — drop a .png/.jpg here, then wire to a machine"
-}

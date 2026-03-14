@@ -152,16 +152,21 @@ bool WallMachine::execute(int machineFrameIndex, const std::string& imagePath,
     int octreeRes = 256;
     int maxFaces = 10000;
     bool texture = true;
+    int texSize = 1024;
+    bool removeBackground = true;
     for (const auto& p : params) {
         if (p.name == "steps") steps = std::stoi(p.value);
         else if (p.name == "octree_resolution") octreeRes = std::stoi(p.value);
         else if (p.name == "max_faces") maxFaces = std::stoi(p.value);
         else if (p.name == "texture") texture = (p.value == "true" || p.value == "1");
+        else if (p.name == "texture_size") texSize = std::stoi(p.value);
+        else if (p.name == "remove_background") removeBackground = (p.value == "true" || p.value == "1");
     }
 
     // Start generation
     std::string uid = m_client.startGeneration("", imageBase64, steps, octreeRes,
-                                                5.0f, maxFaces, texture);
+                                                5.0f, maxFaces, texture, 12345,
+                                                texSize, removeBackground);
     if (uid.empty()) {
         inst.state = MachineState::Error;
         inst.logLines.push_back("ERROR: Failed to start generation (server unreachable?)");
@@ -256,6 +261,14 @@ std::string WallMachine::getOutputPath(int machineFrameIndex) const {
         if (inst.machineFrameIndex == machineFrameIndex) return inst.outputGLBPath;
     }
     return "";
+}
+
+void WallMachine::resetState(int machineFrameIndex) {
+    auto* inst = findInstance(machineFrameIndex);
+    if (inst && inst->state != MachineState::Running) {
+        inst->state = MachineState::Idle;
+        inst->outputGLBPath.clear();
+    }
 }
 
 void WallMachine::cancelAll() {

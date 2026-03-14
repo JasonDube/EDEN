@@ -1,9 +1,0 @@
-{
-    "widget": "slider",
-    "param": "steps",
-    "type": "int",
-    "min": 1,
-    "max": 50,
-    "default": 5,
-    "description": "Number of inference steps (higher = better quality, slower)"
-}

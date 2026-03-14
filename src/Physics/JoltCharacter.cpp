@@ -131,6 +131,13 @@ void JoltCharacter::clearBodies() {
     }
     m_kinematicBodies.clear();
 
+    // Remove dynamic bodies
+    for (const auto& bodyId : m_dynamicBodies) {
+        bodyInterface.RemoveBody(bodyId);
+        bodyInterface.DestroyBody(bodyId);
+    }
+    m_dynamicBodies.clear();
+
     // Clear our own platform tracking
     m_trackedPlatforms.clear();
 }
@@ -385,6 +392,9 @@ bool JoltCharacter::isOnTrackedPlatform(glm::vec3& outVelocity) const {
 
 void JoltCharacter::createCharacter(const glm::vec3& position, float height, float radius) {
     if (!m_initialized) return;
+
+    // Optimize broadphase now that all static bodies have been added
+    m_physicsSystem->OptimizeBroadPhase();
 
     m_characterHeight = height;
     m_characterRadius = radius;
@@ -647,6 +657,112 @@ JoltCharacter::RaycastResult JoltCharacter::raycast(const glm::vec3& from, const
     }
 
     return result;
+}
+
+// === Dynamic body support ===
+
+ICharacterController::DynamicBodyResult JoltCharacter::addDynamicBox(
+    const glm::vec3& halfExtents,
+    const glm::vec3& position,
+    const glm::vec3& velocity,
+    float mass,
+    float friction,
+    float restitution)
+{
+    DynamicBodyResult result;
+    if (!m_physicsSystem) return result;
+
+    // Clamp convex radius for thin shapes
+    float minHalf = std::min({halfExtents.x, halfExtents.y, halfExtents.z});
+    float convexRadius = std::min(0.05f, minHalf * 0.5f);
+
+    JPH::BoxShapeSettings boxSettings(toJolt(halfExtents), convexRadius);
+    boxSettings.mDensity = mass / (8.0f * halfExtents.x * halfExtents.y * halfExtents.z);
+    JPH::ShapeSettings::ShapeResult shapeResult = boxSettings.Create();
+    if (!shapeResult.IsValid()) return result;
+
+    JPH::BodyCreationSettings bodySettings(
+        shapeResult.Get(),
+        JPH::RVec3(position.x, position.y, position.z),
+        JPH::Quat::sIdentity(),
+        JPH::EMotionType::Dynamic,
+        ObjectLayers::MOVING
+    );
+
+    bodySettings.mOverrideMassProperties = JPH::EOverrideMassProperties::CalculateInertia;
+    bodySettings.mMassPropertiesOverride.mMass = mass;
+    bodySettings.mFriction = friction;
+    bodySettings.mRestitution = restitution;
+    bodySettings.mLinearDamping = 0.1f;
+    bodySettings.mAngularDamping = 0.2f;
+    bodySettings.mAllowSleeping = true;
+    bodySettings.mAllowDynamicOrKinematic = true;
+    bodySettings.mLinearVelocity = toJolt(velocity);  // Set velocity at creation time
+    // Add slight angular velocity for tumble effect
+    bodySettings.mAngularVelocity = JPH::Vec3(1.5f, 0.5f, 1.0f);
+
+    JPH::BodyInterface& bodyInterface = m_physicsSystem->GetBodyInterface();
+    JPH::BodyID bodyId = bodyInterface.CreateAndAddBody(bodySettings, JPH::EActivation::Activate);
+
+    if (bodyId.IsInvalid()) return result;
+
+    // Debug: verify velocity was applied
+    JPH::Vec3 actualVel = bodyInterface.GetLinearVelocity(bodyId);
+    std::cout << "[Physics] Created dynamic body id=" << bodyId.GetIndexAndSequenceNumber()
+              << " requestedVel=(" << velocity.x << "," << velocity.y << "," << velocity.z << ")"
+              << " actualVel=(" << actualVel.GetX() << "," << actualVel.GetY() << "," << actualVel.GetZ() << ")"
+              << " pos=(" << position.x << "," << position.y << "," << position.z << ")"
+              << " mass=" << mass << std::endl;
+
+    m_dynamicBodies.push_back(bodyId);
+
+    result.bodyId = bodyId.GetIndexAndSequenceNumber();
+    result.valid = true;
+    return result;
+}
+
+void JoltCharacter::removeDynamicBody(uint32_t bodyId) {
+    if (!m_physicsSystem) return;
+    JPH::BodyID joltId(bodyId);
+    JPH::BodyInterface& bodyInterface = m_physicsSystem->GetBodyInterface();
+    bodyInterface.RemoveBody(joltId);
+    bodyInterface.DestroyBody(joltId);
+
+    auto it = std::find(m_dynamicBodies.begin(), m_dynamicBodies.end(), joltId);
+    if (it != m_dynamicBodies.end()) m_dynamicBodies.erase(it);
+}
+
+bool JoltCharacter::isDynamicBodySleeping(uint32_t bodyId) const {
+    if (!m_physicsSystem) return false;
+    JPH::BodyID joltId(bodyId);
+    JPH::BodyInterface& bodyInterface = m_physicsSystem->GetBodyInterface();
+    return !bodyInterface.IsActive(joltId);
+}
+
+glm::vec3 JoltCharacter::getDynamicBodyPosition(uint32_t bodyId) const {
+    if (!m_physicsSystem) return glm::vec3(0);
+    JPH::BodyID joltId(bodyId);
+    JPH::BodyInterface& bodyInterface = m_physicsSystem->GetBodyInterface();
+    return toGlm(bodyInterface.GetPosition(joltId));
+}
+
+glm::vec3 JoltCharacter::getDynamicBodyVelocity(uint32_t bodyId) const {
+    if (!m_physicsSystem) return glm::vec3(0);
+    JPH::BodyID joltId(bodyId);
+    JPH::BodyInterface& bodyInterface = m_physicsSystem->GetBodyInterface();
+    return toGlm(bodyInterface.GetLinearVelocity(joltId));
+}
+
+glm::quat JoltCharacter::getDynamicBodyRotation(uint32_t bodyId) const {
+    if (!m_physicsSystem) return glm::quat(1, 0, 0, 0);
+    JPH::BodyID joltId(bodyId);
+    JPH::BodyInterface& bodyInterface = m_physicsSystem->GetBodyInterface();
+    return toGlm(bodyInterface.GetRotation(joltId));
+}
+
+void JoltCharacter::stepPhysics(float deltaTime) {
+    if (!m_physicsSystem) return;
+    m_physicsSystem->Update(deltaTime, 1, m_tempAllocator.get(), m_jobSystem.get());
 }
 
 } // namespace eden

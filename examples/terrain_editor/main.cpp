@@ -100,6 +100,7 @@
 #include <queue>
 #include <map>
 #include <glm/gtc/matrix_transform.hpp>
+#include <glm/gtx/euler_angles.hpp>
 
 using namespace eden;
 
@@ -318,7 +319,15 @@ protected:
         loadSplashTexture();
         loadGroveLogoTexture();
         loadBuildingTextures();
-        loadInventory();
+        // Only load EDEN OS hotbar inventory if loading the original OS background level
+        {
+            std::string defaultLevel = getDefaultLevelPath();
+            const char* home = getenv("HOME");
+            std::string xenk2Path = home ? std::string(home) + "/.eden/default_level/xenk2.eden" : "";
+            if (defaultLevel == xenk2Path) {
+                loadInventory();
+            }
+        }
         syncExcludedPaths();
 
         // Create scripts directory
@@ -392,14 +401,11 @@ protected:
         {
             const char* home = getenv("HOME");
             if (home) {
-                std::string defaultLevel = std::string(home) + "/.eden/default_level/xenk2.eden";
+                std::string defaultLevel = getDefaultLevelPath();
                 if (std::filesystem::exists(defaultLevel)) {
                     std::cout << "[EDEN] Auto-loading default level: " << defaultLevel << std::endl;
                     loadLevel(defaultLevel);
                     preloadAdjacentLevels();
-                    // Override saved camera position — offset from origin to avoid hole
-                    float terrainY = m_terrain.getHeightAt(50.0f, 50.0f);
-                    m_camera.setPosition({50.0f, terrainY + 5.0f, 50.0f});
                 }
             }
         }
@@ -1035,7 +1041,8 @@ protected:
     void onBeforeMainLoop() override {
         if (!m_isEdenOSLevel && m_terrain.getConfig().useFixedBounds) {
             int totalChunks = m_terrain.getTotalChunkCount();
-            std::cout << "Pre-loading " << totalChunks << " terrain chunks...\n";
+            int64_t preVram = eden::Buffer::getVramUsedBytes() / (1024 * 1024);
+            std::cout << "Pre-loading " << totalChunks << " terrain chunks... (VRAM before: " << preVram << " MB)\n";
 
             m_chunkManager->preloadAllChunks(m_terrain, [this](int loaded, int total) {
                 m_chunksLoaded = loaded;
@@ -1109,7 +1116,7 @@ protected:
             for (auto& obj : m_sceneObjects) {
                 if (obj) {
                     uint32_t handle = obj->getBufferHandle();
-                    if (handle != 0) handles.push_back(handle);
+                    if (handle != UINT32_MAX) handles.push_back(handle);
                 }
             }
             m_modelRenderer->destroyModels(handles);
@@ -1260,22 +1267,92 @@ protected:
                 for (int machFrameIdx : completed) {
                     std::string outPath = m_wallMachine.getOutputPath(machFrameIdx);
                     if (!outPath.empty()) {
-                        // Find wired output frame and spawn the GLB there
+                        // Find wired output frame — trace through relay pods to end of chain
                         auto& grid = m_filesystemBrowser.getPlatformGrid().grid();
-                        for (const auto& wire : grid.wires) {
-                            if (wire.fromFrame == machFrameIdx &&
-                                wire.toFrame >= 0 && wire.toFrame < static_cast<int>(grid.frames.size()) &&
-                                grid.frames[wire.toFrame].frameType == FrameType::Output) {
-                                auto& outFrame = grid.frames[wire.toFrame];
-                                glm::vec3 outPos(outFrame.worldX, outFrame.worldY, outFrame.worldZ);
-                                // Offset forward from wall
-                                float yawRad = outFrame.yawDeg * static_cast<float>(M_PI) / 180.0f;
-                                outPos.x += sinf(yawRad) * 2.0f;
-                                outPos.z += cosf(yawRad) * 2.0f;
-                                m_filesystemBrowser.spawnFileAtPosition(outPath, outPos);
-                                std::cout << "[WallMachine] Output spawned at output frame" << std::endl;
-                                break;
+                        int outIdx = -1;
+                        {
+                            std::set<int> visited;
+                            outIdx = traceOutputFrame(machFrameIdx, grid, visited);
+                        }
+                        std::cout << "[Machine] traceOutputFrame from machine frame " << machFrameIdx
+                                  << " -> outIdx=" << outIdx << std::endl;
+                        if (outIdx >= 0) {
+
+                            auto& outFrame = grid.frames[outIdx];
+                            std::cout << "[Machine] Output frame type=" << static_cast<int>(outFrame.frameType)
+                                      << " at (" << outFrame.worldX << "," << outFrame.worldY << "," << outFrame.worldZ << ")" << std::endl;
+
+                            // Try to place on output widget's file_slot CPs
+                            bool placedOnSlot = false;
+                            SceneObject* outWidget = findWidgetOnFrame(outFrame);
+                            std::cout << "[Machine] findWidgetOnFrame -> " << (outWidget ? outWidget->getName() : "null")
+                                      << " hasCPs=" << (outWidget ? outWidget->hasControlPoints() : false) << std::endl;
+                            if (outWidget && outWidget->hasControlPoints()) {
+                                // Find file_slot_0A/B on the output widget
+                                glm::vec3 posA, posB;
+                                bool gotA = getCPWorldPosExact(outWidget, "file_slot_0A", posA);
+                                bool gotB = getCPWorldPosExact(outWidget, "file_slot_0B", posB);
+                                if (gotA && gotB) {
+                                    glm::vec3 center = (posA + posB) * 0.5f;
+                                    glm::vec3 diff = posB - posA;
+                                    float slotW = std::abs(diff.x) > std::abs(diff.z) ? std::abs(diff.x) : std::abs(diff.z);
+                                    float slotH = std::abs(diff.y);
+                                    if (slotW < 0.01f) slotW = 0.5f;
+                                    if (slotH < 0.01f) slotH = 0.5f;
+
+                                    float yawRad = outFrame.yawDeg * static_cast<float>(M_PI) / 180.0f;
+                                    glm::vec3 spawnPos = center;
+                                    spawnPos.x += sinf(yawRad) * 0.05f;
+                                    spawnPos.z += cosf(yawRad) * 0.05f;
+
+                                    // Output is a .glb 3D model — use uniform scale to fit slot
+                                    float fitSize = std::min(slotW, slotH);
+                                    float meshSize = 1.5f;
+                                    glm::vec3 slotScale(fitSize / meshSize, fitSize / meshSize, fitSize / meshSize);
+                                    m_filesystemBrowser.spawnFileAtSlot(outPath, spawnPos, slotScale, outFrame.yawDeg);
+
+                                    // Save file_slot assignment
+                                    bool fsFound = false;
+                                    for (auto& fsa : grid.fileSlots) {
+                                        if (fsa.frameIndex == outIdx && fsa.cpName == "file_slot_0A") {
+                                            fsa.filePath = outPath;
+                                            fsFound = true;
+                                            break;
+                                        }
+                                    }
+                                    if (!fsFound) {
+                                        grid.fileSlots.push_back({outIdx, "file_slot_0A", outPath});
+                                    }
+                                    placedOnSlot = true;
+                                    std::cout << "[Machine] Output placed on file_slot of output widget" << std::endl;
+                                }
                             }
+
+                            // Fallback: place on output frame directly
+                            if (!placedOnSlot) {
+                                outFrame.filePath = outPath;
+                                glm::vec3 outPos(outFrame.worldX, outFrame.worldY, outFrame.worldZ);
+                                SceneObject* outFrameObj = nullptr;
+                                for (auto& obj : m_sceneObjects) {
+                                    if (!obj || obj->getBuildingType() != "wall_frame") continue;
+                                    glm::vec3 op = obj->getTransform().getPosition();
+                                    if (std::abs(op.x - outPos.x) < 0.5f &&
+                                        std::abs(op.y - outPos.y) < 0.5f &&
+                                        std::abs(op.z - outPos.z) < 0.5f) {
+                                        outFrameObj = obj.get();
+                                        break;
+                                    }
+                                }
+                                if (outFrameObj) {
+                                    m_filesystemBrowser.spawnFileAtFrame(outPath, outFrameObj);
+                                } else {
+                                    m_filesystemBrowser.spawnFileAtPosition(outPath, outPos);
+                                }
+                                std::cout << "[Machine] Output model spawned on output frame" << std::endl;
+                            }
+
+                            m_filesystemBrowser.getPlatformGrid().saveConfig(
+                                m_filesystemBrowser.getCurrentPath());
                         }
                     }
                 }
@@ -1461,6 +1538,11 @@ protected:
         ImGuiID dockspaceId = ImGui::GetID("MainDockSpace");
         ImGui::DockSpace(dockspaceId, ImVec2(0.0f, 0.0f), ImGuiDockNodeFlags_PassthruCentralNode);
         ImGui::End();
+
+        // Help window renders in both modes
+        if (m_editorUI.showHelp()) {
+            m_editorUI.renderHelpWindow();
+        }
 
         if (m_isPlayMode) {
             renderPlayModeUI();
@@ -1870,7 +1952,10 @@ protected:
             for (auto& obj : m_sceneObjects) {
                 if (!obj || !obj->isSelected()) continue;
                 const auto& bt = obj->getBuildingType();
-                if (bt != "filesystem" && bt != "filesystem_wall" && bt != "wall_frame" && bt != "wall_widget" && bt != "platform_wall") continue;
+                bool isInteraction = (obj->getBeingType() == BeingType::INTERACTION || bt == "salvage");
+                if (!isInteraction && bt != "filesystem" && bt != "filesystem_wall" && bt != "wall_frame" && bt != "wall_widget" && bt != "platform_wall") continue;
+                // Skip building pieces in game mode — they use the blue grid highlight instead
+                if (m_isPlayMode && (bt == "platform_wall" || bt == "platform_slab" || bt == "wall_frame")) continue;
                 bool isDragHover = (m_fsDragActive && obj.get() == m_fsDragHoverWall);
                 const AABB& lb = obj->getLocalBounds();
                 if (lb.getSize().x > 0.001f || lb.getSize().y > 0.001f || lb.getSize().z > 0.001f) {
@@ -1920,10 +2005,10 @@ protected:
                 m_modelRenderer->renderLines(cmd, vp, hitboxLines, glm::vec3(1.0f, 0.0f, 1.0f)); // magenta
         }
 
-        // Draw folder attention emanations (wireframe squares expanding outward)
-        for (const auto& batch : m_filesystemBrowser.getEmanationRenderData()) {
-            m_modelRenderer->renderLines(cmd, vp, batch.lines, batch.color);
-        }
+        // Emanations disabled for now (wireframe squares expanding from frequently-visited folders)
+        // for (const auto& batch : m_filesystemBrowser.getEmanationRenderData()) {
+        //     m_modelRenderer->renderLines(cmd, vp, batch.lines, batch.color);
+        // }
 
         // Draw void structure wireframe
         {
@@ -1936,6 +2021,33 @@ protected:
         // Draw wall machine wires between frames
         if (m_filesystemBrowser.isActive()) {
             auto& grid = m_filesystemBrowser.getPlatformGrid().grid();
+            // Precompute: map each frame to its connected machine's state
+            // by flood-filling from each machine through wires
+            std::vector<MachineState> frameStates(grid.frames.size(), MachineState::Idle);
+            for (int mi = 0; mi < static_cast<int>(grid.frames.size()); mi++) {
+                if (grid.frames[mi].frameType != FrameType::Machine) continue;
+                MachineState ms = m_wallMachine.getState(mi);
+                if (ms == MachineState::Idle) continue;
+                // BFS from this machine through all connected wires
+                std::set<int> reached;
+                std::queue<int> q;
+                q.push(mi);
+                reached.insert(mi);
+                while (!q.empty()) {
+                    int cur = q.front(); q.pop();
+                    if (ms > frameStates[cur]) frameStates[cur] = ms;
+                    for (const auto& w : grid.wires) {
+                        int next = -1;
+                        if (w.fromFrame == cur) next = w.toFrame;
+                        else if (w.toFrame == cur) next = w.fromFrame;
+                        if (next >= 0 && next < static_cast<int>(grid.frames.size()) && !reached.count(next)) {
+                            reached.insert(next);
+                            q.push(next);
+                        }
+                    }
+                }
+            }
+
             std::vector<glm::vec3> wireLines;
             std::vector<glm::vec3> runningWireLines;
             std::vector<glm::vec3> completeWireLines;
@@ -1945,21 +2057,40 @@ protected:
                     continue;
                 auto& f1 = grid.frames[wire.fromFrame];
                 auto& f2 = grid.frames[wire.toFrame];
-                glm::vec3 p1(f1.worldX, f1.worldY, f1.worldZ);
-                glm::vec3 p2(f2.worldX, f2.worldY, f2.worldZ);
-                // Offset slightly from wall
-                float yaw1 = f1.yawDeg * static_cast<float>(M_PI) / 180.0f;
-                float yaw2 = f2.yawDeg * static_cast<float>(M_PI) / 180.0f;
-                p1.x += sinf(yaw1) * 0.3f; p1.z += cosf(yaw1) * 0.3f;
-                p2.x += sinf(yaw2) * 0.3f; p2.z += cosf(yaw2) * 0.3f;
 
-                // Color by machine state
-                MachineState mState = MachineState::Idle;
-                // Check if either endpoint is a machine
-                if (grid.frames[wire.fromFrame].frameType == FrameType::Machine)
-                    mState = m_wallMachine.getState(wire.fromFrame);
-                else if (grid.frames[wire.toFrame].frameType == FrameType::Machine)
-                    mState = m_wallMachine.getState(wire.toFrame);
+                // Try to use control points on the widget models for precise wire endpoints
+                glm::vec3 p1, p2;
+                bool gotP1 = false, gotP2 = false;
+
+                SceneObject* w1 = findWidgetOnFrame(f1);
+                SceneObject* w2 = findWidgetOnFrame(f2);
+
+                // Use stored CP names if available, otherwise fall back to prefix search
+                if (w1 && !wire.fromCP.empty())
+                    gotP1 = getCPWorldPosExact(w1, wire.fromCP, p1);
+                if (!gotP1 && w1)
+                    gotP1 = getCPWorldPos(w1, "wire_out", p1);
+
+                if (w2 && !wire.toCP.empty())
+                    gotP2 = getCPWorldPosExact(w2, wire.toCP, p2);
+                if (!gotP2 && w2)
+                    gotP2 = getCPWorldPos(w2, "wire_in", p2);
+
+
+                // Fallback to frame center + yaw offset
+                if (!gotP1) {
+                    p1 = glm::vec3(f1.worldX, f1.worldY, f1.worldZ);
+                    float yaw1 = f1.yawDeg * static_cast<float>(M_PI) / 180.0f;
+                    p1.x += sinf(yaw1) * 0.3f; p1.z += cosf(yaw1) * 0.3f;
+                }
+                if (!gotP2) {
+                    p2 = glm::vec3(f2.worldX, f2.worldY, f2.worldZ);
+                    float yaw2 = f2.yawDeg * static_cast<float>(M_PI) / 180.0f;
+                    p2.x += sinf(yaw2) * 0.3f; p2.z += cosf(yaw2) * 0.3f;
+                }
+
+                // Color by machine state — use precomputed flood-fill
+                MachineState mState = std::max(frameStates[wire.fromFrame], frameStates[wire.toFrame]);
 
                 auto& dest = (mState == MachineState::Running) ? runningWireLines :
                              (mState == MachineState::Complete) ? completeWireLines : wireLines;
@@ -1973,21 +2104,17 @@ protected:
             if (!completeWireLines.empty())
                 m_modelRenderer->renderLines(cmd, vp, completeWireLines, glm::vec3(0.0f, 1.0f, 0.0f)); // green
 
-            // Wire preview line while in wiring mode
-            if (m_wiringMode && m_wireSourceFrame >= 0 && m_wireSourceFrame < static_cast<int>(grid.frames.size())) {
-                auto& srcFrame = grid.frames[m_wireSourceFrame];
-                glm::vec3 srcPos(srcFrame.worldX, srcFrame.worldY, srcFrame.worldZ);
-                float srcYaw = srcFrame.yawDeg * static_cast<float>(M_PI) / 180.0f;
-                srcPos.x += sinf(srcYaw) * 0.3f;
-                srcPos.z += cosf(srcYaw) * 0.3f;
-
-                // Crosshair ray intersection with some far point
-                glm::vec3 camPos = m_camera.getPosition();
-                glm::vec3 camDir = m_camera.getFront();
-                glm::vec3 endPos = camPos + camDir * 20.0f;
-
-                std::vector<glm::vec3> previewLine = {srcPos, endPos};
-                m_modelRenderer->renderLines(cmd, vp, previewLine, glm::vec3(1.0f, 1.0f, 0.0f)); // yellow
+            // Wire preview line from selected source CP to crosshair (only for wire CPs, not file_slots)
+            if (m_wiringMode && m_wireSourceObj && !m_wireSourceCPName.empty() &&
+                m_wireSourceCPName.rfind("wire_", 0) == 0) {
+                glm::vec3 srcPos;
+                if (getCPWorldPosExact(m_wireSourceObj, m_wireSourceCPName, srcPos)) {
+                    glm::vec3 camPos = m_camera.getPosition();
+                    glm::vec3 camDir = m_camera.getFront();
+                    glm::vec3 endPos = camPos + camDir * 20.0f;
+                    std::vector<glm::vec3> previewLine = {srcPos, endPos};
+                    m_modelRenderer->renderLines(cmd, vp, previewLine, glm::vec3(1.0f, 1.0f, 0.0f)); // yellow
+                }
             }
         }
 
@@ -2094,9 +2221,10 @@ protected:
                 float hs = fs * 0.5f;
                 std::vector<glm::vec3> previewLines;
 
-                if (m_framePreviewNY > 0.5f) {
-                    // Floor frame — horizontal rectangle on XZ plane
-                    glm::vec3 p = m_framePreviewPos + glm::vec3(0, 0.05f, 0);
+                if (std::abs(m_framePreviewNY) > 0.5f) {
+                    // Floor/ceiling frame — horizontal rectangle on XZ plane
+                    float yOff = (m_framePreviewNY > 0) ? 0.05f : -0.05f;
+                    glm::vec3 p = m_framePreviewPos + glm::vec3(0, yOff, 0);
                     glm::vec3 c0 = p + glm::vec3(-hs, 0, -hs);
                     glm::vec3 c1 = p + glm::vec3( hs, 0, -hs);
                     glm::vec3 c2 = p + glm::vec3( hs, 0,  hs);
@@ -2154,19 +2282,19 @@ protected:
             float dz = std::abs(m_wallBrushEnd.z - m_wallBrushStart.z);
             float wallLen = std::round(std::max(dx, dz));
             if (wallLen >= 1.0f) {
-                float wallHeight = 8.0f;
-                float wallThick = 1.0f;
+                float wallHeight = m_wallBrushHeight;
+                float wallThick = m_wallBrushThickness;
                 float minX = std::min(m_wallBrushStart.x, m_wallBrushEnd.x);
                 float minZ = std::min(m_wallBrushStart.z, m_wallBrushEnd.z);
                 float cx, cz;
                 float hw, hd;
                 if (dx >= dz) {
                     cx = minX + wallLen * 0.5f;
-                    cz = m_wallBrushStart.z + 0.5f;
+                    cz = m_wallBrushStart.z + wallThick * 0.5f;
                     hw = wallLen * 0.5f;
                     hd = wallThick * 0.5f;
                 } else {
-                    cx = m_wallBrushStart.x + 0.5f;
+                    cx = m_wallBrushStart.x + wallThick * 0.5f;
                     cz = minZ + wallLen * 0.5f;
                     hw = wallThick * 0.5f;
                     hd = wallLen * 0.5f;
@@ -2189,6 +2317,258 @@ protected:
                     c000, c001, c100, c101, c110, c111, c010, c011  // verticals
                 };
                 m_modelRenderer->renderLines(cmd, vp, wbLines, glm::vec3(1.0f, 0.6f, 0.2f)); // orange
+            }
+        }
+
+        // Game-mode grid overlay on platform_slab floors and platform_wall walls
+        if ((m_hSlabBrushMode || m_wallBrushMode || m_framePlacementMode || m_showSiloConfig) && !m_filesystemBrowser.isActive() && m_isPlayMode) {
+            std::vector<glm::vec3> gameGridLines;
+            std::vector<glm::vec3> selectedGridLines;
+
+            bool anyBrushActive = m_hSlabBrushMode || m_wallBrushMode || m_framePlacementMode;
+            for (auto& obj : m_sceneObjects) {
+                if (!obj) continue;
+                const auto& bt = obj->getBuildingType();
+                bool isSelPiece = obj->isSelected();
+                // Only draw grid on selected piece, or on all pieces when a brush tool is active
+                if (!isSelPiece && !anyBrushActive) continue;
+                auto& lines = isSelPiece ? selectedGridLines : gameGridLines;
+
+                if (bt == "platform_slab") {
+                    // Draw 1m grid on ALL 6 faces of floor slab
+                    // Cube is bottom-aligned: Y from 0 to size, X/Z centered
+                    glm::vec3 pos = obj->getTransform().getPosition();
+                    glm::vec3 sc  = obj->getTransform().getScale();
+                    float hw = sc.x * 0.5f;
+                    float hd = sc.z * 0.5f;
+
+                    float minX = pos.x - hw, maxX = pos.x + hw;
+                    float minY = pos.y,       maxY = pos.y + sc.y; // bottom-aligned
+                    float minZ = pos.z - hd,  maxZ = pos.z + hd;
+                    float o = 0.02f; // slight offset to avoid z-fighting
+
+                    // Outline edges (12 edges of the box) — drawn once
+                    // Top rectangle
+                    float ty = maxY + o, by = minY - o;
+                    lines.push_back({minX, ty, minZ}); lines.push_back({maxX, ty, minZ});
+                    lines.push_back({maxX, ty, minZ}); lines.push_back({maxX, ty, maxZ});
+                    lines.push_back({maxX, ty, maxZ}); lines.push_back({minX, ty, maxZ});
+                    lines.push_back({minX, ty, maxZ}); lines.push_back({minX, ty, minZ});
+                    // Bottom rectangle
+                    lines.push_back({minX, by, minZ}); lines.push_back({maxX, by, minZ});
+                    lines.push_back({maxX, by, minZ}); lines.push_back({maxX, by, maxZ});
+                    lines.push_back({maxX, by, maxZ}); lines.push_back({minX, by, maxZ});
+                    lines.push_back({minX, by, maxZ}); lines.push_back({minX, by, minZ});
+                    // 4 vertical edges
+                    lines.push_back({minX, by, minZ}); lines.push_back({minX, ty, minZ});
+                    lines.push_back({maxX, by, minZ}); lines.push_back({maxX, ty, minZ});
+                    lines.push_back({maxX, by, maxZ}); lines.push_back({maxX, ty, maxZ});
+                    lines.push_back({minX, by, maxZ}); lines.push_back({minX, ty, maxZ});
+
+                    // Top face interior grid lines (local 1m from edges)
+                    for (float x = minX + 1.0f; x <= maxX - 0.01f; x += 1.0f) {
+                        lines.push_back({x, ty, minZ});
+                        lines.push_back({x, ty, maxZ});
+                    }
+                    for (float z = minZ + 1.0f; z <= maxZ - 0.01f; z += 1.0f) {
+                        lines.push_back({minX, ty, z});
+                        lines.push_back({maxX, ty, z});
+                    }
+                    // Bottom face interior grid lines
+                    for (float x = minX + 1.0f; x <= maxX - 0.01f; x += 1.0f) {
+                        lines.push_back({x, by, minZ});
+                        lines.push_back({x, by, maxZ});
+                    }
+                    for (float z = minZ + 1.0f; z <= maxZ - 0.01f; z += 1.0f) {
+                        lines.push_back({minX, by, z});
+                        lines.push_back({maxX, by, z});
+                    }
+                    // Front/back face interior vertical lines
+                    for (float fz : {minZ - o, maxZ + o}) {
+                        for (float x = minX + 1.0f; x <= maxX - 0.01f; x += 1.0f) {
+                            lines.push_back({x, minY, fz});
+                            lines.push_back({x, maxY, fz});
+                        }
+                    }
+                    // Left/right face interior vertical lines
+                    for (float fx : {minX - o, maxX + o}) {
+                        for (float z = minZ + 1.0f; z <= maxZ - 0.01f; z += 1.0f) {
+                            lines.push_back({fx, minY, z});
+                            lines.push_back({fx, maxY, z});
+                        }
+                    }
+                } else if (bt == "platform_wall") {
+                    // Draw 1m grid on wall faces (bottom-aligned cube)
+                    glm::vec3 sc  = obj->getTransform().getScale();
+                    glm::mat4 mat = obj->getTransform().getMatrix();
+                    float hw = sc.x * 0.5f;
+                    float hz = sc.z * 0.5f;
+                    float o = 0.03f; // tiny offset to avoid z-fighting
+
+                    auto toWorld = [&](float lx, float ly, float lz) -> glm::vec3 {
+                        float ux = (sc.x > 0.001f) ? lx / sc.x : 0.0f;
+                        float uy = (sc.y > 0.001f) ? ly / sc.y : 0.0f;
+                        float uz = (sc.z > 0.001f) ? lz / sc.z : 0.0f;
+                        return glm::vec3(mat * glm::vec4(ux, uy, uz, 1.0f));
+                    };
+                    glm::vec3 worldBot = glm::vec3(mat * glm::vec4(0,0,0,1));
+
+                    // 8 corners of the box (with offset to sit just outside surface)
+                    glm::vec3 c000 = toWorld(-(hw+o), -o,      -(hz+o));
+                    glm::vec3 c100 = toWorld( (hw+o), -o,      -(hz+o));
+                    glm::vec3 c010 = toWorld(-(hw+o), sc.y+o,  -(hz+o));
+                    glm::vec3 c110 = toWorld( (hw+o), sc.y+o,  -(hz+o));
+                    glm::vec3 c001 = toWorld(-(hw+o), -o,       (hz+o));
+                    glm::vec3 c101 = toWorld( (hw+o), -o,       (hz+o));
+                    glm::vec3 c011 = toWorld(-(hw+o), sc.y+o,   (hz+o));
+                    glm::vec3 c111 = toWorld( (hw+o), sc.y+o,   (hz+o));
+
+                    // 12 box edges (each drawn exactly once)
+                    // Bottom 4
+                    lines.push_back(c000); lines.push_back(c100);
+                    lines.push_back(c100); lines.push_back(c101);
+                    lines.push_back(c101); lines.push_back(c001);
+                    lines.push_back(c001); lines.push_back(c000);
+                    // Top 4
+                    lines.push_back(c010); lines.push_back(c110);
+                    lines.push_back(c110); lines.push_back(c111);
+                    lines.push_back(c111); lines.push_back(c011);
+                    lines.push_back(c011); lines.push_back(c010);
+                    // 4 verticals
+                    lines.push_back(c000); lines.push_back(c010);
+                    lines.push_back(c100); lines.push_back(c110);
+                    lines.push_back(c101); lines.push_back(c111);
+                    lines.push_back(c001); lines.push_back(c011);
+
+                    // +/-Z faces — interior grid lines at local 1m intervals from edge
+                    for (float fz : { -(hz + o), hz + o }) {
+                        for (float lx = -hw + 1.0f; lx <= hw - 0.01f; lx += 1.0f) {
+                            lines.push_back(toWorld(lx, -o, fz));
+                            lines.push_back(toWorld(lx, sc.y + o, fz));
+                        }
+                        for (float ly = 1.0f; ly <= sc.y - 0.01f; ly += 1.0f) {
+                            lines.push_back(toWorld(-(hw + o), ly, fz));
+                            lines.push_back(toWorld( (hw + o), ly, fz));
+                        }
+                    }
+                    // +/-X faces — interior grid lines at local 1m intervals from edge
+                    for (float fx : { -(hw + o), hw + o }) {
+                        for (float lz = -hz + 1.0f; lz <= hz - 0.01f; lz += 1.0f) {
+                            lines.push_back(toWorld(fx, -o, lz));
+                            lines.push_back(toWorld(fx, sc.y + o, lz));
+                        }
+                        for (float ly = 1.0f; ly <= sc.y - 0.01f; ly += 1.0f) {
+                            lines.push_back(toWorld(fx, ly, -(hz + o)));
+                            lines.push_back(toWorld(fx, ly,  (hz + o)));
+                        }
+                    }
+                }
+            }
+
+            if (!gameGridLines.empty())
+                m_modelRenderer->renderLines(cmd, vp, gameGridLines, glm::vec3(0.0f, 0.0f, 0.0f));
+            if (!selectedGridLines.empty())
+                m_modelRenderer->renderLines(cmd, vp, selectedGridLines, glm::vec3(0.2f, 0.4f, 1.0f));
+        }
+
+        // Move gizmo — XZ arrows on selected piece when W move mode is active
+        if (m_buildMoveMode && m_selectedBuildPiece >= 0
+            && m_selectedBuildPiece < static_cast<int>(m_sceneObjects.size())
+            && m_sceneObjects[m_selectedBuildPiece] && m_isPlayMode) {
+            auto& mobj = m_sceneObjects[m_selectedBuildPiece];
+            glm::vec3 gp = mobj->getTransform().getPosition();
+            glm::vec3 gs = mobj->getTransform().getScale();
+            float gizmoY = gp.y + gs.y + 0.2f; // slightly above object top
+            float arrowLen = 3.0f;
+            float headLen = 0.5f;
+            float headW = 0.2f;
+            glm::vec3 origin = {gp.x, gizmoY, gp.z};
+
+            // X axis (red)
+            glm::vec3 xEnd = origin + glm::vec3(arrowLen, 0, 0);
+            std::vector<glm::vec3> xLines = {
+                origin, xEnd,
+                xEnd, xEnd + glm::vec3(-headLen, 0, headW),
+                xEnd, xEnd + glm::vec3(-headLen, 0, -headW),
+            };
+            m_modelRenderer->renderLines(cmd, vp, xLines, glm::vec3(1.0f, 0.2f, 0.2f));
+
+            // Z axis (blue)
+            glm::vec3 zEnd = origin + glm::vec3(0, 0, arrowLen);
+            std::vector<glm::vec3> zLines = {
+                origin, zEnd,
+                zEnd, zEnd + glm::vec3(headW, 0, -headLen),
+                zEnd, zEnd + glm::vec3(-headW, 0, -headLen),
+            };
+            m_modelRenderer->renderLines(cmd, vp, zLines, glm::vec3(0.2f, 0.4f, 1.0f));
+        }
+
+        // Game-mode frame preview — yellow wireframe showing where frame will be placed
+        if (m_framePreviewValid && !m_filesystemBrowser.isActive() && m_isPlayMode) {
+            float fs = m_framePreviewSize;
+            float hs = fs * 0.5f;
+            std::vector<glm::vec3> previewLines;
+
+            if (std::abs(m_framePreviewNY) > 0.5f) {
+                // Floor/ceiling frame — horizontal rectangle on XZ plane
+                float yOff = (m_framePreviewNY > 0) ? 0.05f : -0.05f;
+                glm::vec3 p = m_framePreviewPos + glm::vec3(0, yOff, 0);
+                glm::vec3 c0 = p + glm::vec3(-hs, 0, -hs);
+                glm::vec3 c1 = p + glm::vec3( hs, 0, -hs);
+                glm::vec3 c2 = p + glm::vec3( hs, 0,  hs);
+                glm::vec3 c3 = p + glm::vec3(-hs, 0,  hs);
+                previewLines.insert(previewLines.end(), { c0, c1, c1, c2, c2, c3, c3, c0 });
+                previewLines.push_back(c0); previewLines.push_back(c2);
+                previewLines.push_back(c1); previewLines.push_back(c3);
+            } else {
+                // Wall frame — vertical rectangle
+                glm::vec3 normal = {m_framePreviewNX, 0.0f, m_framePreviewNZ};
+                glm::vec3 p = m_framePreviewPos + normal * 0.1f;
+                float yawRad = m_framePreviewYaw * static_cast<float>(M_PI) / 180.0f;
+                glm::vec3 right = {cosf(yawRad), 0.0f, -sinf(yawRad)};
+                glm::vec3 up = {0.0f, 1.0f, 0.0f};
+                glm::vec3 c0 = p + right * (-hs);
+                glm::vec3 c1 = p + right * ( hs);
+                glm::vec3 c2 = p + right * ( hs) + up * fs;
+                glm::vec3 c3 = p + right * (-hs) + up * fs;
+                previewLines.insert(previewLines.end(), { c0, c1, c1, c2, c2, c3, c3, c0 });
+                previewLines.push_back(c0); previewLines.push_back(c2);
+                previewLines.push_back(c1); previewLines.push_back(c3);
+            }
+            m_modelRenderer->renderLines(cmd, vp, previewLines, glm::vec3(1.0f, 1.0f, 0.0f));
+        }
+
+        // Floor brush preview — green wireframe rectangle showing where floor will be placed
+        if (m_hSlabPreviewValid && m_hSlabDrawing) {
+            float dx = std::abs(m_hSlabEnd.x - m_hSlabStart.x);
+            float dz = std::abs(m_hSlabEnd.z - m_hSlabStart.z);
+            float floorW = std::round(dx);
+            float floorD = std::round(dz);
+            if (floorW >= 1.0f && floorD >= 1.0f) {
+                float minX = std::min(m_hSlabStart.x, m_hSlabEnd.x);
+                float minZ = std::min(m_hSlabStart.z, m_hSlabEnd.z);
+                float cx = minX + floorW * 0.5f;
+                float cz = minZ + floorD * 0.5f;
+                float avgY = (m_hSlabStart.y + m_hSlabEnd.y) * 0.5f;
+                float hw = floorW * 0.5f;
+                float hd = floorD * 0.5f;
+                float ht = m_hSlabThickness * 0.5f;
+
+                glm::vec3 c000 = {cx - hw, avgY - ht, cz - hd};
+                glm::vec3 c100 = {cx + hw, avgY - ht, cz - hd};
+                glm::vec3 c110 = {cx + hw, avgY - ht, cz + hd};
+                glm::vec3 c010 = {cx - hw, avgY - ht, cz + hd};
+                glm::vec3 c001 = {cx - hw, avgY + ht, cz - hd};
+                glm::vec3 c101 = {cx + hw, avgY + ht, cz - hd};
+                glm::vec3 c111 = {cx + hw, avgY + ht, cz + hd};
+                glm::vec3 c011 = {cx - hw, avgY + ht, cz + hd};
+
+                std::vector<glm::vec3> fbLines = {
+                    c000, c100, c100, c110, c110, c010, c010, c000, // bottom
+                    c001, c101, c101, c111, c111, c011, c011, c001, // top
+                    c000, c001, c100, c101, c110, c111, c010, c011  // verticals
+                };
+                m_modelRenderer->renderLines(cmd, vp, fbLines, glm::vec3(0.2f, 0.8f, 0.4f)); // green
             }
         }
 
@@ -2525,12 +2905,33 @@ private:
             target->setTextureData(tex.pixels, tex.width, tex.height);
             m_modelRenderer->updateTexture(target->getBufferHandle(), tex.pixels.data(), tex.width, tex.height);
 
-            // Rescale UVs on the mesh vertices
-            if (target->hasMeshData() && (std::abs(uScale - 1.0f) > 0.001f || std::abs(vScale - 1.0f) > 0.001f)) {
-                auto vertices = target->getVertices();  // copy
+            // Set vertex colors to white so texture shows through, and apply UV scale from fresh base UVs
+            if (target->hasMeshData() && target->getPrimitiveType() == PrimitiveType::Cube) {
+                auto freshMesh = PrimitiveMeshBuilder::createCube(1.0f, glm::vec4(1.0f));
+                auto vertices = target->getVertices();
+                glm::vec3 sc = target->getTransform().getScale();
+                for (size_t vi = 0; vi < vertices.size() && vi < freshMesh.vertices.size(); vi++) {
+                    auto& v = vertices[vi];
+                    v.color = glm::vec4(1.0f, 1.0f, 1.0f, 1.0f);
+                    v.texCoord = freshMesh.vertices[vi].texCoord;
+                    glm::vec3 absN = glm::abs(v.normal);
+                    float faceW, faceH;
+                    if (absN.y > absN.x && absN.y > absN.z) {
+                        faceW = sc.x; faceH = sc.z;
+                    } else if (absN.x > absN.z) {
+                        faceW = sc.z; faceH = sc.y;
+                    } else {
+                        faceW = sc.x; faceH = sc.y;
+                    }
+                    v.texCoord.x *= faceW * uScale;
+                    v.texCoord.y *= faceH * vScale;
+                }
+                target->setMeshData(vertices, target->getIndices());
+                m_modelRenderer->updateVertices(target->getBufferHandle(), vertices);
+            } else if (target->hasMeshData()) {
+                auto vertices = target->getVertices();
                 for (auto& v : vertices) {
-                    v.texCoord.x *= uScale;
-                    v.texCoord.y *= vScale;
+                    v.color = glm::vec4(1.0f, 1.0f, 1.0f, 1.0f);
                 }
                 target->setMeshData(vertices, target->getIndices());
                 m_modelRenderer->updateVertices(target->getBufferHandle(), vertices);
@@ -2785,6 +3186,9 @@ private:
         });
         m_editorUI.setFileSaveCallback([this]() {
             showSaveDialog();
+        });
+        m_editorUI.setSetDefaultProjectCallback([this]() {
+            setAsDefaultLevel();
         });
         m_editorUI.setFileExitCallback([this]() {
             getWindow().close();
@@ -3771,11 +4175,10 @@ private:
     }
 
     void loadBuildingTextures() {
-        // Try multiple paths: CWD, then project source dir
-        std::string dir = "textures/building";
+        // Prefer project source dir (safe from clean builds), fall back to CWD
+        std::string dir = std::string(CMAKE_SOURCE_DIR) + "/textures/building";
         if (!std::filesystem::exists(dir)) {
-            // Try the source directory (for running from build/ directly)
-            dir = std::string(CMAKE_SOURCE_DIR) + "/textures/building";
+            dir = "textures/building";
         }
         if (!std::filesystem::exists(dir)) {
             std::cout << "Building textures directory not found" << std::endl;
@@ -3785,6 +4188,8 @@ private:
 
         VkDevice device = getContext().getDevice();
         std::vector<EditorUI::BuildingTextureInfo> uiTextures;
+
+        constexpr int THUMB_SIZE = 64; // small thumbnail for catalog — saves VRAM
 
         for (const auto& entry : std::filesystem::directory_iterator(dir)) {
             if (!entry.is_regular_file()) continue;
@@ -3800,17 +4205,33 @@ private:
             tex.name = entry.path().stem().string();
             tex.width = w;
             tex.height = h;
+            // Store full-res pixels in CPU memory only (for applying later)
             tex.pixels.assign(pixels, pixels + w * h * 4);
 
-            // Create Vulkan image for ImGui preview (thumbnail)
-            VkDeviceSize imageSize = w * h * 4;
+            // Create a small thumbnail for the ImGui catalog (not the full-res image)
+            std::vector<unsigned char> thumbPixels(THUMB_SIZE * THUMB_SIZE * 4);
+            for (int ty = 0; ty < THUMB_SIZE; ty++) {
+                for (int tx = 0; tx < THUMB_SIZE; tx++) {
+                    int sx = tx * w / THUMB_SIZE;
+                    int sy = ty * h / THUMB_SIZE;
+                    int srcIdx = (sy * w + sx) * 4;
+                    int dstIdx = (ty * THUMB_SIZE + tx) * 4;
+                    thumbPixels[dstIdx + 0] = pixels[srcIdx + 0];
+                    thumbPixels[dstIdx + 1] = pixels[srcIdx + 1];
+                    thumbPixels[dstIdx + 2] = pixels[srcIdx + 2];
+                    thumbPixels[dstIdx + 3] = pixels[srcIdx + 3];
+                }
+            }
+            stbi_image_free(pixels);
 
-            // Staging buffer
+            VkDeviceSize thumbSize = THUMB_SIZE * THUMB_SIZE * 4;
+
+            // Staging buffer for thumbnail
             VkBuffer stagingBuffer;
             VkDeviceMemory stagingMemory;
             VkBufferCreateInfo bufferInfo{};
             bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-            bufferInfo.size = imageSize;
+            bufferInfo.size = thumbSize;
             bufferInfo.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
             bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
             vkCreateBuffer(device, &bufferInfo, nullptr, &stagingBuffer);
@@ -3827,17 +4248,16 @@ private:
             vkBindBufferMemory(device, stagingBuffer, stagingMemory, 0);
 
             void* data;
-            vkMapMemory(device, stagingMemory, 0, imageSize, 0, &data);
-            memcpy(data, pixels, imageSize);
+            vkMapMemory(device, stagingMemory, 0, thumbSize, 0, &data);
+            memcpy(data, thumbPixels.data(), thumbSize);
             vkUnmapMemory(device, stagingMemory);
-            stbi_image_free(pixels);
 
-            // Create image
+            // Create thumbnail image (64x64 instead of full-res)
             VkImageCreateInfo imageInfo{};
             imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
             imageInfo.imageType = VK_IMAGE_TYPE_2D;
             imageInfo.format = VK_FORMAT_R8G8B8A8_SRGB;
-            imageInfo.extent = {static_cast<uint32_t>(w), static_cast<uint32_t>(h), 1};
+            imageInfo.extent = {THUMB_SIZE, THUMB_SIZE, 1};
             imageInfo.mipLevels = 1;
             imageInfo.arrayLayers = 1;
             imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
@@ -3872,7 +4292,7 @@ private:
 
             VkBufferImageCopy region{};
             region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-            region.imageExtent = {static_cast<uint32_t>(w), static_cast<uint32_t>(h), 1};
+            region.imageExtent = {THUMB_SIZE, THUMB_SIZE, 1};
             vkCmdCopyBufferToImage(cmd, stagingBuffer, tex.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
 
             barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
@@ -3887,7 +4307,7 @@ private:
             eden::Buffer::trackVramFreeHandle(stagingMemory);
             vkFreeMemory(device, stagingMemory, nullptr);
 
-            // Create view + sampler
+            // Create view + sampler for thumbnail
             VkImageViewCreateInfo viewInfo{};
             viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
             viewInfo.image = tex.image;
@@ -3915,12 +4335,10 @@ private:
             uiTextures.push_back(uiTex);
 
             m_buildingTextures.push_back(std::move(tex));
-            std::cout << "Loaded building texture: " << entry.path().filename().string()
-                      << " (" << w << "x" << h << ")" << std::endl;
         }
 
         m_editorUI.setBuildingTextures(uiTextures);
-        std::cout << "Loaded " << m_buildingTextures.size() << " building textures" << std::endl;
+        std::cout << "Loaded " << m_buildingTextures.size() << " building texture(s) (thumbnails only)" << std::endl;
     }
 
     void cleanupBuildingTextures() {
@@ -4017,8 +4435,32 @@ private:
         std::vector<unsigned char> thumbData(THUMB_SIZE * THUMB_SIZE * 4);
         bool gotThumb = false;
 
+        // Try custom door texture first (e.g. forge_door.jpeg, home.jpeg)
+        if (!slot.texturePath.empty()) {
+            int w = 0, h = 0, ch = 0;
+            unsigned char* pixels = stbi_load(slot.texturePath.c_str(), &w, &h, &ch, STBI_rgb_alpha);
+            if (pixels && w > 0 && h > 0) {
+                for (int ty = 0; ty < THUMB_SIZE; ty++) {
+                    for (int tx = 0; tx < THUMB_SIZE; tx++) {
+                        int sx = tx * w / THUMB_SIZE;
+                        int sy = ty * h / THUMB_SIZE;
+                        int si = (sy * w + sx) * 4;
+                        int di = (ty * THUMB_SIZE + tx) * 4;
+                        thumbData[di + 0] = pixels[si + 0];
+                        thumbData[di + 1] = pixels[si + 1];
+                        thumbData[di + 2] = pixels[si + 2];
+                        thumbData[di + 3] = pixels[si + 3];
+                    }
+                }
+                stbi_image_free(pixels);
+                gotThumb = true;
+            } else {
+                if (pixels) stbi_image_free(pixels);
+            }
+        }
+
         // Try loading as image (png/jpg/etc)
-        {
+        if (!gotThumb) {
             int w = 0, h = 0, ch = 0;
             unsigned char* pixels = stbi_load(slot.filePath.c_str(), &w, &h, &ch, STBI_rgb_alpha);
             if (pixels && w > 0 && h > 0) {
@@ -4105,10 +4547,13 @@ private:
         fs::remove(metaPath, ec);
         if (m_toolbarSlots[i].occupied && !m_toolbarSlots[i].filePath.empty()) {
             fs::create_symlink(m_toolbarSlots[i].filePath, linkPath, ec);
-            // Save targetLevel if present
-            if (!m_toolbarSlots[i].targetLevel.empty()) {
+            // Save targetLevel and texturePath if present
+            if (!m_toolbarSlots[i].targetLevel.empty() || !m_toolbarSlots[i].texturePath.empty()) {
                 std::ofstream mf(metaPath);
-                if (mf) mf << m_toolbarSlots[i].targetLevel;
+                if (mf) {
+                    mf << m_toolbarSlots[i].targetLevel << "\n";
+                    mf << m_toolbarSlots[i].texturePath << "\n";
+                }
             }
         }
     }
@@ -4133,11 +4578,14 @@ private:
             if (slashPos != std::string::npos)
                 name = name.substr(slashPos + 1);
             m_toolbarSlots[i].displayName = name;
-            // Load targetLevel from .meta file if present
+            // Load targetLevel and texturePath from .meta file if present
             std::string metaPath = dir + "/slot_" + std::to_string(i) + ".meta";
             if (fs::exists(metaPath)) {
                 std::ifstream mf(metaPath);
-                if (mf) std::getline(mf, m_toolbarSlots[i].targetLevel);
+                if (mf) {
+                    std::getline(mf, m_toolbarSlots[i].targetLevel);
+                    std::getline(mf, m_toolbarSlots[i].texturePath);
+                }
             }
             createSlotThumbnail(i);
         }
@@ -4303,6 +4751,97 @@ private:
                 if (!Input::isMouseCaptured()) {
                     Input::setMouseCaptured(true);
                 }
+            }
+
+            // Building mode camera: orbit/pan/zoom (same as editor/LIME controls)
+            if (m_playModeCursorVisible && m_showSiloConfig) {
+
+                // Scroll wheel zoom (dolly toward/away from orbit target)
+                float scroll = Input::getScrollDelta();
+                if (scroll != 0) {
+                    float orbitDistance = glm::length(m_camera.getPosition() - m_orbitTarget);
+                    if (orbitDistance < 0.01f) orbitDistance = 5.0f;
+                    float dollySpeed = std::max(orbitDistance * 0.08f, 2.0f);
+                    glm::vec3 forward = glm::normalize(m_orbitTarget - m_camera.getPosition());
+                    glm::vec3 move = forward * scroll * dollySpeed;
+                    glm::vec3 newPos = m_camera.getPosition() + move;
+                    glm::vec3 newToTarget = m_orbitTarget - newPos;
+                    if (glm::dot(newToTarget, forward) < 2.0f) {
+                        m_orbitTarget = newPos + forward * 2.0f;
+                    }
+                    m_camera.setPosition(newPos);
+                }
+
+                // RMB tumble and MMB pan
+                if (Input::isMouseButtonPressed(Input::MOUSE_RIGHT)) {
+                    m_isTumbling = true;
+                }
+                if (Input::isMouseButtonPressed(Input::MOUSE_MIDDLE)) {
+                    m_isPanning = true;
+                }
+                if (!Input::isMouseButtonDown(Input::MOUSE_RIGHT)) m_isTumbling = false;
+                if (!Input::isMouseButtonDown(Input::MOUSE_MIDDLE)) m_isPanning = false;
+
+                // Compute mouse delta manually (Input::getMouseDelta() only works when captured)
+                static glm::vec2 buildLastMouse = Input::getMousePosition();
+                glm::vec2 curMouse = Input::getMousePosition();
+                glm::vec2 mouseDelta = curMouse - buildLastMouse;
+                buildLastMouse = curMouse;
+
+                float orbitDistance = glm::length(m_camera.getPosition() - m_orbitTarget);
+                if (orbitDistance < 0.01f) orbitDistance = 5.0f;
+
+                // RMB Tumble
+                if (m_isTumbling) {
+                    if (!m_wasTumbling) {
+                        // If a build piece is selected, orbit around it
+                        if (m_selectedBuildPiece >= 0 && m_selectedBuildPiece < static_cast<int>(m_sceneObjects.size()) && m_sceneObjects[m_selectedBuildPiece]) {
+                            m_orbitTarget = m_sceneObjects[m_selectedBuildPiece]->getTransform().getPosition();
+                        } else {
+                            float dist = glm::length(m_camera.getPosition() - m_orbitTarget);
+                            if (dist < 0.5f) dist = 10.0f;
+                            glm::vec3 camFront = m_camera.getFront();
+                            m_orbitTarget = m_camera.getPosition() + camFront * dist;
+                        }
+                        m_tumbleOrbitTarget = m_orbitTarget;
+                        m_tumbleOrbitDistance = glm::length(m_camera.getPosition() - m_tumbleOrbitTarget);
+                        if (m_tumbleOrbitDistance < 0.5f) m_tumbleOrbitDistance = 5.0f;
+                        glm::vec3 offset = m_camera.getPosition() - m_tumbleOrbitTarget;
+                        m_orbitYaw = glm::degrees(atan2(offset.z, offset.x));
+                        m_orbitPitch = glm::degrees(asin(glm::clamp(offset.y / m_tumbleOrbitDistance, -1.0f, 1.0f)));
+                    } else {
+                        float sensitivity = 0.25f;
+                        m_orbitYaw += mouseDelta.x * sensitivity;
+                        m_orbitPitch += mouseDelta.y * sensitivity;
+                        m_orbitPitch = std::clamp(m_orbitPitch, -89.0f, 89.0f);
+                        float yawRad = glm::radians(m_orbitYaw);
+                        float pitchRad = glm::radians(m_orbitPitch);
+                        glm::vec3 offset;
+                        offset.x = m_tumbleOrbitDistance * cos(pitchRad) * cos(yawRad);
+                        offset.y = m_tumbleOrbitDistance * sin(pitchRad);
+                        offset.z = m_tumbleOrbitDistance * cos(pitchRad) * sin(yawRad);
+                        m_camera.setPosition(m_tumbleOrbitTarget + offset);
+                        glm::vec3 lookDir = glm::normalize(m_tumbleOrbitTarget - m_camera.getPosition());
+                        m_camera.setYaw(glm::degrees(atan2(lookDir.z, lookDir.x)));
+                        m_camera.setPitch(glm::degrees(asin(glm::clamp(lookDir.y, -1.0f, 1.0f))));
+                    }
+                }
+
+                // MMB Pan
+                static bool wasBuildPanning = false;
+                if (m_isPanning) {
+                    if (!wasBuildPanning) mouseDelta = glm::vec2(0.0f);
+                    float panDist = glm::length(m_camera.getPosition() - m_orbitTarget);
+                    if (panDist < 1.0f) panDist = 5.0f;
+                    float panSpeed = std::max(panDist * 0.002f, 0.1f);
+                    glm::vec3 right = m_camera.getRight();
+                    glm::vec3 up = m_camera.getUp();
+                    glm::vec3 panOffset = -right * mouseDelta.x * panSpeed + up * mouseDelta.y * panSpeed;
+                    m_camera.setPosition(m_camera.getPosition() + panOffset);
+                    m_orbitTarget += panOffset;
+                }
+                wasBuildPanning = m_isPanning;
+                m_wasTumbling = m_isTumbling;
             }
         } else if (m_inConversation) {
             // During conversation: same right-click toggle, but default is cursor visible
@@ -4578,12 +5117,13 @@ private:
         // Double-tap space toggles fly/walk mode; spacebar on selected spinning model toggles spin
         if (m_isPlayMode && !imguiWantsKeyboard && !m_inConversation && !m_quickChatMode) {
             if (Input::isKeyPressed(Input::KEY_SPACE)) {
-                // Check if any selected filesystem model has a spin — toggle it
+                // Check if any selected filesystem/widget model has a spin — toggle it
                 bool handledSpin = false;
                 if (m_filesystemBrowser.isActive()) {
                     for (auto& obj : m_sceneObjects) {
                         if (!obj || !obj->isSelected()) continue;
-                        if (obj->getBuildingType() == "filesystem") {
+                        const auto& bt = obj->getBuildingType();
+                        if (bt == "filesystem" || bt == "wall_widget") {
                             if (m_filesystemBrowser.toggleSpin(obj.get()))
                                 handledSpin = true;
                         }
@@ -4592,6 +5132,23 @@ private:
                 if (!handledSpin) {
                     float groundHeight = heightQuery(m_camera.getPosition().x, m_camera.getPosition().z);
                     m_camera.onSpacePressed(groundHeight);
+                }
+            }
+        }
+
+        // Left/Right arrow: rotate selected paused model by 45-degree increments
+        if (m_isPlayMode && !imguiWantsKeyboard && !m_inConversation && !m_quickChatMode &&
+            m_filesystemBrowser.isActive()) {
+            float rotDeg = 0.0f;
+            if (Input::isKeyPressed(Input::KEY_LEFT))  rotDeg = -45.0f;
+            if (Input::isKeyPressed(Input::KEY_RIGHT)) rotDeg =  45.0f;
+            if (rotDeg != 0.0f) {
+                for (auto& obj : m_sceneObjects) {
+                    if (!obj || !obj->isSelected()) continue;
+                    const auto& bt = obj->getBuildingType();
+                    if (bt == "filesystem" || bt == "wall_widget") {
+                        m_filesystemBrowser.rotateSpinIncrement(obj.get(), rotDeg);
+                    }
                 }
             }
         }
@@ -4635,7 +5192,8 @@ private:
         bool useCharacterController = m_isPlayMode && m_characterController &&
                                 m_camera.getMovementMode() == MovementMode::Walk &&
                                 !m_filesystemBrowser.isActive() &&
-                                !m_inPanelFocusMode;
+                                !m_inPanelFocusMode &&
+                                !(m_playModeCursorVisible && m_showSiloConfig);
 
         if (useCharacterController) {
             // Calculate desired velocity from input
@@ -4733,7 +5291,8 @@ private:
             }
 
             // WASD movement only in play mode (editor mode uses orbit/pan/zoom above)
-            if (m_isPlayMode && !m_inPanelFocusMode) {
+            // Skip when in building cursor mode — building mode has its own camera controls
+            if (m_isPlayMode && !m_inPanelFocusMode && !(m_playModeCursorVisible && m_showSiloConfig)) {
                 // During conversation or quick chat: arrow keys, otherwise WASD
                 // When ImGui wants keyboard: no movement at all
                 if (imguiWantsKeyboard) {
@@ -4754,13 +5313,27 @@ private:
                         heightQuery
                     );
                 } else {
+                    // Suppress space (jump/fly-up) when a spinning model is selected,
+                    // so spacebar can toggle spin without also moving the player
+                    bool suppressSpace = false;
+                    if (m_filesystemBrowser.isActive()) {
+                        for (auto& obj : m_sceneObjects) {
+                            if (!obj || !obj->isSelected()) continue;
+                            const auto& bt = obj->getBuildingType();
+                            if ((bt == "filesystem" || bt == "wall_widget") &&
+                                m_filesystemBrowser.hasSpinEntry(obj.get())) {
+                                suppressSpace = true;
+                                break;
+                            }
+                        }
+                    }
                     m_camera.updateMovement(
                         deltaTime * speedMult,
                         Input::isKeyDown(Input::KEY_W),
                         Input::isKeyDown(Input::KEY_S),
                         Input::isKeyDown(Input::KEY_A),
                         Input::isKeyDown(Input::KEY_D),
-                        Input::isKeyDown(Input::KEY_SPACE),
+                        suppressSpace ? false : Input::isKeyDown(Input::KEY_SPACE),
                         Input::isKeyDown(Input::KEY_LEFT_SHIFT),
                         heightQuery
                     );
@@ -5502,13 +6075,67 @@ private:
         }
         wasSlashKeyDown = slashKeyDown;
 
-        // Tab key to toggle world chat history window
+        // Tab key: toggle building mode in play mode, or toggle world chat history
         static bool wasTabKeyDown = false;
         bool tabKeyDown = Input::isKeyDown(Input::KEY_TAB);
         if (tabKeyDown && !wasTabKeyDown && !ImGui::GetIO().WantTextInput && !m_quickChatMode) {
-            m_showWorldChatHistory = !m_showWorldChatHistory;
+            if (m_isPlayMode && !m_filesystemBrowser.isActive()) {
+                // Toggle building mode
+                m_showSiloConfig = !m_showSiloConfig;
+                if (m_showSiloConfig) {
+                    // Entering building mode — show cursor
+                    m_playModeCursorVisible = true;
+                    Input::setMouseCaptured(false);
+                } else {
+                    // Leaving building mode — hide cursor, clear tools, deselect
+                    m_playModeCursorVisible = false;
+                    Input::setMouseCaptured(true);
+                    m_hSlabBrushMode = false;
+                    m_wallBrushMode = false;
+                    m_framePlacementMode = false;
+                    m_buildMoveMode = false;
+                    if (m_selectedBuildPiece >= 0) {
+                        if (m_selectedBuildPiece < static_cast<int>(m_sceneObjects.size()) && m_sceneObjects[m_selectedBuildPiece])
+                            m_sceneObjects[m_selectedBuildPiece]->setSelected(false);
+                        m_selectedBuildPiece = -1;
+                        m_editorUI.setSelectedObjectIndex(-1);
+                    }
+                }
+            } else if (!m_isPlayMode) {
+                m_showWorldChatHistory = !m_showWorldChatHistory;
+            }
         }
         wasTabKeyDown = tabKeyDown;
+
+        // Building mode hotkeys
+        if (m_showSiloConfig && m_playModeCursorVisible && !ImGui::GetIO().WantTextInput) {
+            if (Input::isKeyPressed(Input::KEY_H)) {
+                m_hSlabBrushMode = !m_hSlabBrushMode;
+                if (m_hSlabBrushMode) { m_wallBrushMode = false; m_framePlacementMode = false; m_buildMoveMode = false; }
+            }
+            if (Input::isKeyPressed(Input::KEY_V)) {
+                m_wallBrushMode = !m_wallBrushMode;
+                if (m_wallBrushMode) { m_hSlabBrushMode = false; m_framePlacementMode = false; m_buildMoveMode = false; }
+            }
+            if (Input::isKeyPressed(Input::KEY_Q)) {
+                // Clear all tools
+                m_hSlabBrushMode = false;
+                m_wallBrushMode = false;
+                m_framePlacementMode = false;
+                m_buildMoveMode = false;
+            }
+            if (Input::isKeyPressed(Input::KEY_W) && m_selectedBuildPiece >= 0
+                && m_selectedBuildPiece < static_cast<int>(m_sceneObjects.size())
+                && m_sceneObjects[m_selectedBuildPiece]) {
+                m_buildMoveMode = !m_buildMoveMode;
+                if (m_buildMoveMode) {
+                    m_hSlabBrushMode = false;
+                    m_wallBrushMode = false;
+                    m_framePlacementMode = false;
+                    m_buildMoveOrigPos = m_sceneObjects[m_selectedBuildPiece]->getTransform().getPosition();
+                }
+            }
+        }
 
         // Ctrl+1 to toggle AI context viewer
         static bool was1KeyDown = false;
@@ -5526,8 +6153,117 @@ private:
             glm::vec3 camPos = m_camera.getPosition();
             m_actionSystem.playerInteract(camPos, 10.0f);
 
+            // Check if E is aimed at a machine frame → trigger execution
+            bool handledMachine = false;
+            if (m_filesystemBrowser.isActive()) {
+                glm::vec3 rayO, rayD;
+                {
+                    float aspect = static_cast<float>(getWindow().getWidth()) / getWindow().getHeight();
+                    glm::mat4 proj = m_camera.getProjectionMatrix(aspect, 0.1f, 5000.0f);
+                    glm::mat4 view = m_camera.getViewMatrix();
+                    glm::mat4 invVP = glm::inverse(proj * view);
+                    glm::vec4 nearPt = invVP * glm::vec4(0, 0, -1, 1); nearPt /= nearPt.w;
+                    glm::vec4 farPt  = invVP * glm::vec4(0, 0,  1, 1); farPt  /= farPt.w;
+                    rayO = glm::vec3(nearPt);
+                    rayD = glm::normalize(glm::vec3(farPt - nearPt));
+                }
+                SceneObject* eHit = nullptr;
+                float eDist = std::numeric_limits<float>::max();
+                for (auto& obj : m_sceneObjects) {
+                    if (!obj) continue;
+                    const auto& bt = obj->getBuildingType();
+                    if (bt != "wall_frame" && bt != "wall_widget") continue;
+                    float d = obj->getWorldBounds().intersect(rayO, rayD);
+                    if (d >= 0 && d < 20.0f && d < eDist) {
+                        eDist = d;
+                        eHit = obj.get();
+                    }
+                }
+                if (eHit) {
+                    glm::vec3 hitPos = eHit->getTransform().getPosition();
+                    int machIdx = findFrameIndexAtPos(hitPos);
+
+                    // If position match failed (widget model may be offset), try matching by filePath
+                    if (machIdx < 0 && eHit->getBuildingType() == "wall_widget") {
+                        std::string hitFile = eHit->getTargetLevel();
+                        if (hitFile.rfind("fs://", 0) == 0) hitFile = hitFile.substr(5);
+                        if (hitFile.empty()) {
+                            // Try modelPath for .lime/.glb files
+                            hitFile = eHit->getModelPath();
+                        }
+                        if (!hitFile.empty()) {
+                            auto& frames = m_filesystemBrowser.getPlatformGrid().grid().frames;
+                            for (int i = 0; i < static_cast<int>(frames.size()); i++) {
+                                if (frames[i].filePath == hitFile) {
+                                    machIdx = i;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+
+                    if (machIdx >= 0) {
+                        auto& grid = m_filesystemBrowser.getPlatformGrid().grid();
+                        auto& hitFrame = grid.frames[machIdx];
+                        if (hitFrame.frameType == FrameType::Machine) {
+                            handledMachine = true;
+
+                            // Load schema if needed
+                            if (!m_wallMachineSchemaLoaded) {
+                                std::string schemaPath = std::string(CMAKE_SOURCE_DIR) +
+                                    "/examples/terrain_editor/assets/models/mach_hunyuan3d.json";
+                                m_wallMachine.loadSchema(schemaPath);
+                                m_wallMachineSchemaLoaded = true;
+                            }
+
+                            // Collect input image by tracing wire chain backward
+                            // through relay pods until a file_slot or filePath is found
+                            std::string imagePath;
+                            std::vector<WallMachineInstance::CollectedParam> params;
+                            {
+                                std::set<int> visited;
+                                visited.insert(machIdx); // don't trace back into the machine itself
+                                for (const auto& w : grid.wires) {
+                                    int srcIdx = -1;
+                                    if (w.toFrame == machIdx) srcIdx = w.fromFrame;
+                                    else if (w.fromFrame == machIdx) srcIdx = w.toFrame;
+                                    if (srcIdx < 0 || srcIdx >= static_cast<int>(grid.frames.size())) continue;
+                                    auto& srcFrame = grid.frames[srcIdx];
+                                    if (srcFrame.frameType == FrameType::Output ||
+                                        srcFrame.frameType == FrameType::Machine) continue;
+                                    imagePath = traceInputFile(srcIdx, grid, visited);
+                                    if (!imagePath.empty()) {
+                                        params.push_back({"image", imagePath});
+                                        break;
+                                    }
+                                }
+                            }
+
+                            if (!imagePath.empty()) {
+                                if (!m_aiServerRunning) {
+                                    startHunyuanServer(m_generateLowVRAM); // use user's VRAM setting
+                                    std::cout << "[Machine] Auto-starting Hunyuan server..." << std::endl;
+                                }
+                                if (!m_aiServerReady) {
+                                    m_pendingWallMachine = {machIdx, imagePath,
+                                        std::filesystem::path(imagePath).parent_path().string(), params};
+                                    m_hasPendingWallMachine = true;
+                                    std::cout << "[Machine] Queued (waiting for server)" << std::endl;
+                                } else {
+                                    std::string outputDir = std::filesystem::path(imagePath).parent_path().string();
+                                    m_wallMachine.execute(machIdx, imagePath, outputDir, params);
+                                    std::cout << "[Machine] Triggered via E key, image=" << imagePath << std::endl;
+                                }
+                            } else {
+                                std::cout << "[Machine] No input image — place an image on the blue input frame" << std::endl;
+                            }
+                        }
+                    }
+                }
+            }
+
             // Check for nearby scene objects and start conversation
-            tryInteractWithNearbyObject(camPos);
+            if (!handledMachine) tryInteractWithNearbyObject(camPos);
         }
         wasEKeyDown = eKeyDown;
 
@@ -5702,29 +6438,53 @@ private:
         if (deleteDown && !wasDeleteDown && !ImGui::GetIO().WantTextInput) {
             if (m_isPlayMode && m_filesystemBrowser.isActive()) {
                 // Check for selected wall_frame objects — delete from grid
-                bool deletedFrames = false;
+                // Collect frame positions to delete (avoid modifying while iterating)
+                std::vector<glm::vec3> framesToDelete;
                 for (auto& obj : m_sceneObjects) {
                     if (!obj || !obj->isSelected()) continue;
                     if (obj->getBuildingType() == "wall_frame") {
-                        glm::vec3 fp = obj->getTransform().getPosition();
-                        auto& pg = m_filesystemBrowser.getPlatformGrid();
-                        auto& frames = pg.grid().frames;
-                        for (auto it = frames.begin(); it != frames.end(); ++it) {
-                            if (std::abs(it->worldX - fp.x) < 0.1f &&
-                                std::abs(it->worldY - fp.y) < 0.1f &&
-                                std::abs(it->worldZ - fp.z) < 0.1f) {
-                                frames.erase(it);
-                                deletedFrames = true;
-                                break;
-                            }
-                        }
+                        framesToDelete.push_back(obj->getTransform().getPosition());
                     }
                 }
+
+                bool deletedFrames = false;
+                auto& pg = m_filesystemBrowser.getPlatformGrid();
+                for (auto& fp : framesToDelete) {
+                    auto& frames = pg.grid().frames;
+                    for (auto it = frames.begin(); it != frames.end(); ++it) {
+                        if (std::abs(it->worldX - fp.x) < 0.1f &&
+                            std::abs(it->worldY - fp.y) < 0.1f &&
+                            std::abs(it->worldZ - fp.z) < 0.1f) {
+                            frames.erase(it);
+                            deletedFrames = true;
+                            break;
+                        }
+                    }
+
+                    // Incrementally remove just this frame's GPU objects
+                    std::vector<uint32_t> handles;
+                    auto it2 = m_sceneObjects.begin();
+                    while (it2 != m_sceneObjects.end()) {
+                        if (*it2 && ((*it2)->getBuildingType() == "wall_frame" ||
+                                     (*it2)->getBuildingType() == "wall_widget")) {
+                            glm::vec3 op = (*it2)->getTransform().getPosition();
+                            if (std::abs(op.x - fp.x) < 0.5f &&
+                                std::abs(op.y - fp.y) < 0.5f &&
+                                std::abs(op.z - fp.z) < 0.5f) {
+                                uint32_t h = (*it2)->getBufferHandle();
+                                if (h != UINT32_MAX) handles.push_back(h);
+                                it2 = m_sceneObjects.erase(it2);
+                                continue;
+                            }
+                        }
+                        ++it2;
+                    }
+                    if (!handles.empty() && m_modelRenderer) {
+                        m_modelRenderer->destroyModels(handles);
+                    }
+                }
+
                 if (deletedFrames) {
-                    auto& pg = m_filesystemBrowser.getPlatformGrid();
-                    pg.spawnFrameObjects(m_filesystemBrowser.getSpawnOrigin(),
-                                         m_filesystemBrowser.getBasementFloorY() + 0.5f);
-                    m_filesystemBrowser.respawnFrameFiles();
                     pg.saveConfig(m_filesystemBrowser.getCurrentPath());
                     syncExcludedPaths();
                 }
@@ -5733,6 +6493,7 @@ private:
                 // filesystem objects → trash on disk, then refresh silo
                 bool removedFrameFiles = false;
                 bool trashedFiles = false;
+                std::vector<SceneObject*> widgetsToRemove; // collect for incremental GPU cleanup
                 for (auto& obj : m_sceneObjects) {
                     if (!obj || !obj->isSelected()) continue;
                     const auto& bt = obj->getBuildingType();
@@ -5761,6 +6522,7 @@ private:
                             if (bestFrame) {
                                 bestFrame->filePath.clear();
                                 removedFrameFiles = true;
+                                widgetsToRemove.push_back(obj.get());
                             }
                         }
                         continue; // don't trash the actual file
@@ -5780,11 +6542,26 @@ private:
                     }
                 }
                 if (removedFrameFiles) {
-                    auto& pg = m_filesystemBrowser.getPlatformGrid();
-                    pg.spawnFrameObjects(m_filesystemBrowser.getSpawnOrigin(),
-                                         m_filesystemBrowser.getBasementFloorY() + 0.5f);
-                    m_filesystemBrowser.respawnFrameFiles();
-                    pg.saveConfig(m_filesystemBrowser.getCurrentPath());
+                    // Incrementally remove just the deleted widgets' GPU objects
+                    std::vector<uint32_t> handles;
+                    for (auto* w : widgetsToRemove) {
+                        auto it2 = m_sceneObjects.begin();
+                        while (it2 != m_sceneObjects.end()) {
+                            if (it2->get() == w) {
+                                uint32_t h = (*it2)->getBufferHandle();
+                                if (h != UINT32_MAX) handles.push_back(h);
+                                it2 = m_sceneObjects.erase(it2);
+                                break;
+                            } else {
+                                ++it2;
+                            }
+                        }
+                    }
+                    if (!handles.empty() && m_modelRenderer) {
+                        m_modelRenderer->destroyModels(handles);
+                    }
+                    m_filesystemBrowser.getPlatformGrid().saveConfig(
+                        m_filesystemBrowser.getCurrentPath());
                 }
                 if (trashedFiles) {
                     // Refresh silo to rebuild without trashed files
@@ -5914,6 +6691,7 @@ private:
                 m_toolbarSlots[i].occupied = true;
                 m_toolbarSlots[i].filePath = path;
                 m_toolbarSlots[i].targetLevel = target; // preserve link
+                m_toolbarSlots[i].texturePath = selectedFS->getTexturePath(); // preserve door image
                 std::string name = path;
                 auto slashPos = name.rfind('/');
                 if (slashPos != std::string::npos)
@@ -5930,8 +6708,11 @@ private:
         }
 
         // Number keys 1-0: toolbar slot selection + pick up filesystem objects (not when Shift held)
+        // Skip pickup when in wire mode with a file_slot selected — number keys assign to file_slot there
+        bool wireSlotActive = (m_wiringMode && m_wireSourceObj && m_wireSourceCPName.rfind("file_slot_", 0) == 0);
         if (m_isPlayMode && !ImGui::GetIO().WantTextInput && !m_quickChatMode && !m_inConversation &&
-            !Input::isKeyDown(Input::KEY_LEFT_SHIFT) && !Input::isKeyDown(Input::KEY_RIGHT_SHIFT)) {
+            !Input::isKeyDown(Input::KEY_LEFT_SHIFT) && !Input::isKeyDown(Input::KEY_RIGHT_SHIFT) &&
+            !wireSlotActive) {
             static const int slotKeys[10] = {
                 Input::KEY_1, Input::KEY_2, Input::KEY_3, Input::KEY_4, Input::KEY_5,
                 Input::KEY_6, Input::KEY_7, Input::KEY_8, Input::KEY_9, Input::KEY_0
@@ -5972,14 +6753,6 @@ private:
                             // Also check if it's placed on a wall frame
                             // (the selected object's own frame will be cleared on pickup, so this
                             //  catches duplicates on OTHER frames with the same filePath)
-                            if (!alreadyInHotbar && m_filesystemBrowser.isActive()) {
-                                int frameCount = 0;
-                                for (const auto& fr : m_filesystemBrowser.getPlatformGrid().grid().frames) {
-                                    if (fr.filePath == path) frameCount++;
-                                }
-                                // More than 1 means it's on multiple frames — that's a duplicate
-                                if (frameCount > 1) alreadyInHotbar = true;
-                            }
                             if (alreadyInHotbar) {
                                 std::cout << "[FS] File already in hotbar or on a frame" << std::endl;
                                 selectedFS->setSelected(false);
@@ -5994,14 +6767,70 @@ private:
                                     break;
                                 }
                             }
-                            // Clear WallFrame that holds this file (match by filePath, not proximity)
+                            // Clear WallFrame that holds this widget (match by proximity to the widget object)
                             {
                                 auto& pg = m_filesystemBrowser.getPlatformGrid();
-                                for (auto& fr : pg.grid().frames) {
-                                    if (fr.filePath == path) {
-                                        fr.filePath.clear();
+                                glm::vec3 objPos = selectedFS->getTransform().getPosition();
+                                float bestFrameDist = 3.0f;
+                                int bestFrameIdx = -1;
+                                for (int fi = 0; fi < static_cast<int>(pg.grid().frames.size()); fi++) {
+                                    auto& fr = pg.grid().frames[fi];
+                                    if (fr.filePath != path) continue;
+                                    float d = std::abs(objPos.x - fr.worldX) + std::abs(objPos.y - fr.worldY) + std::abs(objPos.z - fr.worldZ);
+                                    if (d < bestFrameDist) {
+                                        bestFrameDist = d;
+                                        bestFrameIdx = fi;
+                                    }
+                                }
+                                if (bestFrameIdx >= 0) {
+                                    auto& fr = pg.grid().frames[bestFrameIdx];
+                                    fr.filePath.clear();
+                                    // Unhide the frame visual (restore scale)
+                                    float s = static_cast<float>(fr.size);
+                                    for (auto& fobj : m_sceneObjects) {
+                                        if (!fobj || fobj->getBuildingType() != "wall_frame") continue;
+                                        glm::vec3 fp = fobj->getTransform().getPosition();
+                                        if (std::abs(fp.x - fr.worldX) < 0.5f &&
+                                            std::abs(fp.y - fr.worldY) < 0.5f &&
+                                            std::abs(fp.z - fr.worldZ) < 0.5f) {
+                                            if (fr.normalX == 0.0f && fr.normalZ == 0.0f)
+                                                fobj->getTransform().setScale({s, 0.1f, s});
+                                            else
+                                                fobj->getTransform().setScale({s, s, 0.1f});
+                                            break;
+                                        }
+                                    }
+                                    pg.saveConfig(m_filesystemBrowser.getCurrentPath());
+                                }
+                                // Clear file_slot assignment that holds this file
+                                auto& fslots = pg.grid().fileSlots;
+                                for (auto it = fslots.begin(); it != fslots.end(); ++it) {
+                                    if (it->filePath == path) {
+                                        // Reset any connected machine back to Idle
+                                        // so wire color turns from green back to blue
+                                        // BFS from this frame to find connected machines
+                                        {
+                                            std::set<int> visited;
+                                            std::queue<int> q;
+                                            q.push(it->frameIndex);
+                                            visited.insert(it->frameIndex);
+                                            while (!q.empty()) {
+                                                int cur = q.front(); q.pop();
+                                                if (pg.grid().frames[cur].frameType == FrameType::Machine)
+                                                    m_wallMachine.resetState(cur);
+                                                for (const auto& w : pg.grid().wires) {
+                                                    int next = -1;
+                                                    if (w.fromFrame == cur) next = w.toFrame;
+                                                    else if (w.toFrame == cur) next = w.fromFrame;
+                                                    if (next >= 0 && next < static_cast<int>(pg.grid().frames.size()) && !visited.count(next)) {
+                                                        visited.insert(next);
+                                                        q.push(next);
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        fslots.erase(it);
                                         pg.saveConfig(m_filesystemBrowser.getCurrentPath());
-                                        m_pendingFrameRebuild = true;
                                         break;
                                     }
                                 }
@@ -6031,6 +6860,7 @@ private:
                                 m_filesystemBrowser.removeVoidFileObj(selectedFS);
                                 // Remove scene object without destroying GPU resources
                                 selectedFS->setSelected(false);
+                                selectedFS->setBufferHandle(0); // prevent any accidental double-free
                                 m_sceneObjects.erase(m_sceneObjects.begin() + selectedIdx);
                                 if (m_selectedObjectIndex == selectedIdx) m_selectedObjectIndex = -1;
                                 else if (m_selectedObjectIndex > selectedIdx) m_selectedObjectIndex--;
@@ -6074,6 +6904,7 @@ private:
                                                 std::abs(fr.worldY - fp.y) < 0.1f &&
                                                 std::abs(fr.worldZ - fp.z) < 0.1f) {
                                                 fr.filePath = srcPath;
+                                                fr.texturePath = m_toolbarSlots[i].texturePath;
                                                 std::string fname = srcPath;
                                                 auto sp = fname.rfind('/');
                                                 if (sp != std::string::npos) fname = fname.substr(sp + 1);
@@ -6081,8 +6912,34 @@ private:
                                                 break;
                                             }
                                         }
-                                        m_filesystemBrowser.spawnFileAtFrame(srcPath, selectedWall);
+                                        m_filesystemBrowser.spawnFileAtFrame(srcPath, selectedWall, m_toolbarSlots[i].texturePath);
                                         pg.saveConfig(m_filesystemBrowser.getCurrentPath());
+                                        // Detect robot model → open algobot assignment popup
+                                        {
+                                            std::string lowerName = std::filesystem::path(srcPath).filename().string();
+                                            std::transform(lowerName.begin(), lowerName.end(), lowerName.begin(), ::tolower);
+                                            if (lowerName.find("robot") != std::string::npos) {
+                                                m_showAlgobotAssign = true;
+                                                m_algobotModelPath = srcPath;
+                                                m_playModeCursorVisible = true;
+                                                Input::setMouseCaptured(false);
+                                            }
+                                            // Detect machine model → tag frame as Machine type
+                                            if (lowerName.find("machine") != std::string::npos) {
+                                                glm::vec3 fpos = selectedWall->getTransform().getPosition();
+                                                int machIdx = findFrameIndexAtPos(fpos);
+                                                if (machIdx >= 0) {
+                                                    auto& mfr = pg.grid().frames[machIdx];
+                                                    if (mfr.frameType == FrameType::None) {
+                                                        mfr.frameType = FrameType::Machine;
+                                                        std::string stem = std::filesystem::path(srcPath).stem().string();
+                                                        auto machPos = stem.find("_machine");
+                                                        mfr.machineName = (machPos != std::string::npos) ? stem.substr(0, machPos) : stem;
+                                                    }
+                                                    pg.saveConfig(m_filesystemBrowser.getCurrentPath());
+                                                }
+                                            }
+                                        }
                                     } else {
                                         glm::vec3 wallPos = selectedWall->getTransform().getPosition();
                                         glm::vec3 wallScale = selectedWall->getTransform().getScale();
@@ -6095,6 +6952,7 @@ private:
                                     m_toolbarSlots[i].filePath.clear();
                                     m_toolbarSlots[i].displayName.clear();
                                     m_toolbarSlots[i].targetLevel.clear();
+                                    m_toolbarSlots[i].texturePath.clear();
                                     saveInventorySlot(i);
                                     syncExcludedPaths();
                                     selectedWall->setSelected(false);
@@ -6253,6 +7111,32 @@ private:
                                         }
                                         m_filesystemBrowser.spawnFileAtFrame(srcPath, hitWall);
                                         pg.saveConfig(m_filesystemBrowser.getCurrentPath());
+                                        // Detect robot model → open algobot assignment popup
+                                        {
+                                            std::string lowerName = std::filesystem::path(srcPath).filename().string();
+                                            std::transform(lowerName.begin(), lowerName.end(), lowerName.begin(), ::tolower);
+                                            if (lowerName.find("robot") != std::string::npos) {
+                                                m_showAlgobotAssign = true;
+                                                m_algobotModelPath = srcPath;
+                                                m_playModeCursorVisible = true;
+                                                Input::setMouseCaptured(false);
+                                            }
+                                            // Detect machine model → tag frame as Machine type
+                                            if (lowerName.find("machine") != std::string::npos) {
+                                                glm::vec3 fpos = hitWall->getTransform().getPosition();
+                                                int machIdx = findFrameIndexAtPos(fpos);
+                                                if (machIdx >= 0) {
+                                                    auto& mfr = pg.grid().frames[machIdx];
+                                                    if (mfr.frameType == FrameType::None) {
+                                                        mfr.frameType = FrameType::Machine;
+                                                        std::string stem = std::filesystem::path(srcPath).stem().string();
+                                                        auto machPos = stem.find("_machine");
+                                                        mfr.machineName = (machPos != std::string::npos) ? stem.substr(0, machPos) : stem;
+                                                    }
+                                                    pg.saveConfig(m_filesystemBrowser.getCurrentPath());
+                                                }
+                                            }
+                                        }
                                     } else {
                                         // Regular wall panel — spawn file on the wall
                                         glm::vec3 wallPos = hitWall->getTransform().getPosition();
@@ -6275,6 +7159,198 @@ private:
                     }
                     break;
                 }
+            }
+        }
+
+        // Number key in play mode: pick up selected salvage OR throw hotbar item
+        if (m_isPlayMode && !m_filesystemBrowser.isActive() && !ImGui::GetIO().WantTextInput
+            && !m_quickChatMode && !m_inConversation && !m_playModeCursorVisible) {
+            static const int throwKeys[10] = {
+                Input::KEY_1, Input::KEY_2, Input::KEY_3, Input::KEY_4, Input::KEY_5,
+                Input::KEY_6, Input::KEY_7, Input::KEY_8, Input::KEY_9, Input::KEY_0
+            };
+            for (int i = 0; i < 10; i++) {
+                if (!Input::isKeyPressed(throwKeys[i])) continue;
+
+                // Priority 1: Pick up selected salvage into this hotbar slot
+                if (m_selectedSalvageIndex >= 0 && m_selectedSalvageIndex < static_cast<int>(m_sceneObjects.size())
+                    && m_sceneObjects[m_selectedSalvageIndex]
+                    && (m_sceneObjects[m_selectedSalvageIndex]->getBeingType() == BeingType::INTERACTION
+                        || m_sceneObjects[m_selectedSalvageIndex]->getBuildingType() == "salvage")) {
+                    auto& salvObj = m_sceneObjects[m_selectedSalvageIndex];
+
+                    // Remove from physics tracking
+                    SceneObject* salvPtr = salvObj.get();
+                    // Remove Jolt body if still active
+                    for (auto& t : m_physicsObjects) {
+                        if (t.objPtr == salvPtr && t.joltBodyId != UINT32_MAX && m_characterController) {
+                            m_characterController->removeDynamicBody(t.joltBodyId);
+                            t.joltBodyId = UINT32_MAX;
+                        }
+                    }
+                    m_physicsObjects.erase(
+                        std::remove_if(m_physicsObjects.begin(), m_physicsObjects.end(),
+                            [salvPtr](const PhysicsTrackedObject& t) { return t.objPtr == salvPtr; }),
+                        m_physicsObjects.end());
+
+                    // Put into hotbar slot (overwrite if occupied)
+                    m_toolbarSlots[i].gpuHandle = salvObj->getBufferHandle();
+                    m_toolbarSlots[i].modelIndexCount = salvObj->getIndexCount();
+                    m_toolbarSlots[i].modelBounds = salvObj->getLocalBounds();
+                    m_toolbarSlots[i].modelSourcePath = salvObj->getModelPath();
+                    if (salvObj->hasMeshData()) {
+                        m_toolbarSlots[i].meshVertices = salvObj->getVertices();
+                        m_toolbarSlots[i].meshIndices = salvObj->getIndices();
+                    }
+                    if (salvObj->hasTextureData()) {
+                        m_toolbarSlots[i].textureData = salvObj->getTextureData();
+                        m_toolbarSlots[i].textureWidth = salvObj->getTextureWidth();
+                        m_toolbarSlots[i].textureHeight = salvObj->getTextureHeight();
+                    }
+                    m_toolbarSlots[i].is3DModel = true;
+                    m_toolbarSlots[i].occupied = true;
+                    m_toolbarSlots[i].displayName = salvObj->getName();
+                    // Strip trailing _\d+ suffixes to get the original base model name
+                    {
+                        std::string bn = salvObj->getName();
+                        while (bn.size() > 1) {
+                            auto lastUS = bn.rfind('_');
+                            if (lastUS == std::string::npos || lastUS == 0) break;
+                            std::string tail = bn.substr(lastUS + 1);
+                            if (tail.empty()) break;
+                            bool allDigits = true;
+                            for (char c : tail) { if (!isdigit(c)) { allDigits = false; break; } }
+                            if (!allDigits) break;
+                            bn = bn.substr(0, lastUS);
+                        }
+                        m_toolbarSlots[i].baseModelName = bn;
+                    }
+                    m_toolbarSlots[i].filePath.clear();
+
+                    // Remove scene object (don't destroy GPU handle — hotbar owns it now)
+                    salvObj->setBufferHandle(UINT32_MAX);
+                    deleteObject(m_selectedSalvageIndex);
+                    m_selectedSalvageIndex = -1;
+                    std::cout << "[Salvage] Picked up into hotbar slot " << (i + 1) << std::endl;
+                    break;
+                }
+
+                // Priority 2: Throw from occupied hotbar slot
+                if (!m_toolbarSlots[i].occupied || !m_toolbarSlots[i].is3DModel) continue;
+                if (m_toolbarSlots[i].gpuHandle == 0) continue;
+
+                // Spawn the object a few meters in front of the player
+                glm::vec3 camPos = m_camera.getPosition();
+                glm::vec3 camFront = m_camera.getFront();
+                glm::vec3 spawnPos = camPos + camFront * 2.0f + glm::vec3(0, 0.5f, 0);
+                float throwSpeed = 10.0f;
+                glm::vec3 throwVel = camFront * throwSpeed + glm::vec3(0, 4.0f, 0); // arc upward
+
+                // Create scene object from the hotbar's GPU handle
+                static int throwCounter = 0;
+                std::string baseName = m_toolbarSlots[i].baseModelName.empty()
+                    ? m_toolbarSlots[i].displayName : m_toolbarSlots[i].baseModelName;
+                auto obj = std::make_unique<SceneObject>(baseName + "_" + std::to_string(++throwCounter));
+                obj->setBufferHandle(m_toolbarSlots[i].gpuHandle);
+                obj->setIndexCount(m_toolbarSlots[i].modelIndexCount);
+                obj->getTransform().setPosition(spawnPos);
+                obj->getTransform().setScale(glm::vec3(1.0f));
+                obj->setBuildingType("salvage");
+                obj->setBeingType(BeingType::INTERACTION);
+                obj->setLocalBounds(m_toolbarSlots[i].modelBounds);
+                obj->setModelPath(m_toolbarSlots[i].modelSourcePath);
+                if (!m_toolbarSlots[i].meshVertices.empty()) {
+                    obj->setMeshData(m_toolbarSlots[i].meshVertices, m_toolbarSlots[i].meshIndices);
+                }
+                if (!m_toolbarSlots[i].textureData.empty()) {
+                    obj->setTextureData(m_toolbarSlots[i].textureData,
+                        m_toolbarSlots[i].textureWidth, m_toolbarSlots[i].textureHeight);
+                }
+                std::cout << "[Throw] name=" << obj->getName() << " modelPath='" << obj->getModelPath()
+                          << "' hasMesh=" << obj->hasMeshData()
+                          << " hasTex=" << obj->hasTextureData() << std::endl;
+
+                // Create Jolt dynamic body for physics simulation
+                if (m_characterController) {
+                    const AABB& bounds = m_toolbarSlots[i].modelBounds;
+                    glm::vec3 halfExt = bounds.getSize() * 0.5f;
+                    // Ensure minimum size for physics stability
+                    halfExt = glm::max(halfExt, glm::vec3(0.05f));
+
+                    auto bodyResult = m_characterController->addDynamicBox(
+                        halfExt, spawnPos, throwVel, 1.0f, 0.5f, 0.3f);
+
+                    if (bodyResult.valid) {
+                        PhysicsTrackedObject tracked;
+                        tracked.objPtr = obj.get();
+                        tracked.joltBodyId = bodyResult.bodyId;
+                        tracked.settled = false;
+                        m_physicsObjects.push_back(tracked);
+                    }
+                }
+
+                m_sceneObjects.push_back(std::move(obj));
+
+                // Clear the hotbar slot (item was thrown)
+                m_toolbarSlots[i].gpuHandle = 0; // don't destroy — scene object owns it now
+                m_toolbarSlots[i].modelIndexCount = 0;
+                m_toolbarSlots[i].is3DModel = false;
+                m_toolbarSlots[i].occupied = false;
+                m_toolbarSlots[i].filePath.clear();
+                m_toolbarSlots[i].displayName.clear();
+                m_toolbarSlots[i].meshVertices.clear();
+                m_toolbarSlots[i].meshIndices.clear();
+                m_toolbarSlots[i].textureData.clear();
+                m_toolbarSlots[i].textureWidth = 0;
+                m_toolbarSlots[i].textureHeight = 0;
+                break;
+            }
+        }
+
+        // Jolt physics step for dynamic bodies (thrown interactables)
+        if (!m_physicsObjects.empty() && m_characterController) {
+            // Step the Jolt physics simulation
+            m_characterController->stepPhysics(deltaTime);
+
+            // Read back positions/rotations from Jolt onto scene objects
+            for (auto& tracked : m_physicsObjects) {
+                if (!tracked.objPtr) continue;
+                if (tracked.joltBodyId == UINT32_MAX) { tracked.settled = true; continue; }
+
+                // Check if a settled body was woken up by a collision
+                if (tracked.settled) {
+                    if (!m_characterController->isDynamicBodySleeping(tracked.joltBodyId)) {
+                        tracked.settled = false; // Jolt woke it up — resume tracking
+                        tracked.objPtr->setAABBCollision(false);
+                    } else {
+                        continue; // Still sleeping, skip
+                    }
+                }
+
+                glm::vec3 newPos = m_characterController->getDynamicBodyPosition(tracked.joltBodyId);
+                glm::quat newRot = m_characterController->getDynamicBodyRotation(tracked.joltBodyId);
+
+                tracked.objPtr->getTransform().setPosition(newPos);
+                // Convert quaternion to euler for SceneObject
+                glm::vec3 eulerRad = glm::eulerAngles(newRot);
+                tracked.objPtr->setEulerRotation(glm::degrees(eulerRad));
+
+                // Check if Jolt says this body is sleeping (settled)
+                // Keep the Jolt body alive so other dynamic objects can collide with it
+                if (m_characterController->isDynamicBodySleeping(tracked.joltBodyId)) {
+                    tracked.settled = true;
+                    tracked.objPtr->setAABBCollision(true);
+                }
+            }
+        }
+
+        // Scroll wheel: cycle active hotbar slot in play mode (skip in building mode — scroll zooms there)
+        if (m_isPlayMode && !ImGui::GetIO().WantCaptureMouse && !(m_playModeCursorVisible && m_showSiloConfig)) {
+            float scroll = Input::getScrollDelta();
+            if (scroll > 0.0f) {
+                m_activeToolbarSlot = (m_activeToolbarSlot + 9) % 10; // scroll up = previous slot
+            } else if (scroll < 0.0f) {
+                m_activeToolbarSlot = (m_activeToolbarSlot + 1) % 10; // scroll down = next slot
             }
         }
 
@@ -6368,15 +7444,67 @@ private:
         }
         wasGKeyDown = gKeyDown;
 
-        // Ctrl+W — wire mode: connect two wall frames
+        // T — toggle wire mode (shows CPs, click to connect)
         {
             static bool wasWireKey = false;
-            bool wireKey = Input::isKeyDown(Input::KEY_W) && ctrlDown;
+            bool wireKey = Input::isKeyDown(Input::KEY_T) && !Input::isKeyDown(Input::KEY_LEFT_SHIFT);
             if (wireKey && !wasWireKey && m_isPlayMode && m_filesystemBrowser.isActive() &&
                 !ImGui::GetIO().WantCaptureKeyboard) {
-                handleWireKeyPress();
+                m_wiringMode = !m_wiringMode;
+                if (!m_wiringMode) {
+                    m_wireSourceFrame = -1;
+                    m_wireSourceCPName.clear();
+                    m_wireSourceObj = nullptr;
+                }
+                std::cout << "[Wire] Wire mode " << (m_wiringMode ? "ON" : "OFF") << std::endl;
             }
             wasWireKey = wireKey;
+        }
+
+        // Shift+T — clear all wires
+        {
+            static bool wasShiftT = false;
+            bool shiftT = Input::isKeyDown(Input::KEY_T) && Input::isKeyDown(Input::KEY_LEFT_SHIFT);
+            if (shiftT && !wasShiftT && m_isPlayMode && m_filesystemBrowser.isActive() &&
+                !ImGui::GetIO().WantCaptureKeyboard) {
+                auto& pg = m_filesystemBrowser.getPlatformGrid();
+                auto& grid = pg.grid();
+                int count = static_cast<int>(grid.wires.size());
+                grid.wires.clear();
+                m_wiringMode = false;
+                m_wireSourceFrame = -1;
+                m_wireSourceCPName.clear();
+                m_wireSourceObj = nullptr;
+                pg.saveConfig(m_filesystemBrowser.getCurrentPath());
+                std::cout << "[Wire] Cleared all " << count << " wires" << std::endl;
+            }
+            wasShiftT = shiftT;
+        }
+
+        // Wire mode: click to select CPs
+        if (m_wiringMode && m_isPlayMode && Input::isMouseButtonPressed(Input::MOUSE_LEFT)) {
+            handleWireModeClick();
+        }
+
+        // Wire mode: file_slot selected + number key → assign hotbar item to slot
+        if (m_wiringMode && m_isPlayMode && m_wireSourceObj &&
+            m_wireSourceCPName.rfind("file_slot_", 0) == 0) {
+            static const int numKeys[] = {
+                Input::KEY_1, Input::KEY_2, Input::KEY_3, Input::KEY_4, Input::KEY_5,
+                Input::KEY_6, Input::KEY_7, Input::KEY_8, Input::KEY_9, Input::KEY_0
+            };
+            for (int i = 0; i < 10; i++) {
+                if (Input::isKeyPressed(numKeys[i])) {
+                    handleFileSlotAssign(i);
+                    break;
+                }
+            }
+        }
+
+        // Wire mode: X key → delete all wires on CP under crosshair (or selected CP)
+        if (m_wiringMode && m_isPlayMode && Input::isKeyPressed(Input::KEY_X) &&
+            !ImGui::GetIO().WantCaptureKeyboard) {
+            handleWireDeleteAtCrosshair();
         }
 
     }
@@ -6385,13 +7513,199 @@ private:
     int findFrameIndexAtPos(const glm::vec3& pos) {
         auto& frames = m_filesystemBrowser.getPlatformGrid().grid().frames;
         for (int i = 0; i < static_cast<int>(frames.size()); i++) {
-            if (std::abs(frames[i].worldX - pos.x) < 0.5f &&
-                std::abs(frames[i].worldY - pos.y) < 0.5f &&
-                std::abs(frames[i].worldZ - pos.z) < 0.5f) {
+            if (std::abs(frames[i].worldX - pos.x) < 1.5f &&
+                std::abs(frames[i].worldY - pos.y) < 1.5f &&
+                std::abs(frames[i].worldZ - pos.z) < 1.5f) {
                 return i;
             }
         }
         return -1;
+    }
+
+    // Trace wire chain backward from a frame to find the first file_slot image.
+    // Follows through relay/generic frames (not Machine/Output) until a file is found.
+    // Returns the file path, or empty string if none found.
+    std::string traceInputFile(int startFrameIdx, const PlatformGrid& gd,
+                               std::set<int>& visited) {
+        if (visited.count(startFrameIdx)) return ""; // cycle prevention
+        visited.insert(startFrameIdx);
+        if (startFrameIdx < 0 || startFrameIdx >= static_cast<int>(gd.frames.size())) return "";
+        auto& fr = gd.frames[startFrameIdx];
+
+        // Check file_slot assignments on this frame first
+        for (const auto& fsa : gd.fileSlots) {
+            if (fsa.frameIndex == startFrameIdx && !fsa.filePath.empty())
+                return fsa.filePath;
+        }
+        // Check frame's own filePath (but skip relay/machine widgets — they're pass-through)
+        if (!fr.filePath.empty() &&
+            fr.frameType != FrameType::Relay &&
+            fr.frameType != FrameType::Machine) return fr.filePath;
+
+        // No file here — follow wires backward through connected frames
+        for (const auto& w : gd.wires) {
+            int nextIdx = -1;
+            if (w.toFrame == startFrameIdx) nextIdx = w.fromFrame;
+            else if (w.fromFrame == startFrameIdx) nextIdx = w.toFrame;
+            if (nextIdx < 0 || nextIdx >= static_cast<int>(gd.frames.size())) continue;
+            auto& nextFrame = gd.frames[nextIdx];
+            // Don't trace through machines or outputs
+            if (nextFrame.frameType == FrameType::Machine ||
+                nextFrame.frameType == FrameType::Output) continue;
+            std::string result = traceInputFile(nextIdx, gd, visited);
+            if (!result.empty()) return result;
+        }
+        return "";
+    }
+
+    // Trace wire chain forward from a machine to find the final output frame.
+    // Follows through relay/generic frames (not Machine/Input) to the end of the chain.
+    // Returns the frame index of the last output-capable frame, or -1.
+    int traceOutputFrame(int startFrameIdx, const PlatformGrid& gd,
+                         std::set<int>& visited) {
+        if (visited.count(startFrameIdx)) return -1;
+        visited.insert(startFrameIdx);
+        if (startFrameIdx < 0 || startFrameIdx >= static_cast<int>(gd.frames.size())) return -1;
+
+        // Follow wires FORWARD only (fromFrame → toFrame) to find the output chain
+        for (const auto& w : gd.wires) {
+            if (w.fromFrame != startFrameIdx) continue;  // only follow forward direction
+            int nextIdx = w.toFrame;
+            if (nextIdx < 0 || nextIdx >= static_cast<int>(gd.frames.size())) continue;
+            auto& nextFrame = gd.frames[nextIdx];
+            // Don't trace back through machines or inputs
+            if (nextFrame.frameType == FrameType::Machine ||
+                nextFrame.frameType == FrameType::Input) continue;
+            // Try to keep following the chain
+            int deeper = traceOutputFrame(nextIdx, gd, visited);
+            if (deeper >= 0) return deeper;
+            // If this is the end of the chain, return it
+            return nextIdx;
+        }
+        return -1;
+    }
+
+    // Find the wall_widget SceneObject sitting on a given frame (by position match)
+    SceneObject* findWidgetOnFrame(const WallFrame& frame) {
+        glm::vec3 fp(frame.worldX, frame.worldY, frame.worldZ);
+        SceneObject* best = nullptr;
+        float bestDist = 3.0f; // generous tolerance for large models
+        for (auto& obj : m_sceneObjects) {
+            if (!obj || obj->getBuildingType() != "wall_widget") continue;
+            // Must have control points — skip slot_content images/models
+            if (!obj->hasControlPoints()) continue;
+            glm::vec3 op = obj->getTransform().getPosition();
+            float d = std::abs(op.x - fp.x) + std::abs(op.y - fp.y) + std::abs(op.z - fp.z);
+            if (d < bestDist) {
+                bestDist = d;
+                best = obj.get();
+            }
+        }
+        return best;
+    }
+
+    // Get world position of a named control point on a SceneObject.
+    // Returns false if the CP or vertex data is not available.
+    bool getCPWorldPos(SceneObject* obj, const std::string& cpPrefix, glm::vec3& outPos) {
+        if (!obj || !obj->hasControlPoints() || !obj->hasMeshData()) return false;
+        const auto& cps = obj->getControlPoints();
+        const auto& verts = obj->getVertices();
+        for (const auto& cp : cps) {
+            if (cp.name.rfind(cpPrefix, 0) == 0 && cp.vertexIndex < verts.size()) {
+                // Transform local vertex position to world space
+                glm::vec3 localPos = verts[cp.vertexIndex].position;
+                glm::mat4 model = obj->getTransform().getMatrix();
+                glm::vec4 worldPos = model * glm::vec4(localPos, 1.0f);
+                outPos = glm::vec3(worldPos);
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // Get world position of a specific named control point (exact match)
+    bool getCPWorldPosExact(SceneObject* obj, const std::string& cpName, glm::vec3& outPos) {
+        if (!obj || !obj->hasControlPoints() || !obj->hasMeshData()) return false;
+        const auto& cps = obj->getControlPoints();
+        const auto& verts = obj->getVertices();
+        for (const auto& cp : cps) {
+            if (cp.name == cpName && cp.vertexIndex < verts.size()) {
+                glm::vec3 localPos = verts[cp.vertexIndex].position;
+                glm::mat4 model = obj->getTransform().getMatrix();
+                glm::vec4 worldPos = model * glm::vec4(localPos, 1.0f);
+                outPos = glm::vec3(worldPos);
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // Auto-create input and output frames adjacent to a machine frame, plus wires
+    void autoCreateMachineIO(int machFrameIdx) {
+        auto& grid = m_filesystemBrowser.getPlatformGrid().grid();
+        if (machFrameIdx < 0 || machFrameIdx >= static_cast<int>(grid.frames.size())) return;
+        auto& mf = grid.frames[machFrameIdx];
+
+        float s = static_cast<float>(mf.size);
+        bool isFloor = (mf.normalX == 0.0f && mf.normalZ == 0.0f);
+
+        // Calculate left and right offset vectors relative to the frame's facing direction
+        float yawRad = mf.yawDeg * static_cast<float>(M_PI) / 180.0f;
+        // Frame faces outward along (sin(yaw), 0, cos(yaw))
+        // "right" is perpendicular: (cos(yaw), 0, -sin(yaw))
+        float rightX = cosf(yawRad);
+        float rightZ = -sinf(yawRad);
+
+        float spacing = s + s * 0.2f; // gap between frames
+
+        // Input frame (left side of machine when facing it)
+        WallFrame inputFrame;
+        if (isFloor) {
+            inputFrame.worldX = mf.worldX - rightX * spacing;
+            inputFrame.worldY = mf.worldY;
+            inputFrame.worldZ = mf.worldZ - rightZ * spacing;
+        } else {
+            inputFrame.worldX = mf.worldX - rightX * spacing;
+            inputFrame.worldY = mf.worldY;
+            inputFrame.worldZ = mf.worldZ - rightZ * spacing;
+        }
+        inputFrame.size = mf.size;
+        inputFrame.normalX = mf.normalX;
+        inputFrame.normalZ = mf.normalZ;
+        inputFrame.yawDeg = mf.yawDeg;
+        inputFrame.frameType = FrameType::Input;
+        inputFrame.paramName = "image";
+
+        // Output frame (right side of machine when facing it)
+        WallFrame outputFrame;
+        if (isFloor) {
+            outputFrame.worldX = mf.worldX + rightX * spacing;
+            outputFrame.worldY = mf.worldY;
+            outputFrame.worldZ = mf.worldZ + rightZ * spacing;
+        } else {
+            outputFrame.worldX = mf.worldX + rightX * spacing;
+            outputFrame.worldY = mf.worldY;
+            outputFrame.worldZ = mf.worldZ + rightZ * spacing;
+        }
+        outputFrame.size = mf.size;
+        outputFrame.normalX = mf.normalX;
+        outputFrame.normalZ = mf.normalZ;
+        outputFrame.yawDeg = mf.yawDeg;
+        outputFrame.frameType = FrameType::Output;
+        outputFrame.paramName = "model";
+
+        int inputIdx = static_cast<int>(grid.frames.size());
+        grid.frames.push_back(inputFrame);
+        int outputIdx = static_cast<int>(grid.frames.size());
+        grid.frames.push_back(outputFrame);
+
+        // Wire input → machine, machine → output
+        grid.wires.push_back({inputIdx, machFrameIdx});
+        grid.wires.push_back({machFrameIdx, outputIdx});
+
+        std::cout << "[Machine] Auto-created input frame (idx " << inputIdx
+                  << ") and output frame (idx " << outputIdx
+                  << ") for machine at idx " << machFrameIdx << std::endl;
     }
 
     // Find scene object that's a wall_frame or typed frame under crosshair
@@ -6449,6 +7763,25 @@ private:
 
         glm::vec3 framePos = hitFrame->getTransform().getPosition();
         int frameIdx = findFrameIndexAtPos(framePos);
+        // If hit a widget/filesystem object, try matching with looser tolerance
+        if (frameIdx < 0) {
+            auto& frames = grid.frames;
+            float bestDist = 999.f;
+            for (int i = 0; i < static_cast<int>(frames.size()); i++) {
+                float dx = std::abs(frames[i].worldX - framePos.x);
+                float dy = std::abs(frames[i].worldY - framePos.y);
+                float dz = std::abs(frames[i].worldZ - framePos.z);
+                float d = dx + dy + dz;
+                if (d < bestDist) {
+                    bestDist = d;
+                    frameIdx = i;
+                }
+            }
+            if (bestDist > 3.0f) {
+                std::cout << "[Wire] No frame close enough (nearest dist=" << bestDist << ")" << std::endl;
+                frameIdx = -1;
+            }
+        }
         if (frameIdx < 0) {
             std::cout << "[Wire] Frame not found in grid data" << std::endl;
             return;
@@ -6525,6 +7858,307 @@ private:
             m_wiringMode = false;
             m_wireSourceFrame = -1;
         }
+    }
+
+    // CP-based wire mode: find which CP the crosshair is nearest to and select/connect
+    void handleWireModeClick() {
+        if (m_wireCPScreenPositions.empty()) return;
+
+        // Find CP closest to screen center (crosshair)
+        float vpW = static_cast<float>(getWindow().getWidth());
+        float vpH = static_cast<float>(getWindow().getHeight());
+        ImVec2 center(vpW * 0.5f, vpH * 0.5f);
+
+        float bestDist = 40.0f; // max pixel distance to select a CP
+        int bestIdx = -1;
+        for (int i = 0; i < static_cast<int>(m_wireCPScreenPositions.size()); i++) {
+            float dx = m_wireCPScreenPositions[i].screenPos.x - center.x;
+            float dy = m_wireCPScreenPositions[i].screenPos.y - center.y;
+            float dist = std::sqrt(dx * dx + dy * dy);
+            if (dist < bestDist) {
+                bestDist = dist;
+                bestIdx = i;
+            }
+        }
+
+        if (bestIdx < 0) return;
+
+        auto& hit = m_wireCPScreenPositions[bestIdx];
+
+        // Helper: find frame for a widget, with fallback to nearest
+        auto findFrameForWidget = [&](SceneObject* obj) -> int {
+            glm::vec3 pos = obj->getTransform().getPosition();
+            int idx = findFrameIndexAtPos(pos);
+            if (idx >= 0) return idx;
+            // Fallback: nearest frame within 5 units
+            auto& frames = m_filesystemBrowser.getPlatformGrid().grid().frames;
+            float bestDist = 5.0f;
+            for (int i = 0; i < static_cast<int>(frames.size()); i++) {
+                float d = std::abs(frames[i].worldX - pos.x) +
+                          std::abs(frames[i].worldY - pos.y) +
+                          std::abs(frames[i].worldZ - pos.z);
+                if (d < bestDist) { bestDist = d; idx = i; }
+            }
+            return idx;
+        };
+
+        bool hitIsSlot = (hit.cpName.rfind("file_slot_", 0) == 0);
+        bool hitIsWire = (hit.cpName.rfind("wire_", 0) == 0);
+
+        // File slot click: just select it, wait for number key
+        if (hitIsSlot) {
+            m_wireSourceObj = hit.obj;
+            m_wireSourceCPName = hit.cpName;
+            m_wireSourceFrame = findFrameForWidget(hit.obj);
+            std::cout << "[FileSlot] Selected " << hit.cpName
+                      << " on frame " << m_wireSourceFrame
+                      << " — press 1-0 to assign hotbar item" << std::endl;
+            return;
+        }
+
+        // Wire CP click
+        if (!hitIsWire) return;
+
+        if (!m_wireSourceObj || m_wireSourceCPName.rfind("file_slot_", 0) == 0) {
+            // First wire click (or switching from file_slot selection)
+            m_wireSourceObj = hit.obj;
+            m_wireSourceCPName = hit.cpName;
+            m_wireSourceFrame = findFrameForWidget(hit.obj);
+            std::cout << "[Wire] Selected source CP: " << hit.cpName
+                      << " on frame " << m_wireSourceFrame << std::endl;
+        } else {
+            // Second wire click: connect
+            if (hit.obj == m_wireSourceObj && hit.cpName == m_wireSourceCPName) {
+                std::cout << "[Wire] Can't wire CP to itself" << std::endl;
+                return;
+            }
+
+            int dstFrame = findFrameForWidget(hit.obj);
+
+            if (m_wireSourceFrame < 0 || dstFrame < 0) {
+                std::cout << "[Wire] Could not resolve frame indices (src="
+                          << m_wireSourceFrame << " dst=" << dstFrame << ")" << std::endl;
+                m_wireSourceObj = nullptr;
+                m_wireSourceCPName.clear();
+                m_wireSourceFrame = -1;
+                return;
+            }
+
+            auto& pg = m_filesystemBrowser.getPlatformGrid();
+            auto& grid = pg.grid();
+
+            // Check for duplicate
+            bool duplicate = false;
+            for (const auto& w : grid.wires) {
+                if (w.fromFrame == m_wireSourceFrame && w.toFrame == dstFrame &&
+                    w.fromCP == m_wireSourceCPName && w.toCP == hit.cpName) {
+                    duplicate = true;
+                    break;
+                }
+            }
+
+            if (duplicate) {
+                std::cout << "[Wire] Wire already exists" << std::endl;
+            } else {
+                WireConnection wire;
+                wire.fromFrame = m_wireSourceFrame;
+                wire.toFrame = dstFrame;
+                wire.fromCP = m_wireSourceCPName;
+                wire.toCP = hit.cpName;
+                grid.wires.push_back(wire);
+                pg.saveConfig(m_filesystemBrowser.getCurrentPath());
+                std::cout << "[Wire] Connected " << m_wireSourceCPName
+                          << " (frame " << m_wireSourceFrame << ") -> "
+                          << hit.cpName << " (frame " << dstFrame << ")" << std::endl;
+            }
+
+            // Reset selection
+            m_wireSourceObj = nullptr;
+            m_wireSourceCPName.clear();
+            m_wireSourceFrame = -1;
+        }
+    }
+
+    // Assign a hotbar item to the selected file_slot CP
+    void handleFileSlotAssign(int slotIndex) {
+        std::cout << "[FileSlot] handleFileSlotAssign(" << slotIndex << ") called"
+                  << " sourceObj=" << (m_wireSourceObj ? m_wireSourceObj->getName() : "null")
+                  << " sourceCP='" << m_wireSourceCPName << "'"
+                  << " sourceFrame=" << m_wireSourceFrame << std::endl;
+        if (slotIndex < 0 || slotIndex >= TOOLBAR_SLOT_COUNT) return;
+        auto& slot = m_toolbarSlots[slotIndex];
+        if (!slot.occupied || slot.filePath.empty()) {
+            std::cout << "[FileSlot] Hotbar slot " << slotIndex << " is empty" << std::endl;
+            return;
+        }
+        std::cout << "[FileSlot] Hotbar slot " << slotIndex << " has '" << slot.displayName
+                  << "' path='" << slot.filePath << "'" << std::endl;
+
+        // Normalize CP name to the slot base (strip trailing A/B — store as the A corner)
+        std::string cpBase = m_wireSourceCPName;
+        if (!cpBase.empty() && (cpBase.back() == 'A' || cpBase.back() == 'B')) {
+            cpBase = cpBase.substr(0, cpBase.size() - 1) + "A";
+        }
+        std::string cpB = cpBase.substr(0, cpBase.size() - 1) + "B";
+
+        int frameIdx = m_wireSourceFrame;
+        auto& pg = m_filesystemBrowser.getPlatformGrid();
+        auto& grid = pg.grid();
+
+        // Get world positions of A and B corners
+        glm::vec3 posA, posB;
+        bool gotA = getCPWorldPosExact(m_wireSourceObj, cpBase, posA);
+        bool gotB = getCPWorldPosExact(m_wireSourceObj, cpB, posB);
+        if (!gotA || !gotB) {
+            std::cout << "[FileSlot] Could not find A/B corners for " << cpBase << std::endl;
+            m_wireSourceObj = nullptr;
+            m_wireSourceCPName.clear();
+            m_wireSourceFrame = -1;
+            return;
+        }
+
+        // Compute center, size, and yaw from A/B corners
+        glm::vec3 center = (posA + posB) * 0.5f;
+        glm::vec3 diff = posB - posA;
+        float slotW = std::abs(diff.x) > std::abs(diff.z) ? std::abs(diff.x) : std::abs(diff.z);
+        float slotH = std::abs(diff.y);
+        if (slotW < 0.01f) slotW = 0.5f;
+        if (slotH < 0.01f) slotH = 0.5f;
+
+        // Get yaw from the parent widget's frame
+        float yawDeg = 0.0f;
+        if (frameIdx >= 0 && frameIdx < static_cast<int>(grid.frames.size())) {
+            yawDeg = grid.frames[frameIdx].yawDeg;
+        }
+
+        // Offset slightly forward from the model surface
+        float yawRad = yawDeg * static_cast<float>(M_PI) / 180.0f;
+        glm::vec3 spawnPos = center;
+        spawnPos.x += sinf(yawRad) * 0.05f;
+        spawnPos.z += cosf(yawRad) * 0.05f;
+        // Cube primitive starts at Y=0 and extends upward, so shift down
+        // by half the slot height to center it vertically on the slot
+        spawnPos.y -= slotH * 0.5f;
+
+        // Spawn directly at the file_slot position (no gallery offsets)
+        float meshSize = 1.5f; // cube primitive size
+        glm::vec3 slotScale(slotW / meshSize, slotH / meshSize, 0.02f);
+        m_filesystemBrowser.spawnFileAtSlot(slot.filePath, spawnPos, slotScale, yawDeg);
+        std::cout << "[FileSlot] Spawned '" << slot.displayName
+                  << "' at (" << spawnPos.x << "," << spawnPos.y << "," << spawnPos.z
+                  << ") size=" << slotW << "x" << slotH << std::endl;
+
+        // Update or add assignment in config
+        bool found = false;
+        for (auto& fsa : grid.fileSlots) {
+            if (fsa.frameIndex == frameIdx && fsa.cpName == cpBase) {
+                fsa.filePath = slot.filePath;
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            grid.fileSlots.push_back({frameIdx, cpBase, slot.filePath});
+        }
+
+        pg.saveConfig(m_filesystemBrowser.getCurrentPath());
+
+        // Clear the hotbar slot after placing
+        destroySlotThumbnail(slotIndex);
+        m_toolbarSlots[slotIndex].occupied = false;
+        m_toolbarSlots[slotIndex].filePath.clear();
+        m_toolbarSlots[slotIndex].displayName.clear();
+        m_toolbarSlots[slotIndex].targetLevel.clear();
+        m_toolbarSlots[slotIndex].texturePath.clear();
+        saveInventorySlot(slotIndex);
+        syncExcludedPaths();
+
+        // Reset wire selection
+        m_wireSourceObj = nullptr;
+        m_wireSourceCPName.clear();
+        m_wireSourceFrame = -1;
+    }
+
+    // Delete all wires connected to the CP nearest the crosshair
+    void handleWireDeleteAtCrosshair() {
+        if (m_wireCPScreenPositions.empty()) return;
+
+        float vpW = static_cast<float>(getWindow().getWidth());
+        float vpH = static_cast<float>(getWindow().getHeight());
+        ImVec2 center(vpW * 0.5f, vpH * 0.5f);
+
+        float bestDist = 40.0f;
+        int bestIdx = -1;
+        for (int i = 0; i < static_cast<int>(m_wireCPScreenPositions.size()); i++) {
+            float dx = m_wireCPScreenPositions[i].screenPos.x - center.x;
+            float dy = m_wireCPScreenPositions[i].screenPos.y - center.y;
+            float dist = std::sqrt(dx * dx + dy * dy);
+            if (dist < bestDist) { bestDist = dist; bestIdx = i; }
+        }
+        if (bestIdx < 0) return;
+
+        auto& hit = m_wireCPScreenPositions[bestIdx];
+        bool isSlot = (hit.cpName.rfind("file_slot_", 0) == 0);
+
+        // Find frame for this widget
+        glm::vec3 pos = hit.obj->getTransform().getPosition();
+        int frameIdx = findFrameIndexAtPos(pos);
+        if (frameIdx < 0) {
+            // Fallback nearest
+            auto& frames = m_filesystemBrowser.getPlatformGrid().grid().frames;
+            float best = 5.0f;
+            for (int i = 0; i < static_cast<int>(frames.size()); i++) {
+                float d = std::abs(frames[i].worldX - pos.x) +
+                          std::abs(frames[i].worldY - pos.y) +
+                          std::abs(frames[i].worldZ - pos.z);
+                if (d < best) { best = d; frameIdx = i; }
+            }
+        }
+
+        auto& pg = m_filesystemBrowser.getPlatformGrid();
+        auto& grid = pg.grid();
+        int removed = 0;
+
+        if (isSlot) {
+            // Remove file slot assignments for this CP
+            std::string cpBase = hit.cpName;
+            if (!cpBase.empty() && (cpBase.back() == 'A' || cpBase.back() == 'B'))
+                cpBase = cpBase.substr(0, cpBase.size() - 1) + "A";
+            auto it = std::remove_if(grid.fileSlots.begin(), grid.fileSlots.end(),
+                [&](const FileSlotAssignment& fsa) {
+                    return fsa.frameIndex == frameIdx && fsa.cpName == cpBase;
+                });
+            removed = static_cast<int>(std::distance(it, grid.fileSlots.end()));
+            grid.fileSlots.erase(it, grid.fileSlots.end());
+        } else {
+            // Remove all wires that use this CP on this frame
+            // Also match old-style wires (empty CP names) by frame index alone
+            auto it = std::remove_if(grid.wires.begin(), grid.wires.end(),
+                [&](const WireConnection& w) {
+                    // Exact CP match
+                    if (w.fromFrame == frameIdx && w.fromCP == hit.cpName) return true;
+                    if (w.toFrame == frameIdx && w.toCP == hit.cpName) return true;
+                    // Old-style wires without CP names: match by frame
+                    if (w.fromFrame == frameIdx && w.fromCP.empty()) return true;
+                    if (w.toFrame == frameIdx && w.toCP.empty()) return true;
+                    return false;
+                });
+            removed = static_cast<int>(std::distance(it, grid.wires.end()));
+            grid.wires.erase(it, grid.wires.end());
+        }
+
+        if (removed > 0) {
+            pg.saveConfig(m_filesystemBrowser.getCurrentPath());
+            std::cout << "[Wire] Deleted " << removed << " connection(s) from " << hit.cpName
+                      << " on frame " << frameIdx << std::endl;
+        } else {
+            std::cout << "[Wire] No connections on " << hit.cpName << std::endl;
+        }
+
+        // Clear selection
+        m_wireSourceObj = nullptr;
+        m_wireSourceCPName.clear();
+        m_wireSourceFrame = -1;
     }
 
     void trackFPS(float deltaTime) {
@@ -6653,7 +8287,7 @@ private:
         bool leftPressed = Input::isMouseButtonPressed(Input::MOUSE_LEFT) && !ImGui::GetIO().WantCaptureMouse;
         bool leftReleased = m_fsLeftWasDown && !leftDown;
 
-        if (m_filesystemBrowser.isActive() && !m_inConversation) {
+        if (m_filesystemBrowser.isActive() && !m_inConversation && !m_wiringMode) {
             // Helper: crosshair raycast
             auto doCrosshairRay = [&](glm::vec3& rayO, glm::vec3& rayD) {
                 float aspect = static_cast<float>(getWindow().getWidth()) / getWindow().getHeight();
@@ -7057,9 +8691,8 @@ private:
                                 newFrame.yawDeg = yawDeg;
                                 pg.grid().frames.push_back(newFrame);
 
-                                pg.spawnFrameObjects(m_filesystemBrowser.getSpawnOrigin(),
-                                                     m_filesystemBrowser.getBasementFloorY() + 0.5f);
-                                m_filesystemBrowser.respawnFrameFiles();
+                                // Incrementally add just the new frame — no destroy/recreate churn
+                                pg.spawnSingleFrame(static_cast<int>(pg.grid().frames.size()) - 1);
                                 pg.saveConfig(m_filesystemBrowser.getCurrentPath());
                             }
                             m_shootCooldown = 0.2f;
@@ -7110,9 +8743,8 @@ private:
                                 newFrame.yawDeg = 0.0f;
                                 pg.grid().frames.push_back(newFrame);
 
-                                pg.spawnFrameObjects(m_filesystemBrowser.getSpawnOrigin(),
-                                                     m_filesystemBrowser.getBasementFloorY() + 0.5f);
-                                m_filesystemBrowser.respawnFrameFiles();
+                                // Incrementally add just the new frame — no destroy/recreate churn
+                                pg.spawnSingleFrame(static_cast<int>(pg.grid().frames.size()) - 1);
                                 pg.saveConfig(m_filesystemBrowser.getCurrentPath());
                             }
                             m_shootCooldown = 0.2f;
@@ -7390,6 +9022,31 @@ private:
                                 }
                                 pg.saveConfig(m_filesystemBrowser.getCurrentPath());
                                 syncExcludedPaths();
+                                // Detect robot model → open algobot assignment popup
+                                {
+                                    std::string lowerName = std::filesystem::path(srcPath).filename().string();
+                                    std::transform(lowerName.begin(), lowerName.end(), lowerName.begin(), ::tolower);
+                                    if (lowerName.find("robot") != std::string::npos) {
+                                        m_showAlgobotAssign = true;
+                                        m_algobotModelPath = srcPath;
+                                        m_playModeCursorVisible = true;
+                                        Input::setMouseCaptured(false);
+                                    }
+                                    // Detect machine model → tag frame as Machine type
+                                    if (lowerName.find("machine") != std::string::npos) {
+                                        int machIdx = findFrameIndexAtPos(fp);
+                                        if (machIdx >= 0) {
+                                            auto& mfr = pg.grid().frames[machIdx];
+                                            if (mfr.frameType == FrameType::None) {
+                                                mfr.frameType = FrameType::Machine;
+                                                std::string stem = std::filesystem::path(srcPath).stem().string();
+                                                auto machPos = stem.find("_machine");
+                                                mfr.machineName = (machPos != std::string::npos) ? stem.substr(0, machPos) : stem;
+                                            }
+                                            pg.saveConfig(m_filesystemBrowser.getCurrentPath());
+                                        }
+                                    }
+                                }
                             }
                         } else {
                             // Drop onto regular wall
@@ -7451,8 +9108,8 @@ private:
                     m_playerZone = PlayerZone::Outside;
                     updateZoneVisibility();
                     m_shootCooldown = 0.2f;
-                } else if (fsHit && !fsHit->getTargetLevel().empty()) {
-                    // Doors/folders with navigation targets
+                } else if (fsHit && !fsHit->getTargetLevel().empty() && fsHit->isDoor()) {
+                    // Doors/folders with navigation targets (not 3D models or images)
                     handleTargetNavigation(fsHit->getTargetLevel());
                 } else if (m_filesystemBrowser.isActive() && m_playerZone == PlayerZone::Outside) {
                     // Phase 2: player is outside, no visible FS object hit
@@ -7504,7 +9161,7 @@ private:
                     for (auto& obj : m_sceneObjects) {
                         if (!obj) continue;
                         const auto& bt = obj->getBuildingType();
-                        if (bt != "machine_slot" && bt != "machine_lever" && bt != "machine_platform" && bt != "machine_label" && bt != "hitbox" && bt != "machine_visual" && bt != "widget") continue;
+                        if (bt != "machine_slot" && bt != "machine_lever" && bt != "machine_platform" && bt != "machine_label" && bt != "hitbox" && bt != "machine_visual" && bt != "widget" && bt != "wall_widget") continue;
                         float dist = obj->getWorldBounds().intersect(rayO, rayD);
                         if (dist >= 0 && dist < 200.0f && dist < closestMDist) {
                             closestMDist = dist;
@@ -7520,8 +9177,19 @@ private:
                              hover->getBuildingType() == "machine_label" ||
                              hover->getBuildingType() == "hitbox" ||
                              hover->getBuildingType() == "machine_visual" ||
+                             hover->getBuildingType() == "wall_widget" ||
                              hover->getBuildingType() == "widget")) {
                     m_fsHoverName = hover->getDescription();
+                    // For wall_widgets, description may be empty — extract from targetLevel or modelPath
+                    if (m_fsHoverName.empty() && hover->getBuildingType() == "wall_widget") {
+                        std::string target = hover->getTargetLevel();
+                        if (target.rfind("fs://", 0) == 0) target = target.substr(5);
+                        if (target.empty()) target = hover->getModelPath();
+                        if (!target.empty()) {
+                            auto slash = target.rfind('/');
+                            m_fsHoverName = (slash != std::string::npos) ? target.substr(slash + 1) : target;
+                        }
+                    }
                     if (m_tooltipVerbose) {
                         std::string target = hover->getTargetLevel();
                         std::string path = (target.rfind("fs://", 0) == 0) ? target.substr(5) : "";
@@ -7561,6 +9229,444 @@ private:
         }
         m_fsLeftWasDown = leftDown;
 
+        // Floor brush mode — click+drag on terrain to draw rectangular floor slabs (game mode)
+        m_hSlabPreviewValid = false;
+        if (m_hSlabBrushMode && m_isPlayMode && !m_filesystemBrowser.isActive() && !ImGui::GetIO().WantCaptureMouse) {
+            float aspect = static_cast<float>(getWindow().getWidth()) / getWindow().getHeight();
+            glm::mat4 proj = m_camera.getProjectionMatrix(aspect, 0.1f, 5000.0f);
+            glm::mat4 view = m_camera.getViewMatrix();
+            glm::mat4 invVP = glm::inverse(proj * view);
+            float ndcX = 0.0f, ndcY = 0.0f;
+            if (m_playModeCursorVisible) {
+                glm::vec2 mouse = Input::getMousePosition();
+                ndcX = (2.0f * mouse.x / getWindow().getWidth()) - 1.0f;
+                ndcY = 1.0f - (2.0f * mouse.y / getWindow().getHeight());
+            }
+            glm::vec4 nearPt = invVP * glm::vec4(ndcX, ndcY, -1, 1); nearPt /= nearPt.w;
+            glm::vec4 farPt  = invVP * glm::vec4(ndcX, ndcY,  1, 1); farPt  /= farPt.w;
+            glm::vec3 rayO = glm::vec3(nearPt);
+            glm::vec3 rayD = glm::normalize(glm::vec3(farPt - nearPt));
+
+            // Hit test: wall/slab AABB, snap to top surface, then terrain
+            glm::vec3 terrainHitPt{0.0f};
+            bool terrainHit = false;
+            float bestFloorT = std::numeric_limits<float>::max();
+
+            // Check walls and slabs via AABB intersection, snap to top
+            for (auto& obj : m_sceneObjects) {
+                if (!obj) continue;
+                const auto& bt = obj->getBuildingType();
+                if (bt != "platform_wall" && bt != "platform_slab") continue;
+                float dist = obj->getWorldBounds().intersect(rayO, rayD);
+                if (dist >= 0 && dist < 200.0f && dist < bestFloorT) {
+                    bestFloorT = dist;
+                    glm::vec3 hp = rayO + rayD * dist;
+                    float topY = obj->getWorldBounds().max.y;
+                    terrainHitPt = {std::round(hp.x), topY, std::round(hp.z)};
+                    terrainHit = true;
+                }
+            }
+
+            // Fall back to terrain
+            if (!terrainHit && rayD.y < -0.001f) {
+                for (float t = 1.0f; t < 500.0f; t += 0.5f) {
+                    glm::vec3 p = rayO + rayD * t;
+                    float terrY = m_terrain.getHeightAt(p.x, p.z);
+                    if (p.y <= terrY + 0.5f) {
+                        terrainHitPt = {std::round(p.x), terrY, std::round(p.z)};
+                        terrainHit = true;
+                        break;
+                    }
+                }
+            }
+
+            // Right-click to delete floor under cursor (skip when tumbling in build mode)
+            if (Input::isMouseButtonPressed(Input::MOUSE_RIGHT) && !m_hSlabDrawing && !m_isTumbling) {
+                float bestDist = std::numeric_limits<float>::max();
+                int bestIdx = -1;
+                for (int fi = 0; fi < static_cast<int>(m_sceneObjects.size()); fi++) {
+                    auto& obj = m_sceneObjects[fi];
+                    if (!obj || obj->getBuildingType() != "platform_slab") continue;
+                    float dist = obj->getWorldBounds().intersect(rayO, rayD);
+                    if (dist >= 0 && dist < 200.0f && dist < bestDist) {
+                        bestDist = dist;
+                        bestIdx = fi;
+                    }
+                }
+                if (bestIdx >= 0) {
+                    deleteObject(bestIdx);
+                }
+            }
+
+            if (terrainHit) {
+                if (leftPressed && !m_hSlabDrawing) {
+                    m_hSlabStart = terrainHitPt;
+                    m_hSlabEnd = terrainHitPt;
+                    m_hSlabDrawing = true;
+                }
+            }
+
+            // While dragging, project ray onto the starting Y plane so the slab
+            // extends freely beyond the wall/slab that was initially hit
+            if (m_hSlabDrawing) {
+                if (std::abs(rayD.y) > 0.001f) {
+                    float t = (m_hSlabStart.y - rayO.y) / rayD.y;
+                    if (t > 0 && t < 500.0f) {
+                        glm::vec3 hp = rayO + rayD * t;
+                        m_hSlabEnd = {std::round(hp.x), m_hSlabStart.y, std::round(hp.z)};
+                        m_hSlabPreviewValid = true;
+                    }
+                }
+            }
+
+            // Release: create the floor slab
+            if (m_hSlabDrawing && !Input::isMouseButtonDown(Input::MOUSE_LEFT)) {
+                m_hSlabDrawing = false;
+                float dx = std::abs(m_hSlabEnd.x - m_hSlabStart.x);
+                float dz = std::abs(m_hSlabEnd.z - m_hSlabStart.z);
+                if (dx >= 1.0f && dz >= 1.0f) {
+                    float floorW = std::round(dx);
+                    float floorD = std::round(dz);
+                    float minX = std::min(m_hSlabStart.x, m_hSlabEnd.x);
+                    float minZ = std::min(m_hSlabStart.z, m_hSlabEnd.z);
+                    float cx = minX + floorW * 0.5f;
+                    float cz = minZ + floorD * 0.5f;
+                    float avgY = (m_hSlabStart.y + m_hSlabEnd.y) * 0.5f;
+
+                    glm::vec4 floorColor = {0.6f, 0.6f, 0.6f, 1.0f};
+                    auto mesh = PrimitiveMeshBuilder::createCube(1.0f, floorColor);
+                    uint32_t handle = m_modelRenderer->createModel(mesh.vertices, mesh.indices);
+
+                    auto obj = std::make_unique<SceneObject>(
+                        "Floor_" + std::to_string(m_sceneObjects.size()));
+                    obj->setBufferHandle(handle);
+                    obj->setIndexCount(static_cast<uint32_t>(mesh.indices.size()));
+                    obj->setVertexCount(static_cast<uint32_t>(mesh.vertices.size()));
+                    obj->setLocalBounds(mesh.bounds);
+                    obj->setMeshData(mesh.vertices, mesh.indices);
+                    obj->setPrimitiveType(PrimitiveType::Cube);
+                    obj->setPrimitiveSize(1.0f);
+                    obj->setPrimitiveColor(floorColor);
+                    obj->setBuildingType("platform_slab");
+                    obj->setAABBCollision(true);
+
+                    obj->getTransform().setPosition({cx, avgY, cz});
+                    obj->getTransform().setScale({floorW, m_hSlabThickness, floorD});
+
+                    m_sceneObjects.push_back(std::move(obj));
+                    // Floor placed silently
+                }
+            }
+        } else if (!m_hSlabBrushMode) {
+            m_hSlabDrawing = false;
+        }
+
+        // Game-mode wall brush — click+drag on floor slabs to draw walls
+        if (m_wallBrushMode && m_isPlayMode && !m_filesystemBrowser.isActive() && !ImGui::GetIO().WantCaptureMouse) {
+            float aspect = static_cast<float>(getWindow().getWidth()) / getWindow().getHeight();
+            glm::mat4 proj = m_camera.getProjectionMatrix(aspect, 0.1f, 5000.0f);
+            glm::mat4 view = m_camera.getViewMatrix();
+            glm::mat4 invVP = glm::inverse(proj * view);
+            float ndcX = 0.0f, ndcY = 0.0f;
+            if (m_playModeCursorVisible) {
+                glm::vec2 mouse = Input::getMousePosition();
+                ndcX = (2.0f * mouse.x / getWindow().getWidth()) - 1.0f;
+                ndcY = 1.0f - (2.0f * mouse.y / getWindow().getHeight());
+            }
+            glm::vec4 nearPt = invVP * glm::vec4(ndcX, ndcY, -1, 1); nearPt /= nearPt.w;
+            glm::vec4 farPt  = invVP * glm::vec4(ndcX, ndcY,  1, 1); farPt  /= farPt.w;
+            glm::vec3 rayO = glm::vec3(nearPt);
+            glm::vec3 rayD = glm::normalize(glm::vec3(farPt - nearPt));
+
+            // Hit test: platform_slab floors or terrain
+            glm::vec3 floorHitPt{0.0f};
+            bool floorHit = false;
+
+            // Try hitting a platform_slab first
+            float bestSlabDist = std::numeric_limits<float>::max();
+            for (auto& obj : m_sceneObjects) {
+                if (!obj || obj->getBuildingType() != "platform_slab") continue;
+                float dist = obj->getWorldBounds().intersect(rayO, rayD);
+                if (dist >= 0 && dist < 200.0f && dist < bestSlabDist) {
+                    bestSlabDist = dist;
+                    glm::vec3 hp = rayO + rayD * dist;
+                    // Snap to top of slab
+                    AABB slabBounds = obj->getWorldBounds();
+                    floorHitPt = {std::round(hp.x), slabBounds.max.y, std::round(hp.z)};
+                    floorHit = true;
+                }
+            }
+
+            // Fall back to terrain
+            if (!floorHit && rayD.y < -0.001f) {
+                for (float t = 1.0f; t < 500.0f; t += 0.5f) {
+                    glm::vec3 p = rayO + rayD * t;
+                    float terrY = m_terrain.getHeightAt(p.x, p.z);
+                    if (p.y <= terrY + 0.5f) {
+                        floorHitPt = {std::round(p.x), terrY, std::round(p.z)};
+                        floorHit = true;
+                        break;
+                    }
+                }
+            }
+
+            // Check for existing wall click (select for deletion)
+            SceneObject* hitExistingWall = nullptr;
+            if (leftPressed && !m_wallBrushDrawing) {
+                float bestDist = std::numeric_limits<float>::max();
+                for (auto& obj : m_sceneObjects) {
+                    if (!obj || obj->getBuildingType() != "platform_wall") continue;
+                    float dist = obj->getWorldBounds().intersect(rayO, rayD);
+                    if (dist >= 0 && dist < 200.0f && dist < bestDist) {
+                        bestDist = dist;
+                        hitExistingWall = obj.get();
+                    }
+                }
+                if (hitExistingWall) {
+                    for (auto& obj : m_sceneObjects) {
+                        if (obj && obj->getBuildingType() == "platform_wall")
+                            obj->setSelected(false);
+                    }
+                    hitExistingWall->setSelected(true);
+                }
+            }
+
+            // Right-click to delete wall (skip when tumbling)
+            if (Input::isMouseButtonPressed(Input::MOUSE_RIGHT) && !m_wallBrushDrawing && !m_isTumbling) {
+                float bestDist = std::numeric_limits<float>::max();
+                int bestIdx = -1;
+                for (int wi = 0; wi < static_cast<int>(m_sceneObjects.size()); wi++) {
+                    auto& obj = m_sceneObjects[wi];
+                    if (!obj || obj->getBuildingType() != "platform_wall") continue;
+                    float dist = obj->getWorldBounds().intersect(rayO, rayD);
+                    if (dist >= 0 && dist < 200.0f && dist < bestDist) {
+                        bestDist = dist;
+                        bestIdx = wi;
+                    }
+                }
+                if (bestIdx >= 0) {
+                    deleteObject(bestIdx);
+                }
+            }
+
+            if (floorHit && !hitExistingWall) {
+                if (leftPressed && !m_wallBrushDrawing) {
+                    m_wallBrushStart = floorHitPt;
+                    m_wallBrushEnd = floorHitPt;
+                    m_wallBrushDrawing = true;
+                }
+                if (m_wallBrushDrawing) {
+                    m_wallBrushEnd = floorHitPt;
+                    // Constrain to 1m thick: snap to dominant axis
+                    float dx = std::abs(m_wallBrushEnd.x - m_wallBrushStart.x);
+                    float dz = std::abs(m_wallBrushEnd.z - m_wallBrushStart.z);
+                    if (dx >= dz) {
+                        m_wallBrushEnd.z = m_wallBrushStart.z;
+                    } else {
+                        m_wallBrushEnd.x = m_wallBrushStart.x;
+                    }
+                    m_wallBrushPreviewValid = true;
+                }
+            }
+
+            // Release: create the wall
+            if (m_wallBrushDrawing && !Input::isMouseButtonDown(Input::MOUSE_LEFT)) {
+                m_wallBrushDrawing = false;
+                float dx = std::abs(m_wallBrushEnd.x - m_wallBrushStart.x);
+                float dz = std::abs(m_wallBrushEnd.z - m_wallBrushStart.z);
+                float wallLen = std::round(std::max(dx, dz));
+                if (wallLen >= 1.0f) {
+                    float wallHeight = m_wallBrushHeight;
+                    float wallThick = m_wallBrushThickness;
+                    float minX = std::min(m_wallBrushStart.x, m_wallBrushEnd.x);
+                    float minZ = std::min(m_wallBrushStart.z, m_wallBrushEnd.z);
+                    float cx, cz;
+                    glm::vec3 wallScale;
+                    bool alongX = (dx >= dz);
+                    if (alongX) {
+                        cx = minX + wallLen * 0.5f;
+                        cz = m_wallBrushStart.z + wallThick * 0.5f;
+                        wallScale = {wallLen, wallHeight, wallThick};
+                    } else {
+                        cx = m_wallBrushStart.x + wallThick * 0.5f;
+                        cz = minZ + wallLen * 0.5f;
+                        wallScale = {wallThick, wallHeight, wallLen};
+                    }
+
+                    glm::vec4 wallColor = {0.7f, 0.7f, 0.7f, 1.0f};
+                    auto mesh = PrimitiveMeshBuilder::createCube(1.0f, wallColor);
+                    uint32_t handle = m_modelRenderer->createModel(mesh.vertices, mesh.indices);
+
+                    auto obj = std::make_unique<SceneObject>(
+                        "Wall_" + std::to_string(m_sceneObjects.size()));
+                    obj->setBufferHandle(handle);
+                    obj->setIndexCount(static_cast<uint32_t>(mesh.indices.size()));
+                    obj->setVertexCount(static_cast<uint32_t>(mesh.vertices.size()));
+                    obj->setLocalBounds(mesh.bounds);
+                    obj->setMeshData(mesh.vertices, mesh.indices);
+                    obj->setPrimitiveType(PrimitiveType::Cube);
+                    obj->setPrimitiveSize(1.0f);
+                    obj->setPrimitiveColor(wallColor);
+                    obj->setBuildingType("platform_wall");
+                    obj->setAABBCollision(true);
+
+                    obj->getTransform().setPosition({cx, m_wallBrushStart.y, cz});
+                    obj->getTransform().setScale(wallScale);
+
+                    m_sceneObjects.push_back(std::move(obj));
+                    // Wall placed silently
+                }
+            }
+        }
+
+        // Game-mode frame placement — click on a wall or floor to place a frame
+        if (m_framePlacementMode && m_isPlayMode && !m_filesystemBrowser.isActive() && !ImGui::GetIO().WantCaptureMouse) {
+            float aspect = static_cast<float>(getWindow().getWidth()) / getWindow().getHeight();
+            glm::mat4 proj = m_camera.getProjectionMatrix(aspect, 0.1f, 5000.0f);
+            glm::mat4 view = m_camera.getViewMatrix();
+            glm::mat4 invVP = glm::inverse(proj * view);
+            float ndcX = 0.0f, ndcY = 0.0f;
+            if (m_playModeCursorVisible) {
+                glm::vec2 mouse = Input::getMousePosition();
+                ndcX = (2.0f * mouse.x / getWindow().getWidth()) - 1.0f;
+                ndcY = 1.0f - (2.0f * mouse.y / getWindow().getHeight());
+            }
+            glm::vec4 nearPt = invVP * glm::vec4(ndcX, ndcY, -1, 1); nearPt /= nearPt.w;
+            glm::vec4 farPt  = invVP * glm::vec4(ndcX, ndcY,  1, 1); farPt  /= farPt.w;
+            glm::vec3 rayO = glm::vec3(nearPt);
+            glm::vec3 rayD = glm::normalize(glm::vec3(farPt - nearPt));
+
+            // Hit test: walls AND floors
+            m_framePreviewValid = false;
+            float bestDist = std::numeric_limits<float>::max();
+            SceneObject* hitObj = nullptr;
+            std::string hitType;
+            for (auto& obj : m_sceneObjects) {
+                if (!obj) continue;
+                const auto& bt = obj->getBuildingType();
+                if (bt != "platform_wall" && bt != "platform_slab") continue;
+                float dist = obj->getWorldBounds().intersect(rayO, rayD);
+                if (dist >= 0 && dist < 200.0f && dist < bestDist) {
+                    bestDist = dist;
+                    hitObj = obj.get();
+                    hitType = bt;
+                }
+            }
+
+            if (hitObj) {
+                glm::vec3 hitPt = rayO + rayD * bestDist;
+                glm::vec3 objPos = hitObj->getTransform().getPosition();
+                glm::vec3 objScl = hitObj->getTransform().getScale();
+                float s = static_cast<float>(m_frameSizeSetting);
+                float hs = s * 0.5f;
+
+                float frameX = 0, frameY = 0, frameZ = 0;
+                float normalX = 0, normalY = 0, normalZ = 0;
+                float yawDeg = 0;
+
+                if (hitType == "platform_wall") {
+                    // Wall frame — same snapping as EDEN OS
+                    float halfW = objScl.x * 0.5f;
+                    float halfZ = objScl.z * 0.5f;
+                    float dx = hitPt.x - objPos.x;
+                    float dz = hitPt.z - objPos.z;
+                    float distToXFace = std::abs(std::abs(dx) - halfW);
+                    float distToZFace = std::abs(std::abs(dz) - halfZ);
+                    bool hitXFace = (distToXFace < distToZFace);
+
+                    float nx = 0, nz = 0;
+                    if (hitXFace) {
+                        nx = (dx > 0) ? 1.0f : -1.0f;
+                        yawDeg = (dx > 0) ? 90.0f : -90.0f;
+                    } else {
+                        nz = (dz > 0) ? 1.0f : -1.0f;
+                        yawDeg = (dz > 0) ? 0.0f : 180.0f;
+                    }
+                    normalX = nx; normalZ = nz;
+
+                    float wallMinY = objPos.y;
+                    float wallMaxY = objPos.y + objScl.y;
+
+                    if (hitXFace) {
+                        float faceMin = objPos.z - halfZ;
+                        float faceMax = objPos.z + halfZ;
+                        // Snap relative to face edge so frames align with grid lines
+                        float relZ = hitPt.z - faceMin;
+                        float snappedRel = std::floor(relZ / 1.0f) * 1.0f + hs;
+                        frameZ = std::clamp(faceMin + snappedRel, faceMin + hs, faceMax - hs);
+                        frameX = objPos.x + nx * (halfW + 0.05f);
+                    } else {
+                        float faceMin = objPos.x - halfW;
+                        float faceMax = objPos.x + halfW;
+                        float relX = hitPt.x - faceMin;
+                        float snappedRel = std::floor(relX / 1.0f) * 1.0f + hs;
+                        frameX = std::clamp(faceMin + snappedRel, faceMin + hs, faceMax - hs);
+                        frameZ = objPos.z + nz * (halfZ + 0.05f);
+                    }
+
+                    // Y snaps relative to wall base (local 1m grid)
+                    float relY = hitPt.y - wallMinY;
+                    float snappedRelY = std::floor(relY / 1.0f) * 1.0f;
+                    frameY = std::clamp(wallMinY + snappedRelY, wallMinY, wallMaxY - s);
+                } else {
+                    // Slab frame — use ray direction to determine top vs underside
+                    frameX = std::round(hitPt.x - hs) + hs;
+                    frameZ = std::round(hitPt.z - hs) + hs;
+                    float slabBottom = objPos.y;
+                    float slabTop = objPos.y + objScl.y;
+                    if (rayD.y > 0.0f) {
+                        // Looking upward → underside of slab (offset down by frame thickness so it hangs below)
+                        normalY = -1.0f;
+                        frameY = slabBottom - 0.1f - 0.01f;
+                    } else {
+                        // Looking downward → top of slab
+                        normalY = 1.0f;
+                        frameY = slabTop + 0.01f;
+                    }
+                }
+
+                m_framePreviewPos = {frameX, frameY, frameZ};
+                m_framePreviewSize = s;
+                m_framePreviewNX = normalX;
+                m_framePreviewNY = normalY;
+                m_framePreviewNZ = normalZ;
+                m_framePreviewYaw = yawDeg;
+                m_framePreviewValid = true;
+
+                // Click to place
+                if (leftPressed) {
+                    glm::vec4 frameColor = {0.2f, 0.5f, 0.8f, 0.9f};
+                    auto mesh = PrimitiveMeshBuilder::createCube(1.0f, frameColor);
+                    uint32_t handle = m_modelRenderer->createModel(mesh.vertices, mesh.indices);
+
+                    auto obj = std::make_unique<SceneObject>(
+                        "Frame_" + std::to_string(m_sceneObjects.size()));
+                    obj->setBufferHandle(handle);
+                    obj->setIndexCount(static_cast<uint32_t>(mesh.indices.size()));
+                    obj->setVertexCount(static_cast<uint32_t>(mesh.vertices.size()));
+                    obj->setLocalBounds(mesh.bounds);
+                    obj->setMeshData(mesh.vertices, mesh.indices);
+                    obj->setPrimitiveType(PrimitiveType::Cube);
+                    obj->setPrimitiveSize(1.0f);
+                    obj->setPrimitiveColor(frameColor);
+                    obj->setBuildingType("wall_frame");
+
+                    glm::vec3 frameScale;
+                    if (std::abs(normalY) > 0.5f) {
+                        frameScale = {s, 0.1f, s}; // floor/ceiling frame
+                    } else {
+                        frameScale = {s, s, 0.1f}; // wall frame
+                    }
+                    obj->getTransform().setPosition(m_framePreviewPos);
+                    obj->getTransform().setScale(frameScale);
+                    obj->setEulerRotation({0.0f, yawDeg, 0.0f});
+
+                    m_sceneObjects.push_back(std::move(obj));
+                    // Frame placed silently
+                }
+            }
+        }
+
         // Update projectiles (for any still in flight)
         updateProjectiles(deltaTime);
 
@@ -7570,8 +9676,159 @@ private:
         // Update dogfight AI (handles combat)
         updateDogfighters(deltaTime);
 
-        // E key or left-click for interaction
-        if ((Input::isKeyPressed(Input::KEY_E) || Input::isMouseButtonPressed(Input::MOUSE_LEFT))
+        // Building piece selection — left-click when building mode open and no brush tool active
+        bool buildSelectClick = false;
+        if (m_isPlayMode && m_showSiloConfig && !m_hSlabBrushMode && !m_wallBrushMode && !m_framePlacementMode
+            && !m_buildMoveMode
+            && !m_filesystemBrowser.isActive() && !ImGui::GetIO().WantCaptureMouse
+            && Input::isMouseButtonPressed(Input::MOUSE_LEFT)) {
+            buildSelectClick = true;
+            float aspect = static_cast<float>(getWindow().getWidth()) / getWindow().getHeight();
+            glm::mat4 proj = m_camera.getProjectionMatrix(aspect, 0.1f, 5000.0f);
+            glm::mat4 view = m_camera.getViewMatrix();
+            glm::mat4 invVP = glm::inverse(proj * view);
+            float ndcX = 0.0f, ndcY = 0.0f;
+            if (m_playModeCursorVisible) {
+                glm::vec2 mouse = Input::getMousePosition();
+                ndcX = (2.0f * mouse.x / getWindow().getWidth()) - 1.0f;
+                ndcY = 1.0f - (2.0f * mouse.y / getWindow().getHeight());
+            }
+            glm::vec4 nearPt = invVP * glm::vec4(ndcX, ndcY, -1, 1); nearPt /= nearPt.w;
+            glm::vec4 farPt  = invVP * glm::vec4(ndcX, ndcY,  1, 1); farPt  /= farPt.w;
+            glm::vec3 rayO = glm::vec3(nearPt);
+            glm::vec3 rayD = glm::normalize(glm::vec3(farPt - nearPt));
+
+            float bestDist = std::numeric_limits<float>::max();
+            int bestIdx = -1;
+            for (int bi = 0; bi < static_cast<int>(m_sceneObjects.size()); bi++) {
+                auto& obj = m_sceneObjects[bi];
+                if (!obj) continue;
+                const auto& bt = obj->getBuildingType();
+                if (bt != "platform_wall" && bt != "platform_slab" && bt != "wall_frame") continue;
+                float dist = obj->getWorldBounds().intersect(rayO, rayD);
+                if (dist >= 0 && dist < 200.0f && dist < bestDist) {
+                    bestDist = dist;
+                    bestIdx = bi;
+                }
+            }
+
+            // Clear previous selection
+            if (m_selectedBuildPiece >= 0 && m_selectedBuildPiece < static_cast<int>(m_sceneObjects.size())) {
+                if (m_sceneObjects[m_selectedBuildPiece])
+                    m_sceneObjects[m_selectedBuildPiece]->setSelected(false);
+            }
+            m_selectedBuildPiece = bestIdx;
+            if (bestIdx >= 0) {
+                m_sceneObjects[bestIdx]->setSelected(true);
+            }
+            // Sync with EditorUI so Building Textures window can apply to selection
+            updateSceneObjectsList();
+            m_editorUI.setSelectedObjectIndex(bestIdx);
+        }
+
+        // Delete selected building piece
+        if (m_isPlayMode && m_selectedBuildPiece >= 0 && Input::isKeyPressed(Input::KEY_DELETE)
+            && !ImGui::GetIO().WantCaptureKeyboard) {
+            if (m_selectedBuildPiece < static_cast<int>(m_sceneObjects.size()) && m_sceneObjects[m_selectedBuildPiece]) {
+                deleteObject(m_selectedBuildPiece);
+                m_selectedBuildPiece = -1;
+                m_editorUI.setSelectedObjectIndex(-1);
+                m_buildMoveMode = false;
+            }
+        }
+
+        // Move mode: drag selected piece on XZ plane, snapping to 1m grid
+        if (m_buildMoveMode && m_selectedBuildPiece >= 0
+            && m_selectedBuildPiece < static_cast<int>(m_sceneObjects.size())
+            && m_sceneObjects[m_selectedBuildPiece] && m_showSiloConfig && m_playModeCursorVisible) {
+            auto& obj = m_sceneObjects[m_selectedBuildPiece];
+            glm::vec3 objPos = obj->getTransform().getPosition();
+
+            // Cast ray from mouse onto the object's Y plane
+            float aspect = static_cast<float>(getWindow().getWidth()) / getWindow().getHeight();
+            glm::mat4 proj = m_camera.getProjectionMatrix(aspect, 0.1f, 5000.0f);
+            glm::mat4 view = m_camera.getViewMatrix();
+            glm::mat4 invVP = glm::inverse(proj * view);
+            glm::vec2 mouse = Input::getMousePosition();
+            float ndcX = (2.0f * mouse.x / getWindow().getWidth()) - 1.0f;
+            float ndcY = 1.0f - (2.0f * mouse.y / getWindow().getHeight());
+            glm::vec4 nearPt = invVP * glm::vec4(ndcX, ndcY, -1, 1); nearPt /= nearPt.w;
+            glm::vec4 farPt  = invVP * glm::vec4(ndcX, ndcY,  1, 1); farPt  /= farPt.w;
+            glm::vec3 rayO = glm::vec3(nearPt);
+            glm::vec3 rayD = glm::normalize(glm::vec3(farPt - nearPt));
+
+            float planeY = objPos.y;
+            glm::vec3 objScl = obj->getTransform().getScale();
+            // Determine edge-aligned snap grid: if dimension is odd, center is at .5
+            float snapOffX = (static_cast<int>(objScl.x) % 2 == 1) ? 0.5f : 0.0f;
+            float snapOffZ = (static_cast<int>(objScl.z) % 2 == 1) ? 0.5f : 0.0f;
+
+            if (std::abs(rayD.y) > 0.001f) {
+                float t = (planeY - rayO.y) / rayD.y;
+                if (t > 0 && t < 500.0f) {
+                    glm::vec3 hp = rayO + rayD * t;
+
+                    if (Input::isMouseButtonPressed(Input::MOUSE_LEFT) && !ImGui::GetIO().WantCaptureMouse) {
+                        m_buildMoveDragging = true;
+                        m_buildMoveOffset = objPos - hp;
+                    }
+                    if (m_buildMoveDragging) {
+                        glm::vec3 newPos = hp + m_buildMoveOffset;
+                        // Snap to 1m grid aligned with piece edges
+                        newPos.x = std::round(newPos.x - snapOffX) + snapOffX;
+                        newPos.z = std::round(newPos.z - snapOffZ) + snapOffZ;
+                        newPos.y = planeY;
+                        obj->getTransform().setPosition(newPos);
+                    }
+                }
+            }
+            if (!Input::isMouseButtonDown(Input::MOUSE_LEFT)) {
+                m_buildMoveDragging = false;
+            }
+        }
+
+        // Salvage selection — left-click in play mode (not building mode, not filesystem)
+        bool salvageSelectClick = false;
+        if (m_isPlayMode && !m_showSiloConfig && !m_filesystemBrowser.isActive()
+            && !m_playModeCursorVisible && !ImGui::GetIO().WantCaptureMouse
+            && Input::isMouseButtonPressed(Input::MOUSE_LEFT) && !buildSelectClick) {
+            float aspect = static_cast<float>(getWindow().getWidth()) / getWindow().getHeight();
+            glm::mat4 proj = m_camera.getProjectionMatrix(aspect, 0.1f, 5000.0f);
+            glm::mat4 view = m_camera.getViewMatrix();
+            glm::mat4 invVP = glm::inverse(proj * view);
+            // Crosshair = screen center
+            glm::vec4 nearPt = invVP * glm::vec4(0, 0, -1, 1); nearPt /= nearPt.w;
+            glm::vec4 farPt  = invVP * glm::vec4(0, 0,  1, 1); farPt  /= farPt.w;
+            glm::vec3 rayO = glm::vec3(nearPt);
+            glm::vec3 rayD = glm::normalize(glm::vec3(farPt - nearPt));
+
+            float bestDist = std::numeric_limits<float>::max();
+            int bestIdx = -1;
+            for (int si = 0; si < static_cast<int>(m_sceneObjects.size()); si++) {
+                auto& obj = m_sceneObjects[si];
+                if (!obj) continue;
+                if (obj->getBeingType() != BeingType::INTERACTION && obj->getBuildingType() != "salvage") continue;
+                float dist = obj->getWorldBounds().intersect(rayO, rayD);
+                if (dist >= 0 && dist < 5.0f && dist < bestDist) {
+                    bestDist = dist;
+                    bestIdx = si;
+                }
+            }
+
+            // Clear previous salvage selection
+            if (m_selectedSalvageIndex >= 0 && m_selectedSalvageIndex < static_cast<int>(m_sceneObjects.size())) {
+                if (m_sceneObjects[m_selectedSalvageIndex])
+                    m_sceneObjects[m_selectedSalvageIndex]->setSelected(false);
+            }
+            m_selectedSalvageIndex = bestIdx;
+            if (bestIdx >= 0) {
+                m_sceneObjects[bestIdx]->setSelected(true);
+                salvageSelectClick = true;
+            }
+        }
+
+        // E key or left-click for interaction (skip if building/salvage selection consumed the click)
+        if ((Input::isKeyPressed(Input::KEY_E) || (Input::isMouseButtonPressed(Input::MOUSE_LEFT) && !buildSelectClick && !salvageSelectClick))
             && !m_inConversation && !ImGui::GetIO().WantCaptureMouse) {
             interactWithCrosshair();
         }
@@ -11729,16 +13986,23 @@ private:
     void renderPlayModeTopBar() {
         if (ImGui::BeginMainMenuBar()) {
             if (ImGui::BeginMenu("Window")) {
-                if (ImGui::MenuItem("Terminal", nullptr, m_editorUI.showTerminal()))
-                    m_editorUI.showTerminal() = !m_editorUI.showTerminal();
-                if (ImGui::MenuItem("Chat", nullptr, m_showWorldChatHistory))
-                    m_showWorldChatHistory = !m_showWorldChatHistory;
-                if (ImGui::MenuItem("Silo Config", nullptr, m_showSiloConfig))
-                    m_showSiloConfig = !m_showSiloConfig;
+                if (m_filesystemBrowser.isActive()) {
+                    // EDEN OS mode — full menu
+                    if (ImGui::MenuItem("Terminal", nullptr, m_editorUI.showTerminal()))
+                        m_editorUI.showTerminal() = !m_editorUI.showTerminal();
+                    if (ImGui::MenuItem("Chat", nullptr, m_showWorldChatHistory))
+                        m_showWorldChatHistory = !m_showWorldChatHistory;
+                    if (ImGui::MenuItem("Silo Config", nullptr, m_showSiloConfig))
+                        m_showSiloConfig = !m_showSiloConfig;
+                    if (ImGui::MenuItem("Servers", nullptr, m_showServerManager))
+                        m_showServerManager = !m_showServerManager;
+                } else {
+                    // Game mode — building + performance only
+                    if (ImGui::MenuItem("Building Mode", nullptr, m_showSiloConfig))
+                        m_showSiloConfig = !m_showSiloConfig;
+                }
                 if (ImGui::MenuItem("Performance", nullptr, m_showPerfWindow))
                     m_showPerfWindow = !m_showPerfWindow;
-                if (ImGui::MenuItem("Servers", nullptr, m_showServerManager))
-                    m_showServerManager = !m_showServerManager;
                 ImGui::EndMenu();
             }
             ImGui::EndMainMenuBar();
@@ -11747,34 +14011,37 @@ private:
 
     void renderSiloConfigWindow() {
         if (!m_showSiloConfig) return;
-        if (ImGui::Begin("Silo Config", &m_showSiloConfig)) {
-            // Silo size selector
-            auto& cfg = m_filesystemBrowser.siloConfig();
-            const char* sizeNames[] = {"Small", "Medium", "Large"};
-            int currentSize = static_cast<int>(cfg.size);
-            if (ImGui::Combo("Silo Size", &currentSize, sizeNames, 3)) {
-                cfg.size = static_cast<eden::FilesystemBrowser::SiloSize>(currentSize);
-            }
+        bool isSiloMode = m_filesystemBrowser.isActive();
+        const char* windowTitle = isSiloMode ? "Silo Config" : "Building Mode";
+        if (ImGui::Begin(windowTitle, &m_showSiloConfig)) {
 
-            ImGui::ColorEdit4("Wall Color", &cfg.wallColor.x);
-            ImGui::ColorEdit4("Column Color", &cfg.columnColor.x);
+            if (isSiloMode) {
+                // === EDEN OS Silo Config ===
+                auto& cfg = m_filesystemBrowser.siloConfig();
+                const char* sizeNames[] = {"Small", "Medium", "Large"};
+                int currentSize = static_cast<int>(cfg.size);
+                if (ImGui::Combo("Silo Size", &currentSize, sizeNames, 3)) {
+                    cfg.size = static_cast<eden::FilesystemBrowser::SiloSize>(currentSize);
+                }
 
-            ImGui::Separator();
-            ImGui::Checkbox("Spawn at Platform Top", &m_spawnAtPlatformTop);
-            if (m_spawnAtPlatformTop)
-                ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), "Entering folders teleports to platform");
-            else
-                ImGui::TextDisabled("Entering folders teleports to silo floor");
-            ImGui::TextDisabled("PgUp = platform top, PgDn = silo floor");
+                ImGui::ColorEdit4("Wall Color", &cfg.wallColor.x);
+                ImGui::ColorEdit4("Column Color", &cfg.columnColor.x);
 
-            if (m_filesystemBrowser.isActive()) {
+                ImGui::Separator();
+                ImGui::Checkbox("Spawn at Platform Top", &m_spawnAtPlatformTop);
+                if (m_spawnAtPlatformTop)
+                    ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), "Entering folders teleports to platform");
+                else
+                    ImGui::TextDisabled("Entering folders teleports to silo floor");
+                ImGui::TextDisabled("PgUp = platform top, PgDn = silo floor");
+
                 auto& pg = m_filesystemBrowser.getPlatformGrid();
 
                 ImGui::Separator();
                 ImGui::Text("Wall Building");
                 ImGui::Checkbox("Wall Brush", &m_wallBrushMode);
                 if (m_wallBrushMode) {
-                    m_framePlacementMode = false; // mutually exclusive
+                    m_framePlacementMode = false;
                     ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.2f, 1.0f),
                         "Click+drag on platform floor to draw walls (1m thick, 8m tall)");
                     ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.2f, 1.0f),
@@ -11786,7 +14053,7 @@ private:
                 ImGui::SliderInt("Frame Size", &m_frameSizeSetting, 1, 16, "%dm");
                 ImGui::Checkbox("Frame Placement Mode", &m_framePlacementMode);
                 if (m_framePlacementMode) {
-                    m_wallBrushMode = false; // mutually exclusive
+                    m_wallBrushMode = false;
                     ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f),
                         "Click on a platform wall to place a %dm frame", m_frameSizeSetting);
                 }
@@ -11800,18 +14067,52 @@ private:
                 ImGui::Separator();
 
                 if (ImGui::Button("Apply & Save")) {
-                    // Save this folder's platform config then rebuild
                     pg.saveConfig(m_filesystemBrowser.getCurrentPath());
                     m_filesystemBrowser.navigate(m_filesystemBrowser.getCurrentPath());
                 }
-            }
 
-            if (ImGui::Button("Apply")) {
-                m_filesystemBrowser.navigate(m_filesystemBrowser.getCurrentPath());
+                if (ImGui::Button("Apply")) {
+                    m_filesystemBrowser.navigate(m_filesystemBrowser.getCurrentPath());
+                }
+                ImGui::Separator();
+                ImGui::Checkbox("Tooltip at bottom-left", &m_tooltipBottomLeft);
+                ImGui::Checkbox("Verbose (size / file count)", &m_tooltipVerbose);
+            } else {
+                // === Game Building Mode ===
+                ImGui::Text("Horizontal Slab");
+                ImGui::Checkbox("H-Slab Brush", &m_hSlabBrushMode);
+                if (m_hSlabBrushMode) {
+                    m_wallBrushMode = false;
+                    m_framePlacementMode = false;
+                    ImGui::TextColored(ImVec4(0.2f, 0.8f, 0.4f, 1.0f),
+                        "Click+drag to place horizontal slab (floors/ceilings)");
+                }
+                ImGui::SliderFloat("H-Slab Thickness", &m_hSlabThickness, 0.1f, 1.0f, "%.1fm");
+
+                ImGui::Separator();
+                ImGui::Text("Vertical Slab");
+                ImGui::Checkbox("V-Slab Brush", &m_wallBrushMode);
+                if (m_wallBrushMode) {
+                    m_hSlabBrushMode = false;
+                    m_framePlacementMode = false;
+                    ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.2f, 1.0f),
+                        "Click+drag to place vertical slab (walls)");
+                }
+                ImGui::SliderFloat("V-Slab Height", &m_wallBrushHeight, 1.0f, 20.0f, "%.0fm");
+                ImGui::SliderFloat("V-Slab Thickness", &m_wallBrushThickness, 0.5f, 3.0f, "%.1fm");
+
+                ImGui::Separator();
+                ImGui::Text("Frames");
+                ImGui::SliderInt("Frame Size", &m_frameSizeSetting, 1, 16, "%dm");
+                ImGui::Checkbox("Frame Placement Mode", &m_framePlacementMode);
+                if (m_framePlacementMode) {
+                    m_wallBrushMode = false;
+                    m_hSlabBrushMode = false;
+                    ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f),
+                        "Click to place a %dm frame", m_frameSizeSetting);
+                }
+
             }
-            ImGui::Separator();
-            ImGui::Checkbox("Tooltip at bottom-left", &m_tooltipBottomLeft);
-            ImGui::Checkbox("Verbose (size / file count)", &m_tooltipVerbose);
         }
         ImGui::End();
     }
@@ -12150,6 +14451,64 @@ private:
         renderSiloConfigWindow();
         renderPlatformMapMode();
         renderPerfWindow();
+
+        // Show Building Textures window when a game-mode building piece is selected
+        if (m_selectedBuildPiece >= 0 && m_selectedBuildPiece < static_cast<int>(m_sceneObjects.size())
+            && m_sceneObjects[m_selectedBuildPiece]) {
+            m_editorUI.showBuildingTextures() = true;  // Keep open while piece selected
+            m_editorUI.renderBuildingTextureWindow();
+
+            // Game-mode apply button (rendered after texture window so it appears below)
+            int texIdx = m_editorUI.getSelectedBuildingTexture();
+            if (texIdx >= 0 && texIdx < static_cast<int>(m_buildingTextures.size())) {
+                ImGui::SetNextWindowSize(ImVec2(280, 0), ImGuiCond_Always);
+                if (ImGui::Begin("##ApplyTexture", nullptr,
+                    ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+                    ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings)) {
+                    if (ImGui::Button("Apply to Selected", ImVec2(-1, 0))) {
+                        auto* target = m_sceneObjects[m_selectedBuildPiece].get();
+                        auto& tex = m_buildingTextures[texIdx];
+                        float tilesPerMeter = m_editorUI.getBuildingTexScaleU();
+                        float tilesPerMeterV = m_editorUI.getBuildingTexScaleV();
+
+                        target->setTextureData(tex.pixels, tex.width, tex.height);
+                        m_modelRenderer->updateTexture(target->getBufferHandle(), tex.pixels.data(), tex.width, tex.height);
+
+                        // Regenerate UVs from scratch based on object scale so texture tiles per meter
+                        if (target->hasMeshData()) {
+                            glm::vec3 sc = target->getTransform().getScale();
+                            // Rebuild from a fresh unit cube to avoid compounding UV scales
+                            auto freshMesh = PrimitiveMeshBuilder::createCube(1.0f, glm::vec4(1.0f));
+                            auto vertices = target->getVertices();
+                            for (size_t vi = 0; vi < vertices.size() && vi < freshMesh.vertices.size(); vi++) {
+                                auto& v = vertices[vi];
+                                v.color = glm::vec4(1.0f, 1.0f, 1.0f, 1.0f);
+                                // Start from base 0-1 UVs
+                                v.texCoord = freshMesh.vertices[vi].texCoord;
+                                // Determine face orientation from normal to pick correct scale axes
+                                glm::vec3 absN = glm::abs(v.normal);
+                                float faceW, faceH;
+                                if (absN.y > absN.x && absN.y > absN.z) {
+                                    faceW = sc.x;
+                                    faceH = sc.z;
+                                } else if (absN.x > absN.z) {
+                                    faceW = sc.z;
+                                    faceH = sc.y;
+                                } else {
+                                    faceW = sc.x;
+                                    faceH = sc.y;
+                                }
+                                v.texCoord.x *= faceW * tilesPerMeter;
+                                v.texCoord.y *= faceH * tilesPerMeterV;
+                            }
+                            target->setMeshData(vertices, target->getIndices());
+                            m_modelRenderer->updateVertices(target->getBufferHandle(), vertices);
+                        }
+                    }
+                }
+                ImGui::End();
+            }
+        }
         if (m_showServerManager) m_serverManager.renderImGui(&m_showServerManager);
         renderToolbarUI();
 
@@ -12366,22 +14725,6 @@ private:
             }
             ImGui::End();
         } else {
-            // Normal play mode: show hint + HUD
-            ImGui::SetNextWindowPos(ImVec2(10, 25));
-            ImGui::SetNextWindowBgAlpha(0.3f);
-            if (ImGui::Begin("##PlayModeHint", nullptr,
-                ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
-                ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoMove |
-                ImGuiWindowFlags_NoSavedSettings)) {
-                ImGui::Text("PLAY MODE - Press Escape or F5 to exit");
-                if (m_playModeCursorVisible) {
-                    ImGui::TextColored(ImVec4(0.5f, 1.0f, 0.5f, 1.0f), "Right-click to resume mouse look");
-                } else {
-                    ImGui::Text("Right-click to show cursor for UI");
-                }
-            }
-            ImGui::End();
-
             // Credits + City Credits + Game time display (upper right corner)
             std::string timeStr = formatGameTimeDisplay(m_gameTimeMinutes);
             char creditsStr[64];
@@ -12411,11 +14754,14 @@ private:
         float cx = getWindow().getWidth() * 0.5f;
         float cy = getWindow().getHeight() * 0.5f;
         float size = 10.0f;
-        float thickness = 2.0f;
-        ImU32 color = IM_COL32(255, 255, 255, 200);
 
-        drawList->AddLine(ImVec2(cx - size, cy), ImVec2(cx + size, cy), color, thickness);
-        drawList->AddLine(ImVec2(cx, cy - size), ImVec2(cx, cy + size), color, thickness);
+        // Draw crosshair only when not in building cursor mode
+        if (!m_playModeCursorVisible) {
+            float thickness = 2.0f;
+            ImU32 color = IM_COL32(255, 255, 255, 200);
+            drawList->AddLine(ImVec2(cx - size, cy), ImVec2(cx + size, cy), color, thickness);
+            drawList->AddLine(ImVec2(cx, cy - size), ImVec2(cx, cy + size), color, thickness);
+        }
 
         // Cleaner Bot HUD overlay
         if (auto* bot = m_filesystemBrowser.getCleanerBot(); bot && bot->isActive()) {
@@ -12710,6 +15056,101 @@ private:
                     Input::setMouseCaptured(true);
                 }
             }
+        }
+
+        // Algobot frame assignment popup
+        if (m_showAlgobotAssign) {
+            ImGui::SetNextWindowPos(
+                ImVec2(ImGui::GetIO().DisplaySize.x * 0.5f,
+                       ImGui::GetIO().DisplaySize.y * 0.5f),
+                ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+            ImGui::SetNextWindowSize(ImVec2(340, 320), ImGuiCond_Appearing);
+
+            bool open = true;
+            if (ImGui::Begin("Assign Algobot##FrameBot", &open,
+                             ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoSavedSettings)) {
+
+                std::string modelName = std::filesystem::path(m_algobotModelPath).filename().string();
+                ImGui::Text("Robot: %s", modelName.c_str());
+                ImGui::Separator();
+
+                // Job selection
+                ImGui::Text("Job:");
+                const char* jobs[] = {"CleanerBot", "ImageBot", "CullRobot"};
+                ImGui::Combo("##AlgobotJob", &m_algobotSelectedJob, jobs, IM_ARRAYSIZE(jobs));
+
+                ImGui::Separator();
+
+                // Territory selection
+                ImGui::Text("Territory:");
+                const char* home = getenv("HOME");
+                std::string homeStr = home ? home : "/home";
+
+                ImGui::RadioButton("~ (Home)##ab", &m_algobotSelectedTerritory, 0);
+                ImGui::RadioButton("~/Documents##ab", &m_algobotSelectedTerritory, 1);
+                ImGui::RadioButton("~/Downloads##ab", &m_algobotSelectedTerritory, 2);
+                ImGui::RadioButton("Custom:##ab", &m_algobotSelectedTerritory, 3);
+                if (m_algobotSelectedTerritory == 3) {
+                    ImGui::SameLine();
+                    ImGui::SetNextItemWidth(-1);
+                    ImGui::InputText("##AlgobotCustom", m_algobotCustomTerritory, sizeof(m_algobotCustomTerritory));
+                }
+
+                ImGui::Separator();
+
+                // Cancel button
+                if (ImGui::Button("Cancel", ImVec2(ImGui::GetContentRegionAvail().x * 0.4f, 35))) {
+                    m_showAlgobotAssign = false;
+                    m_algobotModelPath.clear();
+                    m_playModeCursorVisible = false;
+                    Input::setMouseCaptured(true);
+                }
+
+                ImGui::SameLine();
+
+                // Deploy button
+                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.1f, 0.6f, 0.1f, 1.0f));
+                if (ImGui::Button("Deploy", ImVec2(-1, 35))) {
+                    // Resolve territory path
+                    std::string territory;
+                    switch (m_algobotSelectedTerritory) {
+                        case 0: territory = homeStr; break;
+                        case 1: territory = homeStr + "/Documents"; break;
+                        case 2: territory = homeStr + "/Downloads"; break;
+                        case 3: {
+                            territory = std::string(m_algobotCustomTerritory);
+                            if (!territory.empty() && territory[0] == '~')
+                                territory = homeStr + territory.substr(1);
+                            break;
+                        }
+                        default: territory = homeStr; break;
+                    }
+                    std::string jobName = jobs[m_algobotSelectedJob];
+
+                    if (auto* forge = m_filesystemBrowser.getForgeRoom()) {
+                        forge->addDeployedBot(m_algobotModelPath, jobName, territory);
+                    }
+
+                    m_showAlgobotAssign = false;
+                    m_algobotModelPath.clear();
+                    m_playModeCursorVisible = false;
+                    Input::setMouseCaptured(true);
+                }
+                ImGui::PopStyleColor();
+            }
+            ImGui::End();
+
+            if (!open) {
+                m_showAlgobotAssign = false;
+                m_algobotModelPath.clear();
+                m_playModeCursorVisible = false;
+                Input::setMouseCaptured(true);
+            }
+            m_algobotAssignWasOpen = m_showAlgobotAssign;
+        } else if (m_algobotAssignWasOpen) {
+            m_playModeCursorVisible = false;
+            Input::setMouseCaptured(true);
+            m_algobotAssignWasOpen = false;
         }
 
         // Filesystem right-click context menu
@@ -13100,6 +15541,143 @@ private:
                 Input::setMouseCaptured(true);
             }
             ImGui::EndPopup();
+        }
+
+        // Wire mode CP overlay: show all control points on wall_widget models
+        if (m_wiringMode && m_filesystemBrowser.isActive()) {
+            ImDrawList* dl = ImGui::GetForegroundDrawList();
+            float vpW = static_cast<float>(getWindow().getWidth());
+            float vpH = static_cast<float>(getWindow().getHeight());
+            float aspect = vpW / vpH;
+            glm::mat4 view = m_camera.getViewMatrix();
+            glm::mat4 proj = m_camera.getProjectionMatrix(aspect, 0.1f, 5000.0f);
+            glm::mat4 vp = proj * view;
+
+            ImU32 cpColorWire     = IM_COL32(255, 0, 255, 255);   // Magenta for wire CPs
+            ImU32 cpColorSlot     = IM_COL32(0, 200, 255, 255);  // Cyan for file_slot CPs
+            ImU32 cpOutline       = IM_COL32(0, 0, 0, 220);
+            ImU32 cpTextColor     = IM_COL32(255, 200, 255, 255);
+            ImU32 cpTextColorSlot = IM_COL32(200, 240, 255, 255);
+            ImU32 cpTextBg        = IM_COL32(0, 0, 0, 180);
+            ImU32 cpSelectedCol   = IM_COL32(0, 255, 0, 255);   // Green for selected
+            float cpSize = 8.0f;
+
+            // Collect all visible CPs for click detection
+            m_wireCPScreenPositions.clear();
+
+            for (auto& obj : m_sceneObjects) {
+                if (!obj || obj->getBuildingType() != "wall_widget") continue;
+                if (!obj->hasControlPoints()) continue;
+
+                const auto& cps = obj->getControlPoints();
+                const auto& verts = obj->getVertices();
+                glm::mat4 modelMat = obj->getTransform().getMatrix();
+
+                for (const auto& cp : cps) {
+                    // Show wire and file_slot CPs
+                    bool isWireCP = (cp.name.rfind("wire_", 0) == 0);
+                    bool isSlotCP = (cp.name.rfind("file_slot_", 0) == 0);
+                    if (!isWireCP && !isSlotCP) continue;
+                    if (cp.vertexIndex >= verts.size()) continue;
+
+                    glm::vec3 localPos = verts[cp.vertexIndex].position;
+                    glm::vec4 worldPos = modelMat * glm::vec4(localPos, 1.0f);
+                    glm::vec4 clip = vp * worldPos;
+                    if (clip.w <= 0.0f) continue;
+                    glm::vec3 ndc = glm::vec3(clip) / clip.w;
+                    ImVec2 sp(ndc.x * 0.5f + 0.5f, 0.5f - ndc.y * 0.5f);
+                    sp.x *= vpW;
+                    sp.y *= vpH;
+
+                    // Store for click detection
+                    m_wireCPScreenPositions.push_back({sp, obj.get(), cp.name, glm::vec3(worldPos)});
+
+                    // Is this the selected source CP?
+                    bool isSelected = (m_wireSourceObj == obj.get() && m_wireSourceCPName == cp.name);
+                    ImU32 fillCol = isSelected ? cpSelectedCol :
+                                   isSlotCP ? cpColorSlot : cpColorWire;
+
+                    // Diamond shape
+                    ImVec2 top(sp.x, sp.y - cpSize);
+                    ImVec2 right(sp.x + cpSize, sp.y);
+                    ImVec2 bottom(sp.x, sp.y + cpSize);
+                    ImVec2 left(sp.x - cpSize, sp.y);
+                    dl->AddQuadFilled(top, right, bottom, left, fillCol);
+                    dl->AddQuad(top, right, bottom, left, cpOutline, 2.0f);
+
+                    // For file_slot pairs, draw rectangle between A and B corners
+                    if (isSlotCP && cp.name.back() == 'A') {
+                        // Find matching B corner
+                        std::string bName = cp.name.substr(0, cp.name.size() - 1) + "B";
+                        for (const auto& cp2 : cps) {
+                            if (cp2.name == bName && cp2.vertexIndex < verts.size()) {
+                                glm::vec3 localB = verts[cp2.vertexIndex].position;
+                                glm::vec4 worldB = modelMat * glm::vec4(localB, 1.0f);
+                                glm::vec4 clipB = vp * worldB;
+                                if (clipB.w > 0.0f) {
+                                    glm::vec3 ndcB = glm::vec3(clipB) / clipB.w;
+                                    ImVec2 spB(ndcB.x * 0.5f + 0.5f, 0.5f - ndcB.y * 0.5f);
+                                    spB.x *= vpW;
+                                    spB.y *= vpH;
+                                    // Draw dashed rectangle outline between A and B
+                                    dl->AddRect(ImVec2(std::min(sp.x, spB.x), std::min(sp.y, spB.y)),
+                                                ImVec2(std::max(sp.x, spB.x), std::max(sp.y, spB.y)),
+                                                cpColorSlot, 0.0f, 0, 1.5f);
+                                }
+                                break;
+                            }
+                        }
+                    }
+
+                    // Name label above diamond
+                    if (!cp.name.empty()) {
+                        ImVec2 textSz = ImGui::CalcTextSize(cp.name.c_str());
+                        ImVec2 textPos(sp.x - textSz.x * 0.5f, sp.y - cpSize - textSz.y - 2);
+                        dl->AddRectFilled(
+                            ImVec2(textPos.x - 2, textPos.y - 1),
+                            ImVec2(textPos.x + textSz.x + 2, textPos.y + textSz.y + 1),
+                            cpTextBg, 2.0f);
+                        dl->AddText(textPos, isSlotCP ? cpTextColorSlot : cpTextColor, cp.name.c_str());
+                    }
+                }
+            }
+
+            // Wire mode preview line from selected CP to crosshair (wire CPs only)
+            if (m_wireSourceObj && !m_wireSourceCPName.empty() &&
+                m_wireSourceCPName.rfind("wire_", 0) == 0) {
+                glm::vec3 srcWorldPos;
+                if (getCPWorldPosExact(m_wireSourceObj, m_wireSourceCPName, srcWorldPos)) {
+                    // Project source to screen
+                    glm::vec4 srcClip = vp * glm::vec4(srcWorldPos, 1.0f);
+                    if (srcClip.w > 0.0f) {
+                        glm::vec3 srcNdc = glm::vec3(srcClip) / srcClip.w;
+                        ImVec2 srcSp(srcNdc.x * 0.5f + 0.5f, 0.5f - srcNdc.y * 0.5f);
+                        srcSp.x *= vpW;
+                        srcSp.y *= vpH;
+                        // Draw line to crosshair center
+                        ImVec2 center(vpW * 0.5f, vpH * 0.5f);
+                        dl->AddLine(srcSp, center, IM_COL32(255, 255, 0, 200), 2.0f);
+                    }
+                }
+            }
+
+            // Wire mode status text
+            {
+                const char* statusText;
+                if (m_wireSourceObj && m_wireSourceCPName.rfind("file_slot_", 0) == 0) {
+                    statusText = "FILE SLOT: Press 1-0 to assign hotbar item (T to cancel)";
+                } else if (m_wireSourceObj) {
+                    statusText = "WIRE MODE: Click destination CP (T to cancel)";
+                } else {
+                    statusText = "WIRE MODE: Click CP to wire, or file_slot to assign (T to exit)";
+                }
+                ImVec2 textSz = ImGui::CalcTextSize(statusText);
+                float tx = (vpW - textSz.x) * 0.5f;
+                float ty = vpH - 40.0f;
+                dl->AddRectFilled(ImVec2(tx - 4, ty - 2), ImVec2(tx + textSz.x + 4, ty + textSz.y + 2),
+                                  IM_COL32(0, 0, 0, 180), 4.0f);
+                dl->AddText(ImVec2(tx, ty), IM_COL32(255, 255, 0, 255), statusText);
+            }
         }
     }
 
@@ -13941,6 +16519,8 @@ private:
             return;
         }
 
+
+
         nfdchar_t* outPath = nullptr;
         nfdfilteritem_t filters[1] = {{"EDEN Level", "eden"}};
 
@@ -14005,7 +16585,7 @@ private:
         while (it != m_sceneObjects.end()) {
             if (!*it) { ++it; continue; }
             const auto& bt = (*it)->getBuildingType();
-            bool isFS = (bt == "filesystem" || bt == "filesystem_wall" || bt == "image_desc" || bt == "platform_wall" || bt == "platform_slab" || bt == "wall_frame" || bt == "wall_widget");
+            bool isFS = (bt == "filesystem" || bt == "filesystem_wall" || bt == "image_desc" || bt == "wall_widget");
             bool isAvatar = (it->get() == m_playerAvatar);
             if (isFS || isAvatar) {
                 if (isAvatar) m_playerAvatar = nullptr;
@@ -14293,15 +16873,27 @@ private:
                 obj->setMeshData(meshData.vertices, meshData.indices);
             }
             else if (!binObj.modelPath.empty()) {
-                // Load from GLB as fallback
-                auto result = GLBLoader::load(binObj.modelPath);
-                if (!result.success || result.meshes.empty()) {
-                    std::cerr << "Failed to load model: " << binObj.modelPath << std::endl;
-                    continue;
+                // Load from file as fallback (supports both GLB and LIME)
+                bool isLime = binObj.modelPath.size() >= 5 &&
+                    binObj.modelPath.substr(binObj.modelPath.size() - 5) == ".lime";
+                if (isLime) {
+                    auto result = LimeLoader::load(binObj.modelPath);
+                    if (!result.success) {
+                        std::cerr << "Failed to load LIME model: " << binObj.modelPath << std::endl;
+                        continue;
+                    }
+                    obj = LimeLoader::createSceneObject(result.mesh, *m_modelRenderer);
+                    if (!obj) continue;
+                } else {
+                    auto result = GLBLoader::load(binObj.modelPath);
+                    if (!result.success || result.meshes.empty()) {
+                        std::cerr << "Failed to load model: " << binObj.modelPath << std::endl;
+                        continue;
+                    }
+                    const auto& mesh = result.meshes[0];
+                    obj = GLBLoader::createSceneObject(mesh, *m_modelRenderer);
+                    if (!obj) continue;
                 }
-                const auto& mesh = result.meshes[0];
-                obj = GLBLoader::createSceneObject(mesh, *m_modelRenderer);
-                if (!obj) continue;
             }
             else {
                 continue;  // Skip invalid objects
@@ -14566,8 +17158,21 @@ private:
                     }
 
                     std::cout << "Loaded skinned model: " << objData.modelPath << std::endl;
+                } else if (objData.modelPath.size() >= 5 &&
+                           objData.modelPath.substr(objData.modelPath.size() - 5) == ".lime") {
+                    // LIME format model
+                    auto result = LimeLoader::load(objData.modelPath);
+                    if (!result.success) {
+                        std::cerr << "Failed to load LIME model: " << objData.modelPath << std::endl;
+                        continue;
+                    }
+                    obj = LimeLoader::createSceneObject(result.mesh, *m_modelRenderer);
+                    if (!obj) {
+                        std::cerr << "Failed to create scene object for LIME: " << objData.modelPath << std::endl;
+                        continue;
+                    }
                 } else {
-                    // Static model
+                    // Static GLB model
                     auto result = GLBLoader::load(objData.modelPath);
                     if (!result.success || result.meshes.empty()) {
                         std::cerr << "Failed to load model: " << objData.modelPath << std::endl;
@@ -15003,6 +17608,38 @@ private:
 
             NFD_FreePath(outPath);
         }
+    }
+
+    // Get the default level path from ~/.eden/default_project.txt, or fall back to xenk2.eden
+    std::string getDefaultLevelPath() {
+        const char* home = getenv("HOME");
+        if (!home) return "";
+        std::string configPath = std::string(home) + "/.eden/default_project.txt";
+        if (std::filesystem::exists(configPath)) {
+            std::ifstream f(configPath);
+            std::string path;
+            std::getline(f, path);
+            if (!path.empty() && std::filesystem::exists(path)) {
+                return path;
+            }
+        }
+        // Fall back to original default
+        return std::string(home) + "/.eden/default_level/xenk2.eden";
+    }
+
+    // Set the current level as the default project (auto-loads on startup)
+    void setAsDefaultLevel() {
+        if (m_currentLevelPath.empty()) {
+            std::cout << "[EDEN] No level loaded — save first" << std::endl;
+            return;
+        }
+        const char* home = getenv("HOME");
+        if (!home) return;
+        std::string configPath = std::string(home) + "/.eden/default_project.txt";
+        std::filesystem::create_directories(std::string(home) + "/.eden");
+        std::ofstream f(configPath);
+        f << m_currentLevelPath;
+        std::cout << "[EDEN] Default project set to: " << m_currentLevelPath << std::endl;
     }
 
     void newLevel() {
@@ -15472,7 +18109,7 @@ private:
         while (it != m_sceneObjects.end()) {
             if (*it && (*it)->getBuildingType() == "eden_os_persistent") {
                 uint32_t handle = (*it)->getBufferHandle();
-                if (handle != 0) handles.push_back(handle);
+                if (handle != UINT32_MAX) handles.push_back(handle);
                 it = m_sceneObjects.erase(it);
             } else {
                 ++it;
@@ -15758,6 +18395,15 @@ private:
         m_selectedFaces.clear();
         Input::setMouseCaptured(true);
 
+        // Clear all editor selections so yellow outlines don't carry over
+        for (auto& obj : m_sceneObjects) {
+            if (obj) obj->setSelected(false);
+        }
+        m_selectedObjectIndex = -1;
+        m_selectedSalvageIndex = -1;
+        m_selectedBuildPiece = -1;
+        m_editorUI.setSelectedObjectIndex(-1);
+
         // Disable noclip for play mode (terrain collision enabled)
         m_camera.setNoClip(false);
 
@@ -15993,6 +18639,7 @@ private:
                 if (!obj->hasAABBCollision() && !obj->hasCollision()) continue;
                 if (obj->hasBulletCollision()) continue;  // Already added as mesh
                 if (obj->isKinematicPlatform()) continue;  // Already added above
+                if (obj->getBeingType() == BeingType::INTERACTION) continue;  // Dynamic, not static
 
                 AABB bounds = obj->getWorldBounds();
                 glm::vec3 center = (bounds.min + bounds.max) * 0.5f;
@@ -16205,6 +18852,9 @@ private:
 
         // Enable noclip for editor mode (can go below terrain)
         m_camera.setNoClip(true);
+
+        // Clear physics tracked objects (Jolt bodies will be destroyed with the system)
+        m_physicsObjects.clear();
 
         // Clear Jolt body IDs from scene objects
         for (auto& objPtr : m_sceneObjects) {
@@ -17811,6 +20461,24 @@ private:
         for (const auto& mesh : result.meshes) {
             auto obj = GLBLoader::createSceneObject(mesh, *m_modelRenderer);
             if (obj) {
+                // Ensure unique name — append _2, _3, etc. if name already exists
+                std::string baseName = obj->getName();
+                std::string uniqueName = baseName;
+                int suffix = 1;
+                bool nameExists = true;
+                while (nameExists) {
+                    nameExists = false;
+                    for (auto& so : m_sceneObjects) {
+                        if (so && so->getName() == uniqueName) {
+                            nameExists = true;
+                            suffix++;
+                            uniqueName = baseName + "_" + std::to_string(suffix);
+                            break;
+                        }
+                    }
+                }
+                if (uniqueName != baseName) obj->setName(uniqueName);
+
                 glm::vec3 spawnPos = m_camera.getPosition() + m_camera.getFront() * 10.0f;
                 spawnPos.y = getPlacementFloorHeight(spawnPos.x, spawnPos.z) + mesh.bounds.getSize().y * 0.5f;
                 obj->getTransform().setPosition(spawnPos);
@@ -17899,6 +20567,24 @@ private:
 
         auto obj = LimeLoader::createSceneObject(result.mesh, *m_modelRenderer);
         if (obj) {
+            // Ensure unique name
+            std::string baseName = obj->getName();
+            std::string uniqueName = baseName;
+            int suffix = 1;
+            bool nameExists = true;
+            while (nameExists) {
+                nameExists = false;
+                for (auto& so : m_sceneObjects) {
+                    if (so && so->getName() == uniqueName) {
+                        nameExists = true;
+                        suffix++;
+                        uniqueName = baseName + "_" + std::to_string(suffix);
+                        break;
+                    }
+                }
+            }
+            if (uniqueName != baseName) obj->setName(uniqueName);
+
             // Position in front of camera
             glm::vec3 spawnPos = m_camera.getPosition() + m_camera.getFront() * 10.0f;
             spawnPos.y = getPlacementFloorHeight(spawnPos.x, spawnPos.z) + 1.0f;
@@ -17959,6 +20645,18 @@ private:
             m_selectedObjectIndex = -1;
         } else if (m_selectedObjectIndex > index) {
             m_selectedObjectIndex--;
+        }
+
+        if (m_selectedSalvageIndex == index) {
+            m_selectedSalvageIndex = -1;
+        } else if (m_selectedSalvageIndex > index) {
+            m_selectedSalvageIndex--;
+        }
+
+        if (m_selectedBuildPiece == index) {
+            m_selectedBuildPiece = -1;
+        } else if (m_selectedBuildPiece > index) {
+            m_selectedBuildPiece--;
         }
 
         m_editorUI.setSelectedObjectIndex(m_selectedObjectIndex);
@@ -19181,10 +21879,19 @@ private:
         std::string filePath;      // stripped fs:// path
         std::string displayName;   // filename
         std::string targetLevel;   // preserved link target (e.g. "fs:///path" or "home://silo")
+        std::string texturePath;   // custom door image (e.g. forge_door.jpeg, home.jpeg)
         VkDescriptorSet imguiDescriptor = VK_NULL_HANDLE; // for drawList->AddImage()
         uint32_t gpuHandle = 0;    // ModelRenderer handle owning the thumbnail texture or 3D model
         bool is3DModel = false;    // true = gpuHandle is an actual 3D model to render in-world
         uint32_t modelIndexCount = 0;
+        AABB modelBounds;          // local bounds for 3D model (needed for selection after throw)
+        std::string modelSourcePath; // original model file path (needed for save persistence)
+        std::string baseModelName;   // original model name without throw suffixes (e.g. "plastic_bottle")
+        std::vector<ModelVertex> meshVertices;  // mesh data for binary save persistence
+        std::vector<uint32_t> meshIndices;
+        std::vector<unsigned char> textureData; // texture for binary save persistence
+        int textureWidth = 0;
+        int textureHeight = 0;
     };
     static constexpr int TOOLBAR_SLOT_COUNT = 10;
     ToolbarSlot m_toolbarSlots[10];
@@ -19399,6 +22106,14 @@ private:
     bool m_imageBotMenuWasOpen = false;
     bool m_cullDecisionWasOpen = false;
 
+    // Algobot frame assignment popup
+    bool m_showAlgobotAssign = false;
+    bool m_algobotAssignWasOpen = false;
+    std::string m_algobotModelPath;        // model file placed on frame
+    int m_algobotSelectedJob = 0;          // 0=CleanerBot, 1=ImageBot, 2=CullRobot
+    int m_algobotSelectedTerritory = 0;    // 0=Home, 1=Documents, 2=Downloads, 3=Custom
+    char m_algobotCustomTerritory[256] = "";
+
     // SmolVLM server for ImageBot
     pid_t m_smolvlmServerPID = -1;
     bool m_smolvlmServerRunning = false;
@@ -19460,6 +22175,20 @@ private:
     bool m_worldGenerated = false;
     bool m_showPlanetInfo = false;
     bool m_showSiloConfig = false;
+    int m_selectedBuildPiece = -1;
+    int m_selectedSalvageIndex = -1;  // Play mode: salvage object under crosshair selection
+    bool m_buildMoveMode = false;
+
+    // Physics-tracked thrown objects (Jolt dynamic bodies)
+    struct PhysicsTrackedObject {
+        SceneObject* objPtr = nullptr;
+        uint32_t joltBodyId = UINT32_MAX;  // Jolt dynamic body ID
+        bool settled = false;
+    };
+    std::vector<PhysicsTrackedObject> m_physicsObjects;
+    bool m_buildMoveDragging = false;
+    glm::vec3 m_buildMoveOrigPos{0.0f};
+    glm::vec3 m_buildMoveOffset{0.0f};
     bool m_spawnAtPlatformTop = false; // true = teleport to platform top on folder nav
     bool m_showPerfWindow = false;
     bool m_showServerManager = false;
@@ -19502,6 +22231,16 @@ private:
     glm::vec3 m_wallBrushStart{0.0f};
     glm::vec3 m_wallBrushEnd{0.0f};
     bool m_wallBrushPreviewValid = false;
+    float m_wallBrushHeight = 8.0f;
+    float m_wallBrushThickness = 1.0f;
+
+    // Horizontal slab brush mode (drag out rectangular floor/ceiling slabs)
+    bool m_hSlabBrushMode = false;
+    bool m_hSlabDrawing = false;
+    glm::vec3 m_hSlabStart{0.0f};
+    glm::vec3 m_hSlabEnd{0.0f};
+    bool m_hSlabPreviewValid = false;
+    float m_hSlabThickness = 0.2f; // how thick the floor slab is
 
     // Platform grid map mode
     bool m_mapModeActive = false;
@@ -19598,8 +22337,17 @@ private:
     // Wall Machine system (spatial wiring on platform grid)
     eden::WallMachine m_wallMachine;
     bool m_wallMachineSchemaLoaded = false;
-    bool m_wiringMode = false;          // W key: selecting wire endpoints
-    int m_wireSourceFrame = -1;         // first selected frame index for wiring
+    bool m_wiringMode = false;          // T key: CP-based wire mode
+    int m_wireSourceFrame = -1;         // frame index of selected source CP
+    std::string m_wireSourceCPName;     // name of selected source CP
+    SceneObject* m_wireSourceObj = nullptr; // widget with selected source CP
+    struct WireCPScreenPos {
+        ImVec2 screenPos;
+        SceneObject* obj;
+        std::string cpName;
+        glm::vec3 worldPos;
+    };
+    std::vector<WireCPScreenPos> m_wireCPScreenPositions;
     float m_machinePollTimer = 0.0f;    // poll running machines every 2s
     static constexpr float MACHINE_POLL_INTERVAL = 2.0f;
 

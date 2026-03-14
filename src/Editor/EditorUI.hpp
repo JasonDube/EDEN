@@ -56,6 +56,7 @@ using NewEdenOSLevelCallback = std::function<void()>;
 using LoadEdenOSLevelCallback = std::function<void()>;
 using FileOpenCallback = std::function<void()>;
 using FileSaveCallback = std::function<void()>;
+using SetDefaultProjectCallback = std::function<void()>;
 using FileExitCallback = std::function<void()>;
 using ExportTerrainCallback = std::function<void()>;
 using AddSpawnCallback = std::function<void()>;
@@ -195,6 +196,7 @@ public:
     void setLoadEdenOSLevelCallback(LoadEdenOSLevelCallback callback) { m_onLoadEdenOSLevel = callback; }
     void setFileOpenCallback(FileOpenCallback callback) { m_onFileOpen = callback; }
     void setFileSaveCallback(FileSaveCallback callback) { m_onFileSave = callback; }
+    void setSetDefaultProjectCallback(SetDefaultProjectCallback callback) { m_onSetDefaultProject = callback; }
     void setFileExitCallback(FileExitCallback callback) { m_onFileExit = callback; }
     void setExportTerrainCallback(ExportTerrainCallback callback) { m_onExportTerrain = callback; }
     void setAddSpawnCallback(AddSpawnCallback callback) { m_onAddSpawn = callback; }
@@ -250,6 +252,7 @@ public:
     bool& showTerrainInfo() { return m_showTerrainInfo; }
     bool& showAINodes() { return m_showAINodes; }
     bool& showHelp() { return m_showHelp; }
+    void renderHelpWindow();
     bool& showTechTree() { return m_showTechTree; }
     bool& showGroveEditor() { return m_showGroveEditor; }
     bool& showZones() { return m_showZones; }
@@ -417,6 +420,10 @@ public:
     };
     void setBuildingTextures(const std::vector<BuildingTextureInfo>& textures) { m_buildingTextures = textures; }
     int getSelectedBuildingTexture() const { return m_selectedBuildingTexture; }
+    void setSelectedBuildingTexture(int idx) { m_selectedBuildingTexture = idx; }
+    int getBuildingTextureCount() const { return static_cast<int>(m_buildingTextures.size()); }
+    float getBuildingTexScaleU() const { return m_buildingTexScaleU; }
+    float getBuildingTexScaleV() const { return m_buildingTexScaleV; }
     void setApplyBuildingTextureCallback(ApplyBuildingTextureCallback cb) { m_onApplyBuildingTexture = std::move(cb); }
     void setApplyFaceTextureCallback(ApplyFaceTextureCallback cb) { m_onApplyFaceTexture = std::move(cb); }
     void setFaceSelectedIndices(const std::vector<int>& indices) { m_faceSelectedIndices = indices; }
@@ -432,6 +439,9 @@ public:
     void saveConfig(const std::string& filepath);
     void loadConfig(const std::string& filepath);
 
+    // Building texture window (needs to be callable from play mode)
+    void renderBuildingTextureWindow();
+
 private:
     void renderMenuBar();
     void renderMainWindow();
@@ -445,11 +455,9 @@ private:
     void renderCharacterController();
     void renderTerrainInfo();
     void renderAINodesWindow();
-    void renderHelpWindow();
     void renderTechTreeWindow();
     void renderGroveEditor();
     void renderZonesWindow();
-    void renderBuildingTextureWindow();
     void handleObjectClick(int objectIndex);  // Multi-select logic
 
     // Display data
@@ -522,6 +530,7 @@ private:
     LoadEdenOSLevelCallback m_onLoadEdenOSLevel;
     FileOpenCallback m_onFileOpen;
     FileSaveCallback m_onFileSave;
+    SetDefaultProjectCallback m_onSetDefaultProject;
     FileExitCallback m_onFileExit;
     ExportTerrainCallback m_onExportTerrain;
     AddSpawnCallback m_onAddSpawn;

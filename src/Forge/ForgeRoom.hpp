@@ -63,6 +63,9 @@ public:
     void saveRegistry();
     std::vector<DeployedBot> getDeployedBotsForTerritory(const std::string& dirPath) const;
 
+    // Direct deployment (from frame or external code — bypasses pad)
+    void addDeployedBot(const std::string& modelPath, const std::string& job, const std::string& territory);
+
     SceneObject* getPadObject() const { return m_padObject; }
 
     // Widget Kit — 3D interactive widgets for machine building

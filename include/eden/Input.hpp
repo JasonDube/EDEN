@@ -44,6 +44,7 @@ public:
     static constexpr int KEY_E = 69;
     static constexpr int KEY_F = 70;
     static constexpr int KEY_G = 71;
+    static constexpr int KEY_H = 72;
     static constexpr int KEY_I = 73;
     static constexpr int KEY_R = 82;
     static constexpr int KEY_N = 78;
@@ -100,6 +101,8 @@ public:
     static constexpr int KEY_MINUS = 45;
     static constexpr int KEY_EQUAL = 61;  // Plus with shift
     static constexpr int KEY_SLASH = 47;  // Forward slash /
+    static constexpr int KEY_LEFT_BRACKET = 91;   // [
+    static constexpr int KEY_RIGHT_BRACKET = 93;  // ]
 
 private:
     static void keyCallback(GLFWwindow* window, int key, int scancode, int action, int mods);

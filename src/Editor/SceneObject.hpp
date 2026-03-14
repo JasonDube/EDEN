@@ -46,7 +46,8 @@ enum class BeingType {
     EVE,           // Eve companion android
     AI_ARCHITECT,  // AI world architect (Xenk)
     ALGOBOT,       // Algorithmic bot — executes Grove scripts, no chat
-    EDEN_COMPANION // EDEN companion — tabula rasa AI partner (Liora etc.)
+    EDEN_COMPANION, // EDEN companion — tabula rasa AI partner (Liora etc.)
+    INTERACTION    // Pickupable/interactable object (salvage, items, etc.)
 };
 
 // Get string name for being type
@@ -63,13 +64,14 @@ inline const char* getBeingTypeName(BeingType type) {
         case BeingType::AI_ARCHITECT: return "AI Architect";
         case BeingType::ALGOBOT:      return "AlgoBot";
         case BeingType::EDEN_COMPANION: return "EDEN Companion";
+        case BeingType::INTERACTION:  return "Interaction";
         default: return "Unknown";
     }
 }
 
 // Check if being type is sentient (can be talked to)
 inline bool isSentient(BeingType type) {
-    return type != BeingType::STATIC;
+    return type != BeingType::STATIC && type != BeingType::INTERACTION;
 }
 
 // Primitive types for programmatically created objects
@@ -113,6 +115,10 @@ public:
     // Source file path (for save/load)
     void setModelPath(const std::string& path) { m_modelPath = path; }
     const std::string& getModelPath() const { return m_modelPath; }
+
+    // Custom texture image path (for doors with icons)
+    void setTexturePath(const std::string& path) { m_texturePath = path; }
+    const std::string& getTexturePath() const { return m_texturePath; }
 
     // Primitive type (for programmatically created objects)
     void setPrimitiveType(PrimitiveType type) { m_primitiveType = type; }
@@ -696,6 +702,7 @@ private:
     std::string m_description;  // Description visible to AI perception
     std::string m_buildingType; // Building catalog type (e.g. "farm"). Empty = not a building.
     std::string m_modelPath;  // Source file path for save/load
+    std::string m_texturePath; // Custom texture image (for doors with icons)
 
     // Primitive object support
     PrimitiveType m_primitiveType = PrimitiveType::None;

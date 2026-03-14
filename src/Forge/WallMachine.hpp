@@ -80,6 +80,9 @@ public:
     const std::vector<std::string>& getLogLines(int machineFrameIndex) const;
     std::string getOutputPath(int machineFrameIndex) const;
 
+    // Reset a machine instance back to Idle
+    void resetState(int machineFrameIndex);
+
     // Cancel all running jobs
     void cancelAll();
 

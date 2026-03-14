@@ -534,7 +534,7 @@ void FilesystemBrowser::clearFilesystemObjects() {
                     bt == "image_desc" || bt == "platform_wall" || bt == "platform_slab" ||
                     bt == "wall_frame" || bt == "wall_widget")) {
             uint32_t handle = (*it)->getBufferHandle();
-            if (handle != 0) {
+            if (handle != UINT32_MAX) {
                 handles.push_back(handle);
             }
             it = m_sceneObjects->erase(it);
@@ -801,35 +801,7 @@ void FilesystemBrowser::spawnOneObject(const EntryInfo& entry, size_t index,
         obj->setEulerRotation({0.0f, yawDegrees, 0.0f});
     }
 
-    // Register emanation source for frequently-visited folders
-    if (entry.category == FileCategory::Folder) {
-        float glow = getVisitGlow(entry.fullPath);
-        if (glow > 0.1f) {
-            // Subtle brightness boost on the folder itself
-            obj->setBrightness(1.0f + glow * 0.3f);
-
-            // Compute inward direction toward gallery center (toward the player)
-            glm::vec3 outward = m_spawnOrigin - pos;
-            outward.y = 0.0f;
-            float len = glm::length(outward);
-            if (len > 0.01f) outward /= len;
-            else outward = glm::vec3(0.0f, 0.0f, 1.0f);
-
-            // Face axes: right is perpendicular to outward on XZ, up is Y
-            glm::vec3 up(0.0f, 1.0f, 0.0f);
-            glm::vec3 right = glm::cross(up, outward);
-
-            Emanation em;
-            em.center = pos + glm::vec3(0.0f, scale.y, 0.0f);  // visual center of folder
-            em.halfExtent = scale;  // scale already represents half-extents of the cube
-            em.forward = outward;
-            em.up = up;
-            em.right = right;
-            em.intensity = glow;
-            em.timer = static_cast<float>(rand() % 100) / 100.0f * EMANATION_SPAWN_INTERVAL;
-            m_emanations.push_back(em);
-        }
-    }
+    // Emanations disabled for now — may revisit with a different visual effect later
 
     // Register video animation
     if (entry.category == FileCategory::Video) {
@@ -1021,10 +993,76 @@ void FilesystemBrowser::spawnFileAtWall(const std::string& filePath,
     std::cout << "[FilesystemBrowser] Pasted " << name << " at wall slot" << std::endl;
 }
 
+// ── Spawn File At Slot (file_slot CP on widget) ────────────────────────
+void FilesystemBrowser::spawnFileAtSlot(const std::string& filePath,
+                                        const glm::vec3& pos,
+                                        const glm::vec3& scale,
+                                        float yawDeg) {
+    if (!m_modelRenderer || !m_sceneObjects) return;
+
+    namespace fs = std::filesystem;
+    fs::path p(filePath);
+    if (!fs::exists(p)) return;
+
+    std::string name = p.filename().string();
+    fs::directory_entry dirEntry(p);
+    FileCategory cat = categorize(dirEntry);
+    EntryInfo entry{name, filePath, cat};
+
+    if (!m_cancelExtraction) {
+        m_cancelExtraction = std::make_shared<std::atomic<bool>>(false);
+    }
+
+    // For images: use white vertex color so texture isn't tinted
+    bool isImage = (cat == FileCategory::Image);
+
+    spawnOneObject(entry, m_sceneObjects->size(), pos, scale, yawDeg);
+
+    if (!m_sceneObjects->empty() && m_sceneObjects->back()) {
+        auto& spawned = m_sceneObjects->back();
+        spawned->setBuildingType("wall_widget");
+
+        // Rebuild image cubes with white vertices for correct color
+        if (isImage) {
+            int imgW, imgH, imgChannels;
+            unsigned char* imgData = stbi_load(filePath.c_str(), &imgW, &imgH, &imgChannels, 4);
+            if (imgData) {
+                std::vector<unsigned char> flipped(imgW * imgH * 4);
+                for (int y = 0; y < imgH; ++y) {
+                    memcpy(&flipped[y * imgW * 4],
+                           &imgData[(imgH - 1 - y) * imgW * 4],
+                           imgW * 4);
+                }
+                stbi_image_free(imgData);
+
+                uint32_t oldHandle = spawned->getBufferHandle();
+                auto whiteMesh = PrimitiveMeshBuilder::createCube(1.5f, glm::vec4(1.0f));
+                uint32_t newHandle = m_modelRenderer->createModel(
+                    whiteMesh.vertices, whiteMesh.indices,
+                    flipped.data(), imgW, imgH);
+                if (oldHandle != UINT32_MAX) m_modelRenderer->destroyModels({oldHandle});
+                spawned->setBufferHandle(newHandle);
+                spawned->setIndexCount(static_cast<uint32_t>(whiteMesh.indices.size()));
+                spawned->setVertexCount(static_cast<uint32_t>(whiteMesh.vertices.size()));
+                spawned->setLocalBounds(whiteMesh.bounds);
+                spawned->setMeshData(whiteMesh.vertices, whiteMesh.indices);
+                spawned->setPrimitiveColor(glm::vec4(1.0f));
+            }
+        }
+    }
+
+    std::cout << "[FilesystemBrowser] Spawned " << name << " at file_slot" << std::endl;
+}
+
 bool FilesystemBrowser::toggleSpin(SceneObject* obj) {
     for (auto& spin : m_modelSpins) {
         if (spin.obj == obj) {
             spin.paused = !spin.paused;
+            // When stopping, snap to face the frame's normal direction
+            if (spin.paused) {
+                spin.angle = 0.0f;
+                obj->setEulerRotation({0.0f, spin.baseYaw, 0.0f});
+            }
             // Persist pause state to the matching WallFrame by file path
             std::string target = obj->getTargetLevel();
             std::string path;
@@ -1041,6 +1079,47 @@ bool FilesystemBrowser::toggleSpin(SceneObject* obj) {
             }
             return true;
         }
+    }
+    return false;
+}
+
+bool FilesystemBrowser::rotateSpinIncrement(SceneObject* obj, float degrees) {
+    for (auto& spin : m_modelSpins) {
+        if (spin.obj == obj && spin.paused) {
+            spin.sideAngle += degrees;
+            while (spin.sideAngle >= 360.0f) spin.sideAngle -= 360.0f;
+            while (spin.sideAngle < 0.0f) spin.sideAngle += 360.0f;
+            // Compose quaternions: yaw first, then rotate around the wall normal axis
+            float yawRad = glm::radians(spin.baseYaw);
+            glm::quat qYaw = glm::angleAxis(yawRad, glm::vec3(0.0f, 1.0f, 0.0f));
+            // Wall normal = forward direction after yaw
+            glm::vec3 wallNormal(sinf(yawRad), 0.0f, cosf(yawRad));
+            glm::quat qSide = glm::angleAxis(glm::radians(spin.sideAngle), wallNormal);
+            obj->getTransform().setRotation(qSide * qYaw);
+
+            // Persist angle to matching WallFrame
+            std::string target = obj->getTargetLevel();
+            std::string path;
+            if (target.size() > 5 && target.substr(0, 5) == "fs://")
+                path = target.substr(5);
+            if (!path.empty()) {
+                for (auto& fr : m_platformGrid.grid().frames) {
+                    if (fr.filePath == path) {
+                        fr.spinAngle = spin.sideAngle;
+                        m_platformGrid.saveConfig(m_currentPath);
+                        break;
+                    }
+                }
+            }
+            return true;
+        }
+    }
+    return false;
+}
+
+bool FilesystemBrowser::hasSpinEntry(SceneObject* obj) const {
+    for (const auto& spin : m_modelSpins) {
+        if (spin.obj == obj) return true;
     }
     return false;
 }
@@ -1094,10 +1173,44 @@ void FilesystemBrowser::parseFrameType(const std::string& filename, WallFrame& f
         }
     }
 
-    frame.frameType = FrameType::None;
+    // Also detect generic input/output models: "input.lime", "input_foo.lime", "output.lime", etc.
+    std::string stem = filename;
+    auto dotPos = stem.rfind('.');
+    if (dotPos != std::string::npos) stem = stem.substr(0, dotPos);
+
+    // Lowercase for comparison
+    std::string lowerStem = stem;
+    std::transform(lowerStem.begin(), lowerStem.end(), lowerStem.begin(), ::tolower);
+
+    if (lowerStem == "input" || lowerStem.rfind("input_", 0) == 0) {
+        frame.frameType = FrameType::Input;
+        return;
+    }
+    if (lowerStem == "output" || lowerStem.rfind("output_", 0) == 0) {
+        frame.frameType = FrameType::Output;
+        return;
+    }
+    // Detect machine models by name containing "machine"
+    if (lowerStem.find("machine") != std::string::npos) {
+        frame.frameType = FrameType::Machine;
+        return;
+    }
+    // Detect relay pods by name containing "relay"
+    if (lowerStem.find("relay") != std::string::npos) {
+        frame.frameType = FrameType::Relay;
+        return;
+    }
+
+    // Don't reset typed frames (Input, Output, Machine, etc.) when the dropped
+    // file doesn't have a type prefix — the frame's type is structural
+    if (frame.frameType == FrameType::None) {
+        // Already None, nothing to change
+    }
+    // else: keep existing frameType
 }
 
-void FilesystemBrowser::spawnFileAtFrame(const std::string& filePath, SceneObject* frame) {
+void FilesystemBrowser::spawnFileAtFrame(const std::string& filePath, SceneObject* frame,
+                                         const std::string& texturePath) {
     if (!m_modelRenderer || !m_sceneObjects || !frame) return;
 
     namespace fs = std::filesystem;
@@ -1117,12 +1230,26 @@ void FilesystemBrowser::spawnFileAtFrame(const std::string& filePath, SceneObjec
     // Check if this file has widget metadata (in .lime) or a machine-system prefix
     WallFrame tmpFrame;
     std::string ext = p.extension().string();
-    if (ext == ".lime") {
-        // Try loading metadata from the .lime file
-        auto limeResult = LimeLoader::load(filePath);
-        if (limeResult.success && !limeResult.mesh.metadata.empty()) {
-            auto wtIt = limeResult.mesh.metadata.find("widget_type");
-            if (wtIt != limeResult.mesh.metadata.end()) {
+    LimeLoader::LoadResult cachedLimeResult; // cache to avoid double-load
+    bool haveLimeResult = false;
+    // Only check LIME metadata for files with widget-style prefixes (mach_, inp_, etc.)
+    // to avoid double-loading normal .lime models
+    std::string lowerName = name;
+    std::transform(lowerName.begin(), lowerName.end(), lowerName.begin(), ::tolower);
+    bool mightBeWidget = (lowerName.rfind("mach_", 0) == 0 || lowerName.rfind("inp_", 0) == 0 ||
+                          lowerName.rfind("out_", 0) == 0 || lowerName.rfind("btn_", 0) == 0 ||
+                          lowerName.rfind("ckbx_", 0) == 0 || lowerName.rfind("sldr_", 0) == 0 ||
+                          lowerName.rfind("log_", 0) == 0 ||
+                          lowerName.rfind("input", 0) == 0 || lowerName.rfind("output", 0) == 0 ||
+                          lowerName.find("machine") != std::string::npos ||
+                          lowerName.find("relay") != std::string::npos);
+    if (ext == ".lime" && mightBeWidget) {
+        // Load once and cache for both metadata check and model creation
+        cachedLimeResult = LimeLoader::load(filePath);
+        haveLimeResult = true;
+        if (cachedLimeResult.success && !cachedLimeResult.mesh.metadata.empty()) {
+            auto wtIt = cachedLimeResult.mesh.metadata.find("widget_type");
+            if (wtIt != cachedLimeResult.mesh.metadata.end()) {
                 // Map widget_type string to FrameType
                 static const std::unordered_map<std::string, FrameType> typeMap = {
                     {"machine",  FrameType::Machine},
@@ -1132,14 +1259,15 @@ void FilesystemBrowser::spawnFileAtFrame(const std::string& filePath, SceneObjec
                     {"checkbox", FrameType::Checkbox},
                     {"slider",   FrameType::Slider},
                     {"log",      FrameType::Log},
+                    {"relay",    FrameType::Relay},
                 };
                 auto ftIt = typeMap.find(wtIt->second);
                 if (ftIt != typeMap.end()) {
                     tmpFrame.frameType = ftIt->second;
-                    auto mnIt = limeResult.mesh.metadata.find("machine_name");
-                    if (mnIt != limeResult.mesh.metadata.end()) tmpFrame.machineName = mnIt->second;
-                    auto pnIt = limeResult.mesh.metadata.find("param_name");
-                    if (pnIt != limeResult.mesh.metadata.end()) tmpFrame.paramName = pnIt->second;
+                    auto mnIt = cachedLimeResult.mesh.metadata.find("machine_name");
+                    if (mnIt != cachedLimeResult.mesh.metadata.end()) tmpFrame.machineName = mnIt->second;
+                    auto pnIt = cachedLimeResult.mesh.metadata.find("param_name");
+                    if (pnIt != cachedLimeResult.mesh.metadata.end()) tmpFrame.paramName = pnIt->second;
                 }
             }
         }
@@ -1163,12 +1291,13 @@ void FilesystemBrowser::spawnFileAtFrame(const std::string& filePath, SceneObjec
             case FrameType::Checkbox: widgetColor = {0.2f, 0.85f, 0.2f, 1.0f}; label = "CHK";  widgetDepth = 0.25f; break;
             case FrameType::Slider:   widgetColor = {0.6f, 0.2f, 0.85f, 1.0f}; label = "SLD";  widgetDepth = 0.2f; break;
             case FrameType::Log:      widgetColor = {0.5f, 0.5f, 0.5f, 1.0f}; label = "LOG";  widgetDepth = 0.15f; break;
+            case FrameType::Relay:    widgetColor = {0.0f, 0.8f, 0.8f, 1.0f}; label = "RLY";  widgetDepth = 0.4f; break;
             default:                  widgetColor = {0.5f, 0.5f, 0.5f, 1.0f}; label = "???";  break;
         }
 
-        // Try to spawn the actual .lime 3D model if available
-        if (ext == ".lime") {
-            auto limeResult = LimeLoader::load(filePath);
+        // Try to spawn the actual .lime 3D model if available (use cached result)
+        if (ext == ".lime" && haveLimeResult) {
+            auto& limeResult = cachedLimeResult;
             if (limeResult.success) {
                 auto limeObj = LimeLoader::createSceneObject(limeResult.mesh, *m_modelRenderer);
                 if (limeObj) {
@@ -1203,7 +1332,10 @@ void FilesystemBrowser::spawnFileAtFrame(const std::string& filePath, SceneObjec
                     frame->setTargetLevel("fs://" + filePath);
                     frame->getTransform().setScale({0, 0, 0});
 
+                    SceneObject* rawPtr = limeObj.get();
                     m_sceneObjects->push_back(std::move(limeObj));
+                    // Register spin so spacebar/arrow rotation works
+                    m_modelSpins.push_back({rawPtr, frameYaw, 0.0f, 0.0f, true}); // starts paused
                     std::cout << "[FilesystemBrowser] Placed .lime widget " << label << " (" << name << ") at wall frame" << std::endl;
                     return;
                 }
@@ -1295,7 +1427,40 @@ void FilesystemBrowser::spawnFileAtFrame(const std::string& filePath, SceneObjec
 
     // Re-tag as wall_widget so zone visibility keeps it visible in both Silo and Basement
     if (!m_sceneObjects->empty() && m_sceneObjects->back()) {
-        m_sceneObjects->back()->setBuildingType("wall_widget");
+        auto& spawned = m_sceneObjects->back();
+        spawned->setBuildingType("wall_widget");
+
+        // Apply custom texture (e.g. forge_door.jpeg, home.jpeg) if provided
+        if (!texturePath.empty()) {
+            int imgW, imgH, imgChannels;
+            unsigned char* data = stbi_load(texturePath.c_str(), &imgW, &imgH, &imgChannels, 4);
+            if (data) {
+                // Flip Y for OpenGL/Vulkan texture orientation
+                std::vector<unsigned char> flipped(imgW * imgH * 4);
+                for (int y = 0; y < imgH; ++y) {
+                    memcpy(&flipped[y * imgW * 4],
+                           &data[(imgH - 1 - y) * imgW * 4],
+                           imgW * 4);
+                }
+                stbi_image_free(data);
+
+                // Rebuild model with white vertices so texture isn't tinted
+                uint32_t oldHandle = spawned->getBufferHandle();
+                float meshSize = isDoor ? 2.0f : 1.5f;
+                auto whiteMesh = PrimitiveMeshBuilder::createCube(meshSize, glm::vec4(1.0f));
+                uint32_t newHandle = m_modelRenderer->createModel(
+                    whiteMesh.vertices, whiteMesh.indices,
+                    flipped.data(), imgW, imgH);
+                if (oldHandle != UINT32_MAX) m_modelRenderer->destroyModels({oldHandle});
+                spawned->setBufferHandle(newHandle);
+                spawned->setIndexCount(static_cast<uint32_t>(whiteMesh.indices.size()));
+                spawned->setVertexCount(static_cast<uint32_t>(whiteMesh.vertices.size()));
+                spawned->setLocalBounds(whiteMesh.bounds);
+                spawned->setMeshData(whiteMesh.vertices, whiteMesh.indices);
+                spawned->setTexturePath(texturePath);
+                spawned->setPrimitiveColor(glm::vec4(1.0f));
+            }
+        }
     }
 
     // For floor models: lift by half their actual height so they sit on the surface
@@ -1320,6 +1485,18 @@ void FilesystemBrowser::spawnFileAtFrame(const std::string& filePath, SceneObjec
 void FilesystemBrowser::respawnFrameFiles() {
     if (!m_modelRenderer || !m_sceneObjects) return;
 
+    // Collect frame-file pairs first, then spawn after iteration.
+    // spawnFileAtFrame calls push_back on m_sceneObjects, so we must NOT
+    // iterate m_sceneObjects while spawning.
+    struct PendingSpawn {
+        std::string filePath;
+        std::string texturePath;
+        float worldX, worldY, worldZ;
+        bool spinPaused;
+        float spinAngle;
+    };
+    std::vector<PendingSpawn> pending;
+
     auto& frames = m_platformGrid.grid().frames;
     int totalFrames = 0, occupiedFrames = 0, matched = 0;
     for (auto& fr : frames) {
@@ -1328,7 +1505,7 @@ void FilesystemBrowser::respawnFrameFiles() {
         occupiedFrames++;
 
         // Find the corresponding frame SceneObject by matching position
-        SceneObject* frameObj = nullptr;
+        bool found = false;
         for (auto& obj : *m_sceneObjects) {
             if (!obj || obj->getBuildingType() != "wall_frame") continue;
             glm::vec3 pos = obj->getTransform().getPosition();
@@ -1336,28 +1513,136 @@ void FilesystemBrowser::respawnFrameFiles() {
             float dy = pos.y - fr.worldY;
             float dz = pos.z - fr.worldZ;
             if (dx * dx + dy * dy + dz * dz < 0.5f) {
-                frameObj = obj.get();
+                found = true;
                 break;
             }
         }
 
-        if (frameObj) {
+        if (found) {
             matched++;
-            printf("[respawnFrameFiles] Respawning '%s' at frame (%.1f, %.1f, %.1f)\n",
-                   fr.filePath.c_str(), fr.worldX, fr.worldY, fr.worldZ);
-            spawnFileAtFrame(fr.filePath, frameObj);
-
-            // Apply saved spin pause state for 3D models
-            if (fr.spinPaused && !m_modelSpins.empty()) {
-                m_modelSpins.back().paused = true;
-            }
+            pending.push_back({fr.filePath, fr.texturePath, fr.worldX, fr.worldY, fr.worldZ, fr.spinPaused, fr.spinAngle});
         } else {
             printf("[respawnFrameFiles] NO frame SceneObject found for '%s' at (%.1f, %.1f, %.1f)\n",
                    fr.filePath.c_str(), fr.worldX, fr.worldY, fr.worldZ);
         }
     }
+
+    // Now spawn — this modifies m_sceneObjects safely outside the iteration
+    for (auto& ps : pending) {
+        // Re-find the frame object (vector may have grown from previous spawns)
+        SceneObject* frameObj = nullptr;
+        for (auto& obj : *m_sceneObjects) {
+            if (!obj || obj->getBuildingType() != "wall_frame") continue;
+            glm::vec3 pos = obj->getTransform().getPosition();
+            if (std::abs(pos.x - ps.worldX) < 0.5f &&
+                std::abs(pos.y - ps.worldY) < 0.5f &&
+                std::abs(pos.z - ps.worldZ) < 0.5f) {
+                frameObj = obj.get();
+                break;
+            }
+        }
+        if (!frameObj) continue;
+
+        printf("[respawnFrameFiles] Respawning '%s' at frame (%.1f, %.1f, %.1f)\n",
+               ps.filePath.c_str(), ps.worldX, ps.worldY, ps.worldZ);
+        spawnFileAtFrame(ps.filePath, frameObj, ps.texturePath);
+
+        // Apply saved spin pause state and rotation angle for 3D models
+        if (!m_modelSpins.empty()) {
+            auto& spin = m_modelSpins.back();
+            if (ps.spinPaused) {
+                spin.paused = true;
+            }
+            if (ps.spinAngle != 0.0f) {
+                spin.sideAngle = ps.spinAngle;
+                // Apply rotation to the object
+                float yawRad = glm::radians(spin.baseYaw);
+                glm::quat qYaw = glm::angleAxis(yawRad, glm::vec3(0.0f, 1.0f, 0.0f));
+                glm::vec3 wallNormal(sinf(yawRad), 0.0f, cosf(yawRad));
+                glm::quat qSide = glm::angleAxis(glm::radians(spin.sideAngle), wallNormal);
+                spin.obj->getTransform().setRotation(qSide * qYaw);
+            }
+        }
+    }
+
     printf("[respawnFrameFiles] %d total frames, %d occupied, %d matched\n",
            totalFrames, occupiedFrames, matched);
+
+    // Respawn file_slot assignments (images/models placed on widget CPs)
+    // Collect pending spawns first — spawnFileAtSlot does push_back on m_sceneObjects,
+    // so we must NOT iterate m_sceneObjects while spawning.
+    struct PendingSlotSpawn {
+        std::string filePath;
+        glm::vec3 pos;
+        glm::vec3 scale;
+        float yawDeg;
+    };
+    std::vector<PendingSlotSpawn> pendingSlots;
+
+    auto getCPWorld = [](SceneObject* obj, const std::string& cpName, glm::vec3& out) -> bool {
+        if (!obj || !obj->hasControlPoints() || !obj->hasMeshData()) return false;
+        const auto& cps = obj->getControlPoints();
+        const auto& verts = obj->getVertices();
+        for (const auto& cp : cps) {
+            if (cp.name == cpName && cp.vertexIndex < verts.size()) {
+                glm::vec3 localPos = verts[cp.vertexIndex].position;
+                glm::mat4 model = obj->getTransform().getMatrix();
+                glm::vec4 worldPos = model * glm::vec4(localPos, 1.0f);
+                out = glm::vec3(worldPos);
+                return true;
+            }
+        }
+        return false;
+    };
+
+    for (const auto& fsa : m_platformGrid.grid().fileSlots) {
+        if (fsa.frameIndex < 0 || fsa.frameIndex >= static_cast<int>(frames.size())) continue;
+        if (fsa.filePath.empty()) continue;
+        if (!std::filesystem::exists(fsa.filePath)) continue;
+
+        auto& fr = frames[fsa.frameIndex];
+        // Find the widget sitting on this frame
+        SceneObject* widget = nullptr;
+        glm::vec3 fp(fr.worldX, fr.worldY, fr.worldZ);
+        float bestDist = 3.0f;
+        for (auto& obj : *m_sceneObjects) {
+            if (!obj || obj->getBuildingType() != "wall_widget") continue;
+            glm::vec3 op = obj->getTransform().getPosition();
+            float d = std::abs(op.x - fp.x) + std::abs(op.y - fp.y) + std::abs(op.z - fp.z);
+            if (d < bestDist) { bestDist = d; widget = obj.get(); }
+        }
+        if (!widget || !widget->hasControlPoints()) continue;
+
+        std::string cpA = fsa.cpName;
+        std::string cpB = cpA.substr(0, cpA.size() - 1) + "B";
+        glm::vec3 posA, posB;
+        if (!getCPWorld(widget, cpA, posA)) continue;
+        if (!getCPWorld(widget, cpB, posB)) continue;
+
+        glm::vec3 center = (posA + posB) * 0.5f;
+        glm::vec3 diff = posB - posA;
+        float slotW = std::abs(diff.x) > std::abs(diff.z) ? std::abs(diff.x) : std::abs(diff.z);
+        float slotH = std::abs(diff.y);
+        if (slotW < 0.01f) slotW = 0.5f;
+        if (slotH < 0.01f) slotH = 0.5f;
+
+        float yawRad = fr.yawDeg * static_cast<float>(M_PI) / 180.0f;
+        glm::vec3 spawnPos = center;
+        spawnPos.x += sinf(yawRad) * 0.05f;
+        spawnPos.z += cosf(yawRad) * 0.05f;
+        spawnPos.y -= slotH * 0.5f;
+
+        float meshSize = 1.5f;
+        glm::vec3 slotScale(slotW / meshSize, slotH / meshSize, 0.02f);
+
+        pendingSlots.push_back({fsa.filePath, spawnPos, slotScale, fr.yawDeg});
+    }
+
+    // Now spawn — safe because we're no longer iterating m_sceneObjects
+    for (auto& ps : pendingSlots) {
+        printf("[respawnFrameFiles] Respawning file_slot '%s'\n", ps.filePath.c_str());
+        spawnFileAtSlot(ps.filePath, ps.pos, ps.scale, ps.yawDeg);
+    }
 }
 
 void FilesystemBrowser::spawnFileAtPosition(const std::string& filePath, const glm::vec3& position) {
@@ -1453,6 +1738,7 @@ void FilesystemBrowser::spawnAppRing(const glm::vec3& center, float baseY) {
             std::vector<unsigned char> texPixels;
             int texW = LABEL_SIZE, texH = LABEL_SIZE;
             bool loadedImage = false;
+            std::string forgeTexPath;
             for (const auto& candidate : {
                 "assets/textures/forge_door.jpeg",
                 "../../../examples/terrain_editor/assets/textures/forge_door.jpeg",
@@ -1470,6 +1756,7 @@ void FilesystemBrowser::spawnAppRing(const glm::vec3& center, float baseY) {
                     }
                     stbi_image_free(data);
                     loadedImage = true;
+                    forgeTexPath = std::filesystem::absolute(candidate).string();
                     break;
                 }
             }
@@ -1496,6 +1783,7 @@ void FilesystemBrowser::spawnAppRing(const glm::vec3& center, float baseY) {
             doorObj->setBuildingType("filesystem");
             doorObj->setDescription("Forge");
             doorObj->setDoorId("appdoor_forge");
+            if (!forgeTexPath.empty()) doorObj->setTexturePath(forgeTexPath);
             // Navigate to the real assets/models directory where ForgeRoom spawns
             // Try multiple locations relative to the executable
             std::string forgePath;
@@ -1538,6 +1826,7 @@ void FilesystemBrowser::spawnAppRing(const glm::vec3& center, float baseY) {
                 std::vector<unsigned char> texPixels;
                 int texW = LABEL_SIZE, texH = LABEL_SIZE;
                 bool loadedImage = false;
+                std::string homeTexPath;
                 for (const auto& candidate : {
                     "assets/textures/home.jpeg",
                     "../../../examples/terrain_editor/assets/textures/home.jpeg",
@@ -1555,6 +1844,7 @@ void FilesystemBrowser::spawnAppRing(const glm::vec3& center, float baseY) {
                         }
                         stbi_image_free(data);
                         loadedImage = true;
+                        homeTexPath = std::filesystem::absolute(candidate).string();
                         break;
                     }
                 }
@@ -1580,6 +1870,7 @@ void FilesystemBrowser::spawnAppRing(const glm::vec3& center, float baseY) {
                 doorObj->setBuildingType("filesystem");
                 doorObj->setDescription("Home");
                 doorObj->setDoorId("appdoor_home");
+                if (!homeTexPath.empty()) doorObj->setTexturePath(homeTexPath);
                 {
                     const char* home = getenv("HOME");
                     std::string homePath = home ? home : "/";
