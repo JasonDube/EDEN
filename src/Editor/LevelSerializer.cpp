@@ -165,8 +165,9 @@ bool LevelSerializer::saveTerrainBinary(const std::string& filepath, const Terra
 
     const auto& allChunks = terrain.getAllChunks();
 
-    // Prepare header
+    // Prepare header (version 2 = splatmap format)
     TerrainFileHeader header;
+    header.version = 2;
     header.chunkCount = static_cast<uint32_t>(allChunks.size());
     header.chunkResolution = 64;  // Default resolution
 
@@ -201,12 +202,14 @@ bool LevelSerializer::saveTerrainBinary(const std::string& filepath, const Terra
         // Write resolution first
         file.write(reinterpret_cast<const char*>(&resolution), sizeof(int));
 
-        // Extract and write heightmap
+        // Extract and write heightmap + splatmap data
         std::vector<float> heightmap(count);
         std::vector<float> paintAlphas(count);
         std::vector<glm::vec3> colors(count);
-        std::vector<glm::vec4> texWeights(count);
-        std::vector<glm::uvec4> texIndices(count);
+        std::vector<glm::vec4> splatmap0(count);
+        std::vector<glm::vec4> splatmap1(count);
+        std::vector<glm::vec4> splatmap2(count);
+        std::vector<glm::vec4> splatmap3(count);
         std::vector<glm::vec3> texHSB(count);
 
         for (int i = 0; i < count; i++) {
@@ -214,17 +217,21 @@ bool LevelSerializer::saveTerrainBinary(const std::string& filepath, const Terra
             heightmap[i] = v.position.y;
             paintAlphas[i] = v.paintAlpha;
             colors[i] = v.color;
-            texWeights[i] = v.texWeights;
-            texIndices[i] = v.texIndices;
+            splatmap0[i] = v.texSplat0;
+            splatmap1[i] = v.texSplat1;
+            splatmap2[i] = v.texSplat2;
+            splatmap3[i] = v.texSplat3;
             texHSB[i] = v.texHSB;
         }
 
-        // Write all arrays directly as binary
+        // Write all arrays directly as binary (version 2: splatmap format, 16 textures)
         file.write(reinterpret_cast<const char*>(heightmap.data()), count * sizeof(float));
         file.write(reinterpret_cast<const char*>(paintAlphas.data()), count * sizeof(float));
         file.write(reinterpret_cast<const char*>(colors.data()), count * sizeof(glm::vec3));
-        file.write(reinterpret_cast<const char*>(texWeights.data()), count * sizeof(glm::vec4));
-        file.write(reinterpret_cast<const char*>(texIndices.data()), count * sizeof(glm::uvec4));
+        file.write(reinterpret_cast<const char*>(splatmap0.data()), count * sizeof(glm::vec4));
+        file.write(reinterpret_cast<const char*>(splatmap1.data()), count * sizeof(glm::vec4));
+        file.write(reinterpret_cast<const char*>(splatmap2.data()), count * sizeof(glm::vec4));
+        file.write(reinterpret_cast<const char*>(splatmap3.data()), count * sizeof(glm::vec4));
         file.write(reinterpret_cast<const char*>(texHSB.data()), count * sizeof(glm::vec3));
 
         entry.dataSize = static_cast<uint64_t>(file.tellp()) - entry.dataOffset;
@@ -269,7 +276,7 @@ bool LevelSerializer::loadTerrainBinary(const std::string& filepath, LevelData& 
         return false;
     }
 
-    if (header.version != 1) {
+    if (header.version != 1 && header.version != 2) {
         s_lastError = "Unsupported terrain file version: " + std::to_string(header.version);
         return false;
     }
@@ -293,19 +300,34 @@ bool LevelSerializer::loadTerrainBinary(const std::string& filepath, LevelData& 
         file.read(reinterpret_cast<char*>(&resolution), sizeof(int));
         int count = resolution * resolution;
 
-        // Read all arrays
         chunk.heightmap.resize(count);
         chunk.paintAlphamap.resize(count);
         chunk.colormap.resize(count);
-        chunk.texWeightmap.resize(count);
-        chunk.texIndicesmap.resize(count);
         chunk.texHSBmap.resize(count);
 
         file.read(reinterpret_cast<char*>(chunk.heightmap.data()), count * sizeof(float));
         file.read(reinterpret_cast<char*>(chunk.paintAlphamap.data()), count * sizeof(float));
         file.read(reinterpret_cast<char*>(chunk.colormap.data()), count * sizeof(glm::vec3));
-        file.read(reinterpret_cast<char*>(chunk.texWeightmap.data()), count * sizeof(glm::vec4));
-        file.read(reinterpret_cast<char*>(chunk.texIndicesmap.data()), count * sizeof(glm::uvec4));
+
+        if (header.version == 1) {
+            // Legacy format: texWeights (vec4) + texIndices (uvec4)
+            chunk.texWeightmap.resize(count);
+            chunk.texIndicesmap.resize(count);
+            file.read(reinterpret_cast<char*>(chunk.texWeightmap.data()), count * sizeof(glm::vec4));
+            file.read(reinterpret_cast<char*>(chunk.texIndicesmap.data()), count * sizeof(glm::uvec4));
+            chunk.isLegacy = true;
+        } else {
+            // Version 2: splatmap0-3 (4x vec4 = 16 textures)
+            chunk.splatmap0.resize(count);
+            chunk.splatmap1.resize(count);
+            chunk.splatmap2.resize(count);
+            chunk.splatmap3.resize(count);
+            file.read(reinterpret_cast<char*>(chunk.splatmap0.data()), count * sizeof(glm::vec4));
+            file.read(reinterpret_cast<char*>(chunk.splatmap1.data()), count * sizeof(glm::vec4));
+            file.read(reinterpret_cast<char*>(chunk.splatmap2.data()), count * sizeof(glm::vec4));
+            file.read(reinterpret_cast<char*>(chunk.splatmap3.data()), count * sizeof(glm::vec4));
+        }
+
         file.read(reinterpret_cast<char*>(chunk.texHSBmap.data()), count * sizeof(glm::vec3));
 
         outData.chunks.push_back(std::move(chunk));
@@ -748,17 +770,45 @@ bool LevelSerializer::load(const std::string& filepath, LevelData& outData) {
                     std::memcpy(chunk.colormap.data(), colorBytes.data(),
                                std::min(colorBytes.size(), count * sizeof(glm::vec3)));
 
-                    // Decode tex weights
-                    auto texWeightBytes = decodeBase64(chunkJson["texWeights"].get<std::string>());
-                    chunk.texWeightmap.resize(count);
-                    std::memcpy(chunk.texWeightmap.data(), texWeightBytes.data(),
-                               std::min(texWeightBytes.size(), count * sizeof(glm::vec4)));
+                    // Check if this is new splatmap format or legacy
+                    if (chunkJson.contains("splatmap0")) {
+                        auto splat0Bytes = decodeBase64(chunkJson["splatmap0"].get<std::string>());
+                        chunk.splatmap0.resize(count);
+                        std::memcpy(chunk.splatmap0.data(), splat0Bytes.data(),
+                                   std::min(splat0Bytes.size(), count * sizeof(glm::vec4)));
 
-                    // Decode tex indices
-                    auto texIndexBytes = decodeBase64(chunkJson["texIndices"].get<std::string>());
-                    chunk.texIndicesmap.resize(count);
-                    std::memcpy(chunk.texIndicesmap.data(), texIndexBytes.data(),
-                               std::min(texIndexBytes.size(), count * sizeof(glm::uvec4)));
+                        auto splat1Bytes = decodeBase64(chunkJson["splatmap1"].get<std::string>());
+                        chunk.splatmap1.resize(count);
+                        std::memcpy(chunk.splatmap1.data(), splat1Bytes.data(),
+                                   std::min(splat1Bytes.size(), count * sizeof(glm::vec4)));
+
+                        if (chunkJson.contains("splatmap2")) {
+                            auto splat2Bytes = decodeBase64(chunkJson["splatmap2"].get<std::string>());
+                            chunk.splatmap2.resize(count);
+                            std::memcpy(chunk.splatmap2.data(), splat2Bytes.data(),
+                                       std::min(splat2Bytes.size(), count * sizeof(glm::vec4)));
+
+                            auto splat3Bytes = decodeBase64(chunkJson["splatmap3"].get<std::string>());
+                            chunk.splatmap3.resize(count);
+                            std::memcpy(chunk.splatmap3.data(), splat3Bytes.data(),
+                                       std::min(splat3Bytes.size(), count * sizeof(glm::vec4)));
+                        } else {
+                            chunk.splatmap2.resize(count, glm::vec4(0.0f));
+                            chunk.splatmap3.resize(count, glm::vec4(0.0f));
+                        }
+                    } else {
+                        // Legacy format: texWeights + texIndices
+                        auto texWeightBytes = decodeBase64(chunkJson["texWeights"].get<std::string>());
+                        chunk.texWeightmap.resize(count);
+                        std::memcpy(chunk.texWeightmap.data(), texWeightBytes.data(),
+                                   std::min(texWeightBytes.size(), count * sizeof(glm::vec4)));
+
+                        auto texIndexBytes = decodeBase64(chunkJson["texIndices"].get<std::string>());
+                        chunk.texIndicesmap.resize(count);
+                        std::memcpy(chunk.texIndicesmap.data(), texIndexBytes.data(),
+                                   std::min(texIndexBytes.size(), count * sizeof(glm::uvec4)));
+                        chunk.isLegacy = true;
+                    }
 
                     // Decode tex HSB
                     auto texHSBBytes = decodeBase64(chunkJson["texHSB"].get<std::string>());
@@ -1036,14 +1086,28 @@ void LevelSerializer::applyToTerrain(const LevelData& data, Terrain& terrain) {
             continue;  // Chunk outside current terrain bounds — skip silently
         }
 
-        chunk->setChunkData(
-            chunkData.heightmap,
-            chunkData.colormap,
-            chunkData.paintAlphamap,
-            chunkData.texWeightmap,
-            chunkData.texIndicesmap,
-            chunkData.texHSBmap
-        );
+        if (chunkData.isLegacy) {
+            // Old format: convert indices+weights to splatmap
+            chunk->setChunkDataLegacy(
+                chunkData.heightmap,
+                chunkData.colormap,
+                chunkData.paintAlphamap,
+                chunkData.texWeightmap,
+                chunkData.texIndicesmap,
+                chunkData.texHSBmap
+            );
+        } else {
+            chunk->setChunkData(
+                chunkData.heightmap,
+                chunkData.colormap,
+                chunkData.paintAlphamap,
+                chunkData.splatmap0,
+                chunkData.splatmap1,
+                chunkData.splatmap2,
+                chunkData.splatmap3,
+                chunkData.texHSBmap
+            );
+        }
         appliedCount++;
     }
 

@@ -148,6 +148,7 @@ set(EDEN_SOURCES
     src/Renderer/ImGuiManager.cpp
     src/Renderer/PipelineBuilder.cpp
     src/Editor/EditorUI.cpp
+    src/Editor/TextureBrowser.cpp
     src/Editor/TerrainBrushTool.cpp
     src/Editor/ChunkManager.cpp
     src/Editor/Gizmo.cpp

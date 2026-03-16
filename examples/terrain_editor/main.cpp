@@ -26,6 +26,7 @@
 #include "Editor/AIPath.hpp"
 #include "Editor/BinaryLevelWriter.hpp"
 #include "Editor/BinaryLevelReader.hpp"
+#include "Editor/TextureBrowser.hpp"
 #include "Renderer/AINodeRenderer.hpp"
 #include "Renderer/DialogueBubbleRenderer.hpp"
 #include "Network/AsyncHttpClient.hpp"
@@ -119,6 +120,9 @@ struct TerrainPushConstants {
     glm::vec4 fogColor;
     float fogStart;
     float fogEnd;
+    float pad0;
+    float pad1;
+    glm::vec4 cameraPos;   // xyz = world-space camera position
 };
 
 enum class TransformMode { Select, Move, Rotate, Scale };
@@ -229,6 +233,20 @@ protected:
         m_textureManager = std::make_unique<TextureManager>(getContext());
         m_textureManager->loadTerrainTexturesFromFolder("textures/");
 
+        // Pass loaded texture names to the editor UI
+        m_editorUI.setTextureNames(m_textureManager->getTextureNames(), m_textureManager->getTextureCount(), m_textureManager->getTextureColors());
+
+        // "Set" button on texture slots — opens texture browser for that slot
+        m_editorUI.setAssignTextureSlotCallback([this](int slotIndex) {
+            m_pendingTextureSlot = slotIndex;
+            m_editorUI.showTextureBrowser() = true;
+            m_textureBrowser.setTextureSelectedCallback([this](const std::string& path) {
+                if (m_pendingTextureSlot < 0) return;
+                assignTextureToSlot(m_pendingTextureSlot, path);
+                m_pendingTextureSlot = -1;
+            });
+        });
+
         m_pipeline = std::make_unique<TerrainPipeline>(
             getContext(), getSwapchain().getRenderPass(), getSwapchain().getExtent(),
             m_textureManager->getDescriptorSetLayout());
@@ -236,6 +254,16 @@ protected:
 
         m_chunkManager = std::make_unique<ChunkManager>(getBufferManager());
         m_brushTool = std::make_unique<TerrainBrushTool>(m_terrain, m_camera);
+        // Find white texture for color brush auto-texture
+        {
+            const auto& names = m_textureManager->getTextureNames();
+            for (int i = 0; i < (int)names.size(); i++) {
+                if (names[i].find("white") != std::string::npos || names[i].find("White") != std::string::npos) {
+                    m_brushTool->setWhiteTextureIndex(i);
+                    break;
+                }
+            }
+        }
         m_pathTool = std::make_unique<PathTool>(m_terrain, m_camera);
 
         setupUICallbacks();
@@ -319,6 +347,7 @@ protected:
         loadSplashTexture();
         loadGroveLogoTexture();
         loadBuildingTextures();
+        m_textureBrowser.init(getContext());
         // Only load EDEN OS hotbar inventory if loading the original OS background level
         {
             std::string defaultLevel = getDefaultLevelPath();
@@ -1053,6 +1082,20 @@ protected:
                 }
             });
 
+            // Re-apply cached terrain data now that chunks exist
+            if (m_hasPendingTerrainData) {
+                LevelSerializer::applyToTerrain(m_pendingTerrainData, m_terrain);
+                m_hasPendingTerrainData = false;
+                m_pendingTerrainData.chunks.clear();  // Free memory
+
+                // Re-upload all chunks with restored texture/height data
+                for (auto& [coord, chunk] : m_terrain.getAllChunks()) {
+                    if (chunk->needsUpload()) {
+                        m_chunkManager->uploadChunk(*chunk);
+                    }
+                }
+            }
+
             m_terrain.update(m_camera.getPosition());
             std::cout << "Terrain loaded! Total chunks: " << totalChunks << "\n";
         }
@@ -1098,6 +1141,7 @@ protected:
         cleanupSplashTexture();
         cleanupGroveLogoTexture();
         cleanupBuildingTextures();
+        m_textureBrowser.cleanup();
         if (m_groveVm) { grove_destroy(m_groveVm); m_groveVm = nullptr; }
 
         if (m_mcpServer) {
@@ -1565,6 +1609,11 @@ protected:
             // Server Manager window
             if (m_editorUI.showServerManager()) m_serverManager.renderImGui(&m_editorUI.showServerManager());
 
+            // Texture Browser window
+            if (m_editorUI.showTextureBrowser()) {
+                m_textureBrowser.render(&m_editorUI.showTextureBrowser());
+            }
+
             // Wall draw / foundation preview (green wireframe box)
             if (m_wallDrawing) {
                 float wallH = (m_editorUI.getBrushMode() == BrushMode::Foundation)
@@ -1818,6 +1867,7 @@ protected:
         pushConstants.fogColor = glm::vec4(m_editorUI.getFogColor(), 1.0f);
         pushConstants.fogStart = m_editorUI.getFogStart();
         pushConstants.fogEnd = m_editorUI.getFogEnd();
+        pushConstants.cameraPos = glm::vec4(m_camera.getPosition(), 1.0f);
 
         // Skip terrain rendering in test/space level mode or EDEN OS mode
         if (!m_isTestLevel && !m_isSpaceLevel && !m_isEdenOSLevel) {
@@ -4174,6 +4224,68 @@ private:
         m_groveLogoLoaded = false;
     }
 
+    void assignTextureToSlot(int slot, const std::string& path) {
+        // Load the image (DDS or PNG/JPG) and assign it to the terrain texture slot
+        std::string ext = std::filesystem::path(path).extension().string();
+        std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+
+        std::vector<unsigned char> rgba;
+        int w = 0, h = 0;
+        bool loaded = false;
+
+        if (ext == ".dds") {
+            // Use TextureBrowser's DDS loader
+            loaded = m_textureBrowser.loadDDS(path, rgba, w, h);
+        }
+        if (!loaded) {
+            int channels;
+            unsigned char* pixels = stbi_load(path.c_str(), &w, &h, &channels, STBI_rgb_alpha);
+            if (pixels) {
+                rgba.assign(pixels, pixels + w * h * 4);
+                stbi_image_free(pixels);
+                loaded = true;
+            }
+        }
+
+        if (!loaded) {
+            std::cout << "Failed to load texture: " << path << std::endl;
+            return;
+        }
+
+        std::string filename = std::filesystem::path(path).stem().string();
+        std::string slotName = "Slot #" + std::to_string(slot + 1) + " (" + filename + ")";
+
+        if (m_textureManager->replaceLayer(slot, rgba.data(), w, h, slotName, path)) {
+            // Update UI with new names/colors
+            m_editorUI.setTextureNames(m_textureManager->getTextureNames(),
+                                        m_textureManager->getTextureCount(),
+                                        m_textureManager->getTextureColors());
+            std::cout << "Assigned " << filename << " to terrain slot " << slot << std::endl;
+
+            // Auto-discover and load companion normal map
+            std::string normalPath = m_textureManager->findNormalMapPath(path);
+            if (!normalPath.empty()) {
+                std::vector<unsigned char> nrgba;
+                int nw = 0, nh = 0;
+                bool nloaded = false;
+                std::string next = std::filesystem::path(normalPath).extension().string();
+                std::transform(next.begin(), next.end(), next.begin(), ::tolower);
+                if (next == ".dds") {
+                    nloaded = m_textureBrowser.loadDDS(normalPath, nrgba, nw, nh);
+                }
+                if (!nloaded) {
+                    int nc;
+                    unsigned char* npx = stbi_load(normalPath.c_str(), &nw, &nh, &nc, STBI_rgb_alpha);
+                    if (npx) { nrgba.assign(npx, npx + nw * nh * 4); stbi_image_free(npx); nloaded = true; }
+                }
+                if (nloaded) {
+                    m_textureManager->replaceNormalLayer(slot, nrgba.data(), nw, nh);
+                    std::cout << "  + auto-loaded normal map: " << std::filesystem::path(normalPath).filename() << std::endl;
+                }
+            }
+        }
+    }
+
     void loadBuildingTextures() {
         // Prefer project source dir (safe from clean builds), fall back to CWD
         std::string dir = std::string(CMAKE_SOURCE_DIR) + "/textures/building";
@@ -5114,8 +5226,16 @@ private:
 
         glm::vec3 oldCameraPos = m_camera.getPosition();
 
+        // Compute early so we can skip camera's onSpacePressed when Jolt handles jump
+        bool useCharacterController = m_isPlayMode && m_characterController &&
+                                m_camera.getMovementMode() == MovementMode::Walk &&
+                                !m_filesystemBrowser.isActive() &&
+                                !m_inPanelFocusMode &&
+                                !(m_playModeCursorVisible && m_showSiloConfig);
+
         // Double-tap space toggles fly/walk mode; spacebar on selected spinning model toggles spin
-        if (m_isPlayMode && !imguiWantsKeyboard && !m_inConversation && !m_quickChatMode) {
+        // Skip when character controller handles jump — prevents accidental fly mode toggle
+        if (m_isPlayMode && !useCharacterController && !imguiWantsKeyboard && !m_inConversation && !m_quickChatMode) {
             if (Input::isKeyPressed(Input::KEY_SPACE)) {
                 // Check if any selected filesystem/widget model has a spin — toggle it
                 bool handledSpin = false;
@@ -5188,13 +5308,7 @@ private:
             }
         }
 
-        // Use character controller for play mode walk (skip in filesystem browser — camera handles movement directly)
-        bool useCharacterController = m_isPlayMode && m_characterController &&
-                                m_camera.getMovementMode() == MovementMode::Walk &&
-                                !m_filesystemBrowser.isActive() &&
-                                !m_inPanelFocusMode &&
-                                !(m_playModeCursorVisible && m_showSiloConfig);
-
+        // Character controller path (already computed above)
         if (useCharacterController) {
             // Calculate desired velocity from input
             float yaw = glm::radians(m_camera.getYaw());
@@ -5239,7 +5353,7 @@ private:
                                                m_characterController->getPosition().z);
 
             glm::vec3 charPos = m_characterController->extendedUpdate(
-                deltaTime, desiredVelocity, jump && m_characterController->isOnGround(), jumpVelocity
+                deltaTime, desiredVelocity, jump, jumpVelocity
             );
 
             // Ensure we don't go below terrain
@@ -7173,10 +7287,12 @@ private:
                 if (!Input::isKeyPressed(throwKeys[i])) continue;
 
                 // Priority 1: Pick up selected salvage into this hotbar slot
+                // Skip if slot already has a 3D model (don't overwrite — throw/place first)
                 if (m_selectedSalvageIndex >= 0 && m_selectedSalvageIndex < static_cast<int>(m_sceneObjects.size())
                     && m_sceneObjects[m_selectedSalvageIndex]
                     && (m_sceneObjects[m_selectedSalvageIndex]->getBeingType() == BeingType::INTERACTION
-                        || m_sceneObjects[m_selectedSalvageIndex]->getBuildingType() == "salvage")) {
+                        || m_sceneObjects[m_selectedSalvageIndex]->getBuildingType() == "salvage")
+                    && !(m_toolbarSlots[i].occupied && m_toolbarSlots[i].is3DModel)) {
                     auto& salvObj = m_sceneObjects[m_selectedSalvageIndex];
 
                     // Remove from physics tracking
@@ -7235,16 +7351,39 @@ private:
                     break;
                 }
 
-                // Priority 2: Throw from occupied hotbar slot
+                // Priority 2: Throw or place from occupied hotbar slot
                 if (!m_toolbarSlots[i].occupied || !m_toolbarSlots[i].is3DModel) continue;
                 if (m_toolbarSlots[i].gpuHandle == 0) continue;
 
-                // Spawn the object a few meters in front of the player
+                bool ctrlHeld = Input::isKeyDown(Input::KEY_LEFT_CONTROL) || Input::isKeyDown(Input::KEY_RIGHT_CONTROL);
+
                 glm::vec3 camPos = m_camera.getPosition();
                 glm::vec3 camFront = m_camera.getFront();
-                glm::vec3 spawnPos = camPos + camFront * 2.0f + glm::vec3(0, 0.5f, 0);
-                float throwSpeed = 10.0f;
-                glm::vec3 throwVel = camFront * throwSpeed + glm::vec3(0, 4.0f, 0); // arc upward
+                glm::vec3 spawnPos;
+                float objHalfH = m_toolbarSlots[i].modelBounds.getSize().y * 0.5f;
+                if (objHalfH < 0.05f) objHalfH = 0.05f;
+
+                if (ctrlHeld) {
+                    // Ctrl+number: place upright at crosshair position
+                    // Raycast from camera to find ground
+                    glm::vec3 rayEnd = camPos + camFront * 20.0f;
+                    float placeY = camPos.y - 1.0f; // fallback
+                    if (m_characterController) {
+                        auto hit = m_characterController->raycast(camPos, rayEnd);
+                        if (hit.hit) {
+                            spawnPos = hit.hitPoint + glm::vec3(0, objHalfH, 0);
+                        } else {
+                            spawnPos = camPos + camFront * 3.0f;
+                            spawnPos.y = m_terrain.getHeightAt(spawnPos.x, spawnPos.z) + objHalfH;
+                        }
+                    } else {
+                        spawnPos = camPos + camFront * 3.0f;
+                        spawnPos.y = m_terrain.getHeightAt(spawnPos.x, spawnPos.z) + objHalfH;
+                    }
+                } else {
+                    // Normal throw: spawn in front and arc forward
+                    spawnPos = camPos + camFront * 2.0f + glm::vec3(0, 0.5f, 0);
+                }
 
                 // Create scene object from the hotbar's GPU handle
                 static int throwCounter = 0;
@@ -7266,33 +7405,40 @@ private:
                     obj->setTextureData(m_toolbarSlots[i].textureData,
                         m_toolbarSlots[i].textureWidth, m_toolbarSlots[i].textureHeight);
                 }
-                std::cout << "[Throw] name=" << obj->getName() << " modelPath='" << obj->getModelPath()
-                          << "' hasMesh=" << obj->hasMeshData()
-                          << " hasTex=" << obj->hasTextureData() << std::endl;
 
-                // Create Jolt dynamic body for physics simulation
-                if (m_characterController) {
-                    const AABB& bounds = m_toolbarSlots[i].modelBounds;
-                    glm::vec3 halfExt = bounds.getSize() * 0.5f;
-                    // Ensure minimum size for physics stability
-                    halfExt = glm::max(halfExt, glm::vec3(0.05f));
+                if (ctrlHeld) {
+                    // Place mode: upright, no physics, immediately collidable
+                    obj->setEulerRotation(glm::vec3(0.0f));
+                    obj->setAABBCollision(true);
+                    std::cout << "[Place] " << obj->getName() << " placed upright" << std::endl;
+                } else {
+                    // Throw mode: create Jolt dynamic body
+                    float throwSpeed = 10.0f;
+                    glm::vec3 throwVel = camFront * throwSpeed + glm::vec3(0, 4.0f, 0);
 
-                    auto bodyResult = m_characterController->addDynamicBox(
-                        halfExt, spawnPos, throwVel, 1.0f, 0.5f, 0.3f);
+                    if (m_characterController) {
+                        const AABB& bounds = m_toolbarSlots[i].modelBounds;
+                        glm::vec3 halfExt = bounds.getSize() * 0.5f;
+                        halfExt = glm::max(halfExt, glm::vec3(0.05f));
 
-                    if (bodyResult.valid) {
-                        PhysicsTrackedObject tracked;
-                        tracked.objPtr = obj.get();
-                        tracked.joltBodyId = bodyResult.bodyId;
-                        tracked.settled = false;
-                        m_physicsObjects.push_back(tracked);
+                        auto bodyResult = m_characterController->addDynamicBox(
+                            halfExt, spawnPos, throwVel, 1.0f, 0.5f, 0.3f);
+
+                        if (bodyResult.valid) {
+                            PhysicsTrackedObject tracked;
+                            tracked.objPtr = obj.get();
+                            tracked.joltBodyId = bodyResult.bodyId;
+                            tracked.settled = false;
+                            m_physicsObjects.push_back(tracked);
+                        }
                     }
+                    std::cout << "[Throw] " << obj->getName() << " thrown" << std::endl;
                 }
 
                 m_sceneObjects.push_back(std::move(obj));
 
-                // Clear the hotbar slot (item was thrown)
-                m_toolbarSlots[i].gpuHandle = 0; // don't destroy — scene object owns it now
+                // Clear the hotbar slot
+                m_toolbarSlots[i].gpuHandle = 0;
                 m_toolbarSlots[i].modelIndexCount = 0;
                 m_toolbarSlots[i].is3DModel = false;
                 m_toolbarSlots[i].occupied = false;
@@ -14867,6 +15013,11 @@ private:
             m_editorUI.renderMindMapWindow();
         }
 
+        // Texture Browser window
+        if (m_editorUI.showTextureBrowser()) {
+            m_textureBrowser.render(&m_editorUI.showTextureBrowser());
+        }
+
         // Cleaner Bot menu (Activate / View Report)
         if (auto* bot = m_filesystemBrowser.getCleanerBot()) {
             bool botMenuOpen = bot->renderMenuUI();
@@ -17050,6 +17201,13 @@ private:
 
         LevelSerializer::applyToTerrain(levelData, m_terrain);
 
+        // Cache terrain data for re-apply after chunk creation (needed for startup
+        // when chunks don't exist yet at load time)
+        if (!levelData.chunks.empty()) {
+            m_pendingTerrainData = levelData;
+            m_hasPendingTerrainData = true;
+        }
+
         // Clear physics world before loading new objects
         if (m_physicsWorld) {
             m_physicsWorld->clear();
@@ -17731,6 +17889,12 @@ private:
         }
 
         m_currentLevelPath.clear();
+
+        // Reset all terrain chunks to clean defaults
+        for (auto& [coord, chunk] : m_terrain.getAllChunks()) {
+            chunk->resetToDefaults();
+        }
+        m_chunkManager->updateModifiedChunks(m_terrain);
 
         // Sync EditorUI with the now-empty scene objects list
         updateSceneObjectsList();
@@ -21914,6 +22078,7 @@ private:
     bool m_wasTumbling = false;
     bool m_isPanning = false;
     bool m_wasGrabbing = false;
+    bool m_needsEdgeStitch = false;
     float m_lastGrabMouseY = 0.0f;
 
     // Entity/Action system
@@ -21931,6 +22096,8 @@ private:
     float m_fadeDuration = 0.3f;  // seconds for fade in/out
     std::string m_pendingLevelPath;
     std::string m_pendingTargetDoorId;
+    LevelData m_pendingTerrainData;  // Cached terrain data for re-apply after chunk creation
+    bool m_hasPendingTerrainData = false;
 
     // Loading state
     int m_chunksLoaded = 0;
@@ -21984,6 +22151,9 @@ private:
         VkDeviceSize memorySize = 0;
     };
     std::vector<BuildingTexture> m_buildingTextures;
+
+    eden::TextureBrowser m_textureBrowser;
+    int m_pendingTextureSlot = -1;
 
     // Object groups (for organization only) - uses EditorUI::ObjectGroup
     std::vector<EditorUI::ObjectGroup> m_objectGroups;

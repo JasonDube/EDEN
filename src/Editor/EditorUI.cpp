@@ -201,6 +201,7 @@ void EditorUI::renderMenuBar() {
             ImGui::MenuItem("Zones", nullptr, &m_showZones);
             ImGui::MenuItem("AI Mind Map", nullptr, &m_showMindMap);
             ImGui::MenuItem("Building Textures", nullptr, &m_showBuildingTextures);
+            ImGui::MenuItem("Texture Browser", nullptr, &m_showTextureBrowser);
             ImGui::MenuItem("Terminal", "Ctrl+`", &m_showTerminal);
             ImGui::MenuItem("Servers", nullptr, &m_showServerManager);
             ImGui::Separator();
@@ -444,17 +445,20 @@ void EditorUI::renderTextureSelector() {
     ImGui::SetNextWindowSize(ImVec2(300, 400), ImGuiCond_FirstUseEver);
     ImGui::Begin("Texture Layers");
 
-    const char* texNames[] = { "Grass", "Sand/Dirt", "Rock", "Snow" };
-    ImVec4 texColors[] = {
-        ImVec4(0.39f, 0.59f, 0.31f, 1.0f),  // Grass
-        ImVec4(0.71f, 0.63f, 0.47f, 1.0f),  // Sand
-        ImVec4(0.47f, 0.43f, 0.39f, 1.0f),  // Rock
-        ImVec4(0.94f, 0.94f, 0.98f, 1.0f),  // Snow
+    // Generate distinct colors for each texture via hue rotation
+    auto texColor = [this](int idx, int count) -> ImVec4 {
+        if (idx < (int)m_textureColors.size()) {
+            return ImVec4(m_textureColors[idx].r, m_textureColors[idx].g, m_textureColors[idx].b, 1.0f);
+        }
+        float hue = fmodf(idx * 0.618033988f, 1.0f);
+        float r, g, b;
+        ImGui::ColorConvertHSVtoRGB(hue, 0.5f, 0.75f, r, g, b);
+        return ImVec4(r, g, b, 1.0f);
     };
 
     // Layer selection
     if (ImGui::CollapsingHeader("Select Layer", ImGuiTreeNodeFlags_DefaultOpen)) {
-        for (int i = 0; i < 4; i++) {
+        for (int i = 0; i < m_textureCount; i++) {
             ImGui::PushID(i);
 
             bool selected = (i == m_selectedTexture);
@@ -462,7 +466,8 @@ void EditorUI::renderTextureSelector() {
                 ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.3f, 0.6f, 0.9f, 1.0f));
             }
 
-            if (ImGui::ColorButton("##tex", texColors[i], 0, ImVec2(40, 40))) {
+            ImVec4 col = texColor(i, m_textureCount);
+            if (ImGui::ColorButton("##tex", col, 0, ImVec2(40, 40))) {
                 m_selectedTexture = i;
             }
 
@@ -471,7 +476,17 @@ void EditorUI::renderTextureSelector() {
             }
 
             ImGui::SameLine();
-            ImGui::Text("%s%s", texNames[i], selected ? " [Paint]" : "");
+            const char* name = (i < (int)m_textureNames.size()) ? m_textureNames[i].c_str() : "Texture";
+            ImGui::Text("%s%s", name, selected ? " [Paint]" : "");
+
+            ImGui::SameLine();
+            char setLabel[32];
+            snprintf(setLabel, sizeof(setLabel), "Set##slot%d", i);
+            if (ImGui::SmallButton(setLabel)) {
+                if (m_onAssignTextureSlot) {
+                    m_onAssignTextureSlot(i);
+                }
+            }
 
             ImGui::PopID();
         }
@@ -480,31 +495,26 @@ void EditorUI::renderTextureSelector() {
     // Color adjustments for selected layer
     if (ImGui::CollapsingHeader("Color Adjustments", ImGuiTreeNodeFlags_DefaultOpen)) {
         int i = m_selectedTexture;
+        if (i >= (int)m_texHue.size()) { ImGui::End(); return; }
 
-        ImGui::Text("Adjusting: %s", texNames[i]);
+        const char* adjName = (i < (int)m_textureNames.size()) ? m_textureNames[i].c_str() : "Texture";
+        ImGui::Text("Adjusting: %s", adjName);
         ImGui::Spacing();
 
         // Get current HSB values
-        float hue = (&m_texHue.x)[i];
-        float sat = (&m_texSaturation.x)[i];
-        float bright = (&m_texBrightness.x)[i];
+        float hue = m_texHue[i];
+        float sat = m_texSat[i];
+        float bright = m_texBright[i];
 
-        // Create a preview color from HSB adjustments
-        // Start with a reference color (neutral for that texture type)
-        float baseHue = 0.0f;
-        switch (i) {
-            case 0: baseHue = 0.33f; break;  // Grass - green
-            case 1: baseHue = 0.1f; break;   // Sand - yellow/tan
-            case 2: baseHue = 0.08f; break;  // Rock - brown/gray
-            case 3: baseHue = 0.0f; break;   // Snow - white (no hue)
-        }
+        // Use golden ratio hue as base color for preview
+        float baseHue = fmodf(i * 0.618033988f, 1.0f);
 
         // Convert HSB adjustments to a preview color
         float previewHue = baseHue + hue / 360.0f;
         while (previewHue < 0.0f) previewHue += 1.0f;
         while (previewHue > 1.0f) previewHue -= 1.0f;
-        float previewSat = std::clamp(0.5f * sat, 0.0f, 1.0f);  // Base sat 0.5
-        float previewVal = std::clamp(0.7f * bright, 0.0f, 1.0f);  // Base val 0.7
+        float previewSat = std::clamp(0.5f * sat, 0.0f, 1.0f);
+        float previewVal = std::clamp(0.7f * bright, 0.0f, 1.0f);
 
         // Convert HSV to RGB for the color picker
         float rgb[3];
@@ -518,43 +528,40 @@ void EditorUI::renderTextureSelector() {
             ImGuiColorEditFlags_NoInputs |
             ImGuiColorEditFlags_NoAlpha)) {
 
-            // Convert picked RGB back to HSV
             float h, s, v;
             ImGui::ColorConvertRGBtoHSV(rgb[0], rgb[1], rgb[2], h, s, v);
 
-            // Calculate HSB adjustments relative to base
             float newHue = (h - baseHue) * 360.0f;
             if (newHue > 180.0f) newHue -= 360.0f;
             if (newHue < -180.0f) newHue += 360.0f;
 
-            float newSat = (s > 0.01f) ? s / 0.5f : 1.0f;  // Relative to base sat
-            float newBright = (v > 0.01f) ? v / 0.7f : 1.0f;  // Relative to base val
+            float newSat = (s > 0.01f) ? s / 0.5f : 1.0f;
+            float newBright = (v > 0.01f) ? v / 0.7f : 1.0f;
 
-            (&m_texHue.x)[i] = newHue;
-            (&m_texSaturation.x)[i] = std::clamp(newSat, 0.0f, 2.0f);
-            (&m_texBrightness.x)[i] = std::clamp(newBright, 0.0f, 2.0f);
+            m_texHue[i] = newHue;
+            m_texSat[i] = std::clamp(newSat, 0.0f, 2.0f);
+            m_texBright[i] = std::clamp(newBright, 0.0f, 2.0f);
         }
 
         ImGui::Spacing();
         ImGui::Separator();
         ImGui::Text("Fine Tuning:");
 
-        // Sliders for fine control
         if (ImGui::SliderFloat("Hue Shift", &hue, -180.0f, 180.0f, "%.0f deg")) {
-            (&m_texHue.x)[i] = hue;
+            m_texHue[i] = hue;
         }
         if (ImGui::SliderFloat("Saturation", &sat, 0.0f, 2.0f, "%.2f")) {
-            (&m_texSaturation.x)[i] = sat;
+            m_texSat[i] = sat;
         }
         if (ImGui::SliderFloat("Brightness", &bright, 0.0f, 2.0f, "%.2f")) {
-            (&m_texBrightness.x)[i] = bright;
+            m_texBright[i] = bright;
         }
 
         ImGui::Spacing();
         if (ImGui::Button("Reset to Original")) {
-            (&m_texHue.x)[i] = 0.0f;
-            (&m_texSaturation.x)[i] = 1.0f;
-            (&m_texBrightness.x)[i] = 1.0f;
+            m_texHue[i] = 0.0f;
+            m_texSat[i] = 1.0f;
+            m_texBright[i] = 1.0f;
         }
     }
 

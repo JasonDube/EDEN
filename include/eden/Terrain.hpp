@@ -15,8 +15,10 @@ struct Vertex3D {
     glm::vec3 color;
     glm::vec3 normal;
     glm::vec2 uv;
-    glm::vec4 texWeights;  // Blend weights for 4 texture layers
-    glm::uvec4 texIndices; // Which 4 textures this vertex uses (indices into texture array)
+    glm::vec4 texSplat0;   // Splatmap weights for textures 0-3 (smoothly interpolated)
+    glm::vec4 texSplat1;   // Splatmap weights for textures 4-7 (smoothly interpolated)
+    glm::vec4 texSplat2;   // Splatmap weights for textures 8-11 (smoothly interpolated)
+    glm::vec4 texSplat3;   // Splatmap weights for textures 12-15 (smoothly interpolated)
     float selection;       // Selection weight (0 = not selected, 1 = selected)
     float paintAlpha;      // Paint intensity (0 = texture only, 1 = painted color only)
     glm::vec3 texHSB;      // Per-vertex texture color adjustment (hue, saturation, brightness)
@@ -92,6 +94,7 @@ public:
     uint32_t getBufferHandle() const { return m_bufferHandle; }
     bool needsUpload() const { return m_needsUpload; }
     void markUploaded() { m_needsUpload = false; }
+    void resetToDefaults();
 
     // Editing support
     using HeightLookup = std::function<float(float, float)>;
@@ -124,9 +127,19 @@ public:
     void setChunkData(const std::vector<float>& heightmap,
                       const std::vector<glm::vec3>& colormap,
                       const std::vector<float>& paintAlphamap,
-                      const std::vector<glm::vec4>& texWeightmap,
-                      const std::vector<glm::uvec4>& texIndicesmap,
+                      const std::vector<glm::vec4>& splatmap0,
+                      const std::vector<glm::vec4>& splatmap1,
+                      const std::vector<glm::vec4>& splatmap2,
+                      const std::vector<glm::vec4>& splatmap3,
                       const std::vector<glm::vec3>& texHSBmap);
+
+    // Legacy loading - convert old indices+weights format to splatmap
+    void setChunkDataLegacy(const std::vector<float>& heightmap,
+                            const std::vector<glm::vec3>& colormap,
+                            const std::vector<float>& paintAlphamap,
+                            const std::vector<glm::vec4>& texWeightmap,
+                            const std::vector<glm::uvec4>& texIndicesmap,
+                            const std::vector<glm::vec3>& texHSBmap);
 
     friend class Terrain;
 private:
@@ -144,8 +157,10 @@ private:
     std::vector<float> m_heightmap;
     std::vector<glm::vec3> m_colormap;  // Per-vertex color override (-1 = use height-based)
     std::vector<float> m_paintAlphamap;  // Per-vertex paint intensity (0-1)
-    std::vector<glm::vec4> m_texWeightmap;  // Per-vertex texture blend weights
-    std::vector<glm::uvec4> m_texIndicesmap;  // Per-vertex texture indices (which 4 textures to blend)
+    std::vector<glm::vec4> m_splatmap0;  // Splatmap weights for textures 0-3
+    std::vector<glm::vec4> m_splatmap1;  // Splatmap weights for textures 4-7
+    std::vector<glm::vec4> m_splatmap2;  // Splatmap weights for textures 8-11
+    std::vector<glm::vec4> m_splatmap3;  // Splatmap weights for textures 12-15
     std::vector<float> m_selectionmap;  // Per-vertex selection weight (0-1)
     std::vector<glm::vec3> m_texHSBmap;  // Per-vertex texture color adjustment (hue, saturation, brightness)
     std::vector<float> m_holemap;  // Per-vertex hole mask (0 = solid, 1 = hole)
@@ -232,6 +247,11 @@ public:
     // Triangulation mode (affects cliff visual quality)
     void setTriangulationMode(TriangulationMode mode);
 
+    // Stitch chunk edges so adjacent chunks share identical edge heights (fixes seams)
+    void stitchChunkEdges();
+    // Lightweight version: only stitch edges of chunks marked needsUpload (for real-time brush use)
+    void stitchModifiedChunkEdges();
+
     // Punch a rectangular hole in the terrain (sets holeMask on vertices)
     void setHoleRect(float worldMinX, float worldMinZ, float worldMaxX, float worldMaxZ, bool isHole = true);
 
@@ -239,6 +259,7 @@ public:
     bool exportToOBJ(const std::string& filepath) const;
 
 private:
+    void syncEdgeTextureData();  // Copy edge texture data from modified chunks to neighbors
     glm::ivec2 worldToChunkCoord(const glm::vec3& worldPos) const;
     glm::ivec2 wrapChunkCoord(glm::ivec2 coord) const;
 

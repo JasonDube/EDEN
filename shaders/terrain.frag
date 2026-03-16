@@ -3,22 +3,29 @@
 layout(location = 0) in vec3 fragColor;
 layout(location = 1) in vec3 fragNormal;
 layout(location = 2) in vec2 fragUV;
-layout(location = 3) in vec4 fragTexWeights;
-layout(location = 4) in flat uvec4 fragTexIndices;
+layout(location = 3) in vec4 fragTexSplat0;   // Weights for textures 0-3
+layout(location = 4) in vec4 fragTexSplat1;   // Weights for textures 4-7
 layout(location = 5) in float fragDistance;
 layout(location = 6) in float fragSelection;
 layout(location = 7) in float fragPaintAlpha;
 layout(location = 8) in vec3 fragTexHSB;  // Per-vertex HSB (hue, saturation, brightness)
 layout(location = 9) in float fragHoleMask;
+layout(location = 10) in vec4 fragTexSplat2;  // Weights for textures 8-11
+layout(location = 11) in vec4 fragTexSplat3;  // Weights for textures 12-15
+layout(location = 12) in vec3 fragWorldPos;
 
-// Texture array (all terrain textures in a single 2D array)
+// Texture arrays
 layout(set = 0, binding = 0) uniform sampler2DArray terrainTextures;
+layout(set = 0, binding = 1) uniform sampler2DArray terrainNormals;
 
 layout(push_constant) uniform PushConstants {
     mat4 mvp;
     vec4 fogColor;
     float fogStart;
     float fogEnd;
+    float pad0;
+    float pad1;
+    vec4 cameraPos;
 } pc;
 
 layout(location = 0) out vec4 outColor;
@@ -54,23 +61,73 @@ void main() {
     // Discard terrain fragments marked as holes
     if (fragHoleMask > 0.5) discard;
 
-    // Simple directional lighting
+    // Sample all 16 texture layers and blend by splatmap weights
+    vec3 blendedTex = vec3(0.0);
+    blendedTex += texture(terrainTextures, vec3(fragUV, 0.0)).rgb * fragTexSplat0.x;
+    blendedTex += texture(terrainTextures, vec3(fragUV, 1.0)).rgb * fragTexSplat0.y;
+    blendedTex += texture(terrainTextures, vec3(fragUV, 2.0)).rgb * fragTexSplat0.z;
+    blendedTex += texture(terrainTextures, vec3(fragUV, 3.0)).rgb * fragTexSplat0.w;
+    blendedTex += texture(terrainTextures, vec3(fragUV, 4.0)).rgb * fragTexSplat1.x;
+    blendedTex += texture(terrainTextures, vec3(fragUV, 5.0)).rgb * fragTexSplat1.y;
+    blendedTex += texture(terrainTextures, vec3(fragUV, 6.0)).rgb * fragTexSplat1.z;
+    blendedTex += texture(terrainTextures, vec3(fragUV, 7.0)).rgb * fragTexSplat1.w;
+    blendedTex += texture(terrainTextures, vec3(fragUV, 8.0)).rgb * fragTexSplat2.x;
+    blendedTex += texture(terrainTextures, vec3(fragUV, 9.0)).rgb * fragTexSplat2.y;
+    blendedTex += texture(terrainTextures, vec3(fragUV, 10.0)).rgb * fragTexSplat2.z;
+    blendedTex += texture(terrainTextures, vec3(fragUV, 11.0)).rgb * fragTexSplat2.w;
+    blendedTex += texture(terrainTextures, vec3(fragUV, 12.0)).rgb * fragTexSplat3.x;
+    blendedTex += texture(terrainTextures, vec3(fragUV, 13.0)).rgb * fragTexSplat3.y;
+    blendedTex += texture(terrainTextures, vec3(fragUV, 14.0)).rgb * fragTexSplat3.z;
+    blendedTex += texture(terrainTextures, vec3(fragUV, 15.0)).rgb * fragTexSplat3.w;
+
+    // Sample all 16 normal map layers and blend by same splatmap weights
+    vec3 blendedNormal = vec3(0.0);
+    blendedNormal += texture(terrainNormals, vec3(fragUV, 0.0)).rgb * fragTexSplat0.x;
+    blendedNormal += texture(terrainNormals, vec3(fragUV, 1.0)).rgb * fragTexSplat0.y;
+    blendedNormal += texture(terrainNormals, vec3(fragUV, 2.0)).rgb * fragTexSplat0.z;
+    blendedNormal += texture(terrainNormals, vec3(fragUV, 3.0)).rgb * fragTexSplat0.w;
+    blendedNormal += texture(terrainNormals, vec3(fragUV, 4.0)).rgb * fragTexSplat1.x;
+    blendedNormal += texture(terrainNormals, vec3(fragUV, 5.0)).rgb * fragTexSplat1.y;
+    blendedNormal += texture(terrainNormals, vec3(fragUV, 6.0)).rgb * fragTexSplat1.z;
+    blendedNormal += texture(terrainNormals, vec3(fragUV, 7.0)).rgb * fragTexSplat1.w;
+    blendedNormal += texture(terrainNormals, vec3(fragUV, 8.0)).rgb * fragTexSplat2.x;
+    blendedNormal += texture(terrainNormals, vec3(fragUV, 9.0)).rgb * fragTexSplat2.y;
+    blendedNormal += texture(terrainNormals, vec3(fragUV, 10.0)).rgb * fragTexSplat2.z;
+    blendedNormal += texture(terrainNormals, vec3(fragUV, 11.0)).rgb * fragTexSplat2.w;
+    blendedNormal += texture(terrainNormals, vec3(fragUV, 12.0)).rgb * fragTexSplat3.x;
+    blendedNormal += texture(terrainNormals, vec3(fragUV, 13.0)).rgb * fragTexSplat3.y;
+    blendedNormal += texture(terrainNormals, vec3(fragUV, 14.0)).rgb * fragTexSplat3.z;
+    blendedNormal += texture(terrainNormals, vec3(fragUV, 15.0)).rgb * fragTexSplat3.w;
+
+    // Decode tangent-space normal from [0,1] -> [-1,1]
+    vec3 tangentNormal = blendedNormal * 2.0 - 1.0;
+
+    // Build TBN matrix from screen-space derivatives (no extra vertex attributes needed)
+    vec3 N = normalize(fragNormal);
+    vec3 dp1 = dFdx(fragWorldPos);
+    vec3 dp2 = dFdy(fragWorldPos);
+    vec2 duv1 = dFdx(fragUV);
+    vec2 duv2 = dFdy(fragUV);
+
+    vec3 T = normalize(dp1 * duv2.y - dp2 * duv1.y);
+    vec3 B = normalize(dp2 * duv1.x - dp1 * duv2.x);
+    mat3 TBN = mat3(T, B, N);
+
+    // Transform tangent-space normal to world space
+    vec3 worldNormal = normalize(TBN * tangentNormal);
+
+    // Directional lighting using the normal-mapped normal
     vec3 lightDir = normalize(vec3(0.5, 1.0, 0.3));
     float ambient = 0.3;
-    float diffuse = max(dot(normalize(fragNormal), lightDir), 0.0) * 0.7;
-    float lighting = ambient + diffuse;
+    float diffuse = max(dot(worldNormal, lightDir), 0.0) * 0.7;
 
-    // Sample textures from array using indices
-    vec3 tex0 = texture(terrainTextures, vec3(fragUV, float(fragTexIndices.x))).rgb;
-    vec3 tex1 = texture(terrainTextures, vec3(fragUV, float(fragTexIndices.y))).rgb;
-    vec3 tex2 = texture(terrainTextures, vec3(fragUV, float(fragTexIndices.z))).rgb;
-    vec3 tex3 = texture(terrainTextures, vec3(fragUV, float(fragTexIndices.w))).rgb;
+    // Specular (Blinn-Phong) — makes normal map bumps catch the light
+    vec3 viewDir = normalize(pc.cameraPos.xyz - fragWorldPos);
+    vec3 halfDir = normalize(lightDir + viewDir);
+    float specAngle = max(dot(worldNormal, halfDir), 0.0);
+    float specular = pow(specAngle, 32.0) * 0.3;
 
-    // Blend textures based on weights
-    vec3 blendedTex = tex0 * fragTexWeights.x +
-                      tex1 * fragTexWeights.y +
-                      tex2 * fragTexWeights.z +
-                      tex3 * fragTexWeights.w;
+    float lighting = ambient + diffuse + specular;
 
     // Apply per-vertex HSB color adjustment to the blended texture
     blendedTex = adjustColor(blendedTex, fragTexHSB.x, fragTexHSB.y, fragTexHSB.z);

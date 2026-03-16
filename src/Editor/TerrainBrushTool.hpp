@@ -35,6 +35,7 @@ public:
     const BrushShapeParams& getShapeParams() const { return m_shapeParams; }
     void setPaintColor(const glm::vec3& color) { m_paintColor = color; }
     void setTextureIndex(int index) { m_textureIndex = index; }
+    void setWhiteTextureIndex(int index) { m_whiteTextureIndex = index; }
     void setTextureHSB(float hue, float saturation, float brightness) {
         m_texHue = hue;
         m_texSaturation = saturation;
@@ -59,6 +60,7 @@ private:
     float m_falloff = 0.5f;
     glm::vec3 m_paintColor{0.2f, 0.5f, 0.15f};
     int m_textureIndex = 1;
+    int m_whiteTextureIndex = -1;  // Auto-set texture to white when color painting
     float m_texHue = 0.0f;
     float m_texSaturation = 1.0f;
     float m_texBrightness = 1.0f;

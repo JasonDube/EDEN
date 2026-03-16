@@ -35,6 +35,14 @@ void TerrainBrushTool::apply(float deltaTime) {
 
     switch (m_mode) {
         case BrushMode::Paint:
+            // Also set texture to white so the color comes through pure
+            if (m_whiteTextureIndex >= 0) {
+                m_terrain.applyTextureBrush(
+                    m_position.x, m_position.z,
+                    m_radius, scaledStrength, m_falloff,
+                    m_whiteTextureIndex, 0.0f, 1.0f, 1.0f, m_shapeParams
+                );
+            }
             m_terrain.applyColorBrush(
                 m_position.x, m_position.z,
                 m_radius, scaledStrength, m_falloff,

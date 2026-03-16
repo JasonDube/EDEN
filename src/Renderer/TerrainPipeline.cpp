@@ -33,8 +33,8 @@ void TerrainPipeline::createPipelineLayout(VkDescriptorSetLayout textureSetLayou
     VkPushConstantRange pushConstantRange{};
     pushConstantRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
     pushConstantRange.offset = 0;
-    // MVP + fogColor + fogStart + fogEnd (HSB is now per-vertex)
-    pushConstantRange.size = sizeof(glm::mat4) + sizeof(glm::vec4) + sizeof(float) * 2;
+    // MVP + fogColor + fogStart + fogEnd + pad + cameraPos
+    pushConstantRange.size = sizeof(glm::mat4) + sizeof(glm::vec4) + sizeof(float) * 4 + sizeof(glm::vec4);
 
     VkPipelineLayoutCreateInfo pipelineLayoutInfo{};
     pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
@@ -81,7 +81,7 @@ void TerrainPipeline::createPipeline(VkRenderPass renderPass, VkExtent2D extent)
     bindingDescription.stride = sizeof(Vertex3D);
     bindingDescription.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
 
-    std::array<VkVertexInputAttributeDescription, 10> attributeDescriptions{};
+    std::array<VkVertexInputAttributeDescription, 12> attributeDescriptions{};
     // Position
     attributeDescriptions[0].binding = 0;
     attributeDescriptions[0].location = 0;
@@ -102,16 +102,16 @@ void TerrainPipeline::createPipeline(VkRenderPass renderPass, VkExtent2D extent)
     attributeDescriptions[3].location = 3;
     attributeDescriptions[3].format = VK_FORMAT_R32G32_SFLOAT;
     attributeDescriptions[3].offset = offsetof(Vertex3D, uv);
-    // Texture weights
+    // Splatmap weights for textures 0-3
     attributeDescriptions[4].binding = 0;
     attributeDescriptions[4].location = 4;
     attributeDescriptions[4].format = VK_FORMAT_R32G32B32A32_SFLOAT;
-    attributeDescriptions[4].offset = offsetof(Vertex3D, texWeights);
-    // Texture indices (which 4 textures to blend from the array)
+    attributeDescriptions[4].offset = offsetof(Vertex3D, texSplat0);
+    // Splatmap weights for textures 4-7
     attributeDescriptions[5].binding = 0;
     attributeDescriptions[5].location = 5;
-    attributeDescriptions[5].format = VK_FORMAT_R32G32B32A32_UINT;
-    attributeDescriptions[5].offset = offsetof(Vertex3D, texIndices);
+    attributeDescriptions[5].format = VK_FORMAT_R32G32B32A32_SFLOAT;
+    attributeDescriptions[5].offset = offsetof(Vertex3D, texSplat1);
     // Selection weight
     attributeDescriptions[6].binding = 0;
     attributeDescriptions[6].location = 6;
@@ -132,6 +132,16 @@ void TerrainPipeline::createPipeline(VkRenderPass renderPass, VkExtent2D extent)
     attributeDescriptions[9].location = 9;
     attributeDescriptions[9].format = VK_FORMAT_R32_SFLOAT;
     attributeDescriptions[9].offset = offsetof(Vertex3D, holeMask);
+    // Splatmap weights for textures 8-11
+    attributeDescriptions[10].binding = 0;
+    attributeDescriptions[10].location = 10;
+    attributeDescriptions[10].format = VK_FORMAT_R32G32B32A32_SFLOAT;
+    attributeDescriptions[10].offset = offsetof(Vertex3D, texSplat2);
+    // Splatmap weights for textures 12-15
+    attributeDescriptions[11].binding = 0;
+    attributeDescriptions[11].location = 11;
+    attributeDescriptions[11].format = VK_FORMAT_R32G32B32A32_SFLOAT;
+    attributeDescriptions[11].offset = offsetof(Vertex3D, texSplat3);
 
     VkPipelineVertexInputStateCreateInfo vertexInputInfo{};
     vertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;

@@ -25,9 +25,15 @@ struct LevelData {
         std::vector<float> heightmap;
         std::vector<glm::vec3> colormap;
         std::vector<float> paintAlphamap;
+        std::vector<glm::vec4> splatmap0;   // Weights for textures 0-3
+        std::vector<glm::vec4> splatmap1;   // Weights for textures 4-7
+        std::vector<glm::vec4> splatmap2;   // Weights for textures 8-11
+        std::vector<glm::vec4> splatmap3;   // Weights for textures 12-15
+        std::vector<glm::vec3> texHSBmap;
+        // Legacy fields (populated when loading old format)
         std::vector<glm::vec4> texWeightmap;
         std::vector<glm::uvec4> texIndicesmap;
-        std::vector<glm::vec3> texHSBmap;
+        bool isLegacy = false;
     };
     std::vector<ChunkData> chunks;
 

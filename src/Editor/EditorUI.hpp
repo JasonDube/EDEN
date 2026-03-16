@@ -96,6 +96,9 @@ using DeletePathCallback = std::function<void(int index)>;
 using SelectPathCallback = std::function<void(int index)>;
 using PathPropertyChangedCallback = std::function<void()>;
 
+// Terrain texture slot callback — fires when user wants to assign a texture to a slot
+using AssignTextureSlotCallback = std::function<void(int slotIndex)>;
+
 // Script callbacks
 using ScriptAddedCallback = std::function<void(int objectIndex, const std::string& scriptName)>;
 using ScriptRemovedCallback = std::function<void(int objectIndex, const std::string& scriptName)>;
@@ -163,9 +166,20 @@ public:
     float getFogEnd() const { return m_fogEnd; }
 
     // Getters for texture color adjustments (for currently selected texture)
-    float getSelectedTexHue() const { return (&m_texHue.x)[m_selectedTexture]; }
-    float getSelectedTexSaturation() const { return (&m_texSaturation.x)[m_selectedTexture]; }
-    float getSelectedTexBrightness() const { return (&m_texBrightness.x)[m_selectedTexture]; }
+    float getSelectedTexHue() const { return m_selectedTexture < (int)m_texHue.size() ? m_texHue[m_selectedTexture] : 0.0f; }
+    float getSelectedTexSaturation() const { return m_selectedTexture < (int)m_texSat.size() ? m_texSat[m_selectedTexture] : 1.0f; }
+    float getSelectedTexBrightness() const { return m_selectedTexture < (int)m_texBright.size() ? m_texBright[m_selectedTexture] : 1.0f; }
+
+    void setTextureNames(const std::vector<std::string>& names, int count,
+                         const std::vector<glm::vec3>& colors = {}) {
+        m_textureNames = names;
+        m_textureCount = count;
+        m_textureColors = colors;
+        m_texHue.resize(count, 0.0f);
+        m_texSat.resize(count, 1.0f);
+        m_texBright.resize(count, 1.0f);
+        if (m_selectedTexture >= count) m_selectedTexture = 0;
+    }
 
     // Callbacks
     void setSpeedChangedCallback(SpeedChangedCallback callback) { m_onSpeedChanged = callback; }
@@ -173,6 +187,7 @@ public:
     void setClearSelectionCallback(ClearSelectionCallback callback) { m_onClearSelection = callback; }
     void setMoveSelectionCallback(MoveSelectionCallback callback) { m_onMoveSelection = callback; }
     void setTiltSelectionCallback(TiltSelectionCallback callback) { m_onTiltSelection = callback; }
+    void setAssignTextureSlotCallback(AssignTextureSlotCallback callback) { m_onAssignTextureSlot = callback; }
     void setImportModelCallback(ImportModelCallback callback) { m_onImportModel = callback; }
     void setBrowseModelCallback(BrowseModelCallback callback) { m_onBrowseModel = callback; }
     void setSelectObjectCallback(SelectObjectCallback callback) { m_onSelectObject = callback; }
@@ -258,6 +273,7 @@ public:
     bool& showZones() { return m_showZones; }
     bool& showMindMap() { return m_showMindMap; }
     bool& showBuildingTextures() { return m_showBuildingTextures; }
+    bool& showTextureBrowser() { return m_showTextureBrowser; }
     bool& showTerminal() { return m_showTerminal; }
     bool& showServerManager() { return m_showServerManager; }
 
@@ -490,11 +506,16 @@ private:
 
     // Texture painting
     int m_selectedTexture = 1;
+    std::vector<std::string> m_textureNames{"Grass", "Sand/Dirt", "Rock", "Snow"};
+    int m_textureCount = 4;
+    std::vector<glm::vec3> m_textureColors;
 
-    // Texture color adjustments (per layer: Grass, Sand, Rock, Snow)
-    glm::vec4 m_texHue{0.0f};        // Hue shift in degrees
-    glm::vec4 m_texSaturation{1.0f}; // Saturation multiplier
-    glm::vec4 m_texBrightness{1.0f}; // Brightness multiplier
+    AssignTextureSlotCallback m_onAssignTextureSlot;
+
+    // Texture color adjustments (per texture, dynamically sized)
+    std::vector<float> m_texHue;
+    std::vector<float> m_texSat;
+    std::vector<float> m_texBright;
 
     // Fog settings
     glm::vec3 m_fogColor{0.5f, 0.7f, 1.0f};
@@ -603,6 +624,7 @@ private:
     bool m_showGroveEditor = false;
     bool m_showMindMap = false;
     bool m_showBuildingTextures = false;
+    bool m_showTextureBrowser = false;
     bool m_showTerminal = false;
     bool m_showServerManager = false;
 

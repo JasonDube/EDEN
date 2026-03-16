@@ -43,8 +43,10 @@ void TerrainChunk::generate(const TerrainConfig& config) {
     m_heightmap.resize(resolution * resolution);
     m_colormap.resize(resolution * resolution, glm::vec3(-1.0f));  // -1 = use height-based color
     m_paintAlphamap.resize(resolution * resolution, 0.0f);  // No paint by default
-    m_texWeightmap.resize(resolution * resolution, glm::vec4(1.0f, 0.0f, 0.0f, 0.0f));  // Default to texture 0
-    m_texIndicesmap.resize(resolution * resolution, glm::uvec4(0, 1, 2, 3));  // Default texture indices 0,1,2,3
+    m_splatmap0.resize(resolution * resolution, glm::vec4(1.0f, 0.0f, 0.0f, 0.0f));  // Default: 100% texture 0
+    m_splatmap1.resize(resolution * resolution, glm::vec4(0.0f));
+    m_splatmap2.resize(resolution * resolution, glm::vec4(0.0f));
+    m_splatmap3.resize(resolution * resolution, glm::vec4(0.0f));
     m_selectionmap.resize(resolution * resolution, 0.0f);  // No selection by default
     m_texHSBmap.resize(resolution * resolution, glm::vec3(0.0f, 1.0f, 1.0f));  // Default: no hue shift, normal sat/bright
     m_holemap.resize(resolution * resolution, 0.0f);  // No holes by default
@@ -86,6 +88,21 @@ void TerrainChunk::generate(const TerrainConfig& config) {
     rebuildVerticesFromHeightmap();
 }
 
+void TerrainChunk::resetToDefaults() {
+    int count = m_resolution * m_resolution;
+    std::fill(m_heightmap.begin(), m_heightmap.end(), 0.0f);
+    std::fill(m_colormap.begin(), m_colormap.end(), glm::vec3(-1.0f));
+    std::fill(m_paintAlphamap.begin(), m_paintAlphamap.end(), 0.0f);
+    std::fill(m_splatmap0.begin(), m_splatmap0.end(), glm::vec4(1.0f, 0.0f, 0.0f, 0.0f));
+    std::fill(m_splatmap1.begin(), m_splatmap1.end(), glm::vec4(0.0f));
+    std::fill(m_splatmap2.begin(), m_splatmap2.end(), glm::vec4(0.0f));
+    std::fill(m_splatmap3.begin(), m_splatmap3.end(), glm::vec4(0.0f));
+    std::fill(m_texHSBmap.begin(), m_texHSBmap.end(), glm::vec3(0.0f, 1.0f, 1.0f));
+    std::fill(m_selectionmap.begin(), m_selectionmap.end(), 0.0f);
+    std::fill(m_holemap.begin(), m_holemap.end(), 0.0f);
+    regenerateMesh();
+}
+
 void TerrainChunk::rebuildVerticesFromHeightmap() {
     float worldOffsetX = m_coord.x * (m_resolution - 1) * m_tileSize;
     float worldOffsetZ = m_coord.y * (m_resolution - 1) * m_tileSize;
@@ -116,11 +133,11 @@ void TerrainChunk::rebuildVerticesFromHeightmap() {
             float worldZ = worldOffsetZ + z * m_tileSize;
             vertex.uv = glm::vec2(worldX / 10.0f, worldZ / 10.0f);
 
-            // Texture weights from splatmap
-            vertex.texWeights = m_texWeightmap[idx];
-
-            // Texture indices (which 4 textures this vertex blends)
-            vertex.texIndices = m_texIndicesmap[idx];
+            // Splatmap weights (smoothly interpolated, no flat)
+            vertex.texSplat0 = m_splatmap0[idx];
+            vertex.texSplat1 = m_splatmap1[idx];
+            vertex.texSplat2 = m_splatmap2[idx];
+            vertex.texSplat3 = m_splatmap3[idx];
 
             // Selection weight
             vertex.selection = m_selectionmap[idx];
@@ -227,19 +244,67 @@ bool TerrainChunk::containsWorldPos(float worldX, float worldZ) const {
 void TerrainChunk::setChunkData(const std::vector<float>& heightmap,
                                  const std::vector<glm::vec3>& colormap,
                                  const std::vector<float>& paintAlphamap,
-                                 const std::vector<glm::vec4>& texWeightmap,
-                                 const std::vector<glm::uvec4>& texIndicesmap,
+                                 const std::vector<glm::vec4>& splatmap0,
+                                 const std::vector<glm::vec4>& splatmap1,
+                                 const std::vector<glm::vec4>& splatmap2,
+                                 const std::vector<glm::vec4>& splatmap3,
                                  const std::vector<glm::vec3>& texHSBmap) {
     size_t expected = static_cast<size_t>(m_resolution * m_resolution);
 
     if (heightmap.size() == expected) m_heightmap = heightmap;
     if (colormap.size() == expected) m_colormap = colormap;
     if (paintAlphamap.size() == expected) m_paintAlphamap = paintAlphamap;
-    if (texWeightmap.size() == expected) m_texWeightmap = texWeightmap;
-    if (texIndicesmap.size() == expected) m_texIndicesmap = texIndicesmap;
+    if (splatmap0.size() == expected) m_splatmap0 = splatmap0;
+    if (splatmap1.size() == expected) m_splatmap1 = splatmap1;
+    if (splatmap2.size() == expected) m_splatmap2 = splatmap2;
+    if (splatmap3.size() == expected) m_splatmap3 = splatmap3;
     if (texHSBmap.size() == expected) m_texHSBmap = texHSBmap;
 
-    // Rebuild mesh from loaded data
+    rebuildVerticesFromHeightmap();
+    m_needsUpload = true;
+}
+
+void TerrainChunk::setChunkDataLegacy(const std::vector<float>& heightmap,
+                                       const std::vector<glm::vec3>& colormap,
+                                       const std::vector<float>& paintAlphamap,
+                                       const std::vector<glm::vec4>& texWeightmap,
+                                       const std::vector<glm::uvec4>& texIndicesmap,
+                                       const std::vector<glm::vec3>& texHSBmap) {
+    size_t expected = static_cast<size_t>(m_resolution * m_resolution);
+
+    if (heightmap.size() == expected) m_heightmap = heightmap;
+    if (colormap.size() == expected) m_colormap = colormap;
+    if (paintAlphamap.size() == expected) m_paintAlphamap = paintAlphamap;
+    if (texHSBmap.size() == expected) m_texHSBmap = texHSBmap;
+
+    // Convert old indices+weights to splatmap format
+    if (texWeightmap.size() == expected && texIndicesmap.size() == expected) {
+        m_splatmap0.resize(expected, glm::vec4(0.0f));
+        m_splatmap1.resize(expected, glm::vec4(0.0f));
+        m_splatmap2.resize(expected, glm::vec4(0.0f));
+        m_splatmap3.resize(expected, glm::vec4(0.0f));
+        for (size_t i = 0; i < expected; i++) {
+            m_splatmap0[i] = glm::vec4(0.0f);
+            m_splatmap1[i] = glm::vec4(0.0f);
+            m_splatmap2[i] = glm::vec4(0.0f);
+            m_splatmap3[i] = glm::vec4(0.0f);
+            // Scatter weights into splatmap by index
+            for (int s = 0; s < 4; s++) {
+                unsigned int texIdx = texIndicesmap[i][s];
+                float weight = texWeightmap[i][s];
+                if (texIdx < 4) {
+                    m_splatmap0[i][texIdx] += weight;
+                } else if (texIdx < 8) {
+                    m_splatmap1[i][texIdx - 4] += weight;
+                } else if (texIdx < 12) {
+                    m_splatmap2[i][texIdx - 8] += weight;
+                } else if (texIdx < 16) {
+                    m_splatmap3[i][texIdx - 12] += weight;
+                }
+            }
+        }
+    }
+
     rebuildVerticesFromHeightmap();
     m_needsUpload = true;
 }
@@ -441,14 +506,17 @@ void TerrainChunk::applyColorBrush(float worldX, float worldZ, float radius, flo
 
                 int idx = z * m_resolution + x;
 
-                // Blend the color
-                glm::vec3 currentColor = m_colormap[idx].x >= 0.0f ? m_colormap[idx] : color;
-                float blendFactor = strength * 0.1f * falloffMult;
-                m_colormap[idx] = glm::mix(currentColor, color, blendFactor);
+                // Paint alpha = how much solid color overrides texture
+                // At full strength + falloff, this goes to 1.0 (pure solid color, no texture)
+                float paintIntensity = strength * falloffMult;
 
-                // Increase paint alpha (how much color shows through texture)
+                // Blend toward target color
+                glm::vec3 currentColor = m_colormap[idx].x >= 0.0f ? m_colormap[idx] : color;
+                m_colormap[idx] = glm::mix(currentColor, color, paintIntensity);
+
+                // Set paint alpha directly — full strength = fully opaque color
                 float currentAlpha = m_paintAlphamap[idx];
-                m_paintAlphamap[idx] = std::min(1.0f, currentAlpha + blendFactor);
+                m_paintAlphamap[idx] = std::max(currentAlpha, paintIntensity);
 
                 modified = true;
             }
@@ -462,7 +530,7 @@ void TerrainChunk::applyColorBrush(float worldX, float worldZ, float radius, flo
 
 void TerrainChunk::applyTextureBrush(float worldX, float worldZ, float radius, float strength, float falloff, int textureIndex,
                                      float hue, float saturation, float brightness, const BrushShapeParams& shapeParams) {
-    if (textureIndex < 0) return;
+    if (textureIndex < 0 || textureIndex >= 16) return;
 
     glm::vec3 chunkPos = getWorldPosition();
 
@@ -490,48 +558,36 @@ void TerrainChunk::applyTextureBrush(float worldX, float worldZ, float radius, f
                 float falloffMult = 1.0f - std::pow(t, 1.0f / (1.0f - falloff * 0.9f + 0.1f));
 
                 int idx = z * m_resolution + x;
-                glm::vec4& weights = m_texWeightmap[idx];
-                glm::uvec4& indices = m_texIndicesmap[idx];
 
-                // Find if this texture index is already in our 4 slots
-                int slot = -1;
-                for (int i = 0; i < 4; i++) {
-                    if (indices[i] == static_cast<unsigned int>(textureIndex)) {
-                        slot = i;
-                        break;
-                    }
-                }
+                // Get all 16 weights as a flat array for easy manipulation
+                float w[16] = {
+                    m_splatmap0[idx].x, m_splatmap0[idx].y, m_splatmap0[idx].z, m_splatmap0[idx].w,
+                    m_splatmap1[idx].x, m_splatmap1[idx].y, m_splatmap1[idx].z, m_splatmap1[idx].w,
+                    m_splatmap2[idx].x, m_splatmap2[idx].y, m_splatmap2[idx].z, m_splatmap2[idx].w,
+                    m_splatmap3[idx].x, m_splatmap3[idx].y, m_splatmap3[idx].z, m_splatmap3[idx].w
+                };
 
-                // If not found, replace the slot with lowest weight
-                if (slot == -1) {
-                    float minWeight = weights[0];
-                    slot = 0;
-                    for (int i = 1; i < 4; i++) {
-                        if (weights[i] < minWeight) {
-                            minWeight = weights[i];
-                            slot = i;
-                        }
-                    }
-                    // Replace that slot with the new texture
-                    indices[slot] = static_cast<unsigned int>(textureIndex);
-                    weights[slot] = 0.0f;  // Start fresh
-                }
-
-                // Increase selected texture weight
+                // Increase target texture weight
                 float addAmount = strength * 0.1f * falloffMult;
-                weights[slot] += addAmount;
+                w[textureIndex] += addAmount;
 
-                // Normalize weights so they sum to 1
-                float sum = weights.x + weights.y + weights.z + weights.w;
+                // Normalize so all 16 weights sum to 1
+                float sum = 0.0f;
+                for (int i = 0; i < 16; i++) sum += w[i];
                 if (sum > 0.0f) {
-                    weights /= sum;
+                    for (int i = 0; i < 16; i++) w[i] /= sum;
                 }
+
+                // Write back
+                m_splatmap0[idx] = glm::vec4(w[0], w[1], w[2], w[3]);
+                m_splatmap1[idx] = glm::vec4(w[4], w[5], w[6], w[7]);
+                m_splatmap2[idx] = glm::vec4(w[8], w[9], w[10], w[11]);
+                m_splatmap3[idx] = glm::vec4(w[12], w[13], w[14], w[15]);
 
                 // Blend HSB values towards the brush settings
                 glm::vec3& hsb = m_texHSBmap[idx];
                 glm::vec3 targetHSB(hue, saturation, brightness);
-                float blendFactor = addAmount;  // Same as texture weight change
-                hsb = glm::mix(hsb, targetHSB, blendFactor);
+                hsb = glm::mix(hsb, targetHSB, addAmount);
 
                 modified = true;
             }
@@ -998,6 +1054,91 @@ void Terrain::applyTextureBrush(float worldX, float worldZ, float radius, float 
             vc.chunk->applyTextureBrush(localX, localZ, radius, strength, falloff, textureIndex, hue, saturation, brightness, shapeParams);
         }
     }
+
+}
+
+void Terrain::syncEdgeTextureData() {
+    // Collect modified set first to avoid cascade from marking neighbors
+    std::vector<glm::ivec2> modified;
+    for (auto& [coord, chunk] : m_chunks) {
+        if (chunk->needsUpload()) modified.push_back(coord);
+    }
+    for (auto& coord : modified) {
+        auto& chunk = m_chunks[coord];
+        int res = chunk->getResolution();
+
+        // Right neighbor
+        auto rightIt = m_chunks.find(glm::ivec2(coord.x + 1, coord.y));
+        if (rightIt != m_chunks.end()) {
+            auto& right = rightIt->second;
+            for (int z = 0; z < res; z++) {
+                int srcIdx = z * res + (res - 1);
+                int dstIdx = z * res + 0;
+                right->m_splatmap0[dstIdx] = chunk->m_splatmap0[srcIdx];
+                right->m_splatmap1[dstIdx] = chunk->m_splatmap1[srcIdx];
+                right->m_splatmap2[dstIdx] = chunk->m_splatmap2[srcIdx];
+                right->m_splatmap3[dstIdx] = chunk->m_splatmap3[srcIdx];
+                right->m_texHSBmap[dstIdx] = chunk->m_texHSBmap[srcIdx];
+                right->m_colormap[dstIdx] = chunk->m_colormap[srcIdx];
+                right->m_paintAlphamap[dstIdx] = chunk->m_paintAlphamap[srcIdx];
+            }
+            right->m_needsUpload = true;
+        }
+
+        // Bottom neighbor
+        auto bottomIt = m_chunks.find(glm::ivec2(coord.x, coord.y + 1));
+        if (bottomIt != m_chunks.end()) {
+            auto& bottom = bottomIt->second;
+            for (int x = 0; x < res; x++) {
+                int srcIdx = (res - 1) * res + x;
+                int dstIdx = x;
+                bottom->m_splatmap0[dstIdx] = chunk->m_splatmap0[srcIdx];
+                bottom->m_splatmap1[dstIdx] = chunk->m_splatmap1[srcIdx];
+                bottom->m_splatmap2[dstIdx] = chunk->m_splatmap2[srcIdx];
+                bottom->m_splatmap3[dstIdx] = chunk->m_splatmap3[srcIdx];
+                bottom->m_texHSBmap[dstIdx] = chunk->m_texHSBmap[srcIdx];
+                bottom->m_colormap[dstIdx] = chunk->m_colormap[srcIdx];
+                bottom->m_paintAlphamap[dstIdx] = chunk->m_paintAlphamap[srcIdx];
+            }
+            bottom->m_needsUpload = true;
+        }
+
+        // Left neighbor
+        auto leftIt = m_chunks.find(glm::ivec2(coord.x - 1, coord.y));
+        if (leftIt != m_chunks.end()) {
+            auto& left = leftIt->second;
+            for (int z = 0; z < res; z++) {
+                int srcIdx = z * res;
+                int dstIdx = z * res + (res - 1);
+                left->m_splatmap0[dstIdx] = chunk->m_splatmap0[srcIdx];
+                left->m_splatmap1[dstIdx] = chunk->m_splatmap1[srcIdx];
+                left->m_splatmap2[dstIdx] = chunk->m_splatmap2[srcIdx];
+                left->m_splatmap3[dstIdx] = chunk->m_splatmap3[srcIdx];
+                left->m_texHSBmap[dstIdx] = chunk->m_texHSBmap[srcIdx];
+                left->m_colormap[dstIdx] = chunk->m_colormap[srcIdx];
+                left->m_paintAlphamap[dstIdx] = chunk->m_paintAlphamap[srcIdx];
+            }
+            left->m_needsUpload = true;
+        }
+
+        // Top neighbor
+        auto topIt = m_chunks.find(glm::ivec2(coord.x, coord.y - 1));
+        if (topIt != m_chunks.end()) {
+            auto& top = topIt->second;
+            for (int x = 0; x < res; x++) {
+                int srcIdx = x;
+                int dstIdx = (res - 1) * res + x;
+                top->m_splatmap0[dstIdx] = chunk->m_splatmap0[srcIdx];
+                top->m_splatmap1[dstIdx] = chunk->m_splatmap1[srcIdx];
+                top->m_splatmap2[dstIdx] = chunk->m_splatmap2[srcIdx];
+                top->m_splatmap3[dstIdx] = chunk->m_splatmap3[srcIdx];
+                top->m_texHSBmap[dstIdx] = chunk->m_texHSBmap[srcIdx];
+                top->m_colormap[dstIdx] = chunk->m_colormap[srcIdx];
+                top->m_paintAlphamap[dstIdx] = chunk->m_paintAlphamap[srcIdx];
+            }
+            top->m_needsUpload = true;
+        }
+    }
 }
 
 std::shared_ptr<TerrainChunk> Terrain::getChunkAt(float worldX, float worldZ) {
@@ -1167,6 +1308,222 @@ void Terrain::tiltSelection(float tiltX, float tiltZ) {
     }
     if (anyModified) {
         updateSelectionCache();
+    }
+}
+
+void Terrain::stitchChunkEdges() {
+    // For each chunk, ensure shared edge vertices are identical between neighbors.
+    // Average heights and texture data so both sides match perfectly.
+    for (auto& [coord, chunk] : m_chunks) {
+        int res = chunk->getResolution();
+
+        // Stitch right edge: chunk's x=res-1 ↔ right neighbor's x=0
+        auto rightIt = m_chunks.find(glm::ivec2(coord.x + 1, coord.y));
+        if (rightIt != m_chunks.end()) {
+            auto& right = rightIt->second;
+            for (int z = 0; z < res; z++) {
+                int idxL = z * res + (res - 1);
+                int idxR = z * res + 0;
+
+                // Average heights
+                float avgHeight = (chunk->m_heightmap[idxL] + right->m_heightmap[idxR]) * 0.5f;
+                chunk->m_heightmap[idxL] = avgHeight;
+                right->m_heightmap[idxR] = avgHeight;
+
+                // Average all per-vertex data
+                chunk->m_colormap[idxL] = right->m_colormap[idxR] =
+                    (chunk->m_colormap[idxL] + right->m_colormap[idxR]) * 0.5f;
+                chunk->m_paintAlphamap[idxL] = right->m_paintAlphamap[idxR] =
+                    (chunk->m_paintAlphamap[idxL] + right->m_paintAlphamap[idxR]) * 0.5f;
+                chunk->m_splatmap0[idxL] = right->m_splatmap0[idxR] =
+                    (chunk->m_splatmap0[idxL] + right->m_splatmap0[idxR]) * 0.5f;
+                chunk->m_splatmap1[idxL] = right->m_splatmap1[idxR] =
+                    (chunk->m_splatmap1[idxL] + right->m_splatmap1[idxR]) * 0.5f;
+                chunk->m_splatmap2[idxL] = right->m_splatmap2[idxR] =
+                    (chunk->m_splatmap2[idxL] + right->m_splatmap2[idxR]) * 0.5f;
+                chunk->m_splatmap3[idxL] = right->m_splatmap3[idxR] =
+                    (chunk->m_splatmap3[idxL] + right->m_splatmap3[idxR]) * 0.5f;
+                chunk->m_texHSBmap[idxL] = right->m_texHSBmap[idxR] =
+                    (chunk->m_texHSBmap[idxL] + right->m_texHSBmap[idxR]) * 0.5f;
+            }
+        }
+
+        // Stitch bottom edge: chunk's z=res-1 ↔ bottom neighbor's z=0
+        auto bottomIt = m_chunks.find(glm::ivec2(coord.x, coord.y + 1));
+        if (bottomIt != m_chunks.end()) {
+            auto& bottom = bottomIt->second;
+            for (int x = 0; x < res; x++) {
+                int idxT = (res - 1) * res + x;
+                int idxB = 0 * res + x;
+
+                float avgHeight = (chunk->m_heightmap[idxT] + bottom->m_heightmap[idxB]) * 0.5f;
+                chunk->m_heightmap[idxT] = avgHeight;
+                bottom->m_heightmap[idxB] = avgHeight;
+
+                chunk->m_colormap[idxT] = bottom->m_colormap[idxB] =
+                    (chunk->m_colormap[idxT] + bottom->m_colormap[idxB]) * 0.5f;
+                chunk->m_paintAlphamap[idxT] = bottom->m_paintAlphamap[idxB] =
+                    (chunk->m_paintAlphamap[idxT] + bottom->m_paintAlphamap[idxB]) * 0.5f;
+                chunk->m_splatmap0[idxT] = bottom->m_splatmap0[idxB] =
+                    (chunk->m_splatmap0[idxT] + bottom->m_splatmap0[idxB]) * 0.5f;
+                chunk->m_splatmap1[idxT] = bottom->m_splatmap1[idxB] =
+                    (chunk->m_splatmap1[idxT] + bottom->m_splatmap1[idxB]) * 0.5f;
+                chunk->m_splatmap2[idxT] = bottom->m_splatmap2[idxB] =
+                    (chunk->m_splatmap2[idxT] + bottom->m_splatmap2[idxB]) * 0.5f;
+                chunk->m_splatmap3[idxT] = bottom->m_splatmap3[idxB] =
+                    (chunk->m_splatmap3[idxT] + bottom->m_splatmap3[idxB]) * 0.5f;
+                chunk->m_texHSBmap[idxT] = bottom->m_texHSBmap[idxB] =
+                    (chunk->m_texHSBmap[idxT] + bottom->m_texHSBmap[idxB]) * 0.5f;
+            }
+        }
+    }
+
+    // Rebuild all chunks — rebuildVerticesFromHeightmap recalculates normals,
+    // but edge normals are still wrong because calculateNormal clamps at boundaries.
+    // Fix: after rebuilding, copy edge normals from neighbors to ensure smooth lighting.
+    for (auto& [coord, chunk] : m_chunks) {
+        chunk->rebuildVerticesFromHeightmap();
+    }
+
+    // Second pass: fix edge normals using neighbor height data
+    for (auto& [coord, chunk] : m_chunks) {
+        int res = chunk->getResolution();
+
+        // Fix right-edge normals (x = res-1): need height from right neighbor at x=1
+        auto rightIt = m_chunks.find(glm::ivec2(coord.x + 1, coord.y));
+        if (rightIt != m_chunks.end()) {
+            auto& right = rightIt->second;
+            for (int z = 0; z < res; z++) {
+                int idx = z * res + (res - 1);
+                float hL = chunk->getHeightAtLocal(res - 2, z);
+                float hR = right->getHeightAtLocal(1, z);  // Use neighbor's data
+                float hD = chunk->getHeightAtLocal(res - 1, std::max(0, z - 1));
+                float hU = chunk->getHeightAtLocal(res - 1, std::min(res - 1, z + 1));
+                chunk->m_vertices[idx].normal = glm::normalize(glm::vec3(hL - hR, 2.0f * chunk->getTileSize(), hD - hU));
+            }
+        }
+
+        // Fix left-edge normals (x = 0): need height from left neighbor at x=res-2
+        auto leftIt = m_chunks.find(glm::ivec2(coord.x - 1, coord.y));
+        if (leftIt != m_chunks.end()) {
+            auto& left = leftIt->second;
+            for (int z = 0; z < res; z++) {
+                int idx = z * res + 0;
+                float hL = left->getHeightAtLocal(res - 2, z);  // Use neighbor's data
+                float hR = chunk->getHeightAtLocal(1, z);
+                float hD = chunk->getHeightAtLocal(0, std::max(0, z - 1));
+                float hU = chunk->getHeightAtLocal(0, std::min(res - 1, z + 1));
+                chunk->m_vertices[idx].normal = glm::normalize(glm::vec3(hL - hR, 2.0f * chunk->getTileSize(), hD - hU));
+            }
+        }
+
+        // Fix bottom-edge normals (z = res-1): need height from bottom neighbor at z=1
+        auto bottomIt = m_chunks.find(glm::ivec2(coord.x, coord.y + 1));
+        if (bottomIt != m_chunks.end()) {
+            auto& bottom = bottomIt->second;
+            for (int x = 0; x < res; x++) {
+                int idx = (res - 1) * res + x;
+                float hL = chunk->getHeightAtLocal(std::max(0, x - 1), res - 1);
+                float hR = chunk->getHeightAtLocal(std::min(res - 1, x + 1), res - 1);
+                float hD = chunk->getHeightAtLocal(x, res - 2);
+                float hU = bottom->getHeightAtLocal(x, 1);  // Use neighbor's data
+                chunk->m_vertices[idx].normal = glm::normalize(glm::vec3(hL - hR, 2.0f * chunk->getTileSize(), hD - hU));
+            }
+        }
+
+        // Fix top-edge normals (z = 0): need height from top neighbor at z=res-2
+        auto topIt = m_chunks.find(glm::ivec2(coord.x, coord.y - 1));
+        if (topIt != m_chunks.end()) {
+            auto& top = topIt->second;
+            for (int x = 0; x < res; x++) {
+                int idx = 0 * res + x;
+                float hL = chunk->getHeightAtLocal(std::max(0, x - 1), 0);
+                float hR = chunk->getHeightAtLocal(std::min(res - 1, x + 1), 0);
+                float hD = top->getHeightAtLocal(x, res - 2);  // Use neighbor's data
+                float hU = chunk->getHeightAtLocal(x, 1);
+                chunk->m_vertices[idx].normal = glm::normalize(glm::vec3(hL - hR, 2.0f * chunk->getTileSize(), hD - hU));
+            }
+        }
+
+        chunk->m_needsUpload = true;
+    }
+}
+
+void Terrain::stitchModifiedChunkEdges() {
+    // Collect modified chunks first to avoid cascade
+    std::vector<glm::ivec2> modifiedCoords;
+    for (auto& [coord, chunk] : m_chunks) {
+        if (chunk->needsUpload()) modifiedCoords.push_back(coord);
+    }
+
+    // Helper: copy ALL per-vertex data from src to dst at given indices
+    auto copyEdgeVertex = [](std::shared_ptr<TerrainChunk>& src, int srcIdx,
+                             std::shared_ptr<TerrainChunk>& dst, int dstIdx) {
+        // Average heights and colors (these blend smoothly)
+        dst->m_heightmap[dstIdx] = src->m_heightmap[srcIdx] =
+            (src->m_heightmap[srcIdx] + dst->m_heightmap[dstIdx]) * 0.5f;
+        dst->m_colormap[dstIdx] = src->m_colormap[srcIdx] =
+            (src->m_colormap[srcIdx] + dst->m_colormap[dstIdx]) * 0.5f;
+        dst->m_paintAlphamap[dstIdx] = src->m_paintAlphamap[srcIdx] =
+            (src->m_paintAlphamap[srcIdx] + dst->m_paintAlphamap[dstIdx]) * 0.5f;
+
+        // For texture data: copy splatmap from modified chunk (src) to neighbor (dst)
+        dst->m_splatmap0[dstIdx] = src->m_splatmap0[srcIdx];
+        dst->m_splatmap1[dstIdx] = src->m_splatmap1[srcIdx];
+        dst->m_splatmap2[dstIdx] = src->m_splatmap2[srcIdx];
+        dst->m_splatmap3[dstIdx] = src->m_splatmap3[srcIdx];
+        dst->m_texHSBmap[dstIdx] = src->m_texHSBmap[srcIdx];
+    };
+
+    for (auto& coord : modifiedCoords) {
+        auto& chunk = m_chunks[coord];
+        int res = chunk->getResolution();
+
+        // Stitch right edge: copy from this chunk to right neighbor
+        auto rightIt = m_chunks.find(glm::ivec2(coord.x + 1, coord.y));
+        if (rightIt != m_chunks.end()) {
+            auto& right = rightIt->second;
+            for (int z = 0; z < res; z++) {
+                copyEdgeVertex(chunk, z * res + (res - 1), right, z * res + 0);
+            }
+            right->rebuildVerticesFromHeightmap();
+            right->m_needsUpload = true;
+        }
+
+        // Stitch bottom edge
+        auto bottomIt = m_chunks.find(glm::ivec2(coord.x, coord.y + 1));
+        if (bottomIt != m_chunks.end()) {
+            auto& bottom = bottomIt->second;
+            for (int x = 0; x < res; x++) {
+                copyEdgeVertex(chunk, (res - 1) * res + x, bottom, x);
+            }
+            bottom->rebuildVerticesFromHeightmap();
+            bottom->m_needsUpload = true;
+        }
+
+        // Stitch left edge
+        auto leftIt = m_chunks.find(glm::ivec2(coord.x - 1, coord.y));
+        if (leftIt != m_chunks.end()) {
+            auto& left = leftIt->second;
+            for (int z = 0; z < res; z++) {
+                copyEdgeVertex(chunk, z * res, left, z * res + (res - 1));
+            }
+            left->rebuildVerticesFromHeightmap();
+            left->m_needsUpload = true;
+        }
+
+        // Stitch top edge
+        auto topIt = m_chunks.find(glm::ivec2(coord.x, coord.y - 1));
+        if (topIt != m_chunks.end()) {
+            auto& top = topIt->second;
+            for (int x = 0; x < res; x++) {
+                copyEdgeVertex(chunk, x, top, (res - 1) * res + x);
+            }
+            top->rebuildVerticesFromHeightmap();
+            top->m_needsUpload = true;
+        }
+
+        chunk->rebuildVerticesFromHeightmap();
     }
 }
 
