@@ -32,6 +32,10 @@ public:
     // Start a looping sound (returns loop ID, or -1 on failure)
     int startLoop(const std::string& filepath, float volume = 1.0f);
 
+    // Start a seamless crossfade loop (two overlapping copies, no gap)
+    // Returns loop ID for the pair, or -1 on failure
+    int startCrossfadeLoop(const std::string& filepath, float volume = 1.0f);
+
     // Stop a looping sound by ID
     void stopLoop(int loopId);
 

@@ -186,6 +186,57 @@ int Audio::startLoop(const std::string& filepath, float volume) {
     return loopId;
 }
 
+int Audio::startCrossfadeLoop(const std::string& filepath, float volume) {
+    if (!m_initialized) return -1;
+
+    std::string absPath = filepath;
+    if (!std::filesystem::path(filepath).is_absolute()) {
+        absPath = std::filesystem::absolute(filepath).string();
+    }
+
+    // Create first copy
+    ma_sound* sound1 = new ma_sound();
+    ma_result r1 = ma_sound_init_from_file(
+        &m_impl->engine, absPath.c_str(), MA_SOUND_FLAG_DECODE,
+        nullptr, nullptr, sound1);
+    if (r1 != MA_SUCCESS) { delete sound1; return -1; }
+
+    // Create second copy
+    ma_sound* sound2 = new ma_sound();
+    ma_result r2 = ma_sound_init_from_file(
+        &m_impl->engine, absPath.c_str(), MA_SOUND_FLAG_DECODE,
+        nullptr, nullptr, sound2);
+    if (r2 != MA_SUCCESS) {
+        ma_sound_uninit(sound1); delete sound1; delete sound2;
+        return -1;
+    }
+
+    // Get duration and seek second copy to halfway
+    float lengthSec = 0.0f;
+    ma_sound_get_length_in_seconds(sound1, &lengthSec);
+    ma_uint64 lengthFrames = 0;
+    ma_sound_get_length_in_pcm_frames(sound1, &lengthFrames);
+    ma_uint64 halfFrames = lengthFrames / 2;
+
+    ma_sound_set_looping(sound1, MA_TRUE);
+    ma_sound_set_volume(sound1, volume);
+    ma_sound_set_looping(sound2, MA_TRUE);
+    ma_sound_set_volume(sound2, volume);
+
+    // Seek second sound to halfway point
+    ma_sound_seek_to_pcm_frame(sound2, halfFrames);
+
+    ma_sound_start(sound1);
+    ma_sound_start(sound2);
+
+    // Store both under consecutive IDs, return first
+    int loopId1 = m_impl->nextLoopId++;
+    int loopId2 = m_impl->nextLoopId++;
+    m_impl->loops[loopId1] = sound1;
+    m_impl->loops[loopId2] = sound2;
+    return loopId1; // stopLoop on loopId1 will stop one; caller should stop loopId1+1 too
+}
+
 void Audio::stopLoop(int loopId) {
     if (!m_initialized || !m_impl) return;
 

@@ -47,8 +47,8 @@ using UndoPathPointCallback = std::function<void()>;
 using CreateTubeCallback = std::function<void(float radius, int segments, const glm::vec3& color)>;
 using CreateRoadCallback = std::function<void(float width, const glm::vec3& color, bool useFixedY, float fixedY)>;
 using WaterChangedCallback = std::function<void(float level, float amplitude, float frequency, bool visible)>;
-using ApplyBuildingTextureCallback = std::function<void(SceneObject* target, int textureIndex, float uScale, float vScale)>;
-using ApplyFaceTextureCallback = std::function<void(int textureIndex, float uScale, float vScale)>;
+using ApplyBuildingTextureCallback = std::function<void(SceneObject* target, int textureIndex, float uScale, float vScale, int rotationDeg)>;
+using ApplyFaceTextureCallback = std::function<void(int textureIndex, float uScale, float vScale, int rotationDeg)>;
 using FileNewCallback = std::function<void()>;
 using NewTestLevelCallback = std::function<void()>;
 using NewSpaceLevelCallback = std::function<void()>;
@@ -274,6 +274,7 @@ public:
     bool& showMindMap() { return m_showMindMap; }
     bool& showBuildingTextures() { return m_showBuildingTextures; }
     bool& showTextureBrowser() { return m_showTextureBrowser; }
+    bool& showImageReferences() { return m_showImageReferences; }
     bool& showTerminal() { return m_showTerminal; }
     bool& showServerManager() { return m_showServerManager; }
 
@@ -440,6 +441,7 @@ public:
     int getBuildingTextureCount() const { return static_cast<int>(m_buildingTextures.size()); }
     float getBuildingTexScaleU() const { return m_buildingTexScaleU; }
     float getBuildingTexScaleV() const { return m_buildingTexScaleV; }
+    int getBuildingTexRotation() const { return m_buildingTexRotation; }
     void setApplyBuildingTextureCallback(ApplyBuildingTextureCallback cb) { m_onApplyBuildingTexture = std::move(cb); }
     void setApplyFaceTextureCallback(ApplyFaceTextureCallback cb) { m_onApplyFaceTexture = std::move(cb); }
     void setFaceSelectedIndices(const std::vector<int>& indices) { m_faceSelectedIndices = indices; }
@@ -625,6 +627,7 @@ private:
     bool m_showMindMap = false;
     bool m_showBuildingTextures = false;
     bool m_showTextureBrowser = false;
+    bool m_showImageReferences = false;
     bool m_showTerminal = false;
     bool m_showServerManager = false;
 
@@ -751,6 +754,7 @@ private:
     int m_selectedBuildingTexture = -1;
     float m_buildingTexScaleU = 1.0f;
     float m_buildingTexScaleV = 1.0f;
+    int m_buildingTexRotation = 0; // 0, 90, 180, 270 degrees
     ApplyBuildingTextureCallback m_onApplyBuildingTexture;
     ApplyFaceTextureCallback m_onApplyFaceTexture;
     std::vector<int> m_faceSelectedIndices;  // Object indices from Alt+click face selection

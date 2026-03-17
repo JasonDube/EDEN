@@ -62,6 +62,14 @@ add_custom_command(TARGET terrain_editor POST_BUILD
         $<TARGET_FILE_DIR:terrain_editor>/sounds
 )
 
+# Copy game asset sounds to build directory
+add_custom_command(TARGET terrain_editor POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E make_directory $<TARGET_FILE_DIR:terrain_editor>/assets/sounds
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+        ${CMAKE_CURRENT_SOURCE_DIR}/assets/sounds
+        $<TARGET_FILE_DIR:terrain_editor>/assets/sounds
+)
+
 # Copy splash image to build directory
 add_custom_command(TARGET terrain_editor POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different

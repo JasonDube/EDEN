@@ -202,6 +202,7 @@ void EditorUI::renderMenuBar() {
             ImGui::MenuItem("AI Mind Map", nullptr, &m_showMindMap);
             ImGui::MenuItem("Building Textures", nullptr, &m_showBuildingTextures);
             ImGui::MenuItem("Texture Browser", nullptr, &m_showTextureBrowser);
+            ImGui::MenuItem("Image References", nullptr, &m_showImageReferences);
             ImGui::MenuItem("Terminal", "Ctrl+`", &m_showTerminal);
             ImGui::MenuItem("Servers", nullptr, &m_showServerManager);
             ImGui::Separator();
@@ -3613,15 +3614,28 @@ void EditorUI::renderBuildingTextureWindow() {
     // UV scale controls
     ImGui::Separator();
     ImGui::Text("Texture Scale:");
-    ImGui::DragFloat("U Scale", &m_buildingTexScaleU, 0.05f, 0.1f, 20.0f, "%.2f");
-    ImGui::DragFloat("V Scale", &m_buildingTexScaleV, 0.05f, 0.1f, 20.0f, "%.2f");
+    ImGui::SetNextItemWidth(-1);
+    ImGui::InputFloat("U Scale", &m_buildingTexScaleU, 0.05f, 0.1f, "%.2f");
+    ImGui::SetNextItemWidth(-1);
+    ImGui::InputFloat("V Scale", &m_buildingTexScaleV, 0.05f, 0.1f, "%.2f");
+    m_buildingTexScaleU = std::max(m_buildingTexScaleU, 0.01f);
+    m_buildingTexScaleV = std::max(m_buildingTexScaleV, 0.01f);
     if (ImGui::Button("Reset Scale")) {
         m_buildingTexScaleU = 1.0f;
         m_buildingTexScaleV = 1.0f;
+        m_buildingTexRotation = 0;
     }
     ImGui::SameLine();
     if (ImGui::Button("Lock UV")) {
         m_buildingTexScaleV = m_buildingTexScaleU;
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Rotate 90")) {
+        m_buildingTexRotation = (m_buildingTexRotation + 90) % 360;
+    }
+    if (m_buildingTexRotation != 0) {
+        ImGui::SameLine();
+        ImGui::Text("%d deg", m_buildingTexRotation);
     }
 
     ImGui::Separator();
@@ -3637,7 +3651,8 @@ void EditorUI::renderBuildingTextureWindow() {
         if (ImGui::Button(label.c_str(), ImVec2(-1, 0))) {
             if (m_onApplyFaceTexture) {
                 m_onApplyFaceTexture(m_selectedBuildingTexture,
-                                     m_buildingTexScaleU, m_buildingTexScaleV);
+                                     m_buildingTexScaleU, m_buildingTexScaleV,
+                                     m_buildingTexRotation);
             }
         }
     } else if (hasObjectSelected) {
@@ -3651,7 +3666,8 @@ void EditorUI::renderBuildingTextureWindow() {
                 if (m_onApplyBuildingTexture) {
                     m_onApplyBuildingTexture(m_sceneObjects[m_selectedObjectIndex],
                                             m_selectedBuildingTexture,
-                                            m_buildingTexScaleU, m_buildingTexScaleV);
+                                            m_buildingTexScaleU, m_buildingTexScaleV,
+                                            m_buildingTexRotation);
                 }
             }
         } else if (isBuildingPart) {

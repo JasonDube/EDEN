@@ -27,6 +27,7 @@
 #include "Editor/BinaryLevelWriter.hpp"
 #include "Editor/BinaryLevelReader.hpp"
 #include "Editor/TextureBrowser.hpp"
+#include "Editor/ImageReferences.hpp"
 #include "Renderer/AINodeRenderer.hpp"
 #include "Renderer/DialogueBubbleRenderer.hpp"
 #include "Network/AsyncHttpClient.hpp"
@@ -348,6 +349,7 @@ protected:
         loadGroveLogoTexture();
         loadBuildingTextures();
         m_textureBrowser.init(getContext());
+        m_imageReferences.init(getContext());
         // Only load EDEN OS hotbar inventory if loading the original OS background level
         {
             std::string defaultLevel = getDefaultLevelPath();
@@ -1142,6 +1144,7 @@ protected:
         cleanupGroveLogoTexture();
         cleanupBuildingTextures();
         m_textureBrowser.cleanup();
+        m_imageReferences.cleanup();
         if (m_groveVm) { grove_destroy(m_groveVm); m_groveVm = nullptr; }
 
         if (m_mcpServer) {
@@ -1196,6 +1199,21 @@ protected:
                 }
                 m_terminal.setLockSize(true);  // Don't let ImGui window resize the terminal
                 m_terminalScreenBound = true;
+            }
+        }
+
+        // Spin attached fans around their shaft axis
+        if (!m_spinningFans.empty()) {
+            float spinSpeed = 360.0f; // degrees per second
+            for (auto& sf : m_spinningFans) {
+                sf.angle += spinSpeed * deltaTime;
+                if (sf.angle > 360.0f) sf.angle -= 360.0f;
+                // Build rotation: base euler first, then spin around axis
+                glm::quat baseQ = glm::quat(glm::radians(sf.baseEuler));
+                glm::quat spinQ = glm::angleAxis(glm::radians(sf.angle), sf.axis);
+                glm::quat finalQ = spinQ * baseQ;
+                glm::vec3 finalEuler = glm::degrees(glm::eulerAngles(finalQ));
+                sf.obj->setEulerRotation(finalEuler);
             }
         }
 
@@ -1612,6 +1630,11 @@ protected:
             // Texture Browser window
             if (m_editorUI.showTextureBrowser()) {
                 m_textureBrowser.render(&m_editorUI.showTextureBrowser());
+            }
+
+            // Image References window
+            if (m_editorUI.showImageReferences()) {
+                m_imageReferences.render(&m_editorUI.showImageReferences());
             }
 
             // Wall draw / foundation preview (green wireframe box)
@@ -2375,7 +2398,7 @@ protected:
             std::vector<glm::vec3> gameGridLines;
             std::vector<glm::vec3> selectedGridLines;
 
-            bool anyBrushActive = m_hSlabBrushMode || m_wallBrushMode || m_framePlacementMode;
+            bool anyBrushActive = m_hSlabBrushMode || m_wallBrushMode || m_framePlacementMode || m_buildMoveMode || m_showSiloConfig;
             for (auto& obj : m_sceneObjects) {
                 if (!obj) continue;
                 const auto& bt = obj->getBuildingType();
@@ -2949,17 +2972,19 @@ private:
             importModel(path);
         });
 
-        m_editorUI.setApplyBuildingTextureCallback([this](SceneObject* target, int textureIndex, float uScale, float vScale) {
+        m_editorUI.setApplyBuildingTextureCallback([this](SceneObject* target, int textureIndex, float uScale, float vScale, int rotationDeg) {
             if (!target || textureIndex < 0 || textureIndex >= static_cast<int>(m_buildingTextures.size())) return;
             auto& tex = m_buildingTextures[textureIndex];
             target->setTextureData(tex.pixels, tex.width, tex.height);
             m_modelRenderer->updateTexture(target->getBufferHandle(), tex.pixels.data(), tex.width, tex.height);
 
-            // Set vertex colors to white so texture shows through, and apply UV scale from fresh base UVs
+            // Set vertex colors to white so texture shows through, and apply UV scale + rotation from fresh base UVs
             if (target->hasMeshData() && target->getPrimitiveType() == PrimitiveType::Cube) {
                 auto freshMesh = PrimitiveMeshBuilder::createCube(1.0f, glm::vec4(1.0f));
                 auto vertices = target->getVertices();
                 glm::vec3 sc = target->getTransform().getScale();
+                float rotRad = glm::radians(static_cast<float>(rotationDeg));
+                float cosR = std::cos(rotRad), sinR = std::sin(rotRad);
                 for (size_t vi = 0; vi < vertices.size() && vi < freshMesh.vertices.size(); vi++) {
                     auto& v = vertices[vi];
                     v.color = glm::vec4(1.0f, 1.0f, 1.0f, 1.0f);
@@ -2975,6 +3000,13 @@ private:
                     }
                     v.texCoord.x *= faceW * uScale;
                     v.texCoord.y *= faceH * vScale;
+                    // Rotate UV around (0.5, 0.5) center
+                    if (rotationDeg != 0) {
+                        float cu = v.texCoord.x - 0.5f;
+                        float cv = v.texCoord.y - 0.5f;
+                        v.texCoord.x = cu * cosR - cv * sinR + 0.5f;
+                        v.texCoord.y = cu * sinR + cv * cosR + 0.5f;
+                    }
                 }
                 target->setMeshData(vertices, target->getIndices());
                 m_modelRenderer->updateVertices(target->getBufferHandle(), vertices);
@@ -2989,7 +3021,7 @@ private:
         });
 
         // Face-aware texture application (Alt+click face selection → apply to all selected blocks)
-        m_editorUI.setApplyFaceTextureCallback([this](int textureIndex, float uScale, float vScale) {
+        m_editorUI.setApplyFaceTextureCallback([this](int textureIndex, float uScale, float vScale, int rotationDeg) {
             if (textureIndex < 0 || textureIndex >= static_cast<int>(m_buildingTextures.size())) return;
             if (m_selectedFaces.empty()) return;
 
@@ -3013,10 +3045,18 @@ private:
                 // Set vertex colors to white so texture shows through
                 if (obj->hasMeshData()) {
                     auto vertices = obj->getVertices();
+                    float rotRad = glm::radians(static_cast<float>(rotationDeg));
+                    float cosR = std::cos(rotRad), sinR = std::sin(rotRad);
                     for (auto& v : vertices) {
                         v.color = glm::vec4(1.0f, 1.0f, 1.0f, 1.0f);
                         v.texCoord.x *= uScale;
                         v.texCoord.y *= vScale;
+                        if (rotationDeg != 0) {
+                            float cu = v.texCoord.x - 0.5f;
+                            float cv = v.texCoord.y - 0.5f;
+                            v.texCoord.x = cu * cosR - cv * sinR + 0.5f;
+                            v.texCoord.y = cu * sinR + cv * cosR + 0.5f;
+                        }
                     }
                     obj->setMeshData(vertices, obj->getIndices());
                     m_modelRenderer->updateVertices(obj->getBufferHandle(), vertices);
@@ -4222,6 +4262,18 @@ private:
             vkFreeMemory(device, m_groveLogoMemory, nullptr);
         }
         m_groveLogoLoaded = false;
+    }
+
+    // Clear selection highlight from ALL building pieces (slabs, walls, frames)
+    void clearBuildSelection() {
+        for (auto& obj : m_sceneObjects) {
+            if (!obj) continue;
+            const auto& bt = obj->getBuildingType();
+            if (bt == "platform_slab" || bt == "platform_wall" || bt == "wall_frame")
+                obj->setSelected(false);
+        }
+        m_selectedBuildPiece = -1;
+        m_editorUI.setSelectedObjectIndex(-1);
     }
 
     void assignTextureToSlot(int slot, const std::string& path) {
@@ -6208,12 +6260,7 @@ private:
                     m_wallBrushMode = false;
                     m_framePlacementMode = false;
                     m_buildMoveMode = false;
-                    if (m_selectedBuildPiece >= 0) {
-                        if (m_selectedBuildPiece < static_cast<int>(m_sceneObjects.size()) && m_sceneObjects[m_selectedBuildPiece])
-                            m_sceneObjects[m_selectedBuildPiece]->setSelected(false);
-                        m_selectedBuildPiece = -1;
-                        m_editorUI.setSelectedObjectIndex(-1);
-                    }
+                    clearBuildSelection();
                 }
             } else if (!m_isPlayMode) {
                 m_showWorldChatHistory = !m_showWorldChatHistory;
@@ -6225,11 +6272,17 @@ private:
         if (m_showSiloConfig && m_playModeCursorVisible && !ImGui::GetIO().WantTextInput) {
             if (Input::isKeyPressed(Input::KEY_H)) {
                 m_hSlabBrushMode = !m_hSlabBrushMode;
-                if (m_hSlabBrushMode) { m_wallBrushMode = false; m_framePlacementMode = false; m_buildMoveMode = false; }
+                if (m_hSlabBrushMode) {
+                    m_wallBrushMode = false; m_framePlacementMode = false; m_buildMoveMode = false;
+                    clearBuildSelection();
+                }
             }
             if (Input::isKeyPressed(Input::KEY_V)) {
                 m_wallBrushMode = !m_wallBrushMode;
-                if (m_wallBrushMode) { m_hSlabBrushMode = false; m_framePlacementMode = false; m_buildMoveMode = false; }
+                if (m_wallBrushMode) {
+                    m_hSlabBrushMode = false; m_framePlacementMode = false; m_buildMoveMode = false;
+                    clearBuildSelection();
+                }
             }
             if (Input::isKeyPressed(Input::KEY_Q)) {
                 // Clear all tools
@@ -6238,27 +6291,31 @@ private:
                 m_framePlacementMode = false;
                 m_buildMoveMode = false;
             }
-            if (Input::isKeyPressed(Input::KEY_W) && m_selectedBuildPiece >= 0
-                && m_selectedBuildPiece < static_cast<int>(m_sceneObjects.size())
-                && m_sceneObjects[m_selectedBuildPiece]) {
+            if (Input::isKeyPressed(Input::KEY_W)) {
                 m_buildMoveMode = !m_buildMoveMode;
                 if (m_buildMoveMode) {
                     m_hSlabBrushMode = false;
                     m_wallBrushMode = false;
                     m_framePlacementMode = false;
-                    m_buildMoveOrigPos = m_sceneObjects[m_selectedBuildPiece]->getTransform().getPosition();
+                    // If something is already selected, save its position for undo
+                    if (m_selectedBuildPiece >= 0
+                        && m_selectedBuildPiece < static_cast<int>(m_sceneObjects.size())
+                        && m_sceneObjects[m_selectedBuildPiece]) {
+                        m_buildMoveOrigPos = m_sceneObjects[m_selectedBuildPiece]->getTransform().getPosition();
+                    }
                 }
             }
         }
 
-        // Ctrl+1 to toggle AI context viewer
-        static bool was1KeyDown = false;
-        bool key1Down = Input::isKeyDown(Input::KEY_1);
-        if (key1Down && !was1KeyDown && !ImGui::GetIO().WantTextInput &&
-            (Input::isKeyDown(Input::KEY_LEFT_CONTROL) || Input::isKeyDown(Input::KEY_RIGHT_CONTROL))) {
+        // Ctrl+Shift+A to toggle AI context viewer
+        static bool wasAKeyDown = false;
+        bool aKeyDown = Input::isKeyDown(Input::KEY_A);
+        if (aKeyDown && !wasAKeyDown && !ImGui::GetIO().WantTextInput &&
+            (Input::isKeyDown(Input::KEY_LEFT_CONTROL) || Input::isKeyDown(Input::KEY_RIGHT_CONTROL)) &&
+            (Input::isKeyDown(Input::KEY_LEFT_SHIFT) || Input::isKeyDown(Input::KEY_RIGHT_SHIFT))) {
             m_showAIContextViewer = !m_showAIContextViewer;
         }
-        was1KeyDown = key1Down;
+        wasAKeyDown = aKeyDown;
 
         // E key to start conversation (only when not already in one)
         static bool wasEKeyDown = false;
@@ -6969,6 +7026,20 @@ private:
                                 m_toolbarSlots[i].gpuHandle = selectedFS->getBufferHandle();
                                 m_toolbarSlots[i].modelIndexCount = selectedFS->getIndexCount();
                                 m_toolbarSlots[i].is3DModel = true;
+                                m_toolbarSlots[i].modelBounds = selectedFS->getLocalBounds();
+                                m_toolbarSlots[i].modelSourcePath = selectedFS->getModelPath();
+                                if (selectedFS->hasMeshData()) {
+                                    m_toolbarSlots[i].meshVertices = selectedFS->getVertices();
+                                    m_toolbarSlots[i].meshIndices = selectedFS->getIndices();
+                                }
+                                if (selectedFS->hasTextureData()) {
+                                    m_toolbarSlots[i].textureData = selectedFS->getTextureData();
+                                    m_toolbarSlots[i].textureWidth = selectedFS->getTextureWidth();
+                                    m_toolbarSlots[i].textureHeight = selectedFS->getTextureHeight();
+                                }
+                                if (selectedFS->hasControlPoints()) {
+                                    m_toolbarSlots[i].controlPoints = selectedFS->getControlPoints();
+                                }
                                 // Remove from model spin list and void tracking before erasing
                                 m_filesystemBrowser.removeModelSpin(selectedFS);
                                 m_filesystemBrowser.removeVoidFileObj(selectedFS);
@@ -7323,6 +7394,9 @@ private:
                         m_toolbarSlots[i].textureWidth = salvObj->getTextureWidth();
                         m_toolbarSlots[i].textureHeight = salvObj->getTextureHeight();
                     }
+                    if (salvObj->hasControlPoints()) {
+                        m_toolbarSlots[i].controlPoints = salvObj->getControlPoints();
+                    }
                     m_toolbarSlots[i].is3DModel = true;
                     m_toolbarSlots[i].occupied = true;
                     m_toolbarSlots[i].displayName = salvObj->getName();
@@ -7405,12 +7479,141 @@ private:
                     obj->setTextureData(m_toolbarSlots[i].textureData,
                         m_toolbarSlots[i].textureWidth, m_toolbarSlots[i].textureHeight);
                 }
+                if (!m_toolbarSlots[i].controlPoints.empty()) {
+                    obj->setControlPoints(m_toolbarSlots[i].controlPoints);
+                }
 
                 if (ctrlHeld) {
-                    // Place mode: upright, no physics, immediately collidable
-                    obj->setEulerRotation(glm::vec3(0.0f));
-                    obj->setAABBCollision(true);
-                    std::cout << "[Place] " << obj->getName() << " placed upright" << std::endl;
+                    // Check if crosshair is on an object with compatible CPs — two-point snap attach
+                    bool cpSnapped = false;
+                    if (m_characterController && obj->hasControlPoints()) {
+                        // Find which scene object crosshair is on
+                        SceneObject* targetObj = nullptr;
+                        float bestDist = std::numeric_limits<float>::max();
+                        for (auto& so : m_sceneObjects) {
+                            if (!so || !so->hasControlPoints()) continue;
+                            float d = so->getWorldBounds().intersect(camPos, camFront);
+                            if (d >= 0 && d < 20.0f && d < bestDist) {
+                                bestDist = d;
+                                targetObj = so.get();
+                            }
+                        }
+                        if (targetObj) {
+                            // Find matching CP pairs by naming convention:
+                            // Target "gen_to_fan_1" / "gen_to_fan_2" ↔ New "fan_to_gen_1" / "fan_to_gen_2"
+                            // Convention: "<src>_to_<dst>_N" matches "<dst>_to_<src>_N"
+                            const auto& targetCPs = targetObj->getControlPoints();
+                            const auto& newCPs = obj->getControlPoints();
+                            const auto& targetVerts = targetObj->getVertices();
+                            const auto& newVerts = obj->getVertices();
+                            glm::mat4 targetModel = targetObj->getTransform().getMatrix();
+
+                            // Collect matched CP pairs (target world pos ↔ new local pos)
+                            struct CPPair { glm::vec3 targetWorld; glm::vec3 newLocal; uint32_t tVertIdx, nVertIdx; std::string tName, nName; };
+                            std::vector<CPPair> pairs;
+
+                            std::string newBase = baseName;
+                            std::transform(newBase.begin(), newBase.end(), newBase.begin(), ::tolower);
+
+                            for (const auto& tcp : targetCPs) {
+                                std::string tcpLower = tcp.name;
+                                std::transform(tcpLower.begin(), tcpLower.end(), tcpLower.begin(), ::tolower);
+                                // Check if target CP has "to_<newBase>" pattern
+                                auto toPos = tcpLower.find("_to_");
+                                if (toPos == std::string::npos) continue;
+                                std::string afterTo = tcpLower.substr(toPos + 4);
+                                // Strip trailing _N suffix to get the target name
+                                std::string afterToBase = afterTo;
+                                auto lastUnderscore = afterToBase.rfind('_');
+                                std::string suffix;
+                                if (lastUnderscore != std::string::npos) {
+                                    suffix = afterToBase.substr(lastUnderscore); // e.g. "_1"
+                                    afterToBase = afterToBase.substr(0, lastUnderscore);
+                                }
+                                if (newBase.find(afterToBase) == std::string::npos) continue;
+
+                                // Now find matching new CP: "<newBase>_to_<targetBase>_N"
+                                std::string targetBase = tcpLower.substr(0, toPos);
+                                std::string expectedNewCP = afterToBase + "_to_" + targetBase + suffix;
+
+                                for (const auto& ncp : newCPs) {
+                                    std::string ncpLower = ncp.name;
+                                    std::transform(ncpLower.begin(), ncpLower.end(), ncpLower.begin(), ::tolower);
+                                    if (ncpLower == expectedNewCP) {
+                                        if (tcp.vertexIndex < targetVerts.size() && ncp.vertexIndex < newVerts.size()) {
+                                            glm::vec3 tLocal = targetVerts[tcp.vertexIndex].position;
+                                            glm::vec3 tWorld = glm::vec3(targetModel * glm::vec4(tLocal, 1.0f));
+                                            glm::vec3 nLocal = newVerts[ncp.vertexIndex].position;
+                                            pairs.push_back({tWorld, nLocal, tcp.vertexIndex, ncp.vertexIndex, tcp.name, ncp.name});
+                                        }
+                                    }
+                                }
+                            }
+
+                            if (pairs.size() >= 2) {
+                                // Two-point alignment: match direction + position
+                                glm::vec3 tDir = glm::normalize(pairs[1].targetWorld - pairs[0].targetWorld);
+                                glm::vec3 nDir = glm::normalize(pairs[1].newLocal - pairs[0].newLocal);
+
+                                // Compute rotation from nDir to tDir (Y-axis rotation for now)
+                                float angleY = std::atan2(tDir.x, tDir.z) - std::atan2(nDir.x, nDir.z);
+
+                                // Check vertex normals at CP0 — mating faces should have opposing normals
+                                // Get target CP0 normal in world space, and new CP0 normal in local space
+                                glm::vec3 tNormal = glm::normalize(glm::vec3(
+                                    glm::transpose(glm::inverse(targetModel)) *
+                                    glm::vec4(targetVerts[pairs[0].tVertIdx].normal, 0.0f)));
+                                glm::mat4 newRot = glm::rotate(glm::mat4(1.0f), angleY, glm::vec3(0, 1, 0));
+                                glm::vec3 nNormal = glm::normalize(glm::vec3(
+                                    newRot * glm::vec4(newVerts[pairs[0].nVertIdx].normal, 0.0f)));
+                                // If normals point same direction, flip 180°
+                                if (glm::dot(tNormal, nNormal) > 0.0f) {
+                                    angleY += glm::pi<float>();
+                                    newRot = glm::rotate(glm::mat4(1.0f), angleY, glm::vec3(0, 1, 0));
+                                }
+
+                                // Rotate the first new CP's local pos, then compute translation
+                                glm::vec3 rotatedCP0 = glm::vec3(newRot * glm::vec4(pairs[0].newLocal, 1.0f));
+                                glm::vec3 translation = pairs[0].targetWorld - rotatedCP0;
+
+                                obj->getTransform().setPosition(translation);
+                                obj->setEulerRotation(glm::vec3(0.0f, glm::degrees(angleY), 0.0f));
+                                obj->setAABBCollision(false);
+                                cpSnapped = true;
+                                std::cout << "[CP Snap] 2-point: " << obj->getName()
+                                          << " (" << pairs[0].nName << "+" << pairs[1].nName << ")"
+                                          << " → " << targetObj->getName()
+                                          << " (" << pairs[0].tName << "+" << pairs[1].tName << ")" << std::endl;
+                                std::cout << "  target CP0 world: " << pairs[0].targetWorld.x << "," << pairs[0].targetWorld.y << "," << pairs[0].targetWorld.z << std::endl;
+                                std::cout << "  new CP0 local: " << pairs[0].newLocal.x << "," << pairs[0].newLocal.y << "," << pairs[0].newLocal.z << std::endl;
+                                std::cout << "  rotated CP0: " << rotatedCP0.x << "," << rotatedCP0.y << "," << rotatedCP0.z << std::endl;
+                                std::cout << "  translation: " << translation.x << "," << translation.y << "," << translation.z << std::endl;
+                                std::cout << "  angleY: " << glm::degrees(angleY) << " deg" << std::endl;
+                                // Verify: after transform, where does CP0 end up?
+                                glm::mat4 finalMat = obj->getTransform().getMatrix();
+                                glm::vec3 verifyCP0 = glm::vec3(finalMat * glm::vec4(pairs[0].newLocal, 1.0f));
+                                std::cout << "  verify CP0 world: " << verifyCP0.x << "," << verifyCP0.y << "," << verifyCP0.z << std::endl;
+                            } else if (pairs.size() == 1) {
+                                // Single-point fallback: position only, no rotation
+                                spawnPos = pairs[0].targetWorld - pairs[0].newLocal;
+                                obj->getTransform().setPosition(spawnPos);
+                                obj->setEulerRotation(glm::vec3(0.0f));
+                                obj->setAABBCollision(false);
+                                cpSnapped = true;
+                                std::cout << "[CP Snap] 1-point: " << obj->getName() << "." << pairs[0].nName
+                                          << " → " << targetObj->getName() << "." << pairs[0].tName << std::endl;
+                            } else if (!targetCPs.empty()) {
+                                m_screenMessage = "No matching control points found";
+                                m_screenMessageTimer = 3.0f;
+                            }
+                        }
+                    }
+                    if (!cpSnapped) {
+                        // Normal place mode: upright, no physics, immediately collidable
+                        obj->setEulerRotation(glm::vec3(0.0f));
+                        obj->setAABBCollision(true);
+                    }
+                    std::cout << "[Place] " << obj->getName() << " placed" << (cpSnapped ? " (CP snapped)" : " upright") << std::endl;
                 } else {
                     // Throw mode: create Jolt dynamic body
                     float throwSpeed = 10.0f;
@@ -7449,6 +7652,7 @@ private:
                 m_toolbarSlots[i].textureData.clear();
                 m_toolbarSlots[i].textureWidth = 0;
                 m_toolbarSlots[i].textureHeight = 0;
+                m_toolbarSlots[i].controlPoints.clear();
                 break;
             }
         }
@@ -8530,11 +8734,7 @@ private:
                         }
                     }
                     if (hitExistingWall) {
-                        // Deselect all, then select this wall
-                        for (auto& obj : m_sceneObjects) {
-                            if (obj && obj->getBuildingType() == "platform_wall")
-                                obj->setSelected(false);
-                        }
+                        clearBuildSelection();
                         hitExistingWall->setSelected(true);
                     }
                 }
@@ -9557,9 +9757,10 @@ private:
             }
 
             // Check for existing wall click (select for deletion)
+            // Only select a wall if it's closer than any slab we hit (don't pick through floors)
             SceneObject* hitExistingWall = nullptr;
             if (leftPressed && !m_wallBrushDrawing) {
-                float bestDist = std::numeric_limits<float>::max();
+                float bestDist = floorHit ? bestSlabDist : std::numeric_limits<float>::max();
                 for (auto& obj : m_sceneObjects) {
                     if (!obj || obj->getBuildingType() != "platform_wall") continue;
                     float dist = obj->getWorldBounds().intersect(rayO, rayD);
@@ -9569,10 +9770,7 @@ private:
                     }
                 }
                 if (hitExistingWall) {
-                    for (auto& obj : m_sceneObjects) {
-                        if (obj && obj->getBuildingType() == "platform_wall")
-                            obj->setSelected(false);
-                    }
+                    clearBuildSelection();
                     hitExistingWall->setSelected(true);
                 }
             }
@@ -9822,10 +10020,12 @@ private:
         // Update dogfight AI (handles combat)
         updateDogfighters(deltaTime);
 
-        // Building piece selection — left-click when building mode open and no brush tool active
+        // Building piece selection — left-click when building mode open and no placement brush active
+        // Also handles click-to-select when in move mode (W) with nothing selected yet
         bool buildSelectClick = false;
+        bool buildMoveSelect = m_buildMoveMode && !m_buildMoveDragging;
         if (m_isPlayMode && m_showSiloConfig && !m_hSlabBrushMode && !m_wallBrushMode && !m_framePlacementMode
-            && !m_buildMoveMode
+            && (!m_buildMoveMode || buildMoveSelect)
             && !m_filesystemBrowser.isActive() && !ImGui::GetIO().WantCaptureMouse
             && Input::isMouseButtonPressed(Input::MOUSE_LEFT)) {
             buildSelectClick = true;
@@ -9859,13 +10059,15 @@ private:
             }
 
             // Clear previous selection
-            if (m_selectedBuildPiece >= 0 && m_selectedBuildPiece < static_cast<int>(m_sceneObjects.size())) {
-                if (m_sceneObjects[m_selectedBuildPiece])
-                    m_sceneObjects[m_selectedBuildPiece]->setSelected(false);
-            }
+            // Clear ALL build piece selections (not just m_selectedBuildPiece)
+            clearBuildSelection();
             m_selectedBuildPiece = bestIdx;
             if (bestIdx >= 0) {
                 m_sceneObjects[bestIdx]->setSelected(true);
+                // If we're in move mode, save the original position so dragging can begin immediately
+                if (m_buildMoveMode) {
+                    m_buildMoveOrigPos = m_sceneObjects[bestIdx]->getTransform().getPosition();
+                }
             }
             // Sync with EditorUI so Building Textures window can apply to selection
             updateSceneObjectsList();
@@ -14188,6 +14390,8 @@ private:
                 ImGui::Checkbox("Wall Brush", &m_wallBrushMode);
                 if (m_wallBrushMode) {
                     m_framePlacementMode = false;
+                    m_buildMoveMode = false;
+                    clearBuildSelection();
                     ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.2f, 1.0f),
                         "Click+drag on platform floor to draw walls (1m thick, 8m tall)");
                     ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.2f, 1.0f),
@@ -14200,6 +14404,8 @@ private:
                 ImGui::Checkbox("Frame Placement Mode", &m_framePlacementMode);
                 if (m_framePlacementMode) {
                     m_wallBrushMode = false;
+                    m_buildMoveMode = false;
+                    clearBuildSelection();
                     ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f),
                         "Click on a platform wall to place a %dm frame", m_frameSizeSetting);
                 }
@@ -14230,6 +14436,8 @@ private:
                 if (m_hSlabBrushMode) {
                     m_wallBrushMode = false;
                     m_framePlacementMode = false;
+                    m_buildMoveMode = false;
+                    clearBuildSelection();
                     ImGui::TextColored(ImVec4(0.2f, 0.8f, 0.4f, 1.0f),
                         "Click+drag to place horizontal slab (floors/ceilings)");
                 }
@@ -14241,6 +14449,8 @@ private:
                 if (m_wallBrushMode) {
                     m_hSlabBrushMode = false;
                     m_framePlacementMode = false;
+                    m_buildMoveMode = false;
+                    clearBuildSelection();
                     ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.2f, 1.0f),
                         "Click+drag to place vertical slab (walls)");
                 }
@@ -14603,57 +14813,6 @@ private:
             && m_sceneObjects[m_selectedBuildPiece]) {
             m_editorUI.showBuildingTextures() = true;  // Keep open while piece selected
             m_editorUI.renderBuildingTextureWindow();
-
-            // Game-mode apply button (rendered after texture window so it appears below)
-            int texIdx = m_editorUI.getSelectedBuildingTexture();
-            if (texIdx >= 0 && texIdx < static_cast<int>(m_buildingTextures.size())) {
-                ImGui::SetNextWindowSize(ImVec2(280, 0), ImGuiCond_Always);
-                if (ImGui::Begin("##ApplyTexture", nullptr,
-                    ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
-                    ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings)) {
-                    if (ImGui::Button("Apply to Selected", ImVec2(-1, 0))) {
-                        auto* target = m_sceneObjects[m_selectedBuildPiece].get();
-                        auto& tex = m_buildingTextures[texIdx];
-                        float tilesPerMeter = m_editorUI.getBuildingTexScaleU();
-                        float tilesPerMeterV = m_editorUI.getBuildingTexScaleV();
-
-                        target->setTextureData(tex.pixels, tex.width, tex.height);
-                        m_modelRenderer->updateTexture(target->getBufferHandle(), tex.pixels.data(), tex.width, tex.height);
-
-                        // Regenerate UVs from scratch based on object scale so texture tiles per meter
-                        if (target->hasMeshData()) {
-                            glm::vec3 sc = target->getTransform().getScale();
-                            // Rebuild from a fresh unit cube to avoid compounding UV scales
-                            auto freshMesh = PrimitiveMeshBuilder::createCube(1.0f, glm::vec4(1.0f));
-                            auto vertices = target->getVertices();
-                            for (size_t vi = 0; vi < vertices.size() && vi < freshMesh.vertices.size(); vi++) {
-                                auto& v = vertices[vi];
-                                v.color = glm::vec4(1.0f, 1.0f, 1.0f, 1.0f);
-                                // Start from base 0-1 UVs
-                                v.texCoord = freshMesh.vertices[vi].texCoord;
-                                // Determine face orientation from normal to pick correct scale axes
-                                glm::vec3 absN = glm::abs(v.normal);
-                                float faceW, faceH;
-                                if (absN.y > absN.x && absN.y > absN.z) {
-                                    faceW = sc.x;
-                                    faceH = sc.z;
-                                } else if (absN.x > absN.z) {
-                                    faceW = sc.z;
-                                    faceH = sc.y;
-                                } else {
-                                    faceW = sc.x;
-                                    faceH = sc.y;
-                                }
-                                v.texCoord.x *= faceW * tilesPerMeter;
-                                v.texCoord.y *= faceH * tilesPerMeterV;
-                            }
-                            target->setMeshData(vertices, target->getIndices());
-                            m_modelRenderer->updateVertices(target->getBufferHandle(), vertices);
-                        }
-                    }
-                }
-                ImGui::End();
-            }
         }
         if (m_showServerManager) m_serverManager.renderImGui(&m_showServerManager);
         renderToolbarUI();
@@ -14909,6 +15068,25 @@ private:
             drawList->AddLine(ImVec2(cx, cy - size), ImVec2(cx, cy + size), color, thickness);
         }
 
+        // Screen message HUD (timed messages like "Generator ON/OFF")
+        if (m_screenMessageTimer > 0.0f) {
+            m_screenMessageTimer -= ImGui::GetIO().DeltaTime;
+            float alpha = std::min(m_screenMessageTimer, 1.0f); // fade out in last second
+            float windowW = static_cast<float>(getWindow().getWidth());
+            ImVec2 textSize = ImGui::CalcTextSize(m_screenMessage.c_str());
+            float winW = textSize.x + 30.0f;
+            ImGui::SetNextWindowPos(ImVec2((windowW - winW) * 0.5f, 100));
+            ImGui::SetNextWindowBgAlpha(0.6f * alpha);
+            if (ImGui::Begin("##ScreenMessage", nullptr,
+                ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+                ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoMove |
+                ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoInputs)) {
+                ImGui::TextColored(ImVec4(1.0f, 1.0f, 0.4f, alpha), "%s", m_screenMessage.c_str());
+            }
+            ImGui::End();
+            if (m_screenMessageTimer <= 0.0f) m_screenMessage.clear();
+        }
+
         // Cleaner Bot HUD overlay
         if (auto* bot = m_filesystemBrowser.getCleanerBot(); bot && bot->isActive()) {
             float windowW = static_cast<float>(getWindow().getWidth());
@@ -15016,6 +15194,11 @@ private:
         // Texture Browser window
         if (m_editorUI.showTextureBrowser()) {
             m_textureBrowser.render(&m_editorUI.showTextureBrowser());
+        }
+
+        // Image References window
+        if (m_editorUI.showImageReferences()) {
+            m_imageReferences.render(&m_editorUI.showImageReferences());
         }
 
         // Cleaner Bot menu (Activate / View Report)
@@ -19252,6 +19435,71 @@ private:
                 }
             }
 
+            // Generator interaction — toggle sound on/off
+            std::cout << "[Interact] Hit: " << closestObj->getName() << " bt=" << closestObj->getBuildingType() << " dist=" << closestDist << std::endl;
+            if (closestObj->getName().find("generator") != std::string::npos ||
+                closestObj->getName().find("Generator") != std::string::npos) {
+                auto it = m_generatorLoops.find(closestObj);
+                if (it != m_generatorLoops.end() && it->second >= 0) {
+                    // Currently running — turn off (stop both crossfade copies)
+                    Audio::getInstance().stopLoop(it->second);
+                    Audio::getInstance().stopLoop(it->second + 1);
+                    m_generatorLoops.erase(it);
+                    // Stop attached fans and restore their base rotation
+                    glm::vec3 genPos = closestObj->getTransform().getPosition();
+                    for (auto fanIt = m_spinningFans.begin(); fanIt != m_spinningFans.end(); ) {
+                        float dist = glm::length(fanIt->obj->getTransform().getPosition() - genPos);
+                        if (dist < 5.0f) {
+                            fanIt->obj->setEulerRotation(fanIt->baseEuler);
+                            fanIt = m_spinningFans.erase(fanIt);
+                        } else {
+                            ++fanIt;
+                        }
+                    }
+                    m_screenMessage = "Generator OFF";
+                    m_screenMessageTimer = 3.0f;
+                } else {
+                    // Not running — turn on with crossfade loop (no gap)
+                    int loopId = Audio::getInstance().startCrossfadeLoop("assets/sounds/generator.wav", 0.3f);
+                    if (loopId >= 0) {
+                        m_generatorLoops[closestObj] = loopId;
+                        // Find attached fans (nearby objects with "fan" in name)
+                        glm::vec3 genPos = closestObj->getTransform().getPosition();
+                        for (auto& so : m_sceneObjects) {
+                            if (!so) continue;
+                            std::string nameLower = so->getName();
+                            std::transform(nameLower.begin(), nameLower.end(), nameLower.begin(), ::tolower);
+                            if (nameLower.find("fan") != std::string::npos) {
+                                float dist = glm::length(so->getTransform().getPosition() - genPos);
+                                if (dist < 5.0f) {
+                                    // Compute spin axis from the fan's two CPs
+                                    glm::vec3 spinAxis(1, 0, 0); // fallback
+                                    if (so->hasControlPoints() && so->getControlPoints().size() >= 2 && so->hasMeshData()) {
+                                        const auto& cps = so->getControlPoints();
+                                        const auto& verts = so->getVertices();
+                                        if (cps[0].vertexIndex < verts.size() && cps[1].vertexIndex < verts.size()) {
+                                            glm::vec3 cp0 = verts[cps[0].vertexIndex].position;
+                                            glm::vec3 cp1 = verts[cps[1].vertexIndex].position;
+                                            glm::mat4 model = so->getTransform().getMatrix();
+                                            glm::vec3 w0 = glm::vec3(model * glm::vec4(cp0, 1.0f));
+                                            glm::vec3 w1 = glm::vec3(model * glm::vec4(cp1, 1.0f));
+                                            glm::vec3 dir = w1 - w0;
+                                            if (glm::length(dir) > 0.001f) {
+                                                spinAxis = glm::normalize(dir);
+                                            }
+                                        }
+                                    }
+                                    m_spinningFans.push_back({so.get(), 0.0f, spinAxis, so->getEulerRotation()});
+                                }
+                            }
+                        }
+                        m_screenMessage = "Generator ON";
+                        m_screenMessageTimer = 3.0f;
+                    }
+                }
+                return;
+            }
+
             closestObj->triggerBehavior(TriggerType::ON_INTERACT);
         }
     }
@@ -22056,6 +22304,7 @@ private:
         std::vector<unsigned char> textureData; // texture for binary save persistence
         int textureWidth = 0;
         int textureHeight = 0;
+        std::vector<SceneObject::StoredControlPoint> controlPoints; // CPs for modular assembly
     };
     static constexpr int TOOLBAR_SLOT_COUNT = 10;
     ToolbarSlot m_toolbarSlots[10];
@@ -22153,6 +22402,7 @@ private:
     std::vector<BuildingTexture> m_buildingTextures;
 
     eden::TextureBrowser m_textureBrowser;
+    eden::ImageReferences m_imageReferences;
     int m_pendingTextureSlot = -1;
 
     // Object groups (for organization only) - uses EditorUI::ObjectGroup
@@ -22466,6 +22716,16 @@ private:
     float m_playerMaxHealth = 100.0f;
     float m_playerHitboxRadius = 1.0f;  // Invisible sphere hitbox around camera
     int m_engineHumLoopId = -1;
+    std::unordered_map<SceneObject*, int> m_generatorLoops; // object → loopId
+    struct SpinningFan {
+        SceneObject* obj;
+        float angle; // accumulated degrees
+        glm::vec3 axis; // world-space spin axis
+        glm::vec3 baseEuler; // euler rotation before spinning started
+    };
+    std::vector<SpinningFan> m_spinningFans;
+    std::string m_screenMessage;
+    float m_screenMessageTimer = 0.0f;
     MovementMode m_lastMovementMode = MovementMode::Fly;
 
     // Dogfight AI
