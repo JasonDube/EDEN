@@ -488,9 +488,20 @@ glm::vec3 JoltCharacter::extendedUpdate(float deltaTime,
     bool onTrackedPlatform = isOnTrackedPlatform(trackedPlatformVelocity);
 
     // Also check Jolt's ground state for static ground
+    // Include steep ground — character should be able to stand/jump on angled slabs
     m_character->UpdateGroundVelocity();
-    bool onGround = isOnGround();
+    bool onGround = isOnGround() || isOnSteepGround();
     JPH::Vec3 currentVelocity = m_character->GetLinearVelocity();
+
+    // Coyote time: track how long since we were last on ground
+    if (onGround || onTrackedPlatform) {
+        m_timeSinceOnGround = 0.0f;
+    } else {
+        m_timeSinceOnGround += deltaTime;
+    }
+    // Can jump if on ground OR within coyote time grace period (and not already going up)
+    bool canJump = onGround || onTrackedPlatform ||
+                   (m_timeSinceOnGround < COYOTE_TIME && currentVelocity.GetY() <= 0.1f);
 
     JPH::Vec3 newVelocity;
 
@@ -503,6 +514,7 @@ glm::vec3 JoltCharacter::extendedUpdate(float deltaTime,
 
         if (jump) {
             newVelocity.SetY(newVelocity.GetY() + jumpVelocity);
+            m_timeSinceOnGround = COYOTE_TIME;  // Consume coyote time
         }
     } else if (onGround) {
         // ON STATIC GROUND: No vertical velocity needed
@@ -510,7 +522,12 @@ glm::vec3 JoltCharacter::extendedUpdate(float deltaTime,
 
         if (jump) {
             newVelocity.SetY(jumpVelocity);
+            m_timeSinceOnGround = COYOTE_TIME;  // Consume coyote time
         }
+    } else if (jump && canJump) {
+        // COYOTE JUMP: just left ground, still within grace period
+        newVelocity = JPH::Vec3(desiredVelocity.x, jumpVelocity, desiredVelocity.z);
+        m_timeSinceOnGround = COYOTE_TIME;  // Consume coyote time
     } else {
         // IN AIR: Apply gravity
         float currentVerticalVel = currentVelocity.GetY();

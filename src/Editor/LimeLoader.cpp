@@ -239,20 +239,6 @@ LimeLoader::LoadResult LimeLoader::load(const std::string& filepath) {
     }
 
     result.success = true;
-    std::cout << "Loaded LIME: " << filepath << " ("
-              << limeVertices.size() << " vertices, "
-              << limeFaces.size() << " faces, "
-              << result.mesh.indices.size() / 3 << " triangles)";
-    if (result.mesh.hasTexture) {
-        std::cout << " with " << result.mesh.textureWidth << "x" << result.mesh.textureHeight << " texture";
-    }
-    if (!result.mesh.controlPoints.empty()) {
-        std::cout << ", " << result.mesh.controlPoints.size() << " control points";
-    }
-    if (!result.mesh.metadata.empty()) {
-        std::cout << ", " << result.mesh.metadata.size() << " metadata entries";
-    }
-    std::cout << std::endl;
 
     return result;
 }

@@ -63,8 +63,6 @@ public:
                 targetObj = so.get();
             }
         }
-        std::cout << "[PortSnap] Searching... ported objects in scene: " << portsChecked
-                  << ", target: " << (targetObj ? targetObj->getName() : "NONE") << std::endl;
         if (!targetObj) return result;
 
         // Find the best port pair (closest to crosshair hit point)

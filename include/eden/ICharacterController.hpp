@@ -72,7 +72,7 @@ public:
                                      const glm::vec3& desiredVelocity,
                                      bool jump,
                                      float jumpVelocity = 8.0f,
-                                     float maxStairHeight = 0.4f) = 0;
+                                     float maxStairHeight = 0.6f) = 0;
 
     // Getters
     virtual glm::vec3 getPosition() const = 0;

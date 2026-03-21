@@ -179,6 +179,10 @@ public:
         auto it = m_state.find(obj);
         return (it != m_state.end()) ? &it->second : nullptr;
     }
+    void setUsedPower(SceneObject* obj, float used) {
+        auto it = m_state.find(obj);
+        if (it != m_state.end()) it->second.usedPower = used;
+    }
 private:
 
     void turnOn(SceneObject* obj, MachineHost& host) {

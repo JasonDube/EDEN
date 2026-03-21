@@ -1236,9 +1236,10 @@ protected:
             rebuildWireMeshes();
         }
 
-        // Update dynamic point lights — find powered light objects
+        // Update dynamic point lights and power usage
         {
             m_activeLights.clear();
+            float totalPowerUsed = 0.0f;
             for (auto& so : m_sceneObjects) {
                 if (!so || !so->isVisible()) continue;
                 std::string nameLower = so->getName();
@@ -1280,10 +1281,18 @@ protected:
                     }
 
                     m_activeLights.push_back(light);
+                    totalPowerUsed += 5.0f;  // Each light uses 5 power units
                 }
             }
             if (m_modelRenderer) {
                 m_modelRenderer->setLights(m_activeLights);
+            }
+            // Update power usage on all running generators
+            for (auto& so : m_sceneObjects) {
+                if (!so) continue;
+                if (m_machineManager.isRunning(so.get())) {
+                    m_machineManager.generator().setUsedPower(so.get(), totalPowerUsed);
+                }
             }
         }
 
@@ -2536,65 +2545,69 @@ protected:
 
                 if (bt == "platform_slab") {
                     // Draw 1m grid on ALL 6 faces of floor slab
-                    // Cube is bottom-aligned: Y from 0 to size, X/Z centered
-                    glm::vec3 pos = obj->getTransform().getPosition();
+                    // Use model matrix so grid follows rotation
                     glm::vec3 sc  = obj->getTransform().getScale();
-                    float hw = sc.x * 0.5f;
-                    float hd = sc.z * 0.5f;
+                    glm::mat4 modelMat = obj->getTransform().getMatrix();
+                    // Local-space bounds: cube is unit cube scaled by sc
+                    float hw = 0.5f;  // half-width in local space (unit cube)
+                    float hd = 0.5f;
 
-                    float minX = pos.x - hw, maxX = pos.x + hw;
-                    float minY = pos.y,       maxY = pos.y + sc.y; // bottom-aligned
-                    float minZ = pos.z - hd,  maxZ = pos.z + hd;
-                    float o = 0.02f; // slight offset to avoid z-fighting
+                    // Helper: transform local point to world via model matrix
+                    auto toWorld = [&](float lx, float ly, float lz) -> glm::vec3 {
+                        return glm::vec3(modelMat * glm::vec4(lx, ly, lz, 1.0f));
+                    };
 
-                    // Outline edges (12 edges of the box) — drawn once
-                    // Top rectangle
-                    float ty = maxY + o, by = minY - o;
-                    lines.push_back({minX, ty, minZ}); lines.push_back({maxX, ty, minZ});
-                    lines.push_back({maxX, ty, minZ}); lines.push_back({maxX, ty, maxZ});
-                    lines.push_back({maxX, ty, maxZ}); lines.push_back({minX, ty, maxZ});
-                    lines.push_back({minX, ty, maxZ}); lines.push_back({minX, ty, minZ});
-                    // Bottom rectangle
-                    lines.push_back({minX, by, minZ}); lines.push_back({maxX, by, minZ});
-                    lines.push_back({maxX, by, minZ}); lines.push_back({maxX, by, maxZ});
-                    lines.push_back({maxX, by, maxZ}); lines.push_back({minX, by, maxZ});
-                    lines.push_back({minX, by, maxZ}); lines.push_back({minX, by, minZ});
-                    // 4 vertical edges
-                    lines.push_back({minX, by, minZ}); lines.push_back({minX, ty, minZ});
-                    lines.push_back({maxX, by, minZ}); lines.push_back({maxX, ty, minZ});
-                    lines.push_back({maxX, by, maxZ}); lines.push_back({maxX, ty, maxZ});
-                    lines.push_back({minX, by, maxZ}); lines.push_back({minX, ty, maxZ});
+                    // Local-space unit cube: X/Z centered (-0.5 to 0.5), Y bottom-aligned (0 to 1)
+                    float lMinX = -0.5f, lMaxX = 0.5f;
+                    float lMinY = 0.0f, lMaxY = 1.0f;
+                    float lMinZ = -0.5f, lMaxZ = 0.5f;
+                    float o = 0.005f; // local-space offset for z-fighting
 
-                    // Top face interior grid lines (local 1m from edges)
-                    for (float x = minX + 1.0f; x <= maxX - 0.01f; x += 1.0f) {
-                        lines.push_back({x, ty, minZ});
-                        lines.push_back({x, ty, maxZ});
+                    // Grid step in local space (1m world = 1/scale local)
+                    float stepX = (sc.x > 0.01f) ? 1.0f / sc.x : 1.0f;
+                    float stepY = (sc.y > 0.01f) ? 1.0f / sc.y : 1.0f;
+                    float stepZ = (sc.z > 0.01f) ? 1.0f / sc.z : 1.0f;
+
+                    float ty = lMaxY + o, by = lMinY - o;
+
+                    // Outline edges (12 edges)
+                    lines.push_back(toWorld(lMinX,ty,lMinZ)); lines.push_back(toWorld(lMaxX,ty,lMinZ));
+                    lines.push_back(toWorld(lMaxX,ty,lMinZ)); lines.push_back(toWorld(lMaxX,ty,lMaxZ));
+                    lines.push_back(toWorld(lMaxX,ty,lMaxZ)); lines.push_back(toWorld(lMinX,ty,lMaxZ));
+                    lines.push_back(toWorld(lMinX,ty,lMaxZ)); lines.push_back(toWorld(lMinX,ty,lMinZ));
+                    lines.push_back(toWorld(lMinX,by,lMinZ)); lines.push_back(toWorld(lMaxX,by,lMinZ));
+                    lines.push_back(toWorld(lMaxX,by,lMinZ)); lines.push_back(toWorld(lMaxX,by,lMaxZ));
+                    lines.push_back(toWorld(lMaxX,by,lMaxZ)); lines.push_back(toWorld(lMinX,by,lMaxZ));
+                    lines.push_back(toWorld(lMinX,by,lMaxZ)); lines.push_back(toWorld(lMinX,by,lMinZ));
+                    lines.push_back(toWorld(lMinX,by,lMinZ)); lines.push_back(toWorld(lMinX,ty,lMinZ));
+                    lines.push_back(toWorld(lMaxX,by,lMinZ)); lines.push_back(toWorld(lMaxX,ty,lMinZ));
+                    lines.push_back(toWorld(lMaxX,by,lMaxZ)); lines.push_back(toWorld(lMaxX,ty,lMaxZ));
+                    lines.push_back(toWorld(lMinX,by,lMaxZ)); lines.push_back(toWorld(lMinX,ty,lMaxZ));
+
+                    // Top face grid
+                    for (float x = lMinX + stepX; x <= lMaxX - 0.001f; x += stepX) {
+                        lines.push_back(toWorld(x, ty, lMinZ)); lines.push_back(toWorld(x, ty, lMaxZ));
                     }
-                    for (float z = minZ + 1.0f; z <= maxZ - 0.01f; z += 1.0f) {
-                        lines.push_back({minX, ty, z});
-                        lines.push_back({maxX, ty, z});
+                    for (float z = lMinZ + stepZ; z <= lMaxZ - 0.001f; z += stepZ) {
+                        lines.push_back(toWorld(lMinX, ty, z)); lines.push_back(toWorld(lMaxX, ty, z));
                     }
-                    // Bottom face interior grid lines
-                    for (float x = minX + 1.0f; x <= maxX - 0.01f; x += 1.0f) {
-                        lines.push_back({x, by, minZ});
-                        lines.push_back({x, by, maxZ});
+                    // Bottom face grid
+                    for (float x = lMinX + stepX; x <= lMaxX - 0.001f; x += stepX) {
+                        lines.push_back(toWorld(x, by, lMinZ)); lines.push_back(toWorld(x, by, lMaxZ));
                     }
-                    for (float z = minZ + 1.0f; z <= maxZ - 0.01f; z += 1.0f) {
-                        lines.push_back({minX, by, z});
-                        lines.push_back({maxX, by, z});
+                    for (float z = lMinZ + stepZ; z <= lMaxZ - 0.001f; z += stepZ) {
+                        lines.push_back(toWorld(lMinX, by, z)); lines.push_back(toWorld(lMaxX, by, z));
                     }
-                    // Front/back face interior vertical lines
-                    for (float fz : {minZ - o, maxZ + o}) {
-                        for (float x = minX + 1.0f; x <= maxX - 0.01f; x += 1.0f) {
-                            lines.push_back({x, minY, fz});
-                            lines.push_back({x, maxY, fz});
+                    // Front/back face grid
+                    for (float fz : {lMinZ - o, lMaxZ + o}) {
+                        for (float x = lMinX + stepX; x <= lMaxX - 0.001f; x += stepX) {
+                            lines.push_back(toWorld(x, lMinY, fz)); lines.push_back(toWorld(x, lMaxY, fz));
                         }
                     }
-                    // Left/right face interior vertical lines
-                    for (float fx : {minX - o, maxX + o}) {
-                        for (float z = minZ + 1.0f; z <= maxZ - 0.01f; z += 1.0f) {
-                            lines.push_back({fx, minY, z});
-                            lines.push_back({fx, maxY, z});
+                    // Left/right face grid
+                    for (float fx : {lMinX - o, lMaxX + o}) {
+                        for (float z = lMinZ + stepZ; z <= lMaxZ - 0.001f; z += stepZ) {
+                            lines.push_back(toWorld(fx, lMinY, z)); lines.push_back(toWorld(fx, lMaxY, z));
                         }
                     }
                 } else if (bt == "platform_wall") {
@@ -5516,9 +5529,9 @@ private:
 
             // Ensure we don't go below terrain
             // Character controller returns CENTER position (half height above feet)
-            const float characterHeight = 0.9f;  // Full character height (halved)
-            const float halfHeight = characterHeight * 0.5f;  // Center above feet
-            const float eyeHeight = 0.85f;       // Eye level from ground
+            const float characterHeight = 1.0f;   // Capsule height (physics)
+            const float halfHeight = characterHeight * 0.5f;
+            const float eyeHeight = 1.65f;       // Eye level from ground (~5'5")
             const float centerToEye = eyeHeight - halfHeight;
 
             float feetY = charPos.y - halfHeight;
@@ -7583,7 +7596,7 @@ private:
                     salvObj->setBufferHandle(UINT32_MAX);
                     deleteObject(m_selectedSalvageIndex);
                     m_selectedSalvageIndex = -1;
-                    std::cout << "[Salvage] Picked up into hotbar slot " << (i + 1) << std::endl;
+                    // std::cout << "[Salvage] Picked up into hotbar slot " << (i + 1) << std::endl;
                     break;
                 }
 
@@ -7684,15 +7697,14 @@ private:
                                     break;
                                 }
 
-                                std::cout << "[Frame] Port '" << p.name << "' accepted for " << frameTypeNames[frameType] << " frame" << std::endl;
+                                // std::cout << "[Frame] Port '" << p.name << "' accepted for " << frameTypeNames[frameType] << " frame" << std::endl;
 
                                 // Align port direction with frame normal
                                 glm::vec3 objDir = p.forward;
                                 glm::vec3 from = glm::normalize(objDir);
                                 glm::vec3 to = glm::normalize(frameNormal);
                                 float dot = glm::dot(from, to);
-                                std::cout << "[Frame] Aligning: from=(" << from.x << "," << from.y << "," << from.z
-                                          << ") to=(" << to.x << "," << to.y << "," << to.z << ") dot=" << dot << std::endl;
+                                // std::cout << "[Frame] Aligning..." << std::endl;
                                 if (dot < -0.999f) {
                                     glm::vec3 perp = (std::abs(from.y) < 0.9f) ? glm::vec3(0,1,0) : glm::vec3(1,0,0);
                                     glm::vec3 axis = glm::normalize(glm::cross(from, perp));
@@ -7743,18 +7755,38 @@ private:
 
                     if (!placedInFrame) {
                         // Ctrl+number: place upright at crosshair position
-                        // Raycast from camera to find ground
+                        // First check platform slabs (AABB), then Jolt raycast, use closest
+                        float bestPlaceDist = std::numeric_limits<float>::max();
+                        bool foundPlace = false;
+
+                        // Check slabs first (they're not in Jolt physics)
+                        for (auto& so : m_sceneObjects) {
+                            if (!so) continue;
+                            if (so->getBuildingType() != "platform_slab") continue;
+                            float d = so->getWorldBounds().intersect(camPos, camFront);
+                            if (d >= 0 && d < 20.0f && d < bestPlaceDist) {
+                                bestPlaceDist = d;
+                                float topY = so->getWorldBounds().max.y;
+                                glm::vec3 hp = camPos + camFront * d;
+                                spawnPos = {hp.x, topY + objHalfH, hp.z};
+                                foundPlace = true;
+                            }
+                        }
+
+                        // Jolt raycast (terrain + dynamic bodies)
                         glm::vec3 rayEnd = camPos + camFront * 20.0f;
-                        float placeY = camPos.y - 1.0f; // fallback
                         if (m_characterController) {
                             auto hit = m_characterController->raycast(camPos, rayEnd);
                             if (hit.hit) {
-                                spawnPos = hit.hitPoint + glm::vec3(0, objHalfH, 0);
-                            } else {
-                                spawnPos = camPos + camFront * 3.0f;
-                                spawnPos.y = m_terrain.getHeightAt(spawnPos.x, spawnPos.z) + objHalfH;
+                                float hitDist = glm::length(hit.hitPoint - camPos);
+                                if (hitDist < bestPlaceDist) {
+                                    spawnPos = hit.hitPoint + glm::vec3(0, objHalfH, 0);
+                                    foundPlace = true;
+                                }
                             }
-                        } else {
+                        }
+
+                        if (!foundPlace) {
                             spawnPos = camPos + camFront * 3.0f;
                             spawnPos.y = m_terrain.getHeightAt(spawnPos.x, spawnPos.z) + objHalfH;
                         }
@@ -7808,10 +7840,10 @@ private:
                         }
                         // Check if target has blueprint attachments (lookup by .limes path)
                         if (bpTarget) {
-                            std::cout << "[Blueprint] Crosshair target: " << bpTarget->getName() << " modelPath: " << bpTarget->getModelPath() << std::endl;
+                            // std::cout << "[Blueprint] Crosshair target: " << bpTarget->getName() << " modelPath: " << bpTarget->getModelPath() << std::endl;
                             auto bpIt = m_blueprintAttachments.find(bpTarget->getModelPath());
                             if (bpIt != m_blueprintAttachments.end()) {
-                                std::cout << "[Blueprint] Found " << bpIt->second.size() << " attachment(s) for this blueprint" << std::endl;
+                                // std::cout << "[Blueprint] Found " << bpIt->second.size() << " attachment(s) for this blueprint" << std::endl;
                                 // Match the item name against attachment names
                                 // Item "generator_fan" matches "generator_fan_attachment"
                                 std::string itemName = baseName;
@@ -7840,11 +7872,7 @@ private:
                                         attObj->setModelPath(bpIt->first); // .limes path
                                         blueprintAttached = true;
 
-                                        std::cout << "[Blueprint] Attached '" << itemName << "' → '" << att.originalName
-                                                  << "' on " << bpTarget->getName()
-                                                  << " at (" << (basePos + att.posOffset).x
-                                                  << "," << (basePos + att.posOffset).y
-                                                  << "," << (basePos + att.posOffset).z << ")" << std::endl;
+                                        // [Blueprint] Attached logging removed
 
                                         SceneObject* attRaw = attObj.get();
                                         m_sceneObjects.push_back(std::move(attObj));
@@ -7987,19 +8015,7 @@ private:
                                 obj->setAABBCollision(false);
                                 m_cpAttachedTo[obj.get()] = targetObj;
                                 cpSnapped = true;
-                                std::cout << "[CP Snap] 2-point: " << obj->getName()
-                                          << " (" << pairs[0].nName << "+" << pairs[1].nName << ")"
-                                          << " → " << targetObj->getName()
-                                          << " (" << pairs[0].tName << "+" << pairs[1].tName << ")" << std::endl;
-                                std::cout << "  target CP0 world: " << pairs[0].targetWorld.x << "," << pairs[0].targetWorld.y << "," << pairs[0].targetWorld.z << std::endl;
-                                std::cout << "  new CP0 local: " << pairs[0].newLocal.x << "," << pairs[0].newLocal.y << "," << pairs[0].newLocal.z << std::endl;
-                                std::cout << "  rotated CP0: " << rotatedCP0.x << "," << rotatedCP0.y << "," << rotatedCP0.z << std::endl;
-                                std::cout << "  translation: " << translation.x << "," << translation.y << "," << translation.z << std::endl;
-                                std::cout << "  angleY: " << glm::degrees(angleY) << " deg" << std::endl;
-                                // Verify: after transform, where does CP0 end up?
-                                glm::mat4 finalMat = obj->getTransform().getMatrix();
-                                glm::vec3 verifyCP0 = glm::vec3(finalMat * glm::vec4(pairs[0].newLocal, 1.0f));
-                                std::cout << "  verify CP0 world: " << verifyCP0.x << "," << verifyCP0.y << "," << verifyCP0.z << std::endl;
+                                // CP snap debug logging removed
                             } else if (pairs.size() == 1) {
                                 // Single-point fallback: position only, no rotation
                                 spawnPos = pairs[0].targetWorld - pairs[0].newLocal;
@@ -8008,8 +8024,7 @@ private:
                                 obj->setAABBCollision(false);
                                 m_cpAttachedTo[obj.get()] = targetObj;
                                 cpSnapped = true;
-                                std::cout << "[CP Snap] 1-point: " << obj->getName() << "." << pairs[0].nName
-                                          << " → " << targetObj->getName() << "." << pairs[0].tName << std::endl;
+                                // [CP Snap] 1-point logging removed
                             } else if (!targetCPs.empty()) {
                                 m_screenMessage = "No matching control points found";
                                 m_screenMessageTimer = 3.0f;
@@ -8027,8 +8042,7 @@ private:
                         }
                         obj->setAABBCollision(true);
                     }
-                    std::cout << "[Place] " << obj->getName() << " placed"
-                              << (portSnapped ? " (port snapped)" : cpSnapped ? " (CP snapped)" : (placedInFrame && m_frameAligned) ? " (frame aligned)" : " upright") << std::endl;
+                    // [Place] logging removed
                     } // end else (non-blueprint path)
                 } else {
                     // Throw mode: create Jolt dynamic body
@@ -8051,7 +8065,7 @@ private:
                             m_physicsObjects.push_back(tracked);
                         }
                     }
-                    std::cout << "[Throw] " << obj->getName() << " thrown" << std::endl;
+                    // std::cout << "[Throw] " << obj->getName() << " thrown" << std::endl;
                 }
 
                 if (!blueprintAttached) {
@@ -10150,7 +10164,7 @@ private:
             bool terrainHit = false;
             float bestFloorT = std::numeric_limits<float>::max();
 
-            // Check walls and slabs via AABB intersection, snap to top
+            // Check walls and slabs — snap Y to nearest 1m increment on the surface
             for (auto& obj : m_sceneObjects) {
                 if (!obj) continue;
                 const auto& bt = obj->getBuildingType();
@@ -10159,8 +10173,13 @@ private:
                 if (dist >= 0 && dist < 200.0f && dist < bestFloorT) {
                     bestFloorT = dist;
                     glm::vec3 hp = rayO + rayD * dist;
-                    float topY = obj->getWorldBounds().max.y;
-                    terrainHitPt = {std::round(hp.x), topY, std::round(hp.z)};
+                    // Snap Y to nearest 1m increment (allows H-slabs at any height on a wall)
+                    float snappedY = std::round(hp.y);
+                    // Clamp to wall bounds
+                    AABB wb = obj->getWorldBounds();
+                    snappedY = std::max(snappedY, std::round(wb.min.y));
+                    snappedY = std::min(snappedY, std::round(wb.max.y));
+                    terrainHitPt = {std::round(hp.x), snappedY, std::round(hp.z)};
                     terrainHit = true;
                 }
             }
@@ -15189,6 +15208,36 @@ private:
                         "Click+drag to place horizontal slab (floors/ceilings)");
                 }
                 ImGui::SliderFloat("H-Slab Thickness", &m_hSlabThickness, 0.1f, 1.0f, "%.1fm");
+                ImGui::SliderFloat("H-Slab Length", &m_hSlabLength, 1.0f, 20.0f, "%.0fm");
+                ImGui::SliderFloat("H-Slab Width", &m_hSlabWidth, 1.0f, 20.0f, "%.0fm");
+                if (ImGui::Button("Place H-Slab")) {
+                    // Place at crosshair position
+                    glm::vec3 camPos = m_camera.getPosition();
+                    glm::vec3 camFront = m_camera.getFront();
+                    glm::vec3 placePos = camPos + camFront * 5.0f;
+                    // Snap to grid
+                    placePos.x = std::round(placePos.x);
+                    placePos.z = std::round(placePos.z);
+                    placePos.y = std::round(placePos.y);
+
+                    glm::vec4 slabColor = {0.7f, 0.7f, 0.7f, 1.0f};
+                    auto mesh = PrimitiveMeshBuilder::createCube(1.0f, slabColor);
+                    uint32_t handle = m_modelRenderer->createModel(mesh.vertices, mesh.indices);
+                    auto obj = std::make_unique<SceneObject>("HSlab_" + std::to_string(m_sceneObjects.size()));
+                    obj->setBufferHandle(handle);
+                    obj->setIndexCount(static_cast<uint32_t>(mesh.indices.size()));
+                    obj->setVertexCount(static_cast<uint32_t>(mesh.vertices.size()));
+                    obj->setLocalBounds(mesh.bounds);
+                    obj->setMeshData(mesh.vertices, mesh.indices);
+                    obj->setPrimitiveType(PrimitiveType::Cube);
+                    obj->setPrimitiveSize(1.0f);
+                    obj->setPrimitiveColor(slabColor);
+                    obj->setBuildingType("platform_slab");
+                    obj->getTransform().setPosition(placePos);
+                    obj->getTransform().setScale({m_hSlabLength, m_hSlabThickness, m_hSlabWidth});
+                    obj->setAABBCollision(true);
+                    m_sceneObjects.push_back(std::move(obj));
+                }
 
                 ImGui::Separator();
                 ImGui::Text("Vertical Slab");
@@ -15205,6 +15254,33 @@ private:
                 float roundedThick = std::round(m_wallBrushThickness * 10.0f) / 10.0f;
                 if (roundedThick != m_wallBrushThickness) m_wallBrushThickness = roundedThick;
                 ImGui::SliderFloat("V-Slab Thickness", &m_wallBrushThickness, 0.1f, 3.0f, "%.1fm");
+                ImGui::SliderFloat("V-Slab Length", &m_vSlabLength, 1.0f, 20.0f, "%.0fm");
+                if (ImGui::Button("Place V-Slab")) {
+                    glm::vec3 camPos = m_camera.getPosition();
+                    glm::vec3 camFront = m_camera.getFront();
+                    glm::vec3 placePos = camPos + camFront * 5.0f;
+                    placePos.x = std::round(placePos.x);
+                    placePos.z = std::round(placePos.z);
+                    placePos.y = std::round(placePos.y);
+
+                    glm::vec4 wallColor = {0.7f, 0.7f, 0.7f, 1.0f};
+                    auto mesh = PrimitiveMeshBuilder::createCube(1.0f, wallColor);
+                    uint32_t handle = m_modelRenderer->createModel(mesh.vertices, mesh.indices);
+                    auto obj = std::make_unique<SceneObject>("Wall_" + std::to_string(m_sceneObjects.size()));
+                    obj->setBufferHandle(handle);
+                    obj->setIndexCount(static_cast<uint32_t>(mesh.indices.size()));
+                    obj->setVertexCount(static_cast<uint32_t>(mesh.vertices.size()));
+                    obj->setLocalBounds(mesh.bounds);
+                    obj->setMeshData(mesh.vertices, mesh.indices);
+                    obj->setPrimitiveType(PrimitiveType::Cube);
+                    obj->setPrimitiveSize(1.0f);
+                    obj->setPrimitiveColor(wallColor);
+                    obj->setBuildingType("platform_wall");
+                    obj->getTransform().setPosition(placePos);
+                    obj->getTransform().setScale({m_vSlabLength, m_wallBrushHeight, m_wallBrushThickness});
+                    obj->setAABBCollision(true);
+                    m_sceneObjects.push_back(std::move(obj));
+                }
 
                 ImGui::Separator();
                 ImGui::Text("Move/Rotate");
@@ -20441,7 +20517,7 @@ private:
             }
 
             // Machine interaction — delegate to MachineManager
-            std::cout << "[Interact] Hit: " << closestObj->getName() << " bt=" << closestObj->getBuildingType() << " dist=" << closestDist << std::endl;
+            // [Interact] Hit logging removed — too noisy for normal gameplay
             if (eKey && m_machineManager.tryInteract(closestObj)) {
                 return;
             }
@@ -23741,6 +23817,9 @@ private:
     glm::vec3 m_hSlabEnd{0.0f};
     bool m_hSlabPreviewValid = false;
     float m_hSlabThickness = 0.2f; // how thick the floor slab is
+    float m_hSlabLength = 4.0f;   // H-slab X dimension for Place button
+    float m_hSlabWidth = 4.0f;    // H-slab Z dimension for Place button
+    float m_vSlabLength = 4.0f;   // V-slab X dimension for Place button
 
     // Platform grid map mode
     bool m_mapModeActive = false;

@@ -228,7 +228,7 @@ public:
                              const glm::vec3& desiredVelocity,
                              bool jump,
                              float jumpVelocity = 8.0f,
-                             float maxStairHeight = 0.4f) override;
+                             float maxStairHeight = 0.6f) override;
 
     // Getters
     glm::vec3 getPosition() const override;
@@ -293,6 +293,10 @@ private:
     float m_gravity = 20.0f;
     float m_characterHeight = 0.9f;
     float m_characterRadius = 0.15f;
+
+    // Coyote time: allows jumping shortly after leaving ground (better platforming)
+    float m_timeSinceOnGround = 0.0f;
+    static constexpr float COYOTE_TIME = 0.12f;  // 120ms grace period
 
     // Track bodies for cleanup
     std::vector<JPH::BodyID> m_staticBodies;
