@@ -2,6 +2,17 @@
 
 layout(set = 0, binding = 0) uniform sampler2D texSampler;
 
+struct PointLight {
+    vec4 position;    // xyz = position, w = radius
+    vec4 color;       // xyz = color, w = intensity
+    vec4 direction;   // xyz = direction (0,0,0 = point light), w = cone angle cosine
+};
+
+layout(set = 1, binding = 0) uniform LightUBO {
+    PointLight lights[16];
+    int numLights;
+} lightData;
+
 layout(location = 0) flat in vec3 fragNormal;  // flat shading - no interpolation
 layout(location = 1) in vec2 fragTexCoord;
 layout(location = 2) in vec4 fragColor;
@@ -59,15 +70,52 @@ void main() {
         adjustedColor = hsv2rgb(hsv);
     }
 
-    // Simple directional lighting (high ambient for flatter look)
-    vec3 lightDir = normalize(vec3(0.5, 1.0, 0.3));
-    float diffuse = max(dot(normalize(fragNormal), lightDir), 0.0);
-    float ambient = 0.7;
-    float lighting = ambient + diffuse * 0.3;
+    // Directional lighting (sun) — indoor blocks get minimal ambient
+    vec3 normal = normalize(fragNormal);
+    vec3 sunDir = normalize(vec3(0.5, 1.0, 0.3));
+    float sunDiffuse = max(dot(normal, sunDir), 0.0);
+    bool isIndoor = fragColorAdjust.w < -0.5;
+    float ambient = isIndoor ? 0.05 : 0.4;
+    float sunContrib = isIndoor ? 0.0 : 0.4;
+    float lighting = ambient + sunDiffuse * sunContrib;
 
     vec3 finalColor = adjustedColor * lighting;
 
-    // Apply alpha multiplier (w=0 means use default 1.0, otherwise use w value for x-ray)
+    // Point lights and spotlights
+    for (int i = 0; i < lightData.numLights; i++) {
+        vec3 lightPos = lightData.lights[i].position.xyz;
+        float radius = lightData.lights[i].position.w;
+        vec3 lightColor = lightData.lights[i].color.xyz;
+        float intensity = lightData.lights[i].color.w;
+        vec3 spotDir = lightData.lights[i].direction.xyz;
+        float coneCos = lightData.lights[i].direction.w;
+
+        vec3 toLight = lightPos - fragWorldPos;
+        float dist = length(toLight);
+        if (dist > radius) continue;
+
+        vec3 lightDir = toLight / dist;
+
+        // Spotlight cone check: if direction is non-zero, it's a spotlight
+        float spotFactor = 1.0;
+        if (coneCos > 0.01) {
+            // How much does the fragment direction align with the spot direction?
+            float theta = dot(-lightDir, normalize(spotDir));
+            if (theta < coneCos) continue;  // Outside the cone
+            // Soft edge — fade near cone boundary
+            float outerCos = coneCos * 0.9;  // Slightly wider for soft edge
+            spotFactor = clamp((theta - outerCos) / (coneCos - outerCos + 0.001), 0.0, 1.0);
+            spotFactor = spotFactor * spotFactor;  // Smooth falloff at edges
+        }
+
+        float diffuse = max(dot(normal, lightDir), 0.0);
+        float attenuation = 1.0 - (dist / radius);
+        attenuation = attenuation * attenuation;
+
+        finalColor += adjustedColor * lightColor * diffuse * attenuation * intensity * spotFactor;
+    }
+
+    // Apply alpha multiplier (w>0 means x-ray, w<0 means indoor, w=0 means normal)
     float alphaMult = fragColorAdjust.w > 0.0 ? fragColorAdjust.w : 1.0;
     outColor = vec4(finalColor, texColor.a * fragColor.a * alphaMult);
 }

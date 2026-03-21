@@ -191,6 +191,8 @@ public:
 
     // Visibility
     void setVisible(bool visible) { m_visible = visible; }
+    void setIndoor(bool indoor) { m_indoor = indoor; }
+    bool isIndoor() const { return m_indoor; }
     bool isVisible() const { return m_visible; }
 
     // X-Ray mode (render both sides, see through backfaces)
@@ -601,6 +603,17 @@ public:
     const std::vector<StoredControlPoint>& getControlPoints() const { return m_controlPoints; }
     bool hasControlPoints() const { return !m_controlPoints.empty(); }
 
+    // Connection ports for pipe/assembly snap system (vertex-independent)
+    struct StoredPort {
+        std::string name;
+        glm::vec3 position{0.0f};
+        glm::vec3 forward{0.0f, 0.0f, 1.0f};
+        glm::vec3 up{0.0f, 1.0f, 0.0f};
+    };
+    void setPorts(const std::vector<StoredPort>& ports) { m_ports = ports; }
+    const std::vector<StoredPort>& getPorts() const { return m_ports; }
+    bool hasPorts() const { return !m_ports.empty(); }
+
     // Texture data for painting (CPU copy)
     void setTextureData(const std::vector<unsigned char>& data, int width, int height);
     std::vector<unsigned char>& getTextureData() { return m_textureData; }
@@ -725,6 +738,7 @@ private:
     AABB m_localBounds;
     bool m_selected = false;
     bool m_visible = true;
+    bool m_indoor = false;  // If true, no sun ambient — only lit by point lights
     bool m_xray = false;             // X-Ray mode (render both sides)
     bool m_aabbCollision = false;    // AABB collision (default off)
     bool m_polygonCollision = false; // Polygon collision (default off)
@@ -817,6 +831,9 @@ private:
 
     // Named control points
     std::vector<StoredControlPoint> m_controlPoints;
+
+    // Connection ports
+    std::vector<StoredPort> m_ports;
 
     // Texture data for painting
     std::vector<unsigned char> m_textureData;

@@ -56,6 +56,42 @@ ModelRenderer::ModelRenderer(VulkanContext& context, VkRenderPass renderPass, Vk
     createSelectionPipeline(renderPass, extent);
     createDefaultTexture();
 
+    // Create light UBO buffer (persistently mapped)
+    {
+        VkDeviceSize bufSize = sizeof(LightUBO);
+        m_context.createBuffer(bufSize,
+                              VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+                              VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                              m_lightUBOBuffer, m_lightUBOMemory);
+        vkMapMemory(m_context.getDevice(), m_lightUBOMemory, 0, bufSize, 0, &m_lightUBOMapped);
+        // Initialize with zero lights
+        LightUBO emptyUBO{};
+        memcpy(m_lightUBOMapped, &emptyUBO, sizeof(LightUBO));
+
+        // Allocate descriptor set for light UBO
+        VkDescriptorSetAllocateInfo allocInfo{};
+        allocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+        allocInfo.descriptorPool = m_descriptorPool;
+        allocInfo.descriptorSetCount = 1;
+        allocInfo.pSetLayouts = &m_lightDescriptorSetLayout;
+        vkAllocateDescriptorSets(m_context.getDevice(), &allocInfo, &m_lightDescriptorSet);
+
+        // Write descriptor
+        VkDescriptorBufferInfo bufferInfo{};
+        bufferInfo.buffer = m_lightUBOBuffer;
+        bufferInfo.offset = 0;
+        bufferInfo.range = sizeof(LightUBO);
+
+        VkWriteDescriptorSet write{};
+        write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        write.dstSet = m_lightDescriptorSet;
+        write.dstBinding = 0;
+        write.descriptorCount = 1;
+        write.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        write.pBufferInfo = &bufferInfo;
+        vkUpdateDescriptorSets(m_context.getDevice(), 1, &write, 0, nullptr);
+    }
+
     // Create MULTIPLE line buffers for renderLines (fixes buffer overwrite when multiple renderLines calls per frame)
     VkDeviceSize lineBufferSize = MAX_LINE_VERTICES * sizeof(ModelVertex);
     for (size_t i = 0; i < NUM_LINE_BUFFERS; i++) {
@@ -146,6 +182,7 @@ ModelRenderer::~ModelRenderer() {
 }
 
 void ModelRenderer::createDescriptorSetLayout() {
+    // Set 0: per-model texture sampler
     VkDescriptorSetLayoutBinding samplerBinding{};
     samplerBinding.binding = 0;
     samplerBinding.descriptorCount = 1;
@@ -160,17 +197,35 @@ void ModelRenderer::createDescriptorSetLayout() {
     if (vkCreateDescriptorSetLayout(m_context.getDevice(), &layoutInfo, nullptr, &m_descriptorSetLayout) != VK_SUCCESS) {
         throw std::runtime_error("Failed to create model descriptor set layout");
     }
+
+    // Set 1: global light UBO
+    VkDescriptorSetLayoutBinding lightBinding{};
+    lightBinding.binding = 0;
+    lightBinding.descriptorCount = 1;
+    lightBinding.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    lightBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+
+    VkDescriptorSetLayoutCreateInfo lightLayoutInfo{};
+    lightLayoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+    lightLayoutInfo.bindingCount = 1;
+    lightLayoutInfo.pBindings = &lightBinding;
+
+    if (vkCreateDescriptorSetLayout(m_context.getDevice(), &lightLayoutInfo, nullptr, &m_lightDescriptorSetLayout) != VK_SUCCESS) {
+        throw std::runtime_error("Failed to create light descriptor set layout");
+    }
 }
 
 void ModelRenderer::createDescriptorPool() {
-    VkDescriptorPoolSize poolSize{};
-    poolSize.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    poolSize.descriptorCount = 1000;  // Support up to 1000 textured models
+    VkDescriptorPoolSize poolSizes[2]{};
+    poolSizes[0].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    poolSizes[0].descriptorCount = 1000;
+    poolSizes[1].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    poolSizes[1].descriptorCount = 2;  // Light UBO
 
     VkDescriptorPoolCreateInfo poolInfo{};
     poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-    poolInfo.poolSizeCount = 1;
-    poolInfo.pPoolSizes = &poolSize;
+    poolInfo.poolSizeCount = 2;
+    poolInfo.pPoolSizes = poolSizes;
     poolInfo.maxSets = 1000;
     poolInfo.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
 
@@ -275,10 +330,11 @@ void ModelRenderer::createPipeline(VkRenderPass renderPass, VkExtent2D extent) {
     pushConstant.offset = 0;
     pushConstant.size = sizeof(ModelPushConstants);
 
+    VkDescriptorSetLayout setLayouts[] = { m_descriptorSetLayout, m_lightDescriptorSetLayout };
     VkPipelineLayoutCreateInfo layoutInfo{};
     layoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-    layoutInfo.setLayoutCount = 1;
-    layoutInfo.pSetLayouts = &m_descriptorSetLayout;
+    layoutInfo.setLayoutCount = 2;
+    layoutInfo.pSetLayouts = setLayouts;
     layoutInfo.pushConstantRangeCount = 1;
     layoutInfo.pPushConstantRanges = &pushConstant;
 
@@ -898,10 +954,19 @@ void ModelRenderer::updateModelBuffer(uint32_t handle, const std::vector<ModelVe
     vkFreeMemory(device, stagingMemory, nullptr);
 }
 
+void ModelRenderer::setLights(const std::vector<GPUPointLight>& lights) {
+    LightUBO ubo{};
+    ubo.numLights = static_cast<int>(std::min(lights.size(), size_t(16)));
+    for (int i = 0; i < ubo.numLights; ++i) {
+        ubo.lights[i] = lights[i];
+    }
+    memcpy(m_lightUBOMapped, &ubo, sizeof(LightUBO));
+}
+
 void ModelRenderer::render(VkCommandBuffer commandBuffer, const glm::mat4& viewProj,
                            uint32_t modelHandle, const glm::mat4& modelMatrix,
                            float hueShift, float saturation, float brightness,
-                           bool twoSided) {
+                           bool twoSided, bool indoor) {
     auto it = m_models.find(modelHandle);
     if (it == m_models.end()) return;
 
@@ -910,17 +975,19 @@ void ModelRenderer::render(VkCommandBuffer commandBuffer, const glm::mat4& viewP
     vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
                       twoSided ? m_twoSidedPipeline : m_pipeline);
 
-    // Bind descriptor set (texture or default)
+    // Bind descriptor sets: set 0 = texture, set 1 = light UBO
     VkDescriptorSet descSet = data.hasTexture ? data.descriptorSet : m_defaultDescriptorSet;
+    VkDescriptorSet descSets[] = { descSet, m_lightDescriptorSet };
     vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                            m_pipelineLayout, 0, 1, &descSet, 0, nullptr);
+                            m_pipelineLayout, 0, 2, descSets, 0, nullptr);
 
     // Push constants with color adjustments
     // For x-ray mode (twoSided), use 0.4 alpha for semi-transparency
     ModelPushConstants pc{};
     pc.mvp = viewProj * modelMatrix;
     pc.model = modelMatrix;
-    pc.colorAdjust = glm::vec4(hueShift, saturation, brightness, twoSided ? 0.4f : 0.0f);
+    float wVal = twoSided ? 0.4f : (indoor ? -1.0f : 0.0f);
+    pc.colorAdjust = glm::vec4(hueShift, saturation, brightness, wVal);
     vkCmdPushConstants(commandBuffer, m_pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT,
                        0, sizeof(ModelPushConstants), &pc);
 

@@ -144,6 +144,7 @@ set(EDEN_SOURCES
     src/Renderer/ModelRenderer.cpp
     src/Renderer/SplineRenderer.cpp
     src/Renderer/WaterRenderer.cpp
+    src/Renderer/ParticleRenderer.cpp
     src/Renderer/VulkanApplicationBase.cpp
     src/Renderer/ImGuiManager.cpp
     src/Renderer/PipelineBuilder.cpp
@@ -259,6 +260,8 @@ compile_shaders(eden
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/water.frag
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/skinned_model.vert
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/skinned_model.frag
+    ${CMAKE_CURRENT_SOURCE_DIR}/shaders/particle.vert
+    ${CMAKE_CURRENT_SOURCE_DIR}/shaders/particle.frag
 )
 
 # Copy compiled shaders to build directory
@@ -287,6 +290,8 @@ add_custom_command(TARGET eden POST_BUILD
         ${CMAKE_CURRENT_BINARY_DIR}/shaders/water.frag.spv
         ${CMAKE_CURRENT_BINARY_DIR}/shaders/skinned_model.vert.spv
         ${CMAKE_CURRENT_BINARY_DIR}/shaders/skinned_model.frag.spv
+        ${CMAKE_CURRENT_BINARY_DIR}/shaders/particle.vert.spv
+        ${CMAKE_CURRENT_BINARY_DIR}/shaders/particle.frag.spv
         $<TARGET_FILE_DIR:eden>/shaders/
 )
 

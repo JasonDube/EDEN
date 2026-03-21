@@ -29,6 +29,19 @@ struct ModelPushConstants {
     glm::vec4 colorAdjust;  // x=hue, y=saturation, z=brightness, w=alpha (0=opaque, >0=x-ray)
 };
 
+// Point/spot light data for GPU (matches UBO layout in shader)
+struct GPUPointLight {
+    glm::vec4 position;    // xyz = position, w = radius
+    glm::vec4 color;       // xyz = color, w = intensity
+    glm::vec4 direction;   // xyz = direction (0,0,0 = point light), w = cone angle cosine (0 = point light)
+};
+
+struct LightUBO {
+    GPUPointLight lights[16];
+    int numLights = 0;
+    float pad[3];  // Alignment padding
+};
+
 struct WireframePushConstants {
     glm::mat4 mvp;
     glm::vec4 wireColor;
@@ -82,11 +95,14 @@ public:
     // Update vertex buffer with new vertex data (for freeze transform)
     void updateModelBuffer(uint32_t handle, const std::vector<ModelVertex>& vertices);
 
+    // Update point light data for this frame (call before rendering)
+    void setLights(const std::vector<GPUPointLight>& lights);
+
     // Render a model with optional color adjustments
     void render(VkCommandBuffer commandBuffer, const glm::mat4& viewProj,
                 uint32_t modelHandle, const glm::mat4& modelMatrix,
                 float hueShift = 0.0f, float saturation = 1.0f, float brightness = 1.0f,
-                bool twoSided = false);
+                bool twoSided = false, bool indoor = false);
 
     // Render model wireframe with solid color
     void renderWireframe(VkCommandBuffer commandBuffer, const glm::mat4& viewProj,
@@ -159,6 +175,13 @@ private:
     // Selection pipeline (for rendering selected faces)
     VkPipelineLayout m_selectionPipelineLayout = VK_NULL_HANDLE;
     VkPipeline m_selectionPipeline = VK_NULL_HANDLE;
+
+    // Light UBO (global, updated per-frame)
+    VkBuffer m_lightUBOBuffer = VK_NULL_HANDLE;
+    VkDeviceMemory m_lightUBOMemory = VK_NULL_HANDLE;
+    void* m_lightUBOMapped = nullptr;
+    VkDescriptorSetLayout m_lightDescriptorSetLayout = VK_NULL_HANDLE;
+    VkDescriptorSet m_lightDescriptorSet = VK_NULL_HANDLE;
 
     // Default white texture for untextured models
     VkImage m_defaultTexture = VK_NULL_HANDLE;

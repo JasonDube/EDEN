@@ -83,6 +83,7 @@ struct LevelData {
         bool polygonCollision = false; // Polygon collision in play mode (default off)
         int bulletCollisionType = 0;   // BulletCollisionType enum as int (0 = NONE)
         bool kinematicPlatform = false; // Kinematic platform (lift) - moves through Jolt physics
+        bool indoor = false;           // Indoor flag — no sun ambient, only point lights
 
         // Frozen transform - rotation/scale baked into vertices (for correct collision)
         bool frozenTransform = false;

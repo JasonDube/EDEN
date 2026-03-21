@@ -51,6 +51,8 @@ add_custom_command(TARGET terrain_editor POST_BUILD
         ${CMAKE_BINARY_DIR}/shaders/selection.frag.spv
         ${CMAKE_BINARY_DIR}/shaders/skinned_model.vert.spv
         ${CMAKE_BINARY_DIR}/shaders/skinned_model.frag.spv
+        ${CMAKE_BINARY_DIR}/shaders/particle.vert.spv
+        ${CMAKE_BINARY_DIR}/shaders/particle.frag.spv
         $<TARGET_FILE_DIR:terrain_editor>/shaders/
 )
 
@@ -89,10 +91,10 @@ add_custom_command(TARGET terrain_editor POST_BUILD
 add_custom_command(TARGET terrain_editor POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E make_directory $<TARGET_FILE_DIR:terrain_editor>/textures/building
 )
-if(EXISTS "${CMAKE_SOURCE_DIR}/textures/building")
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/textures/building")
     add_custom_command(TARGET terrain_editor POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_directory
-            ${CMAKE_SOURCE_DIR}/textures/building
+            ${CMAKE_CURRENT_SOURCE_DIR}/textures/building
             $<TARGET_FILE_DIR:terrain_editor>/textures/building
     )
 endif()

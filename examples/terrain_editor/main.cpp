@@ -11,6 +11,7 @@
 #include "Renderer/SkinnedModelRenderer.hpp"
 #include "Renderer/SplineRenderer.hpp"
 #include "Renderer/WaterRenderer.hpp"
+#include "Renderer/ParticleRenderer.hpp"
 
 #include "Editor/EditorUI.hpp"
 #include "Editor/Gizmo.hpp"
@@ -59,6 +60,10 @@
 #include <eden/ICharacterController.hpp>
 #include <eden/JoltCharacter.hpp>
 #include <eden/HomebrewCharacter.hpp>
+
+#include "MachineManager.hpp"
+#include "PortSnapSystem.hpp"
+#include "FlowSystem.hpp"
 
 #include <nfd.h>
 #include <nlohmann/json.hpp>
@@ -128,7 +133,7 @@ struct TerrainPushConstants {
 
 enum class TransformMode { Select, Move, Rotate, Scale };
 
-class TerrainEditor : public VulkanApplicationBase, public AIBehaviorHost {
+class TerrainEditor : public VulkanApplicationBase, public AIBehaviorHost, public MachineHost {
 public:
     TerrainEditor() : VulkanApplicationBase(1280, 720, "EDEN - Terrain Editor") {}
 
@@ -224,6 +229,16 @@ public:
         return info;
     }
 
+    // ── MachineHost interface ──
+    // getSceneObjects() already satisfies both AIBehaviorHost and MachineHost
+    ParticleRenderer* getParticleRenderer() override { return m_particleRenderer.get(); }
+    std::unordered_map<SceneObject*, SceneObject*>& getCPAttachments() override { return m_cpAttachedTo; }
+    // getCPWorldPos() defined later in class body — satisfies MachineHost::getCPWorldPos
+    void showScreenMessage(const std::string& msg, float duration) override {
+        m_screenMessage = msg;
+        m_screenMessageTimer = duration;
+    }
+
     void setSessionMode(bool enabled) { m_sessionMode = enabled; }
 
 protected:
@@ -302,6 +317,9 @@ protected:
             getContext(), getSwapchain().getRenderPass(), getSwapchain().getExtent());
         m_waterRenderer->setWaterLevel(-5.0f);
         m_waterRenderer->setVisible(false);
+
+        m_particleRenderer = std::make_unique<ParticleRenderer>(
+            getContext(), getSwapchain().getRenderPass(), getSwapchain().getExtent());
 
         m_editorUI.setWaterChangedCallback([this](float level, float amplitude, float frequency, bool visible) {
             m_waterRenderer->setWaterLevel(level);
@@ -1157,6 +1175,13 @@ protected:
         // Clean up filesystem GPU resources before destroying renderers
         m_filesystemBrowser.clearFilesystemObjects();
 
+        // Shut down all machines (stop audio, restore fans)
+        m_machineManager.shutdownAll();
+
+        // Clean up blueprint attachments (unrevealed ones still hold GPU resources)
+        m_blueprintAttachments.clear();
+        m_cpAttachedTo.clear();
+
         // Destroy all remaining scene objects' GPU buffers in one batch
         if (m_modelRenderer) {
             std::vector<uint32_t> handles;
@@ -1170,6 +1195,7 @@ protected:
         }
         m_sceneObjects.clear();
 
+        m_particleRenderer.reset();
         m_brushRing.reset();
         m_gizmoRenderer.reset();
         m_splineRenderer.reset();
@@ -1202,18 +1228,87 @@ protected:
             }
         }
 
-        // Spin attached fans around their shaft axis
-        if (!m_spinningFans.empty()) {
-            float spinSpeed = 360.0f; // degrees per second
-            for (auto& sf : m_spinningFans) {
-                sf.angle += spinSpeed * deltaTime;
-                if (sf.angle > 360.0f) sf.angle -= 360.0f;
-                // Build rotation: base euler first, then spin around axis
-                glm::quat baseQ = glm::quat(glm::radians(sf.baseEuler));
-                glm::quat spinQ = glm::angleAxis(glm::radians(sf.angle), sf.axis);
-                glm::quat finalQ = spinQ * baseQ;
-                glm::vec3 finalEuler = glm::degrees(glm::eulerAngles(finalQ));
-                sf.obj->setEulerRotation(finalEuler);
+        // Update machines (fan spinning, etc.)
+        m_machineManager.update(deltaTime);
+
+        // Rebuild wire 3D meshes if needed
+        if (m_wiresMeshDirty && m_modelRenderer) {
+            rebuildWireMeshes();
+        }
+
+        // Update dynamic point lights — find powered light objects
+        {
+            m_activeLights.clear();
+            for (auto& so : m_sceneObjects) {
+                if (!so || !so->isVisible()) continue;
+                std::string nameLower = so->getName();
+                std::transform(nameLower.begin(), nameLower.end(), nameLower.begin(), ::tolower);
+                if (nameLower.find("light") == std::string::npos) continue;
+                // Check if this light has power
+                if (canPowerReach(so.get())) {
+                    // Use light_emanation CP if available, otherwise object position
+                    glm::vec3 pos = so->getTransform().getPosition();
+                    if (so->hasControlPoints() && so->hasMeshData()) {
+                        glm::vec3 cpPos;
+                        if (getCPWorldPos(so.get(), "light", cpPos) ||
+                            getCPWorldPos(so.get(), "emanat", cpPos)) {
+                            pos = cpPos;
+                        }
+                    }
+
+                    GPUPointLight light;
+                    light.position = glm::vec4(pos, 15.0f);
+                    light.color = glm::vec4(1.0f, 0.85f, 0.4f, 5.0f);
+                    light.direction = glm::vec4(0.0f);  // Default: point light (no direction)
+
+                    // Check for a port with "light" or "spot" — use its direction for spotlight
+                    if (so->hasPorts()) {
+                        glm::mat4 mat = so->getTransform().getMatrix();
+                        for (const auto& p : so->getPorts()) {
+                            std::string pn = p.name;
+                            std::transform(pn.begin(), pn.end(), pn.begin(), ::tolower);
+                            if (pn.find("light") != std::string::npos || pn.find("spot") != std::string::npos) {
+                                glm::vec3 worldDir = glm::normalize(glm::vec3(mat * glm::vec4(p.forward, 0.0f)));
+                                // Cone angle: cos(30°) = 0.866 for a medium cone
+                                light.direction = glm::vec4(worldDir, 0.866f);
+                                // Spotlights get more intensity and range to compensate for focused beam
+                                light.position.w = 20.0f;  // 20m range
+                                light.color.w = 8.0f;      // Higher intensity
+                                break;
+                            }
+                        }
+                    }
+
+                    m_activeLights.push_back(light);
+                }
+            }
+            if (m_modelRenderer) {
+                m_modelRenderer->setLights(m_activeLights);
+            }
+        }
+
+        // Update smoke particles
+        if (m_particleRenderer) {
+            m_particleRenderer->update(deltaTime, m_camera.getPosition(),
+                                        m_camera.getRight(), m_camera.getUp());
+        }
+
+        // Update water tank drain
+        if (m_waterTank.flowing && m_flowResult.active) {
+            if (!m_waterTank.update(deltaTime, m_flowResult.drainRateGPS)) {
+                // Tank is empty — stop flow
+                m_flowSource = nullptr;
+                m_flowResult.active = false;
+                if (m_particleRenderer) {
+                    m_particleRenderer->clearDirectedEmitters();
+                }
+                if (m_waterLoopId >= 0) {
+                    Audio::getInstance().stopLoop(m_waterLoopId);
+                    Audio::getInstance().stopLoop(m_waterLoopId + 1);
+                    m_waterLoopId = -1;
+                }
+                m_screenMessage = "Water tank empty!";
+                m_screenMessageTimer = 3.0f;
             }
         }
 
@@ -1961,7 +2056,16 @@ protected:
                                                hue, sat, bright);
             } else {
                 m_modelRenderer->render(cmd, vp, objPtr->getBufferHandle(), modelMatrix,
-                                        hue, sat, bright);
+                                        hue, sat, bright, false, objPtr->isIndoor());
+            }
+        }
+
+        // Render 3D wire meshes (only in play mode, not in T-mode where overlay lines are used)
+        if (m_isPlayMode && !m_showCPsInGame) {
+            glm::mat4 identity(1.0f);
+            for (const auto& wire : m_wires) {
+                if (wire.meshHandle == 0) continue;
+                m_modelRenderer->render(cmd, vp, wire.meshHandle, identity);
             }
         }
 
@@ -2006,11 +2110,7 @@ protected:
                 // Scale: make it fit within roughly slotSize pixels at that distance
                 float modelScale = 0.04f;
 
-                // Slowly spin the model for visual interest
-                float spinAngle = static_cast<float>(glfwGetTime()) * 0.8f;
-
                 glm::mat4 modelMatrix = glm::translate(glm::mat4(1.0f), modelPos);
-                modelMatrix = glm::rotate(modelMatrix, spinAngle, glm::vec3(0, 1, 0));
                 modelMatrix = glm::scale(modelMatrix, glm::vec3(modelScale));
 
                 m_modelRenderer->render(cmd, vp, slot.gpuHandle, modelMatrix);
@@ -2027,8 +2127,9 @@ protected:
                 const auto& bt = obj->getBuildingType();
                 bool isInteraction = (obj->getBeingType() == BeingType::INTERACTION || bt == "salvage");
                 if (!isInteraction && bt != "filesystem" && bt != "filesystem_wall" && bt != "wall_frame" && bt != "wall_widget" && bt != "platform_wall") continue;
-                // Skip building pieces in game mode — they use the blue grid highlight instead
-                if (m_isPlayMode && (bt == "platform_wall" || bt == "platform_slab" || bt == "wall_frame")) continue;
+                // Skip building pieces in game mode — they use the build selection highlight instead
+                // But allow wall_frame through so it gets the selection outline
+                if (m_isPlayMode && (bt == "platform_wall" || bt == "platform_slab")) continue;
                 bool isDragHover = (m_fsDragActive && obj.get() == m_fsDragHoverWall);
                 const AABB& lb = obj->getLocalBounds();
                 if (lb.getSize().x > 0.001f || lb.getSize().y > 0.001f || lb.getSize().z > 0.001f) {
@@ -2054,6 +2155,32 @@ protected:
                 m_modelRenderer->renderLines(cmd, vp, selectionLines, glm::vec3(1.0f, 0.7f, 0.0f));
             if (!dragHoverLines.empty())
                 m_modelRenderer->renderLines(cmd, vp, dragHoverLines, glm::vec3(0.0f, 1.0f, 0.3f));
+        }
+
+        // Yellow outline for selected building piece in play mode
+        if (m_isPlayMode && m_selectedBuildPiece >= 0
+            && m_selectedBuildPiece < static_cast<int>(m_sceneObjects.size())
+            && m_sceneObjects[m_selectedBuildPiece]) {
+            auto& bobj = m_sceneObjects[m_selectedBuildPiece];
+            const AABB& lb = bobj->getLocalBounds();
+            if (lb.getSize().x > 0.001f || lb.getSize().y > 0.001f || lb.getSize().z > 0.001f) {
+                glm::mat4 m = bobj->getTransform().getMatrix();
+                glm::vec3 c[8];
+                c[0] = glm::vec3(m * glm::vec4(lb.min.x, lb.min.y, lb.min.z, 1.0f));
+                c[1] = glm::vec3(m * glm::vec4(lb.max.x, lb.min.y, lb.min.z, 1.0f));
+                c[2] = glm::vec3(m * glm::vec4(lb.max.x, lb.min.y, lb.max.z, 1.0f));
+                c[3] = glm::vec3(m * glm::vec4(lb.min.x, lb.min.y, lb.max.z, 1.0f));
+                c[4] = glm::vec3(m * glm::vec4(lb.min.x, lb.max.y, lb.min.z, 1.0f));
+                c[5] = glm::vec3(m * glm::vec4(lb.max.x, lb.max.y, lb.min.z, 1.0f));
+                c[6] = glm::vec3(m * glm::vec4(lb.max.x, lb.max.y, lb.max.z, 1.0f));
+                c[7] = glm::vec3(m * glm::vec4(lb.min.x, lb.max.y, lb.max.z, 1.0f));
+                std::vector<glm::vec3> buildSelectLines = {
+                    c[0],c[1], c[1],c[2], c[2],c[3], c[3],c[0],
+                    c[4],c[5], c[5],c[6], c[6],c[7], c[7],c[4],
+                    c[0],c[4], c[1],c[5], c[2],c[6], c[3],c[7]
+                };
+                m_modelRenderer->renderLines(cmd, vp, buildSelectLines, glm::vec3(1.0f, 1.0f, 0.0f));
+            }
         }
 
         // F10: Draw AABB hitboxes for ALL scene objects
@@ -2545,36 +2672,9 @@ protected:
         }
 
         // Move gizmo — XZ arrows on selected piece when W move mode is active
-        if (m_buildMoveMode && m_selectedBuildPiece >= 0
-            && m_selectedBuildPiece < static_cast<int>(m_sceneObjects.size())
-            && m_sceneObjects[m_selectedBuildPiece] && m_isPlayMode) {
-            auto& mobj = m_sceneObjects[m_selectedBuildPiece];
-            glm::vec3 gp = mobj->getTransform().getPosition();
-            glm::vec3 gs = mobj->getTransform().getScale();
-            float gizmoY = gp.y + gs.y + 0.2f; // slightly above object top
-            float arrowLen = 3.0f;
-            float headLen = 0.5f;
-            float headW = 0.2f;
-            glm::vec3 origin = {gp.x, gizmoY, gp.z};
-
-            // X axis (red)
-            glm::vec3 xEnd = origin + glm::vec3(arrowLen, 0, 0);
-            std::vector<glm::vec3> xLines = {
-                origin, xEnd,
-                xEnd, xEnd + glm::vec3(-headLen, 0, headW),
-                xEnd, xEnd + glm::vec3(-headLen, 0, -headW),
-            };
-            m_modelRenderer->renderLines(cmd, vp, xLines, glm::vec3(1.0f, 0.2f, 0.2f));
-
-            // Z axis (blue)
-            glm::vec3 zEnd = origin + glm::vec3(0, 0, arrowLen);
-            std::vector<glm::vec3> zLines = {
-                origin, zEnd,
-                zEnd, zEnd + glm::vec3(headW, 0, -headLen),
-                zEnd, zEnd + glm::vec3(-headW, 0, -headLen),
-            };
-            m_modelRenderer->renderLines(cmd, vp, zLines, glm::vec3(0.2f, 0.4f, 1.0f));
-        }
+        // Build mode indicators removed — movement and rotation are keyboard-driven
+        // W mode: mouse drag XZ, up/down arrows Y, snap amount configurable
+        // E mode: left/right arrows Y rotation (45°), X/Z keys for tilt/roll
 
         // Game-mode frame preview — yellow wireframe showing where frame will be placed
         if (m_framePreviewValid && !m_filesystemBrowser.isActive() && m_isPlayMode) {
@@ -2647,6 +2747,10 @@ protected:
 
         if (m_waterRenderer && m_waterRenderer->isVisible()) {
             m_waterRenderer->render(cmd, vp, m_camera.getPosition(), m_totalTime);
+        }
+
+        if (m_particleRenderer) {
+            m_particleRenderer->render(cmd, vp);
         }
 
         if (m_brushRing) {
@@ -2943,6 +3047,8 @@ protected:
         m_modelRenderer->recreatePipeline(getSwapchain().getRenderPass(), getSwapchain().getExtent());
         m_skinnedModelRenderer->recreatePipeline(getSwapchain().getRenderPass(), getSwapchain().getExtent());
         m_waterRenderer->recreatePipeline(getSwapchain().getRenderPass(), getSwapchain().getExtent());
+        if (m_particleRenderer)
+            m_particleRenderer->recreatePipeline(getSwapchain().getRenderPass(), getSwapchain().getExtent());
     }
 
 private:
@@ -6259,6 +6365,7 @@ private:
                     m_hSlabBrushMode = false;
                     m_wallBrushMode = false;
                     m_framePlacementMode = false;
+                    m_framePreviewValid = false;
                     m_buildMoveMode = false;
                     clearBuildSelection();
                 }
@@ -6284,25 +6391,25 @@ private:
                     clearBuildSelection();
                 }
             }
+            // Q clears brush tools (H/V slab, frame placement)
             if (Input::isKeyPressed(Input::KEY_Q)) {
-                // Clear all tools
                 m_hSlabBrushMode = false;
                 m_wallBrushMode = false;
                 m_framePlacementMode = false;
-                m_buildMoveMode = false;
+                m_framePreviewValid = false;
             }
-            if (Input::isKeyPressed(Input::KEY_W)) {
-                m_buildMoveMode = !m_buildMoveMode;
-                if (m_buildMoveMode) {
+            // F key: toggle frame placement (1x1 frames)
+            if (Input::isKeyPressed(Input::KEY_F)) {
+                m_framePlacementMode = !m_framePlacementMode;
+                m_frameSizeSetting = 1;  // Always 1x1
+                if (m_framePlacementMode) {
                     m_hSlabBrushMode = false;
                     m_wallBrushMode = false;
-                    m_framePlacementMode = false;
-                    // If something is already selected, save its position for undo
-                    if (m_selectedBuildPiece >= 0
-                        && m_selectedBuildPiece < static_cast<int>(m_sceneObjects.size())
-                        && m_sceneObjects[m_selectedBuildPiece]) {
-                        m_buildMoveOrigPos = m_sceneObjects[m_selectedBuildPiece]->getTransform().getPosition();
-                    }
+                    clearBuildSelection();
+                    m_screenMessage = "Frame mode: click to place 1x1 frames";
+                    m_screenMessageTimer = 2.0f;
+                } else {
+                    m_framePreviewValid = false;
                 }
             }
         }
@@ -7040,6 +7147,9 @@ private:
                                 if (selectedFS->hasControlPoints()) {
                                     m_toolbarSlots[i].controlPoints = selectedFS->getControlPoints();
                                 }
+                                if (selectedFS->hasPorts()) {
+                                    m_toolbarSlots[i].ports = selectedFS->getPorts();
+                                }
                                 // Remove from model spin list and void tracking before erasing
                                 m_filesystemBrowser.removeModelSpin(selectedFS);
                                 m_filesystemBrowser.removeVoidFileObj(selectedFS);
@@ -7384,6 +7494,7 @@ private:
                     m_toolbarSlots[i].gpuHandle = salvObj->getBufferHandle();
                     m_toolbarSlots[i].modelIndexCount = salvObj->getIndexCount();
                     m_toolbarSlots[i].modelBounds = salvObj->getLocalBounds();
+                    m_toolbarSlots[i].modelScale = salvObj->getTransform().getScale();
                     m_toolbarSlots[i].modelSourcePath = salvObj->getModelPath();
                     if (salvObj->hasMeshData()) {
                         m_toolbarSlots[i].meshVertices = salvObj->getVertices();
@@ -7396,6 +7507,9 @@ private:
                     }
                     if (salvObj->hasControlPoints()) {
                         m_toolbarSlots[i].controlPoints = salvObj->getControlPoints();
+                    }
+                    if (salvObj->hasPorts()) {
+                        m_toolbarSlots[i].ports = salvObj->getPorts();
                     }
                     m_toolbarSlots[i].is3DModel = true;
                     m_toolbarSlots[i].occupied = true;
@@ -7417,6 +7531,54 @@ private:
                     }
                     m_toolbarSlots[i].filePath.clear();
 
+                    // If this is a running machine, shut it down before pickup
+                    m_machineManager.notifyPickup(salvObj.get());
+
+                    // Detach attached parts (fans, outlet box) — make them physics bodies so they fall
+                    {
+                        if (m_characterController) {
+                            SceneObject* genPtr = salvObj.get();
+                            for (auto& so : m_sceneObjects) {
+                                if (!so || so.get() == genPtr) continue;
+
+                                // Only detach objects that are CP-snapped/blueprint-attached to this object
+                                auto attachIt = m_cpAttachedTo.find(so.get());
+                                if (attachIt == m_cpAttachedTo.end() || attachIt->second != genPtr) continue;
+
+                                // Skip objects that are already physics tracked
+                                bool alreadyTracked = false;
+                                for (auto& pt : m_physicsObjects) {
+                                    if (pt.objPtr == so.get()) { alreadyTracked = true; break; }
+                                }
+                                if (alreadyTracked) continue;
+
+                                // Unlink attachment
+                                m_cpAttachedTo.erase(attachIt);
+
+                                // Create a Jolt dynamic body so it falls under gravity
+                                const AABB& lb = so->getLocalBounds();
+                                glm::vec3 objScale = so->getTransform().getScale();
+                                glm::vec3 halfExt = lb.getSize() * objScale * 0.5f;
+                                halfExt = glm::max(halfExt, glm::vec3(0.05f));
+                                glm::vec3 partPos = so->getTransform().getPosition();
+
+                                auto bodyResult = m_characterController->addDynamicBox(
+                                    halfExt, partPos, glm::vec3(0.0f), 1.0f, 0.3f, 0.5f);
+
+                                if (bodyResult.valid) {
+                                    PhysicsTrackedObject tracked;
+                                    tracked.objPtr = so.get();
+                                    tracked.joltBodyId = bodyResult.bodyId;
+                                    tracked.settled = false;
+                                    m_physicsObjects.push_back(tracked);
+                                    so->setAABBCollision(false); // Jolt handles collision now
+                                    std::cout << "[Generator Detach] " << so->getName()
+                                              << " → physics body (will fall)" << std::endl;
+                                }
+                            }
+                        }
+                    }
+
                     // Remove scene object (don't destroy GPU handle — hotbar owns it now)
                     salvObj->setBufferHandle(UINT32_MAX);
                     deleteObject(m_selectedSalvageIndex);
@@ -7434,25 +7596,168 @@ private:
                 glm::vec3 camPos = m_camera.getPosition();
                 glm::vec3 camFront = m_camera.getFront();
                 glm::vec3 spawnPos;
-                float objHalfH = m_toolbarSlots[i].modelBounds.getSize().y * 0.5f;
+                float objHalfH = m_toolbarSlots[i].modelBounds.getSize().y * m_toolbarSlots[i].modelScale.y * 0.5f;
                 if (objHalfH < 0.05f) objHalfH = 0.05f;
 
+                bool placedInFrame = false;
                 if (ctrlHeld) {
-                    // Ctrl+number: place upright at crosshair position
-                    // Raycast from camera to find ground
-                    glm::vec3 rayEnd = camPos + camFront * 20.0f;
-                    float placeY = camPos.y - 1.0f; // fallback
-                    if (m_characterController) {
-                        auto hit = m_characterController->raycast(camPos, rayEnd);
-                        if (hit.hit) {
-                            spawnPos = hit.hitPoint + glm::vec3(0, objHalfH, 0);
+                    // Check if a frame is selected — place into frame position
+                    if (m_selectedSalvageIndex >= 0 && m_selectedSalvageIndex < static_cast<int>(m_sceneObjects.size())
+                        && m_sceneObjects[m_selectedSalvageIndex]
+                        && m_sceneObjects[m_selectedSalvageIndex]->getBuildingType() == "wall_frame") {
+                        spawnPos = m_sceneObjects[m_selectedSalvageIndex]->getTransform().getPosition();
+                        placedInFrame = true;
+
+                        // Get frame normal — check PlatformGrid data + detect ceiling/floor
+                        glm::vec3 fp = spawnPos;
+                        auto& pg = m_filesystemBrowser.getPlatformGrid();
+                        auto& frames = pg.grid().frames;
+                        auto frameIt = frames.end();
+                        glm::vec3 frameNormal(0, 0, 1);
+                        for (auto fit = frames.begin(); fit != frames.end(); ++fit) {
+                            if (std::abs(fit->worldX - fp.x) < 0.1f &&
+                                std::abs(fit->worldY - fp.y) < 0.1f &&
+                                std::abs(fit->worldZ - fp.z) < 0.1f) {
+                                frameNormal = glm::normalize(glm::vec3(fit->normalX, 0, fit->normalZ));
+                                frameIt = fit;
+                                break;
+                            }
+                        }
+
+                        // Detect frame type: ceiling, floor, or wall
+                        // 0 = wall, 1 = ceiling, 2 = floor
+                        int frameType = 0;
+                        for (auto& slab : m_sceneObjects) {
+                            if (!slab || slab->getBuildingType() != "platform_slab") continue;
+                            AABB slabBounds = slab->getWorldBounds();
+                            if (std::abs(slabBounds.min.y - fp.y) < 0.15f &&
+                                fp.x >= slabBounds.min.x - 0.1f && fp.x <= slabBounds.max.x + 0.1f &&
+                                fp.z >= slabBounds.min.z - 0.1f && fp.z <= slabBounds.max.z + 0.1f) {
+                                frameNormal = glm::vec3(0, -1, 0);
+                                frameType = 1;  // Ceiling
+                                break;
+                            }
+                            if (std::abs(slabBounds.max.y - fp.y) < 0.15f &&
+                                fp.x >= slabBounds.min.x - 0.1f && fp.x <= slabBounds.max.x + 0.1f &&
+                                fp.z >= slabBounds.min.z - 0.1f && fp.z <= slabBounds.max.z + 0.1f) {
+                                frameNormal = glm::vec3(0, 1, 0);
+                                frameType = 2;  // Floor
+                                break;
+                            }
+                        }
+                        const char* frameTypeNames[] = {"wall", "ceiling", "floor"};
+                        std::cout << "[Frame] Type: " << frameTypeNames[frameType]
+                                  << " Normal: (" << frameNormal.x << "," << frameNormal.y << "," << frameNormal.z << ")" << std::endl;
+
+                        // Check if the item has a matching frame port
+                        // ceiling_frame_port → only on ceiling frames
+                        // floor_frame_port → only on floor frames
+                        // wall_frame_port → only on wall frames
+                        // frame_port → any frame (universal)
+                        m_frameAlignRot = glm::quat(1, 0, 0, 0);
+                        m_frameAligned = false;
+                        bool portRejected = false;
+                        if (!m_toolbarSlots[i].ports.empty()) {
+                            for (const auto& p : m_toolbarSlots[i].ports) {
+                                std::string pn = p.name;
+                                std::transform(pn.begin(), pn.end(), pn.begin(), ::tolower);
+                                if (pn.find("frame") == std::string::npos) continue;
+
+                                // Check frame type compatibility
+                                bool isUniversal = (pn.find("ceiling") == std::string::npos &&
+                                                    pn.find("floor") == std::string::npos &&
+                                                    pn.find("wall") == std::string::npos);
+                                bool matchesCeiling = (pn.find("ceiling") != std::string::npos && frameType == 1);
+                                bool matchesFloor = (pn.find("floor") != std::string::npos && frameType == 2);
+                                bool matchesWall = (pn.find("wall") != std::string::npos && frameType == 0);
+
+                                if (!isUniversal && !matchesCeiling && !matchesFloor && !matchesWall) {
+                                    // Wrong frame type
+                                    std::string needed = (pn.find("ceiling") != std::string::npos) ? "ceiling" :
+                                                         (pn.find("floor") != std::string::npos) ? "floor" : "wall";
+                                    m_screenMessage = "This item needs a " + needed + " frame";
+                                    m_screenMessageTimer = 3.0f;
+                                    portRejected = true;
+                                    placedInFrame = false;
+                                    std::cout << "[Frame] REJECTED: port '" << p.name << "' needs " << needed
+                                              << " but frame is " << frameTypeNames[frameType] << std::endl;
+                                    break;
+                                }
+
+                                std::cout << "[Frame] Port '" << p.name << "' accepted for " << frameTypeNames[frameType] << " frame" << std::endl;
+
+                                // Align port direction with frame normal
+                                glm::vec3 objDir = p.forward;
+                                glm::vec3 from = glm::normalize(objDir);
+                                glm::vec3 to = glm::normalize(frameNormal);
+                                float dot = glm::dot(from, to);
+                                std::cout << "[Frame] Aligning: from=(" << from.x << "," << from.y << "," << from.z
+                                          << ") to=(" << to.x << "," << to.y << "," << to.z << ") dot=" << dot << std::endl;
+                                if (dot < -0.999f) {
+                                    glm::vec3 perp = (std::abs(from.y) < 0.9f) ? glm::vec3(0,1,0) : glm::vec3(1,0,0);
+                                    glm::vec3 axis = glm::normalize(glm::cross(from, perp));
+                                    m_frameAlignRot = glm::angleAxis(glm::radians(180.0f), axis);
+                                } else if (dot < 0.999f) {
+                                    glm::vec3 axis = glm::normalize(glm::cross(from, to));
+                                    float angle = std::acos(glm::clamp(dot, -1.0f, 1.0f));
+                                    m_frameAlignRot = glm::angleAxis(angle, axis);
+                                }
+
+                                // Offset spawn position so the PORT lands at the frame, not the origin
+                                glm::vec3 rotatedPortPos = m_frameAlignRot * p.position;
+                                spawnPos -= rotatedPortPos;
+
+                                m_frameAligned = true;
+                                break;
+                            }
+                        }
+
+                        // If no frame port was found at all, reject
+                        if (!m_frameAligned && !portRejected) {
+                            m_screenMessage = "This item has no frame port";
+                            m_screenMessageTimer = 3.0f;
+                            portRejected = true;
+                            placedInFrame = false;
+                            std::cout << "[Frame] REJECTED: no frame port on item" << std::endl;
+                        }
+
+                        // Only consume frame if port wasn't rejected
+                        if (!portRejected) {
+                            // Remove the frame from PlatformGrid
+                            if (frameIt != frames.end()) {
+                                frames.erase(frameIt);
+                            }
+
+                            // Delete the frame scene object
+                            int frameIdx = m_selectedSalvageIndex;
+                            m_sceneObjects[frameIdx]->setSelected(false);
+                            m_selectedSalvageIndex = -1;
+                            deleteObject(frameIdx);
+
+                            std::cout << "[Frame] Placed item into frame at ("
+                                      << spawnPos.x << "," << spawnPos.y << "," << spawnPos.z << ")"
+                                      << " normal=(" << frameNormal.x << "," << frameNormal.z << ")"
+                                      << (m_frameAligned ? " (port aligned)" : "") << std::endl;
+                        }
+                    }
+
+                    if (!placedInFrame) {
+                        // Ctrl+number: place upright at crosshair position
+                        // Raycast from camera to find ground
+                        glm::vec3 rayEnd = camPos + camFront * 20.0f;
+                        float placeY = camPos.y - 1.0f; // fallback
+                        if (m_characterController) {
+                            auto hit = m_characterController->raycast(camPos, rayEnd);
+                            if (hit.hit) {
+                                spawnPos = hit.hitPoint + glm::vec3(0, objHalfH, 0);
+                            } else {
+                                spawnPos = camPos + camFront * 3.0f;
+                                spawnPos.y = m_terrain.getHeightAt(spawnPos.x, spawnPos.z) + objHalfH;
+                            }
                         } else {
                             spawnPos = camPos + camFront * 3.0f;
                             spawnPos.y = m_terrain.getHeightAt(spawnPos.x, spawnPos.z) + objHalfH;
                         }
-                    } else {
-                        spawnPos = camPos + camFront * 3.0f;
-                        spawnPos.y = m_terrain.getHeightAt(spawnPos.x, spawnPos.z) + objHalfH;
                     }
                 } else {
                     // Normal throw: spawn in front and arc forward
@@ -7467,7 +7772,7 @@ private:
                 obj->setBufferHandle(m_toolbarSlots[i].gpuHandle);
                 obj->setIndexCount(m_toolbarSlots[i].modelIndexCount);
                 obj->getTransform().setPosition(spawnPos);
-                obj->getTransform().setScale(glm::vec3(1.0f));
+                obj->getTransform().setScale(m_toolbarSlots[i].modelScale);
                 obj->setBuildingType("salvage");
                 obj->setBeingType(BeingType::INTERACTION);
                 obj->setLocalBounds(m_toolbarSlots[i].modelBounds);
@@ -7482,11 +7787,112 @@ private:
                 if (!m_toolbarSlots[i].controlPoints.empty()) {
                     obj->setControlPoints(m_toolbarSlots[i].controlPoints);
                 }
+                if (!m_toolbarSlots[i].ports.empty()) {
+                    obj->setPorts(m_toolbarSlots[i].ports);
+                }
 
+                bool blueprintAttached = false;
                 if (ctrlHeld) {
+                    // Check for blueprint attachment match first
+                    if (m_characterController) {
+                        // Find which scene object crosshair is on
+                        SceneObject* bpTarget = nullptr;
+                        float bpBestDist = std::numeric_limits<float>::max();
+                        for (auto& so : m_sceneObjects) {
+                            if (!so || !so->isVisible()) continue;
+                            float d = so->getWorldBounds().intersect(camPos, camFront);
+                            if (d >= 0 && d < 20.0f && d < bpBestDist) {
+                                bpBestDist = d;
+                                bpTarget = so.get();
+                            }
+                        }
+                        // Check if target has blueprint attachments (lookup by .limes path)
+                        if (bpTarget) {
+                            std::cout << "[Blueprint] Crosshair target: " << bpTarget->getName() << " modelPath: " << bpTarget->getModelPath() << std::endl;
+                            auto bpIt = m_blueprintAttachments.find(bpTarget->getModelPath());
+                            if (bpIt != m_blueprintAttachments.end()) {
+                                std::cout << "[Blueprint] Found " << bpIt->second.size() << " attachment(s) for this blueprint" << std::endl;
+                                // Match the item name against attachment names
+                                // Item "generator_fan" matches "generator_fan_attachment"
+                                std::string itemName = baseName;
+                                std::transform(itemName.begin(), itemName.end(), itemName.begin(), ::tolower);
+
+                                for (auto& att : bpIt->second) {
+                                    std::string attName = att.originalName;
+                                    std::transform(attName.begin(), attName.end(), attName.begin(), ::tolower);
+
+                                    // Check if item name is contained in attachment name (minus "_attachment")
+                                    std::string attBase = attName;
+                                    auto attSuffix = attBase.find("_attachment");
+                                    if (attSuffix != std::string::npos)
+                                        attBase = attBase.substr(0, attSuffix);
+
+                                    if (attBase.find(itemName) != std::string::npos || itemName.find(attBase) != std::string::npos) {
+                                        // Match — create a fresh SceneObject from cached mesh data
+                                        auto attObj = LimeLoader::createSceneObject(att.meshData, *m_modelRenderer);
+                                        if (!attObj) break;
+
+                                        glm::vec3 basePos = bpTarget->getTransform().getPosition();
+                                        attObj->getTransform().setPosition(basePos + att.posOffset);
+                                        attObj->setVisible(true);
+                                        attObj->setBuildingType("salvage");
+                                        attObj->setBeingType(BeingType::INTERACTION);
+                                        attObj->setModelPath(bpIt->first); // .limes path
+                                        blueprintAttached = true;
+
+                                        std::cout << "[Blueprint] Attached '" << itemName << "' → '" << att.originalName
+                                                  << "' on " << bpTarget->getName()
+                                                  << " at (" << (basePos + att.posOffset).x
+                                                  << "," << (basePos + att.posOffset).y
+                                                  << "," << (basePos + att.posOffset).z << ")" << std::endl;
+
+                                        SceneObject* attRaw = attObj.get();
+                                        m_sceneObjects.push_back(std::move(attObj));
+                                        m_cpAttachedTo[attRaw] = bpTarget;
+
+                                        m_screenMessage = "Attached " + baseName;
+                                        m_screenMessageTimer = 3.0f;
+
+                                        // Consume the hotbar item — detach GPU handle so it doesn't double-free
+                                        obj->setBufferHandle(0);
+                                        m_toolbarSlots[i].gpuHandle = 0;
+                                        m_toolbarSlots[i].modelIndexCount = 0;
+                                        m_toolbarSlots[i].is3DModel = false;
+                                        m_toolbarSlots[i].occupied = false;
+                                        m_toolbarSlots[i].filePath.clear();
+                                        m_toolbarSlots[i].displayName.clear();
+                                        m_toolbarSlots[i].meshVertices.clear();
+                                        m_toolbarSlots[i].meshIndices.clear();
+                                        m_toolbarSlots[i].textureData.clear();
+                                        m_toolbarSlots[i].controlPoints.clear();
+                                        m_toolbarSlots[i].ports.clear();
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    if (blueprintAttached) {
+                        // Item was consumed by blueprint, skip normal placement
+                    } else {
+                    // Try port-based snap first (pipes, modular assemblies)
+                    bool portSnapped = false;
+                    if (obj->hasPorts()) {
+                        auto snapResult = m_portSnap.trySnap(obj.get(), m_sceneObjects, camPos, camFront);
+                        if (snapResult.snapped) {
+                            obj->getTransform().setPosition(snapResult.position);
+                            obj->getTransform().setRotation(snapResult.rotation);
+                            obj->setEulerRotation(glm::degrees(glm::eulerAngles(snapResult.rotation)));
+                            obj->setAABBCollision(false);
+                            m_cpAttachedTo[obj.get()] = snapResult.target;
+                            portSnapped = true;
+                        }
+                    }
+
                     // Check if crosshair is on an object with compatible CPs — two-point snap attach
-                    bool cpSnapped = false;
-                    if (m_characterController && obj->hasControlPoints()) {
+                    bool cpSnapped = portSnapped;  // Skip CP snap if port snap already succeeded
+                    if (!cpSnapped && m_characterController && obj->hasControlPoints()) {
                         // Find which scene object crosshair is on
                         SceneObject* targetObj = nullptr;
                         float bestDist = std::numeric_limits<float>::max();
@@ -7579,6 +7985,7 @@ private:
                                 obj->getTransform().setPosition(translation);
                                 obj->setEulerRotation(glm::vec3(0.0f, glm::degrees(angleY), 0.0f));
                                 obj->setAABBCollision(false);
+                                m_cpAttachedTo[obj.get()] = targetObj;
                                 cpSnapped = true;
                                 std::cout << "[CP Snap] 2-point: " << obj->getName()
                                           << " (" << pairs[0].nName << "+" << pairs[1].nName << ")"
@@ -7599,6 +8006,7 @@ private:
                                 obj->getTransform().setPosition(spawnPos);
                                 obj->setEulerRotation(glm::vec3(0.0f));
                                 obj->setAABBCollision(false);
+                                m_cpAttachedTo[obj.get()] = targetObj;
                                 cpSnapped = true;
                                 std::cout << "[CP Snap] 1-point: " << obj->getName() << "." << pairs[0].nName
                                           << " → " << targetObj->getName() << "." << pairs[0].tName << std::endl;
@@ -7608,12 +8016,20 @@ private:
                             }
                         }
                     }
-                    if (!cpSnapped) {
-                        // Normal place mode: upright, no physics, immediately collidable
-                        obj->setEulerRotation(glm::vec3(0.0f));
+                    if (!cpSnapped && !portSnapped) {
+                        if (placedInFrame && m_frameAligned) {
+                            // Align to frame normal using port direction
+                            obj->getTransform().setRotation(m_frameAlignRot);
+                            obj->setEulerRotation(glm::degrees(glm::eulerAngles(m_frameAlignRot)));
+                            obj->getTransform().setRotation(m_frameAlignRot);
+                        } else {
+                            obj->setEulerRotation(glm::vec3(0.0f));
+                        }
                         obj->setAABBCollision(true);
                     }
-                    std::cout << "[Place] " << obj->getName() << " placed" << (cpSnapped ? " (CP snapped)" : " upright") << std::endl;
+                    std::cout << "[Place] " << obj->getName() << " placed"
+                              << (portSnapped ? " (port snapped)" : cpSnapped ? " (CP snapped)" : (placedInFrame && m_frameAligned) ? " (frame aligned)" : " upright") << std::endl;
+                    } // end else (non-blueprint path)
                 } else {
                     // Throw mode: create Jolt dynamic body
                     float throwSpeed = 10.0f;
@@ -7621,7 +8037,7 @@ private:
 
                     if (m_characterController) {
                         const AABB& bounds = m_toolbarSlots[i].modelBounds;
-                        glm::vec3 halfExt = bounds.getSize() * 0.5f;
+                        glm::vec3 halfExt = bounds.getSize() * m_toolbarSlots[i].modelScale * 0.5f;
                         halfExt = glm::max(halfExt, glm::vec3(0.05f));
 
                         auto bodyResult = m_characterController->addDynamicBox(
@@ -7638,7 +8054,9 @@ private:
                     std::cout << "[Throw] " << obj->getName() << " thrown" << std::endl;
                 }
 
-                m_sceneObjects.push_back(std::move(obj));
+                if (!blueprintAttached) {
+                    m_sceneObjects.push_back(std::move(obj));
+                }
 
                 // Clear the hotbar slot
                 m_toolbarSlots[i].gpuHandle = 0;
@@ -7653,6 +8071,8 @@ private:
                 m_toolbarSlots[i].textureWidth = 0;
                 m_toolbarSlots[i].textureHeight = 0;
                 m_toolbarSlots[i].controlPoints.clear();
+                m_toolbarSlots[i].ports.clear();
+                m_toolbarSlots[i].modelScale = glm::vec3(1.0f);
                 break;
             }
         }
@@ -7701,6 +8121,138 @@ private:
                 m_activeToolbarSlot = (m_activeToolbarSlot + 9) % 10; // scroll up = previous slot
             } else if (scroll < 0.0f) {
                 m_activeToolbarSlot = (m_activeToolbarSlot + 1) % 10; // scroll down = next slot
+            }
+        }
+
+        // R key in play mode: rotate selected object through 6 cardinal orientations
+        if (m_isPlayMode && Input::isKeyPressed(Input::KEY_R) && !ImGui::GetIO().WantTextInput) {
+            if (m_selectedSalvageIndex >= 0 && m_selectedSalvageIndex < static_cast<int>(m_sceneObjects.size())) {
+                auto& selObj = m_sceneObjects[m_selectedSalvageIndex];
+                if (selObj) {
+                    m_objectRotationIndex = (m_objectRotationIndex + 1) % 6;
+
+                    glm::quat rot(1.0f, 0.0f, 0.0f, 0.0f);
+                    glm::vec3 euler(0.0f);
+                    const char* dirName = "Default";
+                    switch (m_objectRotationIndex) {
+                        case 0: dirName = "Default"; break;
+                        case 1: rot = glm::angleAxis(glm::radians(90.0f), glm::vec3(0,1,0));
+                                euler = {0,90,0}; dirName = "Y +90"; break;
+                        case 2: rot = glm::angleAxis(glm::radians(180.0f), glm::vec3(0,1,0));
+                                euler = {0,180,0}; dirName = "Y +180"; break;
+                        case 3: rot = glm::angleAxis(glm::radians(270.0f), glm::vec3(0,1,0));
+                                euler = {0,270,0}; dirName = "Y +270"; break;
+                        case 4: rot = glm::angleAxis(glm::radians(90.0f), glm::vec3(1,0,0));
+                                euler = {90,0,0}; dirName = "X +90 (tilt fwd)"; break;
+                        case 5: rot = glm::angleAxis(glm::radians(-90.0f), glm::vec3(1,0,0));
+                                euler = {-90,0,0}; dirName = "X -90 (tilt back)"; break;
+                    }
+
+                    selObj->setEulerRotation(euler);
+                    selObj->getTransform().setRotation(rot);
+
+                    m_screenMessage = std::string("Rotation: ") + dirName;
+                    m_screenMessageTimer = 2.0f;
+                }
+            }
+        }
+
+        // I key in play mode: toggle indoor flag on selected block
+        if (m_isPlayMode && Input::isKeyPressed(Input::KEY_I) && !ImGui::GetIO().WantTextInput) {
+            if (m_selectedSalvageIndex >= 0 && m_selectedSalvageIndex < static_cast<int>(m_sceneObjects.size())) {
+                auto& selObj = m_sceneObjects[m_selectedSalvageIndex];
+                if (selObj) {
+                    selObj->setIndoor(!selObj->isIndoor());
+                    m_screenMessage = selObj->isIndoor() ? "Indoor: ON (no sunlight)" : "Indoor: OFF (sunlight)";
+                    m_screenMessageTimer = 2.0f;
+                }
+            }
+        }
+
+        // T key in play mode: toggle control point visualization
+        if (m_isPlayMode && Input::isKeyPressed(Input::KEY_T) && !ImGui::GetIO().WantTextInput) {
+            m_showCPsInGame = !m_showCPsInGame;
+            if (!m_showCPsInGame) {
+                // Cancel any in-progress wiring when hiding CPs
+                m_wiringActive = false;
+                m_wireFromObj = nullptr;
+                m_wireFromCP.clear();
+            }
+            m_screenMessage = m_showCPsInGame ? "Control Points: VISIBLE (click CPs to wire)" : "Control Points: HIDDEN";
+            m_screenMessageTimer = 2.0f;
+        }
+
+        // Left-click in T mode: wire CPs together
+        if (m_isPlayMode && m_showCPsInGame && Input::isMouseButtonPressed(Input::MOUSE_LEFT)
+            && !ImGui::GetIO().WantCaptureMouse) {
+            // Find the CP closest to the crosshair within 5m
+            glm::vec3 camPos = m_camera.getPosition();
+            glm::vec3 camFront = m_camera.getFront();
+            float windowW = static_cast<float>(getWindow().getWidth());
+            float windowH = static_cast<float>(getWindow().getHeight());
+            float aspect = windowW / windowH;
+            glm::mat4 view = m_camera.getViewMatrix();
+            glm::mat4 proj = m_camera.getProjectionMatrix(aspect, 0.1f, 5000.0f);
+            glm::mat4 vp = proj * view;
+
+            SceneObject* bestObj = nullptr;
+            std::string bestCPName;
+            float bestScreenDist = 30.0f;  // Max pixel distance from crosshair center
+
+            for (auto& obj : m_sceneObjects) {
+                if (!obj || !obj->isVisible() || !obj->hasControlPoints() || !obj->hasMeshData()) continue;
+                float objDist = glm::length(obj->getTransform().getPosition() - camPos);
+                if (objDist > 5.0f) continue;
+
+                const auto& cps = obj->getControlPoints();
+                const auto& verts = obj->getVertices();
+                glm::mat4 modelMat = obj->getTransform().getMatrix();
+
+                for (const auto& cp : cps) {
+                    if (cp.vertexIndex >= verts.size()) continue;
+                    glm::vec3 localPos = verts[cp.vertexIndex].position;
+                    glm::vec3 worldPos = glm::vec3(modelMat * glm::vec4(localPos, 1.0f));
+                    glm::vec4 clip = vp * glm::vec4(worldPos, 1.0f);
+                    if (clip.w <= 0.0f) continue;
+                    glm::vec3 ndc = glm::vec3(clip) / clip.w;
+                    float sx = (ndc.x + 1.0f) * 0.5f * windowW;
+                    float sy = (1.0f - ndc.y) * 0.5f * windowH;
+
+                    // Distance from screen center (crosshair)
+                    float dx = sx - windowW * 0.5f;
+                    float dy = sy - windowH * 0.5f;
+                    float screenDist = std::sqrt(dx * dx + dy * dy);
+                    if (screenDist < bestScreenDist) {
+                        bestScreenDist = screenDist;
+                        bestObj = obj.get();
+                        bestCPName = cp.name;
+                    }
+                }
+            }
+
+            if (bestObj && !bestCPName.empty()) {
+                if (!m_wiringActive) {
+                    // First click — set "from"
+                    m_wireFromObj = bestObj;
+                    m_wireFromCP = bestCPName;
+                    m_wiringActive = true;
+                    m_screenMessage = "Wire from: " + bestCPName + " — click destination CP";
+                    m_screenMessageTimer = 3.0f;
+                } else {
+                    // Second click — create wire
+                    // Don't wire a CP to itself
+                    if (bestObj != m_wireFromObj || bestCPName != m_wireFromCP) {
+                        m_wires.push_back({m_wireFromObj, m_wireFromCP, bestObj, bestCPName, 0});
+                        m_wiresMeshDirty = true;
+                        m_screenMessage = "Wired: " + m_wireFromCP + " -> " + bestCPName;
+                        m_screenMessageTimer = 3.0f;
+                        std::cout << "[Wire] " << m_wireFromObj->getName() << "." << m_wireFromCP
+                                  << " -> " << bestObj->getName() << "." << bestCPName << std::endl;
+                    }
+                    m_wiringActive = false;
+                    m_wireFromObj = nullptr;
+                    m_wireFromCP.clear();
+                }
             }
         }
 
@@ -10006,7 +10558,9 @@ private:
                     obj->setEulerRotation({0.0f, yawDeg, 0.0f});
 
                     m_sceneObjects.push_back(std::move(obj));
-                    // Frame placed silently
+                    m_framePreviewValid = false;
+                    m_screenMessage = "Frame placed";
+                    m_screenMessageTimer = 1.5f;
                 }
             }
         }
@@ -10021,11 +10575,16 @@ private:
         updateDogfighters(deltaTime);
 
         // Building piece selection — left-click when building mode open and no placement brush active
-        // Also handles click-to-select when in move mode (W) with nothing selected yet
+        // Auto-enable move mode when in build mode (unified mode — no W/E switching)
+        if (m_showSiloConfig && !m_hSlabBrushMode && !m_wallBrushMode && !m_framePlacementMode) {
+            m_buildMoveMode = true;
+        }
+
+        // Click to select build pieces (and move them by dragging)
         bool buildSelectClick = false;
-        bool buildMoveSelect = m_buildMoveMode && !m_buildMoveDragging;
+        bool buildMoveSelect = !m_buildMoveDragging;
         if (m_isPlayMode && m_showSiloConfig && !m_hSlabBrushMode && !m_wallBrushMode && !m_framePlacementMode
-            && (!m_buildMoveMode || buildMoveSelect)
+            && buildMoveSelect
             && !m_filesystemBrowser.isActive() && !ImGui::GetIO().WantCaptureMouse
             && Input::isMouseButtonPressed(Input::MOUSE_LEFT)) {
             buildSelectClick = true;
@@ -10074,23 +10633,47 @@ private:
             m_editorUI.setSelectedObjectIndex(bestIdx);
         }
 
-        // Delete selected building piece
+        // Delete selected building piece (walls, slabs, frames)
         if (m_isPlayMode && m_selectedBuildPiece >= 0 && Input::isKeyPressed(Input::KEY_DELETE)
             && !ImGui::GetIO().WantCaptureKeyboard) {
             if (m_selectedBuildPiece < static_cast<int>(m_sceneObjects.size()) && m_sceneObjects[m_selectedBuildPiece]) {
+                auto& delObj = m_sceneObjects[m_selectedBuildPiece];
+                // If it's a frame, also remove from PlatformGrid
+                if (delObj->getBuildingType() == "wall_frame") {
+                    glm::vec3 fp = delObj->getTransform().getPosition();
+                    auto& pg = m_filesystemBrowser.getPlatformGrid();
+                    auto& frames = pg.grid().frames;
+                    for (auto it = frames.begin(); it != frames.end(); ++it) {
+                        if (std::abs(it->worldX - fp.x) < 0.1f &&
+                            std::abs(it->worldY - fp.y) < 0.1f &&
+                            std::abs(it->worldZ - fp.z) < 0.1f) {
+                            frames.erase(it);
+                            break;
+                        }
+                    }
+                }
                 deleteObject(m_selectedBuildPiece);
                 m_selectedBuildPiece = -1;
                 m_editorUI.setSelectedObjectIndex(-1);
-                m_buildMoveMode = false;
             }
         }
 
-        // Move mode: drag selected piece on XZ plane, snapping to 1m grid
-        if (m_buildMoveMode && m_selectedBuildPiece >= 0
+        // Move/rotate selected build piece — always active when a piece is selected in build mode
+        if (m_selectedBuildPiece >= 0
             && m_selectedBuildPiece < static_cast<int>(m_sceneObjects.size())
             && m_sceneObjects[m_selectedBuildPiece] && m_showSiloConfig && m_playModeCursorVisible) {
             auto& obj = m_sceneObjects[m_selectedBuildPiece];
             glm::vec3 objPos = obj->getTransform().getPosition();
+
+            // Up/Down arrow keys: move piece vertically by snap amount
+            if (Input::isKeyPressed(Input::KEY_UP)) {
+                objPos.y += m_buildSnapAmount;
+                obj->getTransform().setPosition(objPos);
+            }
+            if (Input::isKeyPressed(Input::KEY_DOWN)) {
+                objPos.y -= m_buildSnapAmount;
+                obj->getTransform().setPosition(objPos);
+            }
 
             // Cast ray from mouse onto the object's Y plane
             float aspect = static_cast<float>(getWindow().getWidth()) / getWindow().getHeight();
@@ -10111,7 +10694,25 @@ private:
             float snapOffX = (static_cast<int>(objScl.x) % 2 == 1) ? 0.5f : 0.0f;
             float snapOffZ = (static_cast<int>(objScl.z) % 2 == 1) ? 0.5f : 0.0f;
 
-            if (std::abs(rayD.y) > 0.001f) {
+            bool shiftHeld = Input::isKeyDown(Input::KEY_LEFT_SHIFT) || Input::isKeyDown(Input::KEY_RIGHT_SHIFT);
+
+            if (shiftHeld) {
+                // Shift+drag: move vertically (Y axis)
+                // Use screen Y motion mapped to world Y
+                if (Input::isMouseButtonPressed(Input::MOUSE_LEFT) && !ImGui::GetIO().WantCaptureMouse) {
+                    m_buildMoveDragging = true;
+                    m_buildMoveLastMouseY = mouse.y;
+                }
+                if (m_buildMoveDragging) {
+                    float dy = (m_buildMoveLastMouseY - mouse.y) * 0.02f; // Screen pixels to world units
+                    glm::vec3 newPos = objPos;
+                    newPos.y += dy;
+                    newPos.y = std::round(newPos.y * 2.0f) / 2.0f; // Snap to 0.5m grid
+                    obj->getTransform().setPosition(newPos);
+                    m_buildMoveLastMouseY = mouse.y;
+                }
+            } else if (std::abs(rayD.y) > 0.001f) {
+                // Normal drag: move on XZ plane
                 float t = (planeY - rayO.y) / rayD.y;
                 if (t > 0 && t < 500.0f) {
                     glm::vec3 hp = rayO + rayD * t;
@@ -10122,9 +10723,9 @@ private:
                     }
                     if (m_buildMoveDragging) {
                         glm::vec3 newPos = hp + m_buildMoveOffset;
-                        // Snap to 1m grid aligned with piece edges
-                        newPos.x = std::round(newPos.x - snapOffX) + snapOffX;
-                        newPos.z = std::round(newPos.z - snapOffZ) + snapOffZ;
+                        float snap = m_buildSnapAmount;
+                        newPos.x = std::round((newPos.x - snapOffX) / snap) * snap + snapOffX;
+                        newPos.z = std::round((newPos.z - snapOffZ) / snap) * snap + snapOffZ;
                         newPos.y = planeY;
                         obj->getTransform().setPosition(newPos);
                     }
@@ -10132,6 +10733,45 @@ private:
             }
             if (!Input::isMouseButtonDown(Input::MOUSE_LEFT)) {
                 m_buildMoveDragging = false;
+            }
+        }
+
+        // Build rotation: arrow keys for Y rotation, X/Z for other axes — active whenever piece is selected
+        if (m_selectedBuildPiece >= 0
+            && m_selectedBuildPiece < static_cast<int>(m_sceneObjects.size())
+            && m_sceneObjects[m_selectedBuildPiece] && m_showSiloConfig && m_playModeCursorVisible) {
+            auto& robj = m_sceneObjects[m_selectedBuildPiece];
+            glm::vec3 euler = robj->getEulerRotation();
+            bool rotated = false;
+
+            // Left/Right arrows: Y rotation by snap amount
+            if (Input::isKeyPressed(Input::KEY_LEFT)) {
+                euler.y -= m_buildRotateSnap;
+                rotated = true;
+            }
+            if (Input::isKeyPressed(Input::KEY_RIGHT)) {
+                euler.y += m_buildRotateSnap;
+                rotated = true;
+            }
+            // X/Z keys for tilt and roll
+            if (Input::isKeyPressed(Input::KEY_X)) {
+                euler.x += m_buildRotateSnap;
+                rotated = true;
+            }
+            if (Input::isKeyPressed(Input::KEY_Z)) {
+                euler.z += m_buildRotateSnap;
+                rotated = true;
+            }
+            if (rotated) {
+                // Normalize angles
+                while (euler.x >= 360.0f) euler.x -= 360.0f;
+                while (euler.y >= 360.0f) euler.y -= 360.0f;
+                while (euler.z >= 360.0f) euler.z -= 360.0f;
+                robj->setEulerRotation(euler);
+                char buf[64];
+                snprintf(buf, sizeof(buf), "Rotation: %.0f / %.0f / %.0f", euler.x, euler.y, euler.z);
+                m_screenMessage = buf;
+                m_screenMessageTimer = 1.5f;
             }
         }
 
@@ -10155,7 +10795,8 @@ private:
             for (int si = 0; si < static_cast<int>(m_sceneObjects.size()); si++) {
                 auto& obj = m_sceneObjects[si];
                 if (!obj) continue;
-                if (obj->getBeingType() != BeingType::INTERACTION && obj->getBuildingType() != "salvage") continue;
+                if (obj->getBeingType() != BeingType::INTERACTION && obj->getBuildingType() != "salvage"
+                    && obj->getBuildingType() != "wall_frame") continue;
                 float dist = obj->getWorldBounds().intersect(rayO, rayD);
                 if (dist >= 0 && dist < 5.0f && dist < bestDist) {
                     bestDist = dist;
@@ -10175,10 +10816,116 @@ private:
             }
         }
 
+        // Crosshair focus: show status info for whatever the player is looking at
+        if (m_isPlayMode && !ImGui::GetIO().WantCaptureMouse) {
+            // Reuse the crosshair raycast to find what we're looking at
+            glm::vec3 focusCamPos = m_camera.getPosition();
+            glm::vec3 focusCamFront = m_camera.getFront();
+            SceneObject* focusObj = nullptr;
+            float focusBest = 20.0f;
+            for (auto& so : m_sceneObjects) {
+                if (!so || !so->isVisible()) continue;
+                if (so->getBeingType() != BeingType::INTERACTION && so->getBuildingType() != "salvage"
+                    && so->getBuildingType() != "wall_frame") continue;
+                float d = so->getWorldBounds().intersect(focusCamPos, focusCamFront);
+                if (d >= 0 && d < focusBest) {
+                    focusBest = d;
+                    focusObj = so.get();
+                }
+            }
+
+            // Show status based on what we're focused on
+            if (focusObj) {
+                std::string nameLower = focusObj->getName();
+                std::transform(nameLower.begin(), nameLower.end(), nameLower.begin(), ::tolower);
+
+                // Water tank status
+                if (nameLower.find("water") != std::string::npos || nameLower.find("tank") != std::string::npos) {
+                    char buf[128];
+                    if (m_waterTank.flowing) {
+                        snprintf(buf, sizeof(buf), "Water: %.0f / %.0f gal (%.0f%%) - FLOWING",
+                                 m_waterTank.currentGallons, m_waterTank.capacityGallons,
+                                 m_waterTank.getPercentFull());
+                    } else {
+                        snprintf(buf, sizeof(buf), "Water: %.0f / %.0f gal (%.0f%%)",
+                                 m_waterTank.currentGallons, m_waterTank.capacityGallons,
+                                 m_waterTank.getPercentFull());
+                    }
+                    m_screenMessage = buf;
+                    m_screenMessageTimer = 0.3f;
+                }
+                // Generator status — power and fuel
+                else if (nameLower.find("generator") != std::string::npos
+                         && nameLower.find("fan") == std::string::npos
+                         && nameLower.find("outlet") == std::string::npos) {
+                    bool running = m_machineManager.isRunning(focusObj);
+                    auto* state = m_machineManager.generator().getState(focusObj);
+                    char buf[128];
+                    if (running && state) {
+                        snprintf(buf, sizeof(buf), "Generator ON | Power: %.0f / %.0f | Fuel: %.1f / %.1f gal",
+                                 state->usedPower, state->maxPower,
+                                 state->fuelLevel, state->fuelCapacity);
+                    } else if (state) {
+                        snprintf(buf, sizeof(buf), "Generator OFF | Fuel: %.1f / %.1f gal",
+                                 state->fuelLevel, state->fuelCapacity);
+                    } else {
+                        snprintf(buf, sizeof(buf), "Generator OFF");
+                    }
+                    m_screenMessage = buf;
+                    m_screenMessageTimer = 0.3f;
+                }
+                // Switch status
+                else if (nameLower.find("switch") != std::string::npos) {
+                    bool isOn = m_switchStates.count(focusObj) ? m_switchStates[focusObj] : false;
+                    bool hasPower = isSwitchPowered(focusObj);
+                    char buf[128];
+                    snprintf(buf, sizeof(buf), "Switch: %s | Power: %s",
+                             isOn ? "ON" : "OFF",
+                             hasPower ? "YES" : "NO");
+                    m_screenMessage = buf;
+                    m_screenMessageTimer = 0.3f;
+                }
+                // Relay status
+                else if (nameLower.find("relay") != std::string::npos) {
+                    bool hasPower = canPowerReach(focusObj);
+                    char buf[128];
+                    snprintf(buf, sizeof(buf), "Relay: Power %s", hasPower ? "ON" : "OFF");
+                    m_screenMessage = buf;
+                    m_screenMessageTimer = 0.3f;
+                }
+                // Light status
+                else if (nameLower.find("light") != std::string::npos) {
+                    bool hasPower = canPowerReach(focusObj);
+                    char buf[128];
+                    snprintf(buf, sizeof(buf), "Light: %s", hasPower ? "ON" : "OFF");
+                    m_screenMessage = buf;
+                    m_screenMessageTimer = 0.3f;
+                }
+                // Frame type tooltip
+                else if (focusObj->getBuildingType() == "wall_frame") {
+                    // Detect frame type by slab proximity
+                    glm::vec3 fpos = focusObj->getTransform().getPosition();
+                    const char* ftype = "Wall Frame";
+                    for (auto& slab : m_sceneObjects) {
+                        if (!slab || slab->getBuildingType() != "platform_slab") continue;
+                        AABB sb = slab->getWorldBounds();
+                        if (fpos.x >= sb.min.x - 0.1f && fpos.x <= sb.max.x + 0.1f &&
+                            fpos.z >= sb.min.z - 0.1f && fpos.z <= sb.max.z + 0.1f) {
+                            if (std::abs(sb.min.y - fpos.y) < 0.15f) { ftype = "Ceiling Frame"; break; }
+                            if (std::abs(sb.max.y - fpos.y) < 0.15f) { ftype = "Floor Frame"; break; }
+                        }
+                    }
+                    m_screenMessage = ftype;
+                    m_screenMessageTimer = 0.3f;
+                }
+            }
+        }
+
         // E key or left-click for interaction (skip if building/salvage selection consumed the click)
         if ((Input::isKeyPressed(Input::KEY_E) || (Input::isMouseButtonPressed(Input::MOUSE_LEFT) && !buildSelectClick && !salvageSelectClick))
             && !m_inConversation && !ImGui::GetIO().WantCaptureMouse) {
-            interactWithCrosshair();
+            bool eKey = Input::isKeyPressed(Input::KEY_E);
+            interactWithCrosshair(eKey);
         }
 
         // CullSession input (Up/Down arrow for accept/reject)
@@ -14455,7 +15202,19 @@ private:
                         "Click+drag to place vertical slab (walls)");
                 }
                 ImGui::SliderFloat("V-Slab Height", &m_wallBrushHeight, 1.0f, 20.0f, "%.0fm");
-                ImGui::SliderFloat("V-Slab Thickness", &m_wallBrushThickness, 0.5f, 3.0f, "%.1fm");
+                float roundedThick = std::round(m_wallBrushThickness * 10.0f) / 10.0f;
+                if (roundedThick != m_wallBrushThickness) m_wallBrushThickness = roundedThick;
+                ImGui::SliderFloat("V-Slab Thickness", &m_wallBrushThickness, 0.1f, 3.0f, "%.1fm");
+
+                ImGui::Separator();
+                ImGui::Text("Move/Rotate");
+                ImGui::SliderFloat("Move Snap", &m_buildSnapAmount, 0.1f, 2.0f, "%.1fm");
+                ImGui::SliderFloat("Rotate Snap", &m_buildRotateSnap, 5.0f, 90.0f, "%.0f\xC2\xB0");
+
+                ImGui::Separator();
+                if (ImGui::Button("Reference Images")) {
+                    m_editorUI.showImageReferences() = !m_editorUI.showImageReferences();
+                }
 
                 ImGui::Separator();
                 ImGui::Text("Frames");
@@ -15085,6 +15844,125 @@ private:
             }
             ImGui::End();
             if (m_screenMessageTimer <= 0.0f) m_screenMessage.clear();
+        }
+
+        // Control point visualization (T key toggle)
+        if (m_showCPsInGame && m_isPlayMode) {
+            ImDrawList* cpDL = ImGui::GetForegroundDrawList();
+            float windowW = static_cast<float>(getWindow().getWidth());
+            float windowH = static_cast<float>(getWindow().getHeight());
+            float aspect = windowW / windowH;
+            glm::mat4 view = m_camera.getViewMatrix();
+            glm::mat4 proj = m_camera.getProjectionMatrix(aspect, 0.1f, 5000.0f);
+            glm::mat4 vp = proj * view;
+            glm::vec3 playerPos = m_camera.getPosition();
+
+            for (auto& obj : m_sceneObjects) {
+                if (!obj || !obj->isVisible() || !obj->hasControlPoints() || !obj->hasMeshData()) continue;
+                // Only show CPs within 5 meters
+                float objDist = glm::length(obj->getTransform().getPosition() - playerPos);
+                if (objDist > 5.0f) continue;
+
+                const auto& cps = obj->getControlPoints();
+                const auto& verts = obj->getVertices();
+                glm::mat4 modelMat = obj->getTransform().getMatrix();
+
+                for (const auto& cp : cps) {
+                    if (cp.vertexIndex >= verts.size()) continue;
+                    glm::vec3 localPos = verts[cp.vertexIndex].position;
+                    glm::vec3 worldPos = glm::vec3(modelMat * glm::vec4(localPos, 1.0f));
+                    glm::vec4 clip = vp * glm::vec4(worldPos, 1.0f);
+                    if (clip.w <= 0.0f) continue;
+                    glm::vec3 ndc = glm::vec3(clip) / clip.w;
+                    if (ndc.x < -1 || ndc.x > 1 || ndc.y < -1 || ndc.y > 1) continue;
+                    float sx = (ndc.x + 1.0f) * 0.5f * windowW;
+                    float sy = (1.0f - ndc.y) * 0.5f * windowH;
+
+                    // Diamond marker
+                    float sz = 6.0f;
+                    ImVec2 top(sx, sy - sz), right(sx + sz, sy), bot(sx, sy + sz), left(sx - sz, sy);
+                    cpDL->AddQuadFilled(top, right, bot, left, IM_COL32(255, 0, 255, 200));
+                    cpDL->AddQuad(top, right, bot, left, IM_COL32(0, 0, 0, 220), 2.0f);
+
+                    // Name label
+                    if (!cp.name.empty()) {
+                        ImVec2 textSize = ImGui::CalcTextSize(cp.name.c_str());
+                        ImVec2 textPos(sx - textSize.x * 0.5f, sy - sz - textSize.y - 2);
+                        cpDL->AddRectFilled(ImVec2(textPos.x - 2, textPos.y - 1),
+                            ImVec2(textPos.x + textSize.x + 2, textPos.y + textSize.y + 1),
+                            IM_COL32(0, 0, 0, 180), 2.0f);
+                        cpDL->AddText(textPos, IM_COL32(255, 200, 255, 255), cp.name.c_str());
+                    }
+                }
+            }
+
+        }
+
+        // Draw wire overlay lines — only in T mode (3D wire meshes show in normal mode)
+        if (m_isPlayMode && m_showCPsInGame && !m_wires.empty()) {
+            ImDrawList* wireDL = ImGui::GetForegroundDrawList();
+            float wireWinW = static_cast<float>(getWindow().getWidth());
+            float wireWinH = static_cast<float>(getWindow().getHeight());
+            float wireAspect = wireWinW / wireWinH;
+            glm::mat4 wireView = m_camera.getViewMatrix();
+            glm::mat4 wireProj = m_camera.getProjectionMatrix(wireAspect, 0.1f, 5000.0f);
+            glm::mat4 wireVP = wireProj * wireView;
+
+            for (const auto& wire : m_wires) {
+                if (!wire.fromObj || !wire.toObj) continue;
+                if (!wire.fromObj->hasMeshData() || !wire.toObj->hasMeshData()) continue;
+
+                glm::vec3 fromWorld, toWorld;
+                bool gotFrom = getCPWorldPos(wire.fromObj, wire.fromCP, fromWorld) ||
+                               getCPWorldPosExact(wire.fromObj, wire.fromCP, fromWorld);
+                bool gotTo = getCPWorldPos(wire.toObj, wire.toCP, toWorld) ||
+                             getCPWorldPosExact(wire.toObj, wire.toCP, toWorld);
+                if (!gotFrom || !gotTo) continue;
+
+                glm::vec4 clipFrom = wireVP * glm::vec4(fromWorld, 1.0f);
+                glm::vec4 clipTo = wireVP * glm::vec4(toWorld, 1.0f);
+                // If both endpoints are behind the camera, skip entirely
+                if (clipFrom.w <= 0.0f && clipTo.w <= 0.0f) continue;
+                // If one endpoint is behind camera, clamp it to near plane
+                if (clipFrom.w <= 0.01f) {
+                    float t = (0.01f - clipFrom.w) / (clipTo.w - clipFrom.w);
+                    clipFrom = clipFrom + t * (clipTo - clipFrom);
+                }
+                if (clipTo.w <= 0.01f) {
+                    float t = (0.01f - clipTo.w) / (clipFrom.w - clipTo.w);
+                    clipTo = clipTo + t * (clipFrom - clipTo);
+                }
+                glm::vec3 ndcFrom = glm::vec3(clipFrom) / clipFrom.w;
+                glm::vec3 ndcTo = glm::vec3(clipTo) / clipTo.w;
+                ImVec2 screenFrom((ndcFrom.x + 1.0f) * 0.5f * wireWinW, (1.0f - ndcFrom.y) * 0.5f * wireWinH);
+                ImVec2 screenTo((ndcTo.x + 1.0f) * 0.5f * wireWinW, (1.0f - ndcTo.y) * 0.5f * wireWinH);
+
+                // Green = power flows through this wire, yellow = no power
+                bool powered = isWirePowered(wire);
+                ImU32 wireColor = powered ? IM_COL32(0, 220, 0, 220) : IM_COL32(255, 220, 0, 200);
+                wireDL->AddLine(screenFrom, screenTo, wireColor, 2.5f);
+            }
+        }
+
+        // Draw in-progress wire from first selected CP to crosshair (only in T mode)
+        if (m_isPlayMode && m_showCPsInGame && m_wiringActive && m_wireFromObj && m_wireFromObj->hasMeshData()) {
+            ImDrawList* wireDL = ImGui::GetForegroundDrawList();
+            float wireWinW = static_cast<float>(getWindow().getWidth());
+            float wireWinH = static_cast<float>(getWindow().getHeight());
+            float wireAspect = wireWinW / wireWinH;
+            glm::mat4 wireVP = m_camera.getProjectionMatrix(wireAspect, 0.1f, 5000.0f) * m_camera.getViewMatrix();
+
+            glm::vec3 fromWorld;
+            if (getCPWorldPos(m_wireFromObj, m_wireFromCP, fromWorld) ||
+                getCPWorldPosExact(m_wireFromObj, m_wireFromCP, fromWorld)) {
+                glm::vec4 clipFrom = wireVP * glm::vec4(fromWorld, 1.0f);
+                if (clipFrom.w > 0.0f) {
+                    glm::vec3 ndcFrom = glm::vec3(clipFrom) / clipFrom.w;
+                    ImVec2 screenFrom((ndcFrom.x + 1.0f) * 0.5f * wireWinW, (1.0f - ndcFrom.y) * 0.5f * wireWinH);
+                    ImVec2 screenCenter(wireWinW * 0.5f, wireWinH * 0.5f);
+                    wireDL->AddLine(screenFrom, screenCenter, IM_COL32(255, 255, 0, 120), 1.5f);
+                }
+            }
         }
 
         // Cleaner Bot HUD overlay
@@ -16891,8 +17769,9 @@ private:
 
     void showModelImportDialog() {
         nfdchar_t* outPath = nullptr;
-        nfdfilteritem_t filters[3] = {
+        nfdfilteritem_t filters[4] = {
             {"LIME Model", "lime"},
+            {"LIME Scene", "limes"},
             {"GLB Model", "glb"},
             {"GLTF Model", "gltf"}
         };
@@ -16901,7 +17780,7 @@ private:
         std::filesystem::path modelsPath = std::filesystem::current_path() / "models";
         std::string modelsDir = modelsPath.string();
 
-        nfdresult_t result = NFD_OpenDialog(&outPath, filters, 3, modelsDir.c_str());
+        nfdresult_t result = NFD_OpenDialog(&outPath, filters, 4, modelsDir.c_str());
 
         if (result == NFD_OKAY) {
             importModel(outPath);
@@ -16995,6 +17874,21 @@ private:
                     edenOS["spawnOrigin"] = {origin.x, origin.y, origin.z};
                     edenOS["path"] = m_filesystemBrowser.getCurrentPath();
                     root["edenOS"] = edenOS;
+                }
+
+                // Save wire connections (CP-to-CP wires)
+                if (!m_wires.empty()) {
+                    nlohmann::json wiresJson = nlohmann::json::array();
+                    for (const auto& wire : m_wires) {
+                        if (!wire.fromObj || !wire.toObj) continue;
+                        nlohmann::json w;
+                        w["fromObj"] = wire.fromObj->getName();
+                        w["fromCP"] = wire.fromCP;
+                        w["toObj"] = wire.toObj->getName();
+                        w["toCP"] = wire.toCP;
+                        wiresJson.push_back(w);
+                    }
+                    root["cpWires"] = wiresJson;
                 }
 
                 std::ofstream outFile(filepath);
@@ -17235,6 +18129,27 @@ private:
 
             // Apply properties from binary
             obj->setModelPath(binObj.modelPath);
+
+            // Restore ports and CPs from .lime file (binary cache doesn't store these)
+            if (binObj.modelPath.size() >= 5 &&
+                binObj.modelPath.substr(binObj.modelPath.size() - 5) == ".lime") {
+                auto limeResult = LimeLoader::load(binObj.modelPath);
+                if (limeResult.success) {
+                    if (!limeResult.mesh.controlPoints.empty()) {
+                        std::vector<SceneObject::StoredControlPoint> cps;
+                        for (const auto& cp : limeResult.mesh.controlPoints)
+                            cps.push_back({cp.vertexIndex, cp.name});
+                        obj->setControlPoints(cps);
+                    }
+                    if (!limeResult.mesh.ports.empty()) {
+                        std::vector<SceneObject::StoredPort> ports;
+                        for (const auto& p : limeResult.mesh.ports)
+                            ports.push_back({p.name, p.position, p.forward, p.up});
+                        obj->setPorts(ports);
+                    }
+                }
+            }
+
             obj->getTransform().setPosition(binObj.position);
             obj->setEulerRotation(binObj.rotation);
             obj->getTransform().setScale(binObj.scale);
@@ -17540,6 +18455,7 @@ private:
                 obj->setPolygonCollision(objData.polygonCollision);
                 obj->setBulletCollisionType(static_cast<BulletCollisionType>(objData.bulletCollisionType));
                 obj->setKinematicPlatform(objData.kinematicPlatform);
+                obj->setIndoor(objData.indoor);
                 obj->setBeingType(static_cast<BeingType>(objData.beingType));
                 if (!objData.groveScript.empty()) {
                     obj->setGroveScriptPath(objData.groveScript);
@@ -17782,6 +18698,32 @@ private:
                     m_editorUI.setObjectGroups(m_objectGroups);
                     if (!m_objectGroups.empty()) {
                         std::cout << "Loaded " << m_objectGroups.size() << " object groups" << std::endl;
+                    }
+                }
+
+                // Load wire connections (CP-to-CP wires)
+                m_wires.clear();
+                if (zroot.contains("cpWires") && zroot["cpWires"].is_array()) {
+                    // Build name→object map
+                    std::unordered_map<std::string, SceneObject*> nameToObj;
+                    for (auto& so : m_sceneObjects) {
+                        if (so) nameToObj[so->getName()] = so.get();
+                    }
+                    for (const auto& wj : zroot["cpWires"]) {
+                        std::string fromName = wj.value("fromObj", "");
+                        std::string toName = wj.value("toObj", "");
+                        auto fromIt = nameToObj.find(fromName);
+                        auto toIt = nameToObj.find(toName);
+                        if (fromIt != nameToObj.end() && toIt != nameToObj.end()) {
+                            m_wires.push_back({
+                                fromIt->second, wj.value("fromCP", ""),
+                                toIt->second, wj.value("toCP", "")
+                            });
+                        }
+                    }
+                    if (!m_wires.empty()) {
+                        std::cout << "Loaded " << m_wires.size() << " wire connections" << std::endl;
+                        m_wiresMeshDirty = true;
                     }
                 }
 
@@ -19235,7 +20177,7 @@ private:
         // std::cout << "Exited PLAY MODE" << std::endl;
     }
 
-    void interactWithCrosshair() {
+    void interactWithCrosshair(bool eKey = false) {
         float aspect = static_cast<float>(getWindow().getWidth()) / getWindow().getHeight();
         glm::mat4 proj = m_camera.getProjectionMatrix(aspect, 0.1f, 5000.0f);
         glm::mat4 view = m_camera.getViewMatrix();
@@ -19435,68 +20377,72 @@ private:
                 }
             }
 
-            // Generator interaction — toggle sound on/off
-            std::cout << "[Interact] Hit: " << closestObj->getName() << " bt=" << closestObj->getBuildingType() << " dist=" << closestDist << std::endl;
-            if (closestObj->getName().find("generator") != std::string::npos ||
-                closestObj->getName().find("Generator") != std::string::npos) {
-                auto it = m_generatorLoops.find(closestObj);
-                if (it != m_generatorLoops.end() && it->second >= 0) {
-                    // Currently running — turn off (stop both crossfade copies)
-                    Audio::getInstance().stopLoop(it->second);
-                    Audio::getInstance().stopLoop(it->second + 1);
-                    m_generatorLoops.erase(it);
-                    // Stop attached fans and restore their base rotation
-                    glm::vec3 genPos = closestObj->getTransform().getPosition();
-                    for (auto fanIt = m_spinningFans.begin(); fanIt != m_spinningFans.end(); ) {
-                        float dist = glm::length(fanIt->obj->getTransform().getPosition() - genPos);
-                        if (dist < 5.0f) {
-                            fanIt->obj->setEulerRotation(fanIt->baseEuler);
-                            fanIt = m_spinningFans.erase(fanIt);
-                        } else {
-                            ++fanIt;
+            // Switch interaction — toggle on/off
+            if (eKey) {
+                std::string switchNameLower = closestObj->getName();
+                std::transform(switchNameLower.begin(), switchNameLower.end(), switchNameLower.begin(), ::tolower);
+                if (switchNameLower.find("switch") != std::string::npos) {
+                    bool& state = m_switchStates[closestObj];
+                    state = !state;
+                    m_screenMessage = state ? "Switch ON" : "Switch OFF";
+                    m_screenMessageTimer = 2.0f;
+                    std::cout << "[Switch] " << closestObj->getName() << " → " << (state ? "ON" : "OFF") << std::endl;
+                    return;
+                }
+            }
+
+            // Water tower flow interaction — toggle pipe flow on/off
+            if (eKey && closestObj->hasPorts()) {
+                std::string nameLower = closestObj->getName();
+                std::transform(nameLower.begin(), nameLower.end(), nameLower.begin(), ::tolower);
+                if (nameLower.find("water") != std::string::npos || nameLower.find("tank") != std::string::npos) {
+                    if (m_flowSource == closestObj) {
+                        // Toggle off
+                        m_flowSource = nullptr;
+                        m_flowResult.active = false;
+                        m_waterTank.flowing = false;
+                        if (m_particleRenderer) {
+                            m_particleRenderer->clearDirectedEmitters();
                         }
-                    }
-                    m_screenMessage = "Generator OFF";
-                    m_screenMessageTimer = 3.0f;
-                } else {
-                    // Not running — turn on with crossfade loop (no gap)
-                    int loopId = Audio::getInstance().startCrossfadeLoop("assets/sounds/generator.wav", 0.3f);
-                    if (loopId >= 0) {
-                        m_generatorLoops[closestObj] = loopId;
-                        // Find attached fans (nearby objects with "fan" in name)
-                        glm::vec3 genPos = closestObj->getTransform().getPosition();
-                        for (auto& so : m_sceneObjects) {
-                            if (!so) continue;
-                            std::string nameLower = so->getName();
-                            std::transform(nameLower.begin(), nameLower.end(), nameLower.begin(), ::tolower);
-                            if (nameLower.find("fan") != std::string::npos) {
-                                float dist = glm::length(so->getTransform().getPosition() - genPos);
-                                if (dist < 5.0f) {
-                                    // Compute spin axis from the fan's two CPs
-                                    glm::vec3 spinAxis(1, 0, 0); // fallback
-                                    if (so->hasControlPoints() && so->getControlPoints().size() >= 2 && so->hasMeshData()) {
-                                        const auto& cps = so->getControlPoints();
-                                        const auto& verts = so->getVertices();
-                                        if (cps[0].vertexIndex < verts.size() && cps[1].vertexIndex < verts.size()) {
-                                            glm::vec3 cp0 = verts[cps[0].vertexIndex].position;
-                                            glm::vec3 cp1 = verts[cps[1].vertexIndex].position;
-                                            glm::mat4 model = so->getTransform().getMatrix();
-                                            glm::vec3 w0 = glm::vec3(model * glm::vec4(cp0, 1.0f));
-                                            glm::vec3 w1 = glm::vec3(model * glm::vec4(cp1, 1.0f));
-                                            glm::vec3 dir = w1 - w0;
-                                            if (glm::length(dir) > 0.001f) {
-                                                spinAxis = glm::normalize(dir);
-                                            }
-                                        }
-                                    }
-                                    m_spinningFans.push_back({so.get(), 0.0f, spinAxis, so->getEulerRotation()});
-                                }
+                        // Stop water sound
+                        if (m_waterLoopId >= 0) {
+                            Audio::getInstance().stopLoop(m_waterLoopId);
+                            Audio::getInstance().stopLoop(m_waterLoopId + 1);
+                            m_waterLoopId = -1;
+                        }
+                        m_screenMessage = "Water OFF";
+                        m_screenMessageTimer = 2.0f;
+                        std::cout << "[Flow] Water tower OFF" << std::endl;
+                    } else {
+                        // Toggle on — calculate flow and spawn emitters
+                        m_flowSource = closestObj;
+                        m_flowResult = m_flowSystem.calculateFlow(closestObj, m_sceneObjects);
+                        m_flowResult.drainRateGPS = WaterTank::computeDrainRate(m_flowResult.openEnds);
+                        m_waterTank.flowing = true;
+                        if (m_waterTank.currentGallons <= 0.0f) {
+                            m_waterTank.currentGallons = m_waterTank.capacityGallons;  // Refill on restart
+                        }
+                        if (m_particleRenderer) {
+                            m_particleRenderer->clearDirectedEmitters();
+                            for (const auto& oe : m_flowResult.openEnds) {
+                                float speed = 1.0f + (oe.pressure / 100.0f) * 3.0f;
+                                m_particleRenderer->addDirectedEmitter(oe.position, oe.direction, speed);
                             }
                         }
-                        m_screenMessage = "Generator ON";
+                        // Start water sound
+                        if (m_waterLoopId < 0) {
+                            m_waterLoopId = Audio::getInstance().startCrossfadeLoop("assets/sounds/water_flow.wav", 0.4f);
+                        }
+                        m_screenMessage = "Water ON — " + std::to_string(m_flowResult.openEnds.size()) + " outlets";
                         m_screenMessageTimer = 3.0f;
                     }
+                    return;
                 }
+            }
+
+            // Machine interaction — delegate to MachineManager
+            std::cout << "[Interact] Hit: " << closestObj->getName() << " bt=" << closestObj->getBuildingType() << " dist=" << closestDist << std::endl;
+            if (eKey && m_machineManager.tryInteract(closestObj)) {
                 return;
             }
 
@@ -20840,7 +21786,8 @@ private:
             path = "models/" + path;
             if (path.find(".glb") == std::string::npos &&
                 path.find(".gltf") == std::string::npos &&
-                path.find(".lime") == std::string::npos) {
+                path.find(".lime") == std::string::npos &&
+                path.find(".limes") == std::string::npos) {
                 path += ".glb";
             }
         }
@@ -20848,6 +21795,12 @@ private:
         std::cout << "=== Importing model ===" << std::endl;
         std::cout << "Input: " << inputPath << std::endl;
         std::cout << "Resolved path: " << path << std::endl;
+
+        // Check for LIME scene format (.limes)
+        if (path.size() >= 6 && path.substr(path.size() - 6) == ".limes") {
+            importLimeScene(path);
+            return;
+        }
 
         // Check for LIME format
         if (path.size() >= 5 && path.substr(path.size() - 5) == ".lime") {
@@ -20895,6 +21848,7 @@ private:
                 spawnPos.y = getPlacementFloorHeight(spawnPos.x, spawnPos.z) + mesh.bounds.getSize().y * 0.5f;
                 obj->getTransform().setPosition(spawnPos);
                 obj->setModelPath(path);  // Store the model path for save/load
+                obj->setBeingType(BeingType::INTERACTION);
 
                 std::cout << "Created object: " << obj->getName()
                           << " (" << obj->getVertexCount() << " vertices, "
@@ -21002,6 +21956,7 @@ private:
             spawnPos.y = getPlacementFloorHeight(spawnPos.x, spawnPos.z) + 1.0f;
             obj->getTransform().setPosition(spawnPos);
             obj->setModelPath(path);
+            obj->setBeingType(BeingType::INTERACTION);
 
             std::cout << "Created object: " << obj->getName()
                       << " (" << obj->getVertexCount() << " vertices, "
@@ -21013,6 +21968,64 @@ private:
 
             m_sceneObjects.push_back(std::move(obj));
             selectObject(static_cast<int>(m_sceneObjects.size()) - 1);
+        }
+    }
+
+    // Blueprint assembly: base object → its hidden attachment objects with relative transforms
+    struct BlueprintAttachment {
+        LimeLoader::LoadedMesh meshData; // cached mesh for creating fresh objects each time
+        glm::vec3 posOffset;
+        std::string originalName;
+    };
+
+    void importLimeScene(const std::string& path) {
+        auto result = LimeLoader::loadScene(path);
+        if (!result.success) {
+            std::cerr << "!!! Failed to load LIMES scene: " << result.error << std::endl;
+            return;
+        }
+
+        // Spawn all objects relative to a common origin in front of the camera
+        glm::vec3 spawnOrigin = m_camera.getPosition() + m_camera.getFront() * 10.0f;
+        spawnOrigin.y = getPlacementFloorHeight(spawnOrigin.x, spawnOrigin.z) + 1.0f;
+
+        SceneObject* baseObj = nullptr;
+
+        for (auto& mesh : result.objects) {
+            auto obj = LimeLoader::createSceneObject(mesh, *m_modelRenderer);
+            if (!obj) continue;
+
+            obj->getTransform().setPosition(spawnOrigin + mesh.position);
+            obj->setModelPath(path);
+
+            bool isAttachment = mesh.name.find("_attachment") != std::string::npos;
+
+            if (isAttachment) {
+                // Store mesh data for on-demand creation — no SceneObject created yet
+                std::cout << "  Blueprint attachment: " << mesh.name
+                          << " offset=(" << mesh.position.x << "," << mesh.position.y << "," << mesh.position.z << ")"
+                          << " scale=(" << mesh.scale.x << "," << mesh.scale.y << "," << mesh.scale.z << ")"
+                          << std::endl;
+                m_blueprintAttachments[path].push_back({
+                    mesh, mesh.position, mesh.name
+                });
+            } else {
+                std::cout << "  Spawned: " << obj->getName() << std::endl;
+                obj->setBeingType(BeingType::INTERACTION);
+                SceneObject* rawPtr = obj.get();
+                m_sceneObjects.push_back(std::move(obj));
+                if (!baseObj) baseObj = rawPtr;
+            }
+        }
+
+        // Select the base object
+        if (baseObj) {
+            for (int i = 0; i < static_cast<int>(m_sceneObjects.size()); i++) {
+                if (m_sceneObjects[i].get() == baseObj) {
+                    selectObject(i);
+                    break;
+                }
+            }
         }
     }
 
@@ -21037,6 +22050,64 @@ private:
         if (index < 0 || index >= static_cast<int>(m_sceneObjects.size())) return;
 
         bool isDeletingSpawn = (index == m_spawnObjectIndex);
+
+        // Clean up physics tracking — remove Jolt body and purge from tracked list
+        SceneObject* delPtr = m_sceneObjects[index].get();
+        for (auto& t : m_physicsObjects) {
+            if (t.objPtr == delPtr) {
+                if (t.joltBodyId != UINT32_MAX && m_characterController) {
+                    m_characterController->removeDynamicBody(t.joltBodyId);
+                }
+                t.objPtr = nullptr;
+                t.joltBodyId = UINT32_MAX;
+            }
+        }
+        m_physicsObjects.erase(
+            std::remove_if(m_physicsObjects.begin(), m_physicsObjects.end(),
+                [](const PhysicsTrackedObject& t) { return t.objPtr == nullptr; }),
+            m_physicsObjects.end());
+
+        // Notify machine system (stops audio, removes fans referencing this object)
+        m_machineManager.notifyDelete(delPtr);
+
+        // Clean up attachment tracking (remove as child, and remove any children pointing to this as parent)
+        m_cpAttachedTo.erase(delPtr);
+        for (auto it = m_cpAttachedTo.begin(); it != m_cpAttachedTo.end(); ) {
+            if (it->second == delPtr) it = m_cpAttachedTo.erase(it);
+            else ++it;
+        }
+
+        // Clean up wire connections referencing this object
+        {
+            // Destroy GPU meshes for wires being removed
+            for (auto& w : m_wires) {
+                if ((w.fromObj == delPtr || w.toObj == delPtr) && w.meshHandle != 0 && m_modelRenderer) {
+                    m_modelRenderer->destroyModel(w.meshHandle);
+                    w.meshHandle = 0;
+                }
+            }
+            m_wires.erase(
+                std::remove_if(m_wires.begin(), m_wires.end(),
+                    [delPtr](const CPWire& w) { return w.fromObj == delPtr || w.toObj == delPtr; }),
+                m_wires.end());
+            m_wiresMeshDirty = true;
+        }
+
+        // Clean up switch state
+        m_switchStates.erase(delPtr);
+
+        // Clean up flow source reference
+        if (m_flowSource == delPtr) {
+            m_flowSource = nullptr;
+            m_flowResult.active = false;
+            m_waterTank.flowing = false;
+            if (m_particleRenderer) m_particleRenderer->clearDirectedEmitters();
+            if (m_waterLoopId >= 0) {
+                Audio::getInstance().stopLoop(m_waterLoopId);
+                Audio::getInstance().stopLoop(m_waterLoopId + 1);
+                m_waterLoopId = -1;
+            }
+        }
 
         uint32_t bufferHandle = m_sceneObjects[index]->getBufferHandle();
         if (bufferHandle != UINT32_MAX) {
@@ -22136,6 +23207,7 @@ private:
     std::unique_ptr<ModelRenderer> m_modelRenderer;
     std::unique_ptr<SkinnedModelRenderer> m_skinnedModelRenderer;
     std::unique_ptr<WaterRenderer> m_waterRenderer;
+    std::unique_ptr<ParticleRenderer> m_particleRenderer;
     std::unique_ptr<SplineRenderer> m_splineRenderer;
     std::unique_ptr<AINodeRenderer> m_aiNodeRenderer;
     DialogueBubbleRenderer m_dialogueRenderer;
@@ -22305,6 +23377,8 @@ private:
         int textureWidth = 0;
         int textureHeight = 0;
         std::vector<SceneObject::StoredControlPoint> controlPoints; // CPs for modular assembly
+        std::vector<SceneObject::StoredPort> ports; // Connection ports for pipe/assembly snap
+        glm::vec3 modelScale{1.0f}; // original model scale (preserved through pickup/place)
     };
     static constexpr int TOOLBAR_SLOT_COUNT = 10;
     ToolbarSlot m_toolbarSlots[10];
@@ -22606,9 +23680,15 @@ private:
         bool settled = false;
     };
     std::vector<PhysicsTrackedObject> m_physicsObjects;
+    bool m_buildRotateMode = false;
+    float m_buildSnapAmount = 0.5f;   // Movement snap grid size
+    glm::quat m_frameAlignRot{1, 0, 0, 0};  // Rotation for frame-aligned placement
+    bool m_frameAligned = false;              // True if last placement used frame port alignment
+    float m_buildRotateSnap = 45.0f;  // Rotation snap in degrees
     bool m_buildMoveDragging = false;
     glm::vec3 m_buildMoveOrigPos{0.0f};
     glm::vec3 m_buildMoveOffset{0.0f};
+    float m_buildMoveLastMouseY = 0.0f;  // For vertical drag (Shift+drag)
     bool m_spawnAtPlatformTop = false; // true = teleport to platform top on folder nav
     bool m_showPerfWindow = false;
     bool m_showServerManager = false;
@@ -22716,14 +23796,220 @@ private:
     float m_playerMaxHealth = 100.0f;
     float m_playerHitboxRadius = 1.0f;  // Invisible sphere hitbox around camera
     int m_engineHumLoopId = -1;
-    std::unordered_map<SceneObject*, int> m_generatorLoops; // object → loopId
-    struct SpinningFan {
-        SceneObject* obj;
-        float angle; // accumulated degrees
-        glm::vec3 axis; // world-space spin axis
-        glm::vec3 baseEuler; // euler rotation before spinning started
+    MachineManager m_machineManager{*this};
+    PortSnapSystem m_portSnap;
+    FlowSystem m_flowSystem;
+    FlowResult m_flowResult;
+    SceneObject* m_flowSource = nullptr;  // Currently active water source
+    int m_waterLoopId = -1;              // Audio loop for water flow
+    WaterTank m_waterTank;               // Tracks water level in the active source
+    int m_objectRotationIndex = 0;  // 0-5: cardinal rotation for selected object (R key cycles)
+    bool m_showCPsInGame = false;   // T key toggles CP visualization in play mode
+    std::vector<GPUPointLight> m_activeLights;  // Point lights updated each frame
+
+    // Wire connections between control points
+    struct CPWire {
+        SceneObject* fromObj = nullptr;
+        std::string fromCP;
+        SceneObject* toObj = nullptr;
+        std::string toCP;
+        uint32_t meshHandle = 0;  // GPU model handle for 3D wire mesh (0 = not created)
     };
-    std::vector<SpinningFan> m_spinningFans;
+    std::vector<CPWire> m_wires;
+    bool m_wiresMeshDirty = true;  // Rebuild wire meshes next frame
+
+    // Generate a tube mesh between two points with optional sag
+    void rebuildWireMeshes() {
+        // Destroy old wire meshes
+        for (auto& wire : m_wires) {
+            if (wire.meshHandle != 0 && m_modelRenderer) {
+                m_modelRenderer->destroyModel(wire.meshHandle);
+                wire.meshHandle = 0;
+            }
+        }
+
+        const int segments = 12;    // Points along the wire length
+        const int sides = 6;        // Tube cross-section
+        const float radius = 0.03f;  // Wire thickness (doubled for chunky pixel art style)
+
+        for (auto& wire : m_wires) {
+            if (!wire.fromObj || !wire.toObj) continue;
+            if (!wire.fromObj->hasMeshData() || !wire.toObj->hasMeshData()) continue;
+
+            glm::vec3 fromWorld, toWorld;
+            bool gotFrom = getCPWorldPos(wire.fromObj, wire.fromCP, fromWorld) ||
+                           getCPWorldPosExact(wire.fromObj, wire.fromCP, fromWorld);
+            bool gotTo = getCPWorldPos(wire.toObj, wire.toCP, toWorld) ||
+                         getCPWorldPosExact(wire.toObj, wire.toCP, toWorld);
+            if (!gotFrom || !gotTo) continue;
+
+            // Calculate sag — only for wires spanning open air
+            float hDist = glm::length(glm::vec2(toWorld.x - fromWorld.x, toWorld.z - fromWorld.z));
+            float vDist = std::abs(toWorld.y - fromWorld.y);
+            float minY = std::min(fromWorld.y, toWorld.y);
+            // Check if wire is near the ground
+            float terrainY = m_terrain.getHeightAt(
+                (fromWorld.x + toWorld.x) * 0.5f,
+                (fromWorld.z + toWorld.z) * 0.5f);
+            bool nearGround = (minY - terrainY) < 0.5f;
+            // Check if wire runs mostly vertically (along a wall)
+            bool mostlyVertical = vDist > hDist * 0.8f;
+            float sagAmount = 0.0f;
+            if (hDist > 3.0f && !nearGround && !mostlyVertical && vDist < hDist * 0.5f) {
+                sagAmount = std::min(hDist * 0.1f, 0.4f);
+            }
+
+            // Build path points along the wire with catenary sag
+            std::vector<glm::vec3> path;
+            for (int i = 0; i <= segments; ++i) {
+                float t = static_cast<float>(i) / segments;
+                glm::vec3 p = glm::mix(fromWorld, toWorld, t);
+                // Parabolic sag: maximum at midpoint
+                float sagT = 4.0f * t * (1.0f - t);  // 0 at ends, 1 at middle
+                p.y -= sagAmount * sagT;
+                path.push_back(p);
+            }
+
+            // Generate tube mesh around the path
+            std::vector<ModelVertex> verts;
+            std::vector<uint32_t> indices;
+
+            for (int i = 0; i <= segments; ++i) {
+                // Get direction along path
+                glm::vec3 dir;
+                if (i == 0) dir = glm::normalize(path[1] - path[0]);
+                else if (i == segments) dir = glm::normalize(path[segments] - path[segments - 1]);
+                else dir = glm::normalize(path[i + 1] - path[i - 1]);
+
+                // Build perpendicular axes
+                glm::vec3 up = (std::abs(dir.y) < 0.9f) ? glm::vec3(0, 1, 0) : glm::vec3(1, 0, 0);
+                glm::vec3 perp1 = glm::normalize(glm::cross(dir, up));
+                glm::vec3 perp2 = glm::normalize(glm::cross(dir, perp1));
+
+                // Ring of vertices
+                for (int j = 0; j < sides; ++j) {
+                    float angle = static_cast<float>(j) / sides * 6.28318f;
+                    glm::vec3 offset = perp1 * std::cos(angle) * radius + perp2 * std::sin(angle) * radius;
+                    glm::vec3 pos = path[i] + offset;
+                    glm::vec3 normal = glm::normalize(offset);
+
+                    ModelVertex v;
+                    v.position = pos;
+                    v.normal = normal;
+                    v.texCoord = glm::vec2(static_cast<float>(j) / sides, static_cast<float>(i) / segments);
+                    v.color = glm::vec4(0.1f, 0.1f, 0.1f, 1.0f);  // Dark gray wire
+                    verts.push_back(v);
+                }
+            }
+
+            // Build triangle indices connecting rings (outward-facing winding)
+            for (int i = 0; i < segments; ++i) {
+                for (int j = 0; j < sides; ++j) {
+                    int curr = i * sides + j;
+                    int next = i * sides + (j + 1) % sides;
+                    int currNext = (i + 1) * sides + j;
+                    int nextNext = (i + 1) * sides + (j + 1) % sides;
+
+                    // Reversed winding for correct outward normals
+                    indices.push_back(curr);
+                    indices.push_back(next);
+                    indices.push_back(currNext);
+
+                    indices.push_back(next);
+                    indices.push_back(nextNext);
+                    indices.push_back(currNext);
+                }
+            }
+
+            if (m_modelRenderer && !verts.empty()) {
+                wire.meshHandle = m_modelRenderer->createModel(verts, indices);
+            }
+        }
+
+        m_wiresMeshDirty = false;
+    }
+    // Wiring state: first click sets "from", second click sets "to" and creates the wire
+    SceneObject* m_wireFromObj = nullptr;
+    std::string m_wireFromCP;
+    bool m_wiringActive = false;  // True after first CP click, waiting for second
+
+    // Switch states: tracks on/off for each switch object
+    std::unordered_map<SceneObject*, bool> m_switchStates;  // true = ON
+
+    // Check if power can reach a given object from a running generator
+    // through the wire graph, stopping at OFF switches
+    bool canPowerReach(SceneObject* target) {
+        std::unordered_set<SceneObject*> visited;
+        std::vector<SceneObject*> queue = {target};
+        visited.insert(target);
+        while (!queue.empty()) {
+            SceneObject* current = queue.back();
+            queue.pop_back();
+
+            // Is this object an outlet box connected to a running generator?
+            std::string cn = current->getName();
+            std::transform(cn.begin(), cn.end(), cn.begin(), ::tolower);
+            if (cn.find("outlet") != std::string::npos) {
+                for (auto& so : m_sceneObjects) {
+                    if (!so || !m_machineManager.isRunning(so.get())) continue;
+                    std::string gn = so->getName();
+                    std::transform(gn.begin(), gn.end(), gn.begin(), ::tolower);
+                    if (gn.find("generator") == std::string::npos) continue;
+                    if (so->hasPorts() && current->hasPorts()) {
+                        glm::mat4 gMat = so->getTransform().getMatrix();
+                        glm::mat4 oMat = current->getTransform().getMatrix();
+                        for (const auto& gp : so->getPorts()) {
+                            glm::vec3 gpw = glm::vec3(gMat * glm::vec4(gp.position, 1.0f));
+                            for (const auto& op : current->getPorts()) {
+                                glm::vec3 opw = glm::vec3(oMat * glm::vec4(op.position, 1.0f));
+                                if (glm::length(gpw - opw) < 0.5f) return true;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Follow wires, but stop at OFF switches
+            for (const auto& wire : m_wires) {
+                SceneObject* next = nullptr;
+                if (wire.toObj == current && visited.count(wire.fromObj) == 0) next = wire.fromObj;
+                if (wire.fromObj == current && visited.count(wire.toObj) == 0) next = wire.toObj;
+                if (!next) continue;
+
+                // If next is a switch that's OFF, don't pass through
+                std::string nn = next->getName();
+                std::transform(nn.begin(), nn.end(), nn.begin(), ::tolower);
+                if (nn.find("switch") != std::string::npos) {
+                    bool switchOn = m_switchStates.count(next) ? m_switchStates[next] : false;
+                    if (!switchOn) continue;  // Switch is OFF — power can't pass
+                }
+
+                visited.insert(next);
+                queue.push_back(next);
+            }
+        }
+        return false;
+    }
+
+    // Check if a specific wire has power flowing through it
+    bool isWirePowered(const CPWire& wire) {
+        // A wire is powered if the "from" side can reach a running generator
+        // through the wire graph (respecting switch states)
+        if (!wire.fromObj) return false;
+        return canPowerReach(wire.fromObj);
+    }
+
+    // Check if a switch has power (is wired to a running generator's outlet)
+    bool isSwitchPowered(SceneObject* switchObj) {
+        return canPowerReach(switchObj);
+    }
+
+    // Key = .limes file path, so the link survives pickup/replace of the base object
+    std::unordered_map<std::string, std::vector<BlueprintAttachment>> m_blueprintAttachments;
+
+    // Tracks CP-snapped / blueprint-attached parts: child → parent
+    std::unordered_map<SceneObject*, SceneObject*> m_cpAttachedTo;
+
     std::string m_screenMessage;
     float m_screenMessageTimer = 0.0f;
     MovementMode m_lastMovementMode = MovementMode::Fly;

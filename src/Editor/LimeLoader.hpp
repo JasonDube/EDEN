@@ -24,6 +24,13 @@ public:
         std::string name;
     };
 
+    struct Port {
+        std::string name;
+        glm::vec3 position{0.0f};
+        glm::vec3 forward{0.0f, 0.0f, 1.0f};
+        glm::vec3 up{0.0f, 1.0f, 0.0f};
+    };
+
     struct LoadedMesh {
         std::string name;
         std::vector<ModelVertex> vertices;
@@ -36,6 +43,7 @@ public:
         glm::vec3 rotation{0.0f};  // Euler degrees (converted from quaternion)
         glm::vec3 scale{1.0f};
         std::vector<ControlPoint> controlPoints;
+        std::vector<Port> ports;
         std::unordered_map<std::string, std::string> metadata;
     };
 
@@ -45,12 +53,25 @@ public:
         LoadedMesh mesh;
     };
 
+    struct SceneResult {
+        bool success = false;
+        std::string error;
+        std::vector<LoadedMesh> objects;
+    };
+
     /**
      * @brief Load a .lime file
      * @param filepath Path to the .lime file
      * @return LoadResult with mesh data or error
      */
     static LoadResult load(const std::string& filepath);
+
+    /**
+     * @brief Load a .limes scene file (multiple objects)
+     * @param filepath Path to the .limes file
+     * @return SceneResult with all objects or error
+     */
+    static SceneResult loadScene(const std::string& filepath);
 
     /**
      * @brief Create a SceneObject from loaded mesh data

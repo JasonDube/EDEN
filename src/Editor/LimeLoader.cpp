@@ -171,6 +171,27 @@ LimeLoader::LoadResult LimeLoader::load(const std::string& filepath) {
             }
             result.mesh.controlPoints.push_back({vertIdx, cpName});
         }
+        else if (type == "port") {
+            // Parse: port idx: "name" px py pz | fx fy fz | ux uy uz
+            uint32_t idx;
+            char colon;
+            iss >> idx >> colon;
+            std::string rest;
+            std::getline(iss, rest);
+            Port port;
+            size_t q1 = rest.find('"');
+            size_t q2 = rest.find('"', q1 + 1);
+            if (q1 != std::string::npos && q2 != std::string::npos && q2 > q1) {
+                port.name = rest.substr(q1 + 1, q2 - q1 - 1);
+            }
+            std::string nums = (q2 != std::string::npos) ? rest.substr(q2 + 1) : rest;
+            for (char& c : nums) { if (c == '|') c = ' '; }
+            std::istringstream niss(nums);
+            niss >> port.position.x >> port.position.y >> port.position.z
+                 >> port.forward.x >> port.forward.y >> port.forward.z
+                 >> port.up.x >> port.up.y >> port.up.z;
+            result.mesh.ports.push_back(port);
+        }
         else if (type == "meta") {
             // Parse metadata: meta key: value
             std::string rest;
@@ -287,7 +308,226 @@ std::unique_ptr<SceneObject> LimeLoader::createSceneObject(
         obj->setControlPoints(storedCPs);
     }
 
+    // Transfer connection ports
+    if (!mesh.ports.empty()) {
+        std::vector<SceneObject::StoredPort> storedPorts;
+        for (const auto& p : mesh.ports) {
+            storedPorts.push_back({p.name, p.position, p.forward, p.up});
+        }
+        obj->setPorts(storedPorts);
+    }
+
     return obj;
+}
+
+LimeLoader::SceneResult LimeLoader::loadScene(const std::string& filepath) {
+    SceneResult result;
+
+    std::ifstream file(filepath);
+    if (!file.is_open()) {
+        result.error = "Failed to open scene file: " + filepath;
+        return result;
+    }
+
+    // Split the .limes file into per-object line blocks
+    std::string line;
+    std::vector<std::string> currentBlock;
+    std::string currentName;
+    bool inObject = false;
+
+    while (std::getline(file, line)) {
+        if (line.empty() || line[0] == '#') {
+            if (inObject) currentBlock.push_back(line);
+            continue;
+        }
+
+        if (line.rfind("OBJECT_BEGIN", 0) == 0) {
+            inObject = true;
+            currentBlock.clear();
+            // Extract name from OBJECT_BEGIN "name"
+            size_t q1 = line.find('"');
+            size_t q2 = line.rfind('"');
+            if (q1 != std::string::npos && q2 > q1)
+                currentName = line.substr(q1 + 1, q2 - q1 - 1);
+            else
+                currentName = "unnamed";
+            continue;
+        }
+
+        if (line == "OBJECT_END") {
+            if (inObject && !currentBlock.empty()) {
+                // Parse this block using the same logic as load()
+                LoadedMesh mesh;
+                mesh.name = currentName;
+
+                std::vector<LimeVertex> limeVertices;
+                std::vector<LimeFace> limeFaces;
+
+                for (const auto& bline : currentBlock) {
+                    if (bline.empty() || bline[0] == '#') continue;
+                    std::istringstream iss(bline);
+                    std::string type;
+                    iss >> type;
+
+                    if (type == "transform_pos:") {
+                        iss >> mesh.position.x >> mesh.position.y >> mesh.position.z;
+                    }
+                    else if (type == "transform_rot:") {
+                        float w, x, y, z;
+                        iss >> w >> x >> y >> z;
+                        glm::quat q(w, x, y, z);
+                        mesh.rotation = glm::degrees(glm::eulerAngles(q));
+                    }
+                    else if (type == "transform_scale:") {
+                        iss >> mesh.scale.x >> mesh.scale.y >> mesh.scale.z;
+                    }
+                    else if (type == "tex_size:") {
+                        iss >> mesh.textureWidth >> mesh.textureHeight;
+                    }
+                    else if (type == "tex_data:") {
+                        std::string encoded;
+                        iss >> encoded;
+                        mesh.textureData = base64_decode(encoded);
+                        mesh.hasTexture = !mesh.textureData.empty() &&
+                                           mesh.textureWidth > 0 &&
+                                           mesh.textureHeight > 0;
+                    }
+                    else if (type == "v") {
+                        uint32_t idx;
+                        char colon, pipe1, pipe2, pipe3, pipe4;
+                        LimeVertex v;
+                        int selected;
+
+                        iss >> idx >> colon
+                            >> v.position.x >> v.position.y >> v.position.z >> pipe1
+                            >> v.normal.x >> v.normal.y >> v.normal.z >> pipe2
+                            >> v.uv.x >> v.uv.y >> pipe3;
+
+                        float r, g, b, a;
+                        if (iss >> r >> g >> b >> a >> pipe4) {
+                            v.color = glm::vec4(r, g, b, a);
+                            iss >> v.halfEdgeIndex >> selected;
+                        } else {
+                            v.color = glm::vec4(1.0f);
+                            iss.clear();
+                            iss.seekg(0);
+                            std::string dummy;
+                            iss >> dummy >> idx >> colon
+                                >> v.position.x >> v.position.y >> v.position.z >> pipe1
+                                >> v.normal.x >> v.normal.y >> v.normal.z >> pipe2
+                                >> v.uv.x >> v.uv.y >> pipe3
+                                >> v.halfEdgeIndex >> selected;
+                        }
+                        v.selected = (selected != 0);
+                        if (idx >= limeVertices.size()) limeVertices.resize(idx + 1);
+                        limeVertices[idx] = v;
+                    }
+                    else if (type == "f") {
+                        uint32_t idx, heIdx, vertCount;
+                        int selected;
+                        char colon, pipe;
+                        iss >> idx >> colon >> heIdx >> vertCount >> selected >> pipe;
+
+                        LimeFace f;
+                        f.halfEdgeIndex = heIdx;
+                        f.vertexCount = vertCount;
+                        f.selected = (selected != 0);
+                        uint32_t vi;
+                        while (iss >> vi) f.vertexIndices.push_back(vi);
+                        if (idx >= limeFaces.size()) limeFaces.resize(idx + 1);
+                        limeFaces[idx] = f;
+                    }
+                    else if (type == "cp") {
+                        uint32_t idx, vertIdx;
+                        char colon;
+                        iss >> idx >> colon >> vertIdx;
+                        std::string cpName;
+                        std::getline(iss, cpName);
+                        size_t start = cpName.find('"');
+                        size_t end = cpName.rfind('"');
+                        if (start != std::string::npos && end != std::string::npos && end > start)
+                            cpName = cpName.substr(start + 1, end - start - 1);
+                        else
+                            while (!cpName.empty() && cpName[0] == ' ') cpName.erase(0, 1);
+                        mesh.controlPoints.push_back({vertIdx, cpName});
+                    }
+                    else if (type == "port") {
+                        uint32_t idx;
+                        char colon;
+                        iss >> idx >> colon;
+                        std::string rest;
+                        std::getline(iss, rest);
+                        Port port;
+                        size_t q1 = rest.find('"');
+                        size_t q2 = rest.find('"', q1 + 1);
+                        if (q1 != std::string::npos && q2 != std::string::npos && q2 > q1) {
+                            port.name = rest.substr(q1 + 1, q2 - q1 - 1);
+                        }
+                        std::string nums = (q2 != std::string::npos) ? rest.substr(q2 + 1) : rest;
+                        for (char& c : nums) { if (c == '|') c = ' '; }
+                        std::istringstream niss(nums);
+                        niss >> port.position.x >> port.position.y >> port.position.z
+                             >> port.forward.x >> port.forward.y >> port.forward.z
+                             >> port.up.x >> port.up.y >> port.up.z;
+                        mesh.ports.push_back(port);
+                    }
+                    else if (type == "meta") {
+                        std::string rest;
+                        std::getline(iss, rest);
+                        size_t start = rest.find_first_not_of(' ');
+                        if (start != std::string::npos) rest = rest.substr(start);
+                        size_t colonPos = rest.find(": ");
+                        if (colonPos != std::string::npos)
+                            mesh.metadata[rest.substr(0, colonPos)] = rest.substr(colonPos + 2);
+                    }
+                }
+
+                // Convert vertices
+                mesh.vertices.reserve(limeVertices.size());
+                for (const auto& lv : limeVertices) {
+                    ModelVertex mv;
+                    mv.position = lv.position;
+                    mv.normal = lv.normal;
+                    mv.texCoord = lv.uv;
+                    mv.color = lv.color;
+                    mesh.vertices.push_back(mv);
+                }
+
+                // Triangulate faces
+                for (const auto& face : limeFaces) {
+                    if (face.vertexIndices.size() < 3) continue;
+                    for (size_t i = 1; i + 1 < face.vertexIndices.size(); ++i) {
+                        mesh.indices.push_back(face.vertexIndices[0]);
+                        mesh.indices.push_back(face.vertexIndices[i]);
+                        mesh.indices.push_back(face.vertexIndices[i + 1]);
+                    }
+                }
+
+                std::cout << "  Object: " << currentName << " ("
+                          << limeVertices.size() << " verts, "
+                          << limeFaces.size() << " faces";
+                if (!mesh.controlPoints.empty())
+                    std::cout << ", " << mesh.controlPoints.size() << " CPs";
+                std::cout << ")" << std::endl;
+
+                result.objects.push_back(std::move(mesh));
+            }
+            inObject = false;
+            continue;
+        }
+
+        if (inObject) currentBlock.push_back(line);
+    }
+
+    file.close();
+
+    result.success = !result.objects.empty();
+    if (result.success)
+        std::cout << "Loaded LIMES scene: " << filepath << " (" << result.objects.size() << " objects)" << std::endl;
+    else
+        result.error = "No objects found in scene file";
+
+    return result;
 }
 
 } // namespace eden

@@ -448,6 +448,9 @@ bool LevelSerializer::save(const std::string& filepath,
             objJson["polygonCollision"] = obj->hasPolygonCollision();
             objJson["bulletCollisionType"] = static_cast<int>(obj->getBulletCollisionType());
             objJson["kinematicPlatform"] = obj->isKinematicPlatform();
+            if (obj->isIndoor()) {
+                objJson["indoor"] = true;
+            }
 
             // Frozen transform - rotation/scale baked into vertices
             if (obj->hasFrozenTransform()) {
@@ -846,6 +849,7 @@ bool LevelSerializer::load(const std::string& filepath, LevelData& outData) {
                 }
                 obj.bulletCollisionType = objJson.value("bulletCollisionType", 0);
                 obj.kinematicPlatform = objJson.value("kinematicPlatform", false);
+                obj.indoor = objJson.value("indoor", false);
 
                 // Frozen transform - rotation/scale baked into vertices
                 obj.frozenTransform = objJson.value("frozenTransform", false);
