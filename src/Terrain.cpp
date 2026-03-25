@@ -349,6 +349,36 @@ void TerrainChunk::applyBrush(float worldX, float worldZ, float radius, float st
                 continue;
             }
 
+            // Shovel: lower nearest vertex to exactly 1m below original, capped
+            if (mode == BrushMode::Shovel) {
+                if (t <= 1.0f) {
+                    float currentHeight = m_heightmap[z * m_resolution + x];
+                    if (currentHeight > targetHeight) {
+                        m_heightmap[z * m_resolution + x] = targetHeight;
+                        modified = true;
+                    }
+                }
+                continue;
+            }
+
+            // Furrow brush: dig center, raise edges
+            if (mode == BrushMode::Furrow) {
+                float currentHeight = m_heightmap[z * m_resolution + x];
+                if (t <= 0.4f) {
+                    // Center: dig down by strength
+                    float newHeight = std::min(currentHeight, targetHeight - strength);
+                    m_heightmap[z * m_resolution + x] = newHeight;
+                    modified = true;
+                } else if (t <= 1.0f) {
+                    // Edges: raise up by half strength (berms)
+                    float edgeFactor = 1.0f - (t - 0.4f) / 0.6f;  // 1.0 at inner edge, 0.0 at outer
+                    float newHeight = currentHeight + strength * 0.5f * edgeFactor;
+                    m_heightmap[z * m_resolution + x] = newHeight;
+                    modified = true;
+                }
+                continue;
+            }
+
             if (t <= 1.0f) {
                 // Calculate falloff - smoother curve
                 float falloffMult = 1.0f - std::pow(t, 1.0f / (1.0f - falloff * 0.9f + 0.1f));
@@ -977,8 +1007,8 @@ void Terrain::applyBrush(float worldX, float worldZ, float radius, float strengt
     } else if (mode == BrushMode::Plateau) {
         // Plateau mode: extrude the center point upward by strength amount
         targetHeight = getHeightAt(worldX, worldZ) + strength;
-    } else if (mode == BrushMode::Trench) {
-        // Trench mode: get center height as reference for flat bottom
+    } else if (mode == BrushMode::Trench || mode == BrushMode::Furrow) {
+        // Trench/Furrow: get center height as reference
         targetHeight = getHeightAt(worldX, worldZ);
     } else if (mode == BrushMode::LevelMin) {
         // Find the minimum height within the brush radius
@@ -1003,6 +1033,20 @@ void Terrain::applyBrush(float worldX, float worldZ, float radius, float strengt
         heightLookup = [this](float x, float z) {
             return getHeightAt(x, z);
         };
+    }
+
+    // Shovel: lower vertices to target height, capped (won't go below target)
+    // If targetHeightOverride is non-zero, use it as absolute target and keep caller's radius (gameplay dig)
+    // Otherwise default to 1m below current surface with tiny radius (editor single-vertex brush)
+    if (mode == BrushMode::Shovel) {
+        if (targetHeightOverride != 0.0f) {
+            targetHeight = targetHeightOverride;
+            // Caller controls radius for gameplay dig
+        } else {
+            targetHeight = getHeightAt(worldX, worldZ) - 1.0f;
+            radius = m_config.tileSize * 0.5f;  // Single vertex for editor brush
+        }
+        strength = 100.0f;  // Large strength so it snaps to target in one click
     }
 
     // Calculate max radius for chunk overlap check (account for ellipse/rotation)

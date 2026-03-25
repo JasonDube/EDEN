@@ -238,6 +238,8 @@ public:
         m_screenMessage = msg;
         m_screenMessageTimer = duration;
     }
+    glm::vec3 getCameraPosition() const override { return m_camera.getPosition(); }
+    // canPowerReach() defined later in class — satisfies MachineHost::canPowerReach
 
     void setSessionMode(bool enabled) { m_sessionMode = enabled; }
 
@@ -1228,8 +1230,21 @@ protected:
             }
         }
 
-        // Update machines (fan spinning, etc.)
+        // Update machines (fan spinning, sound attenuation, etc.)
         m_machineManager.update(deltaTime);
+
+        // Water flow sound attenuation (same curve as generator)
+        if (m_waterLoopId >= 0 && m_flowSource) {
+            glm::vec3 camPos = m_camera.getPosition();
+            glm::vec3 tankPos = m_flowSource->getTransform().getPosition();
+            float dist = glm::length(tankPos - camPos);
+            constexpr float baseVol = 0.4f, innerR = 5.0f, outerR = 30.0f;
+            float vol = 0.0f;
+            if (dist < innerR) vol = baseVol;
+            else if (dist < outerR) vol = baseVol * (1.0f - (dist - innerR) / (outerR - innerR));
+            Audio::getInstance().setLoopVolume(m_waterLoopId, vol);
+            Audio::getInstance().setLoopVolume(m_waterLoopId + 1, vol);
+        }
 
         // Rebuild wire 3D meshes if needed
         if (m_wiresMeshDirty && m_modelRenderer) {
@@ -1284,6 +1299,10 @@ protected:
                     totalPowerUsed += 5.0f;  // Each light uses 5 power units
                 }
             }
+            // Append interior lights from hinged doors (fridge light, etc.)
+            auto hingeLights = m_machineManager.hinge().getActiveLights();
+            m_activeLights.insert(m_activeLights.end(), hingeLights.begin(), hingeLights.end());
+
             if (m_modelRenderer) {
                 m_modelRenderer->setLights(m_activeLights);
             }
@@ -1318,6 +1337,38 @@ protected:
                 }
                 m_screenMessage = "Water tank empty!";
                 m_screenMessageTimer = 3.0f;
+            }
+
+            // Fill containers that are under water spray
+            for (const auto& oe : m_flowResult.openEnds) {
+                // Check each container object
+                for (auto& so : m_sceneObjects) {
+                    if (!so) continue;
+                    std::string capStr = so->getMetaValue("capacity");
+                    if (capStr.empty()) continue;
+
+                    float capacity = std::stof(capStr);
+                    auto& cs = m_containerStates[so.get()];
+                    if (cs.fillLevel >= capacity) continue;  // Already full
+
+                    // Check if container is in the spray path
+                    glm::vec3 containerPos = so->getTransform().getPosition();
+                    glm::vec3 toContainer = containerPos - oe.position;
+                    float dist = glm::length(toContainer);
+                    if (dist > 3.0f) continue;  // Too far from spray
+
+                    // Check if container is roughly in the spray direction
+                    float alignment = glm::dot(glm::normalize(toContainer), oe.direction);
+                    // Also allow containers directly below (gravity pulls water down)
+                    float belowness = -glm::normalize(toContainer).y;  // Positive if container is below
+                    if (alignment < 0.3f && belowness < 0.3f) continue;  // Not in spray path
+
+                    // Fill rate: ~1 gallon per second at full pressure
+                    float fillRate = oe.pressure / 100.0f;
+
+                    cs.fillLevel = std::min(cs.fillLevel + fillRate * deltaTime, capacity);
+                    cs.liquidType = "Water";
+                }
             }
         }
 
@@ -2032,41 +2083,64 @@ protected:
                 m_terminalPixelBuffer.data(), 2048, 1152);
         }
 
-        for (size_t i = 0; i < m_sceneObjects.size(); i++) {
-            const auto& objPtr = m_sceneObjects[i];
-            if (!objPtr || !objPtr->isVisible()) continue;
+        // Batched instanced rendering: group non-skinned objects by bufferHandle
+        {
+            std::unordered_map<uint32_t, std::vector<eden::InstanceData>> batches;
+            int drawCalls = 0;
 
-            // Hide door trigger zones in play mode (they're invisible interaction areas)
-            // But keep filesystem doors visible — they represent folder entries
-            if (m_isPlayMode && objPtr->isDoor() && objPtr->getBuildingType() != "filesystem" && objPtr->getBuildingType() != "wall_widget") continue;
+            for (size_t i = 0; i < m_sceneObjects.size(); i++) {
+                const auto& objPtr = m_sceneObjects[i];
+                if (!objPtr || !objPtr->isVisible()) continue;
 
-            glm::mat4 modelMatrix = const_cast<SceneObject*>(objPtr.get())->getTransform().getMatrix();
+                if (m_isPlayMode && objPtr->isDoor() && objPtr->getBuildingType() != "filesystem" && objPtr->getBuildingType() != "wall_widget") continue;
 
-            float hue = objPtr->getHueShift();
-            float sat = objPtr->getSaturation();
-            float bright = objPtr->getBrightness();
+                glm::mat4 modelMatrix = const_cast<SceneObject*>(objPtr.get())->getTransform().getMatrix();
 
-            bool isSelected = (static_cast<int>(i) == m_selectedObjectIndex);
-            if (isSelected && !m_isPlayMode) {
-                hue += 15.0f;
-                bright *= 1.3f;
+                float hue = objPtr->getHueShift();
+                float sat = objPtr->getSaturation();
+                float bright = objPtr->getBrightness();
+
+                bool isSelected = (static_cast<int>(i) == m_selectedObjectIndex);
+                if (isSelected && !m_isPlayMode) {
+                    hue += 15.0f;
+                    bright *= 1.3f;
+                }
+
+                if (objPtr->isHitFlashing()) {
+                    hue = 0.0f;
+                    sat = 3.0f;
+                    bright = 2.0f;
+                }
+
+                if (objPtr->isSkinned()) {
+                    m_skinnedModelRenderer->render(cmd, vp, objPtr->getSkinnedModelHandle(), modelMatrix,
+                                                   hue, sat, bright);
+                    drawCalls++;
+                } else {
+                    float wVal = objPtr->isIndoor() ? -1.0f : 0.0f;
+                    eden::InstanceData inst;
+                    inst.model = modelMatrix;
+                    inst.colorAdjust = glm::vec4(hue, sat, bright, wVal);
+                    batches[objPtr->getBufferHandle()].push_back(inst);
+                }
             }
 
-            // Hit flash effect - turn red when damaged
-            if (objPtr->isHitFlashing()) {
-                hue = 0.0f;      // Red hue
-                sat = 3.0f;      // High saturation
-                bright = 2.0f;   // Bright
+            // Render batches: instanced for 2+, single draw for 1
+            for (auto& [handle, instances] : batches) {
+                if (instances.size() >= 2) {
+                    m_modelRenderer->renderInstanced(cmd, vp, handle,
+                                                     instances.data(),
+                                                     static_cast<uint32_t>(instances.size()));
+                } else {
+                    auto& inst = instances[0];
+                    m_modelRenderer->render(cmd, vp, handle, inst.model,
+                                            inst.colorAdjust.x, inst.colorAdjust.y,
+                                            inst.colorAdjust.z, false,
+                                            inst.colorAdjust.w < -0.5f);
+                }
+                drawCalls++;
             }
-
-            // Use appropriate renderer based on model type
-            if (objPtr->isSkinned()) {
-                m_skinnedModelRenderer->render(cmd, vp, objPtr->getSkinnedModelHandle(), modelMatrix,
-                                               hue, sat, bright);
-            } else {
-                m_modelRenderer->render(cmd, vp, objPtr->getBufferHandle(), modelMatrix,
-                                        hue, sat, bright, false, objPtr->isIndoor());
-            }
+            m_modelDrawCalls = drawCalls;
         }
 
         // Render 3D wire meshes (only in play mode, not in T-mode where overlay lines are used)
@@ -2123,6 +2197,101 @@ protected:
                 modelMatrix = glm::scale(modelMatrix, glm::vec3(modelScale));
 
                 m_modelRenderer->render(cmd, vp, slot.gpuHandle, modelMatrix);
+            }
+        }
+
+        // Drinking animation — render model large in front of camera, tipping up
+        if (m_isDrinking && m_drinkSlot >= 0 && m_drinkSlot < TOOLBAR_SLOT_COUNT) {
+            auto& drinkSlot = m_toolbarSlots[m_drinkSlot];
+            if (drinkSlot.gpuHandle != 0) {
+                float t = m_drinkTimer / m_drinkDuration;  // 0 to 1
+                // Animation: model comes up (0-0.3), tips back (0.3-0.7), goes down (0.7-1.0)
+                float liftT = std::min(t / 0.3f, 1.0f);        // 0→1 during lift
+                float tipT = std::clamp((t - 0.3f) / 0.4f, 0.0f, 1.0f);  // 0→1 during tip
+                float downT = std::clamp((t - 0.7f) / 0.3f, 0.0f, 1.0f); // 0→1 during lower
+
+                glm::vec3 camPos2 = m_camera.getPosition();
+                glm::vec3 camFront2 = m_camera.getFront();
+                glm::vec3 camRight2 = m_camera.getRight();
+                glm::vec3 camUp2 = m_camera.getUp();
+
+                // Position: starts below camera, rises to center of screen, then back down
+                float yOffset = -0.4f + liftT * 0.4f - downT * 0.4f;
+                float xOffset = 0.0f;  // Centered
+                float zDist = 0.25f;    // Right in your face
+                glm::vec3 drinkPos = camPos2 + camFront2 * zDist + camRight2 * xOffset + camUp2 * yOffset;
+
+                // Rotation: tip backward during drink phase
+                float tipAngle = tipT * 45.0f * (1.0f - downT);  // Tip up to 45°, then back
+                glm::mat4 drinkMatrix = glm::translate(glm::mat4(1.0f), drinkPos);
+                // Orient to face same direction as camera
+                glm::mat4 camOrient(1.0f);
+                camOrient[0] = glm::vec4(camRight2, 0.0f);
+                camOrient[1] = glm::vec4(camUp2, 0.0f);
+                camOrient[2] = glm::vec4(-camFront2, 0.0f);  // Camera looks along -Z
+                drinkMatrix *= camOrient;
+                drinkMatrix = glm::rotate(drinkMatrix, glm::radians(tipAngle), glm::vec3(1, 0, 0));
+                drinkMatrix = glm::scale(drinkMatrix, glm::vec3(0.3f));  // Large, filling the view
+
+                m_modelRenderer->render(cmd, vp, drinkSlot.gpuHandle, drinkMatrix);
+            }
+        }
+
+        // Held shovel — render active hotbar shovel model in lower-right like a held tool
+        if (m_isPlayMode && !m_isDrinking) {
+            auto& heldSlot = m_toolbarSlots[m_activeToolbarSlot];
+            if (heldSlot.occupied && heldSlot.is3DModel && heldSlot.gpuHandle != 0) {
+                std::string heldName = heldSlot.displayName;
+                std::transform(heldName.begin(), heldName.end(), heldName.begin(), ::tolower);
+                if (heldName.find("shovel") != std::string::npos) {
+                    glm::vec3 camPos3 = m_camera.getPosition();
+                    glm::vec3 camFront3 = m_camera.getFront();
+                    glm::vec3 camRight3 = m_camera.getRight();
+                    glm::vec3 camUp3 = m_camera.getUp();
+
+                    // Position: lower-right of view, like holding a tool
+                    float xOff = 0.25f;   // Right of center
+                    float yOff = -0.25f;  // Below center
+                    float zDist = 0.5f;   // Distance from camera
+
+                    // Dig swing animation: loops while holding to dig
+                    float swingAngle = 0.0f;
+                    if (m_isDigging) {
+                        float t = m_digSwingTimer / m_digSwingDuration;
+                        // Swing down fast (0-0.3), hold (0.3-0.5), swing back (0.5-1.0)
+                        if (t < 0.3f) {
+                            swingAngle = (t / 0.3f) * 45.0f;
+                            yOff -= (t / 0.3f) * 0.1f;
+                        } else if (t < 0.5f) {
+                            swingAngle = 45.0f;
+                            yOff -= 0.1f;
+                        } else {
+                            float returnT = (t - 0.5f) / 0.5f;
+                            swingAngle = 45.0f * (1.0f - returnT);
+                            yOff -= 0.1f * (1.0f - returnT);
+                        }
+                    }
+
+                    glm::vec3 heldPos = camPos3 + camFront3 * zDist
+                                      + camRight3 * xOff + camUp3 * yOff;
+
+                    glm::mat4 heldMatrix = glm::translate(glm::mat4(1.0f), heldPos);
+                    // Orient to camera
+                    glm::mat4 camOrient2(1.0f);
+                    camOrient2[0] = glm::vec4(camRight3, 0.0f);
+                    camOrient2[1] = glm::vec4(camUp3, 0.0f);
+                    camOrient2[2] = glm::vec4(-camFront3, 0.0f);
+                    heldMatrix *= camOrient2;
+                    // Tilt handle toward player (lean back ~30 deg) + dig swing
+                    heldMatrix = glm::rotate(heldMatrix, glm::radians(-30.0f + swingAngle),
+                                             glm::vec3(1.0f, 0.0f, 0.0f));
+                    // Slight rotation so handle faces right
+                    heldMatrix = glm::rotate(heldMatrix, glm::radians(15.0f),
+                                             glm::vec3(0.0f, 0.0f, 1.0f));
+                    heldMatrix = glm::scale(heldMatrix, glm::vec3(0.15f));
+
+                    m_modelRenderer->render(cmd, vp, heldSlot.gpuHandle, heldMatrix);
+                }
             }
         }
 
@@ -5375,9 +5544,29 @@ private:
                 AABB bounds = obj->getWorldBounds();
                 if (x >= bounds.min.x - playerRadius && x <= bounds.max.x + playerRadius &&
                     z >= bounds.min.z - playerRadius && z <= bounds.max.z + playerRadius) {
-                    // Only count as ground if we're above it
-                    if (bounds.max.y > height && bounds.max.y < camPos.y + 0.5f) {
-                        height = bounds.max.y;
+                    // For rotated objects (ramps), compute actual surface height
+                    // by transforming player position into local space and checking the unit cube
+                    glm::vec3 euler = obj->getEulerRotation();
+                    bool isRotated = (std::abs(euler.x) > 1.0f || std::abs(euler.z) > 1.0f);
+
+                    float surfaceY = bounds.max.y;
+                    if (isRotated) {
+                        // Transform player XZ into object's local space
+                        glm::mat4 invModel = glm::inverse(obj->getTransform().getMatrix());
+                        glm::vec3 localPos = glm::vec3(invModel * glm::vec4(x, camPos.y, z, 1.0f));
+                        // Unit cube is -0.5 to 0.5 on X/Z, 0 to 1 on Y
+                        if (localPos.x >= -0.5f && localPos.x <= 0.5f &&
+                            localPos.z >= -0.5f && localPos.z <= 0.5f) {
+                            // Find the Y in local space where the top surface is at this XZ
+                            // Top surface of unit cube is Y=1.0
+                            glm::vec3 localTop(localPos.x, 1.0f, localPos.z);
+                            glm::vec3 worldTop = glm::vec3(obj->getTransform().getMatrix() * glm::vec4(localTop, 1.0f));
+                            surfaceY = worldTop.y;
+                        }
+                    }
+
+                    if (surfaceY > height && surfaceY < camPos.y + 0.5f) {
+                        height = surfaceY;
                     }
                 }
             }
@@ -7163,6 +7352,9 @@ private:
                                 if (selectedFS->hasPorts()) {
                                     m_toolbarSlots[i].ports = selectedFS->getPorts();
                                 }
+                                if (!selectedFS->getModelMetadata().empty()) {
+                                    m_toolbarSlots[i].metadata = selectedFS->getModelMetadata();
+                                }
                                 // Remove from model spin list and void tracking before erasing
                                 m_filesystemBrowser.removeModelSpin(selectedFS);
                                 m_filesystemBrowser.removeVoidFileObj(selectedFS);
@@ -7470,15 +7662,33 @@ private:
             }
         }
 
-        // Number key in play mode: pick up selected salvage OR throw hotbar item
+        // Number key / RMB / Q in play mode: pick up selected salvage OR throw/place hotbar item
+        // RMB = place active slot on surface (like Ctrl+Number)
+        // Q = throw active slot (like Number without Ctrl)
         if (m_isPlayMode && !m_filesystemBrowser.isActive() && !ImGui::GetIO().WantTextInput
             && !m_quickChatMode && !m_inConversation && !m_playModeCursorVisible) {
+
+            // Check for RMB/Q shortcuts before number keys
+            int rmbqSlot = -1;
+            bool rmbqForceCtrl = false;
+            bool altHeldForRMB = Input::isKeyDown(Input::KEY_LEFT_ALT) || Input::isKeyDown(Input::KEY_RIGHT_ALT);
+            if (Input::isMouseButtonPressed(Input::MOUSE_RIGHT) && !altHeldForRMB) {
+                rmbqSlot = m_activeToolbarSlot;
+                rmbqForceCtrl = true;  // RMB = surface placement
+            } else if (Input::isKeyPressed(Input::KEY_Q)) {
+                rmbqSlot = m_activeToolbarSlot;  // Q = throw
+            }
+
             static const int throwKeys[10] = {
                 Input::KEY_1, Input::KEY_2, Input::KEY_3, Input::KEY_4, Input::KEY_5,
                 Input::KEY_6, Input::KEY_7, Input::KEY_8, Input::KEY_9, Input::KEY_0
             };
             for (int i = 0; i < 10; i++) {
-                if (!Input::isKeyPressed(throwKeys[i])) continue;
+                if (rmbqSlot >= 0) {
+                    if (i != rmbqSlot) continue;  // skip to the active slot
+                } else {
+                    if (!Input::isKeyPressed(throwKeys[i])) continue;
+                }
 
                 // Priority 1: Pick up selected salvage into this hotbar slot
                 // Skip if slot already has a 3D model (don't overwrite — throw/place first)
@@ -7523,6 +7733,15 @@ private:
                     }
                     if (salvObj->hasPorts()) {
                         m_toolbarSlots[i].ports = salvObj->getPorts();
+                    }
+                    if (!salvObj->getModelMetadata().empty()) {
+                        m_toolbarSlots[i].metadata = salvObj->getModelMetadata();
+                    }
+                    // Preserve container fill level
+                    auto csIt = m_containerStates.find(salvObj.get());
+                    if (csIt != m_containerStates.end()) {
+                        m_toolbarSlots[i].containerFill = csIt->second.fillLevel;
+                        m_toolbarSlots[i].containerLiquid = csIt->second.liquidType;
                     }
                     m_toolbarSlots[i].is3DModel = true;
                     m_toolbarSlots[i].occupied = true;
@@ -7596,7 +7815,7 @@ private:
                     salvObj->setBufferHandle(UINT32_MAX);
                     deleteObject(m_selectedSalvageIndex);
                     m_selectedSalvageIndex = -1;
-                    // std::cout << "[Salvage] Picked up into hotbar slot " << (i + 1) << std::endl;
+                    showHotbarTooltip(i);
                     break;
                 }
 
@@ -7604,7 +7823,7 @@ private:
                 if (!m_toolbarSlots[i].occupied || !m_toolbarSlots[i].is3DModel) continue;
                 if (m_toolbarSlots[i].gpuHandle == 0) continue;
 
-                bool ctrlHeld = Input::isKeyDown(Input::KEY_LEFT_CONTROL) || Input::isKeyDown(Input::KEY_RIGHT_CONTROL);
+                bool ctrlHeld = rmbqForceCtrl || Input::isKeyDown(Input::KEY_LEFT_CONTROL) || Input::isKeyDown(Input::KEY_RIGHT_CONTROL);
 
                 glm::vec3 camPos = m_camera.getPosition();
                 glm::vec3 camFront = m_camera.getFront();
@@ -7822,6 +8041,13 @@ private:
                 if (!m_toolbarSlots[i].ports.empty()) {
                     obj->setPorts(m_toolbarSlots[i].ports);
                 }
+                if (!m_toolbarSlots[i].metadata.empty()) {
+                    obj->setModelMetadata(m_toolbarSlots[i].metadata);
+                }
+                // Restore container fill state
+                if (m_toolbarSlots[i].containerFill > 0.001f) {
+                    m_containerStates[obj.get()] = {m_toolbarSlots[i].containerFill, m_toolbarSlots[i].containerLiquid};
+                }
 
                 bool blueprintAttached = false;
                 if (ctrlHeld) {
@@ -7894,6 +8120,7 @@ private:
                                         m_toolbarSlots[i].textureData.clear();
                                         m_toolbarSlots[i].controlPoints.clear();
                                         m_toolbarSlots[i].ports.clear();
+                                        m_toolbarSlots[i].metadata.clear();
                                         break;
                                     }
                                 }
@@ -8050,12 +8277,28 @@ private:
                     glm::vec3 throwVel = camFront * throwSpeed + glm::vec3(0, 4.0f, 0);
 
                     if (m_characterController) {
-                        const AABB& bounds = m_toolbarSlots[i].modelBounds;
-                        glm::vec3 halfExt = bounds.getSize() * m_toolbarSlots[i].modelScale * 0.5f;
-                        halfExt = glm::max(halfExt, glm::vec3(0.05f));
+                        ICharacterController::DynamicBodyResult bodyResult;
 
-                        auto bodyResult = m_characterController->addDynamicBox(
-                            halfExt, spawnPos, throwVel, 1.0f, 0.5f, 0.3f);
+                        // Use convex hull for rocks (natural piling), box for everything else
+                        std::string throwName = obj->getName();
+                        std::transform(throwName.begin(), throwName.end(), throwName.begin(), ::tolower);
+                        bool useConvexHull = (throwName.find("rock") != std::string::npos) && obj->hasMeshData();
+
+                        if (useConvexHull) {
+                            const auto& verts = obj->getVertices();
+                            std::vector<glm::vec3> positions;
+                            positions.reserve(verts.size());
+                            for (const auto& v : verts) positions.push_back(v.position);
+                            bodyResult = m_characterController->addDynamicConvexHull(
+                                positions, spawnPos, m_toolbarSlots[i].modelScale,
+                                throwVel, 5.0f, 0.7f, 0.15f); // heavier, more friction, less bounce
+                        } else {
+                            const AABB& bounds = m_toolbarSlots[i].modelBounds;
+                            glm::vec3 halfExt = bounds.getSize() * m_toolbarSlots[i].modelScale * 0.5f;
+                            halfExt = glm::max(halfExt, glm::vec3(0.05f));
+                            bodyResult = m_characterController->addDynamicBox(
+                                halfExt, spawnPos, throwVel, 1.0f, 0.5f, 0.3f);
+                        }
 
                         if (bodyResult.valid) {
                             PhysicsTrackedObject tracked;
@@ -8086,6 +8329,7 @@ private:
                 m_toolbarSlots[i].textureHeight = 0;
                 m_toolbarSlots[i].controlPoints.clear();
                 m_toolbarSlots[i].ports.clear();
+                m_toolbarSlots[i].metadata.clear();
                 m_toolbarSlots[i].modelScale = glm::vec3(1.0f);
                 break;
             }
@@ -8132,46 +8376,180 @@ private:
         if (m_isPlayMode && !ImGui::GetIO().WantCaptureMouse && !(m_playModeCursorVisible && m_showSiloConfig)) {
             float scroll = Input::getScrollDelta();
             if (scroll > 0.0f) {
-                m_activeToolbarSlot = (m_activeToolbarSlot + 9) % 10; // scroll up = previous slot
+                m_activeToolbarSlot = (m_activeToolbarSlot + 9) % 10;
+                showHotbarTooltip(m_activeToolbarSlot);
             } else if (scroll < 0.0f) {
-                m_activeToolbarSlot = (m_activeToolbarSlot + 1) % 10; // scroll down = next slot
+                m_activeToolbarSlot = (m_activeToolbarSlot + 1) % 10;
+                showHotbarTooltip(m_activeToolbarSlot);
             }
         }
 
-        // R key in play mode: rotate selected object through 6 cardinal orientations
+        // R key in play mode: rotate selected object
+        // Pipes: spin 90° around pipe_start direction axis (pivot on start port)
+        // Everything else: cycle through 6 cardinal orientations
         if (m_isPlayMode && Input::isKeyPressed(Input::KEY_R) && !ImGui::GetIO().WantTextInput) {
             if (m_selectedSalvageIndex >= 0 && m_selectedSalvageIndex < static_cast<int>(m_sceneObjects.size())) {
                 auto& selObj = m_sceneObjects[m_selectedSalvageIndex];
                 if (selObj) {
-                    m_objectRotationIndex = (m_objectRotationIndex + 1) % 6;
-
-                    glm::quat rot(1.0f, 0.0f, 0.0f, 0.0f);
-                    glm::vec3 euler(0.0f);
-                    const char* dirName = "Default";
-                    switch (m_objectRotationIndex) {
-                        case 0: dirName = "Default"; break;
-                        case 1: rot = glm::angleAxis(glm::radians(90.0f), glm::vec3(0,1,0));
-                                euler = {0,90,0}; dirName = "Y +90"; break;
-                        case 2: rot = glm::angleAxis(glm::radians(180.0f), glm::vec3(0,1,0));
-                                euler = {0,180,0}; dirName = "Y +180"; break;
-                        case 3: rot = glm::angleAxis(glm::radians(270.0f), glm::vec3(0,1,0));
-                                euler = {0,270,0}; dirName = "Y +270"; break;
-                        case 4: rot = glm::angleAxis(glm::radians(90.0f), glm::vec3(1,0,0));
-                                euler = {90,0,0}; dirName = "X +90 (tilt fwd)"; break;
-                        case 5: rot = glm::angleAxis(glm::radians(-90.0f), glm::vec3(1,0,0));
-                                euler = {-90,0,0}; dirName = "X -90 (tilt back)"; break;
+                    // Check if this is a pipe (has pipe_start port)
+                    bool isPipe = false;
+                    int startPortIdx = -1;
+                    if (selObj->hasPorts()) {
+                        const auto& ports = selObj->getPorts();
+                        for (int pi = 0; pi < static_cast<int>(ports.size()); ++pi) {
+                            std::string pn = ports[pi].name;
+                            std::transform(pn.begin(), pn.end(), pn.begin(), ::tolower);
+                            if (pn.find("pipe") != std::string::npos && pn.find("start") != std::string::npos) {
+                                isPipe = true;
+                                startPortIdx = pi;
+                                break;
+                            }
+                        }
                     }
 
-                    selObj->setEulerRotation(euler);
-                    selObj->getTransform().setRotation(rot);
+                    if (isPipe && startPortIdx >= 0) {
+                        // Pipe rotation: spin 90° around pipe_start's direction, pivot on port position
+                        const auto& ports = selObj->getPorts();
+                        glm::mat4 modelMat = selObj->getTransform().getMatrix();
+                        glm::vec3 rotAxis = glm::normalize(glm::vec3(modelMat * glm::vec4(ports[startPortIdx].forward, 0.0f)));
+                        glm::vec3 pivotPos = glm::vec3(modelMat * glm::vec4(ports[startPortIdx].position, 1.0f));
 
-                    m_screenMessage = std::string("Rotation: ") + dirName;
-                    m_screenMessageTimer = 2.0f;
+                        glm::quat spin = glm::angleAxis(glm::radians(90.0f), rotAxis);
+                        glm::quat currentRot = selObj->getTransform().getRotation();
+                        glm::vec3 currentPos = selObj->getTransform().getPosition();
+
+                        // Pivot around the port position
+                        glm::vec3 offset = currentPos - pivotPos;
+                        glm::vec3 newOffset = spin * offset;
+                        glm::vec3 newPos = pivotPos + newOffset;
+                        glm::quat newRot = spin * currentRot;
+
+                        selObj->getTransform().setPosition(newPos);
+                        selObj->getTransform().setRotation(newRot);
+                        // Store clean euler for save — round to nearest degree to avoid drift
+                        glm::vec3 euler = glm::degrees(glm::eulerAngles(newRot));
+                        euler.x = std::round(euler.x);
+                        euler.y = std::round(euler.y);
+                        euler.z = std::round(euler.z);
+                        selObj->setEulerRotation(euler);
+                        selObj->getTransform().setRotation(newRot);  // Re-apply precise quaternion
+
+                        m_screenMessage = "Pipe rotated 90\xC2\xB0";
+                        m_screenMessageTimer = 2.0f;
+                    } else {
+                        // Normal object: cycle all 24 cardinal orientations
+                        m_objectRotationIndex = (m_objectRotationIndex + 1) % 24;
+
+                        // All 24 orientations of a cube (6 faces × 4 rotations each)
+                        struct CardinalRot { glm::quat q; const char* name; };
+                        static const CardinalRot orientations[24] = {
+                            // Face +Y up (top facing up) — 4 rotations around Y
+                            { glm::quat(1,0,0,0), "Up" },
+                            { glm::angleAxis(glm::radians(90.0f), glm::vec3(0,1,0)), "Up Y+90" },
+                            { glm::angleAxis(glm::radians(180.0f), glm::vec3(0,1,0)), "Up Y+180" },
+                            { glm::angleAxis(glm::radians(270.0f), glm::vec3(0,1,0)), "Up Y+270" },
+                            // Face -Y up (upside down) — 4 rotations around Y
+                            { glm::angleAxis(glm::radians(180.0f), glm::vec3(1,0,0)), "Down" },
+                            { glm::angleAxis(glm::radians(180.0f), glm::vec3(1,0,0)) * glm::angleAxis(glm::radians(90.0f), glm::vec3(0,1,0)), "Down Y+90" },
+                            { glm::angleAxis(glm::radians(180.0f), glm::vec3(1,0,0)) * glm::angleAxis(glm::radians(180.0f), glm::vec3(0,1,0)), "Down Y+180" },
+                            { glm::angleAxis(glm::radians(180.0f), glm::vec3(1,0,0)) * glm::angleAxis(glm::radians(270.0f), glm::vec3(0,1,0)), "Down Y+270" },
+                            // Face +Z up (tilted forward) — 4 rotations
+                            { glm::angleAxis(glm::radians(90.0f), glm::vec3(1,0,0)), "Forward" },
+                            { glm::angleAxis(glm::radians(90.0f), glm::vec3(1,0,0)) * glm::angleAxis(glm::radians(90.0f), glm::vec3(0,0,1)), "Forward +90" },
+                            { glm::angleAxis(glm::radians(90.0f), glm::vec3(1,0,0)) * glm::angleAxis(glm::radians(180.0f), glm::vec3(0,0,1)), "Forward +180" },
+                            { glm::angleAxis(glm::radians(90.0f), glm::vec3(1,0,0)) * glm::angleAxis(glm::radians(270.0f), glm::vec3(0,0,1)), "Forward +270" },
+                            // Face -Z up (tilted back) — 4 rotations
+                            { glm::angleAxis(glm::radians(-90.0f), glm::vec3(1,0,0)), "Back" },
+                            { glm::angleAxis(glm::radians(-90.0f), glm::vec3(1,0,0)) * glm::angleAxis(glm::radians(90.0f), glm::vec3(0,0,1)), "Back +90" },
+                            { glm::angleAxis(glm::radians(-90.0f), glm::vec3(1,0,0)) * glm::angleAxis(glm::radians(180.0f), glm::vec3(0,0,1)), "Back +180" },
+                            { glm::angleAxis(glm::radians(-90.0f), glm::vec3(1,0,0)) * glm::angleAxis(glm::radians(270.0f), glm::vec3(0,0,1)), "Back +270" },
+                            // Face +X up (tilted right) — 4 rotations
+                            { glm::angleAxis(glm::radians(-90.0f), glm::vec3(0,0,1)), "Right" },
+                            { glm::angleAxis(glm::radians(-90.0f), glm::vec3(0,0,1)) * glm::angleAxis(glm::radians(90.0f), glm::vec3(1,0,0)), "Right +90" },
+                            { glm::angleAxis(glm::radians(-90.0f), glm::vec3(0,0,1)) * glm::angleAxis(glm::radians(180.0f), glm::vec3(1,0,0)), "Right +180" },
+                            { glm::angleAxis(glm::radians(-90.0f), glm::vec3(0,0,1)) * glm::angleAxis(glm::radians(270.0f), glm::vec3(1,0,0)), "Right +270" },
+                            // Face -X up (tilted left) — 4 rotations
+                            { glm::angleAxis(glm::radians(90.0f), glm::vec3(0,0,1)), "Left" },
+                            { glm::angleAxis(glm::radians(90.0f), glm::vec3(0,0,1)) * glm::angleAxis(glm::radians(90.0f), glm::vec3(1,0,0)), "Left +90" },
+                            { glm::angleAxis(glm::radians(90.0f), glm::vec3(0,0,1)) * glm::angleAxis(glm::radians(180.0f), glm::vec3(1,0,0)), "Left +180" },
+                            { glm::angleAxis(glm::radians(90.0f), glm::vec3(0,0,1)) * glm::angleAxis(glm::radians(270.0f), glm::vec3(1,0,0)), "Left +270" },
+                        };
+
+                        const auto& o = orientations[m_objectRotationIndex];
+                        glm::quat rot = o.q;
+                        glm::vec3 euler = glm::degrees(glm::eulerAngles(rot));
+                        const char* dirName = o.name;
+
+                        selObj->setEulerRotation(euler);
+                        selObj->getTransform().setRotation(rot);
+
+                        m_screenMessage = std::string("Rotation: ") + dirName;
+                        m_screenMessageTimer = 2.0f;
+                    }
                 }
             }
         }
 
-        // I key in play mode: toggle indoor flag on selected block
+        // Arrow keys in play mode: nudge selected object (hold to repeat)
+        // Left/Right = local X, Up/Down = local Z, Ctrl+Up/Down = Y (vertical)
+        if (m_isPlayMode && !ImGui::GetIO().WantTextInput && !m_inConversation && !m_quickChatMode
+            && m_selectedSalvageIndex >= 0 && m_selectedSalvageIndex < static_cast<int>(m_sceneObjects.size())) {
+            auto& nudgeObj = m_sceneObjects[m_selectedSalvageIndex];
+            if (nudgeObj) {
+                bool anyArrow = Input::isKeyDown(Input::KEY_LEFT) || Input::isKeyDown(Input::KEY_RIGHT) ||
+                                Input::isKeyDown(Input::KEY_UP) || Input::isKeyDown(Input::KEY_DOWN);
+                bool ctrlHeld = Input::isKeyDown(Input::KEY_LEFT_CONTROL) || Input::isKeyDown(Input::KEY_RIGHT_CONTROL);
+
+                if (anyArrow) {
+                    // Key repeat: first press is instant, then 0.4s delay, then 20 steps/sec
+                    if (!m_nudgeHeld) {
+                        m_nudgeHeld = true;
+                        m_nudgeTimer = 0.0f;
+                        m_nudgeFirstPress = true;
+                    } else {
+                        m_nudgeTimer += ImGui::GetIO().DeltaTime;
+                        m_nudgeFirstPress = false;
+                    }
+
+                    bool doNudge = m_nudgeFirstPress || (m_nudgeTimer > 0.4f);
+                    if (doNudge && !m_nudgeFirstPress) {
+                        // After initial delay, nudge at 20/sec
+                        m_nudgeRepeatTimer += ImGui::GetIO().DeltaTime;
+                        if (m_nudgeRepeatTimer < 0.05f) doNudge = false;
+                        else m_nudgeRepeatTimer = 0.0f;
+                    }
+
+                    if (doNudge) {
+                        constexpr float nudgeStep = 0.01f;
+                        glm::vec3 nudge(0);
+
+                        if (ctrlHeld) {
+                            // Ctrl+Up/Down = vertical (world Y)
+                            if (Input::isKeyDown(Input::KEY_UP))   nudge.y =  nudgeStep;
+                            if (Input::isKeyDown(Input::KEY_DOWN)) nudge.y = -nudgeStep;
+                        } else {
+                            // Camera-relative: left/right/up/down match screen directions
+                            glm::vec3 camFwd = m_camera.getFront();
+                            glm::vec3 camRight = glm::normalize(glm::cross(camFwd, glm::vec3(0,1,0)));
+                            glm::vec3 camFwdFlat = glm::normalize(glm::vec3(camFwd.x, 0, camFwd.z));
+
+                            if (Input::isKeyDown(Input::KEY_LEFT))  nudge -= camRight * nudgeStep;
+                            if (Input::isKeyDown(Input::KEY_RIGHT)) nudge += camRight * nudgeStep;
+                            if (Input::isKeyDown(Input::KEY_UP))    nudge += camFwdFlat * nudgeStep;
+                            if (Input::isKeyDown(Input::KEY_DOWN))  nudge -= camFwdFlat * nudgeStep;
+                        }
+                        nudgeObj->getTransform().setPosition(
+                            nudgeObj->getTransform().getPosition() + nudge);
+                    }
+                } else {
+                    m_nudgeHeld = false;
+                    m_nudgeTimer = 0.0f;
+                    m_nudgeRepeatTimer = 0.0f;
+                }
+            }
+        }
+
+        // I key in play mode: toggle indoor flag (if block selected) or survival stats
         if (m_isPlayMode && Input::isKeyPressed(Input::KEY_I) && !ImGui::GetIO().WantTextInput) {
             if (m_selectedSalvageIndex >= 0 && m_selectedSalvageIndex < static_cast<int>(m_sceneObjects.size())) {
                 auto& selObj = m_sceneObjects[m_selectedSalvageIndex];
@@ -8180,6 +8558,8 @@ private:
                     m_screenMessage = selObj->isIndoor() ? "Indoor: ON (no sunlight)" : "Indoor: OFF (sunlight)";
                     m_screenMessageTimer = 2.0f;
                 }
+            } else {
+                m_showSurvivalStats = !m_showSurvivalStats;
             }
         }
 
@@ -9115,6 +9495,17 @@ private:
         }
 
         int currentMinute = static_cast<int>(m_gameTimeMinutes);
+
+        // Survival stat decay — every 60 game minutes (1 game hour), lose some thirst/hunger
+        if (currentMinute != previousMinute) {
+            // Accumulate minutes, decay every 60
+            int prevHour = previousMinute / 60;
+            int currHour = currentMinute / 60;
+            if (currHour != prevHour) {
+                m_thirst = std::max(0.0f, m_thirst - 5.0f);   // 5% per game hour (~20 hours to empty)
+                m_hunger = std::max(0.0f, m_hunger - 3.0f);   // 3% per game hour (~33 hours to empty)
+            }
+        }
 
         // Check for time-based triggers if minute changed
         if (currentMinute != previousMinute) {
@@ -10812,6 +11203,8 @@ private:
             float bestDist = std::numeric_limits<float>::max();
             int bestIdx = -1;
             for (int si = 0; si < static_cast<int>(m_sceneObjects.size()); si++) {
+                // Skip already-selected object so ray passes through to items inside
+                if (si == m_selectedSalvageIndex) continue;
                 auto& obj = m_sceneObjects[si];
                 if (!obj) continue;
                 if (obj->getBeingType() != BeingType::INTERACTION && obj->getBuildingType() != "salvage"
@@ -10845,7 +11238,7 @@ private:
             for (auto& so : m_sceneObjects) {
                 if (!so || !so->isVisible()) continue;
                 if (so->getBeingType() != BeingType::INTERACTION && so->getBuildingType() != "salvage"
-                    && so->getBuildingType() != "wall_frame") continue;
+                    && so->getBuildingType() != "wall_frame" && so->getName().find("dirt_pile") == std::string::npos) continue;
                 float d = so->getWorldBounds().intersect(focusCamPos, focusCamFront);
                 if (d >= 0 && d < focusBest) {
                     focusBest = d;
@@ -10920,6 +11313,38 @@ private:
                     m_screenMessage = buf;
                     m_screenMessageTimer = 0.3f;
                 }
+                // Valve status
+                else if (nameLower.find("valve") != std::string::npos) {
+                    bool isOpen = m_valveStates.count(focusObj) ? m_valveStates[focusObj] : false;
+                    m_screenMessage = isOpen ? "Valve: OPEN" : "Valve: CLOSED";
+                    m_screenMessageTimer = 0.3f;
+                }
+                // Container tooltip (any object with "capacity" in metadata)
+                else if (!focusObj->getMetaValue("capacity").empty()) {
+                    std::string material = focusObj->getMetaValue("material");
+                    float capacity = std::stof(focusObj->getMetaValue("capacity"));
+                    std::string unit = focusObj->getMetaValue("unit");
+                    if (unit.empty()) unit = "gal";
+
+                    // Get or create container state
+                    auto& cs = m_containerStates[focusObj];
+
+                    // Capitalize material
+                    std::string matDisplay = material;
+                    if (!matDisplay.empty()) matDisplay[0] = std::toupper(matDisplay[0]);
+
+                    char buf[128];
+                    if (cs.fillLevel <= 0.001f) {
+                        snprintf(buf, sizeof(buf), "%s | %.1f %s | Empty",
+                                 matDisplay.c_str(), capacity, unit.c_str());
+                    } else {
+                        snprintf(buf, sizeof(buf), "%s | %.2f / %.1f %s | %s",
+                                 matDisplay.c_str(), cs.fillLevel, capacity, unit.c_str(),
+                                 cs.liquidType.empty() ? "Unknown" : cs.liquidType.c_str());
+                    }
+                    m_screenMessage = buf;
+                    m_screenMessageTimer = 0.3f;
+                }
                 // Frame type tooltip
                 else if (focusObj->getBuildingType() == "wall_frame") {
                     // Detect frame type by slab proximity
@@ -10937,14 +11362,370 @@ private:
                     m_screenMessage = ftype;
                     m_screenMessageTimer = 0.3f;
                 }
+                // Dirt pile tooltip — show volume (read from description for persistence)
+                else if (nameLower.find("dirt_pile") != std::string::npos) {
+                    int loads = 0;
+                    // Try description first (survives save/load)
+                    const std::string& desc = focusObj->getDescription();
+                    if (desc.rfind("dig_count:", 0) == 0) {
+                        loads = std::stoi(desc.substr(10));
+                    } else {
+                        // Fall back to in-memory map
+                        for (auto& [stake, sinfo] : m_stakeDigs) {
+                            if (sinfo.dirtPile == focusObj) { loads = sinfo.digCount; break; }
+                        }
+                    }
+                    int cuFt = loads * 6;
+                    int wheelbarrows = cuFt / 6;
+                    char buf[128];
+                    snprintf(buf, sizeof(buf), "Dirt pile: %d cu ft (%d wheelbarrow%s)",
+                             cuFt, wheelbarrows, wheelbarrows == 1 ? "" : "s");
+                    m_screenMessage = buf;
+                    m_screenMessageTimer = 0.3f;
+                }
+            }
+        }
+
+        // Shovel hold-to-dig system
+        bool shovelDigged = false;
+
+        // Start dig on press — validate and lock in target
+        if (!m_isDigging && Input::isMouseButtonPressed(Input::MOUSE_LEFT) && !buildSelectClick && !salvageSelectClick
+            && !m_inConversation && !ImGui::GetIO().WantCaptureMouse && !m_isEdenOSLevel) {
+            auto& slot = m_toolbarSlots[m_activeToolbarSlot];
+            if (slot.occupied && slot.is3DModel) {
+                std::string nameLower = slot.displayName;
+                std::transform(nameLower.begin(), nameLower.end(), nameLower.begin(), ::tolower);
+                if (nameLower.find("shovel") != std::string::npos) {
+                    float aspect = static_cast<float>(getWindow().getWidth()) / getWindow().getHeight();
+                    glm::vec3 rayDir = m_camera.screenToWorldRay(0.5f, 0.5f, aspect);
+                    glm::vec3 hitPos;
+                    if (m_terrain.raycast(m_camera.getPosition(), rayDir, hitPos)) {
+                        float camDist = glm::length(hitPos - m_camera.getPosition());
+                        if (camDist < 15.0f) {
+                            float ts = m_terrain.getConfig().tileSize;
+                            float snapX = std::round(hitPos.x / ts) * ts;
+                            float snapZ = std::round(hitPos.z / ts) * ts;
+
+                            // Find nearest stake
+                            SceneObject* nearestStake = nullptr;
+                            float nearestStakeDist = 50.0f;
+                            for (auto& obj : m_sceneObjects) {
+                                if (!obj || !obj->isVisible()) continue;
+                                std::string sname = obj->getName();
+                                std::transform(sname.begin(), sname.end(), sname.begin(), ::tolower);
+                                if (sname.find("stake") == std::string::npos) continue;
+                                glm::vec3 sp = obj->getTransform().getPosition();
+                                float d = glm::length(glm::vec2(sp.x - snapX, sp.z - snapZ));
+                                if (d < nearestStakeDist) {
+                                    nearestStakeDist = d;
+                                    nearestStake = obj.get();
+                                }
+                            }
+
+                            if (!nearestStake) {
+                                m_screenMessage = "Place a dirt stake first";
+                                m_screenMessageTimer = 2.0f;
+                            } else {
+                                // Check depth limit before starting
+                                float digRadius = ts * 1.5f;
+                                int gridRange = static_cast<int>(std::ceil(digRadius / ts)) + 1;
+                                for (int gz = -gridRange; gz <= gridRange; gz++) {
+                                    for (int gx = -gridRange; gx <= gridRange; gx++) {
+                                        float vx = snapX + gx * ts;
+                                        float vz = snapZ + gz * ts;
+                                        int64_t vkey = digGridKey(vx, vz);
+                                        if (m_dugHoles.find(vkey) == m_dugHoles.end())
+                                            m_dugHoles[vkey] = m_terrain.getHeightAt(vx, vz);
+                                    }
+                                }
+                                float originalHeight = m_dugHoles[digGridKey(snapX, snapZ)];
+                                float currentHeight = m_terrain.getHeightAt(snapX, snapZ);
+                                if (currentHeight > originalHeight - 8.0f + 0.01f) {
+                                    // Begin hold-to-dig
+                                    m_isDigging = true;
+                                    m_digTimer = 0.0f;
+                                    m_digSwingTimer = 0.0f;
+                                    m_digLockPos = m_camera.getPosition();
+                                    m_digSnapX = snapX;
+                                    m_digSnapZ = snapZ;
+                                    m_digRadius = digRadius;
+                                    m_digStake = nearestStake;
+                                } else {
+                                    m_screenMessage = "Max depth reached (8m)";
+                                    m_screenMessageTimer = 1.5f;
+                                }
+                            }
+                            shovelDigged = true;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Continue or cancel dig while holding
+        if (m_isDigging) {
+            shovelDigged = true;
+            bool stillHolding = Input::isMouseButtonDown(Input::MOUSE_LEFT);
+            if (!stillHolding) {
+                // Released early — cancel
+                m_isDigging = false;
+                m_screenMessage = "Dig cancelled";
+                m_screenMessageTimer = 1.0f;
+            } else {
+                // Lock player position (can still look around)
+                m_camera.setPosition(m_digLockPos);
+
+                // Advance timer
+                m_digTimer += deltaTime;
+                m_digSwingTimer += deltaTime;
+                if (m_digSwingTimer >= m_digSwingDuration) {
+                    m_digSwingTimer -= m_digSwingDuration; // loop the swing
+                    Audio::getInstance().playSound("assets/sounds/shovel_dig.wav", 0.05f);
+                }
+
+                // Show progress
+                float progress = m_digTimer / m_digDuration;
+                int pct = static_cast<int>(progress * 100.0f);
+                m_screenMessage = "Digging... " + std::to_string(std::min(pct, 100)) + "%";
+                m_screenMessageTimer = 0.2f;
+
+                // Dig complete
+                if (m_digTimer >= m_digDuration) {
+                    m_isDigging = false;
+                    float snapX = m_digSnapX, snapZ = m_digSnapZ;
+                    float digRadius = m_digRadius;
+                    float ts = m_terrain.getConfig().tileSize;
+
+                    float originalHeight = m_dugHoles[digGridKey(snapX, snapZ)];
+                    float currentHeight = m_terrain.getHeightAt(snapX, snapZ);
+                    float targetHeight = std::max(originalHeight - 8.0f, currentHeight - 0.75f);
+
+                    // Dig the hole
+                    m_terrain.applyBrush(snapX, snapZ, digRadius, 100.0f, 0.0f,
+                                         BrushMode::Shovel, {}, targetHeight);
+                    m_terrain.applyTextureBrush(snapX, snapZ, digRadius * 1.2f, 500.0f, 0.0f, 6);
+                    m_chunkManager->updateModifiedChunks(m_terrain);
+
+                    // Update physics heightfield BEFORE spawning rocks so Jolt sees the new floor
+                    if (m_characterController && !m_physicsHeightData.empty()) {
+                        int sc = m_physicsHeightSC;
+                        float patchR = digRadius + 2.0f;
+                        int sMinX = std::max(0, (int)((snapX - patchR - m_physicsHeightMinX) / m_physicsHeightSpX));
+                        int sMaxX = std::min(sc - 1, (int)((snapX + patchR - m_physicsHeightMinX) / m_physicsHeightSpX) + 1);
+                        int sMinZ = std::max(0, (int)((snapZ - patchR - m_physicsHeightMinZ) / m_physicsHeightSpZ));
+                        int sMaxZ = std::min(sc - 1, (int)((snapZ + patchR - m_physicsHeightMinZ) / m_physicsHeightSpZ) + 1);
+                        for (int hz = sMinZ; hz <= sMaxZ; hz++) {
+                            for (int hx = sMinX; hx <= sMaxX; hx++) {
+                                float wx = m_physicsHeightMinX + hx * m_physicsHeightSpX;
+                                float wz = m_physicsHeightMinZ + hz * m_physicsHeightSpZ;
+                                m_physicsHeightData[hz * sc + hx] = m_terrain.getHeightAt(wx, wz);
+                            }
+                        }
+                        m_characterController->updateTerrainHeightfield(
+                            m_physicsHeightData, sc,
+                            {m_physicsHeightMinX, 0.0f, m_physicsHeightMinZ},
+                            {m_physicsHeightSpX, 1.0f, m_physicsHeightSpZ});
+                        // Wake all sleeping dynamic bodies so rocks fall if undercut
+                        m_characterController->wakeAllDynamicBodies();
+                    }
+
+                    // Defer rock spawn — wait a few frames for Jolt to process new heightfield
+                    m_pendingRockFrames = 3;
+                    m_pendingRockX = snapX;
+                    m_pendingRockZ = snapZ;
+
+                    // Grow dirt pile at stake
+                    auto& info = m_stakeDigs[m_digStake];
+                    info.digCount++;
+                    // Growth factor: sqrt(N) so area scales linearly
+                    float growthFactor = std::sqrt(static_cast<float>(info.digCount));
+
+                    if (!info.dirtPile) {
+                        std::string dirtPath = std::string(CMAKE_SOURCE_DIR) +
+                            "/examples/terrain_editor/assets/models/misc/dirt_pile.lime";
+                        glm::vec3 stakePos = m_digStake->getTransform().getPosition();
+                        auto loadResult = LimeLoader::load(dirtPath);
+                        if (loadResult.success) {
+                            auto pileObj = LimeLoader::createSceneObject(loadResult.mesh, *m_modelRenderer);
+                            if (pileObj) {
+                                // Preserve the LIME model's native scale, multiply by growth
+                                info.nativeScale = pileObj->getTransform().getScale();
+                                glm::vec3 finalScale = info.nativeScale * growthFactor;
+                                AABB lb = pileObj->getLocalBounds();
+                                stakePos.y += -lb.min.y * finalScale.y;
+                                pileObj->getTransform().setPosition(stakePos);
+                                pileObj->getTransform().setScale(finalScale);
+                                pileObj->setModelPath(dirtPath);
+                                pileObj->setName("dirt_pile");
+                                info.dirtPile = pileObj.get();
+                                m_sceneObjects.push_back(std::move(pileObj));
+                            }
+                        }
+                    } else {
+                        // Rescale: native LIME scale * growth factor
+                        glm::vec3 finalScale = info.nativeScale * growthFactor;
+                        AABB lb = info.dirtPile->getLocalBounds();
+                        glm::vec3 pos = info.dirtPile->getTransform().getPosition();
+                        float terrainY = m_terrain.getHeightAt(pos.x, pos.z);
+                        info.dirtPile->getTransform().setScale(finalScale);
+                        info.dirtPile->getTransform().setPosition(
+                            {pos.x, terrainY + (-lb.min.y * finalScale.y), pos.z});
+                    }
+
+                    // Update poly collision
+                    if (info.dirtPile && info.dirtPile->hasMeshData() && m_characterController) {
+                        if (info.collisionBodyId != UINT32_MAX)
+                            m_characterController->removeStaticBody(info.collisionBodyId);
+                        const auto& verts = info.dirtPile->getVertices();
+                        const auto& inds = info.dirtPile->getIndices();
+                        std::vector<glm::vec3> positions;
+                        positions.reserve(verts.size());
+                        for (const auto& v : verts) positions.push_back(v.position);
+                        info.collisionBodyId = m_characterController->addStaticMeshWithId(
+                            positions, inds, info.dirtPile->getTransform().getMatrix());
+                    }
+
+                    // Store dig count in description (persists through save/load)
+                    if (info.dirtPile) {
+                        info.dirtPile->setDescription("dig_count:" + std::to_string(info.digCount));
+                    }
+
+                    // (Physics heightfield already updated above, before rock spawn)
+
+                    // 6 cubic feet per shovel load
+                    int totalCuFt = info.digCount * 6;
+                    char digMsg[128];
+                    snprintf(digMsg, sizeof(digMsg), "Dirt pile: %d cu ft (%d loads)", totalCuFt, info.digCount);
+                    m_screenMessage = digMsg;
+                    m_screenMessageTimer = 2.0f;
+                }
             }
         }
 
         // E key or left-click for interaction (skip if building/salvage selection consumed the click)
-        if ((Input::isKeyPressed(Input::KEY_E) || (Input::isMouseButtonPressed(Input::MOUSE_LEFT) && !buildSelectClick && !salvageSelectClick))
+        if (!shovelDigged &&
+            (Input::isKeyPressed(Input::KEY_E) || (Input::isMouseButtonPressed(Input::MOUSE_LEFT) && !buildSelectClick && !salvageSelectClick))
             && !m_inConversation && !ImGui::GetIO().WantCaptureMouse) {
             bool eKey = Input::isKeyPressed(Input::KEY_E);
             interactWithCrosshair(eKey);
+        }
+
+        // E key with no target — drink from active hotbar container
+        if (m_isPlayMode && !m_isDrinking && !m_showSiloConfig
+            && Input::isKeyPressed(Input::KEY_E) && !ImGui::GetIO().WantTextInput) {
+            int slot = m_activeToolbarSlot;
+            auto& s = m_toolbarSlots[slot];
+            if (s.occupied && s.is3DModel && s.containerFill > 0.01f) {
+                m_isDrinking = true;
+                m_drinkTimer = 0.0f;
+                m_drinkSlot = slot;
+                m_drinkSoundPlayed = false;
+            }
+        }
+
+        // Update drinking animation
+        if (m_isDrinking) {
+            m_drinkTimer += deltaTime;
+            // Play gulp sound at start of phase 2 (tipping)
+            float t = m_drinkTimer / m_drinkDuration;
+            if (t >= 0.3f && !m_drinkSoundPlayed) {
+                Audio::getInstance().playSound("assets/sounds/drink.wav", 0.8f);
+                m_drinkSoundPlayed = true;
+            }
+            if (m_drinkTimer >= m_drinkDuration) {
+                // Drink complete — reduce fill level
+                auto& s = m_toolbarSlots[m_drinkSlot];
+                float drinkAmount = 0.05f;  // Drink 0.05 gallons per sip (20 drinks per gallon)
+                m_thirst = std::min(100.0f, m_thirst + 15.0f);  // Each sip restores 15% thirst
+                s.containerFill = std::max(0.0f, s.containerFill - drinkAmount);
+                if (s.containerFill <= 0.001f) {
+                    s.containerLiquid.clear();
+                }
+                showHotbarTooltip(m_drinkSlot);
+                m_isDrinking = false;
+                m_drinkSlot = -1;
+            }
+        }
+
+        // (Dig timer + swing are now updated in the hold-to-dig block above)
+
+        // Deferred rock spawn — gives Jolt time to process updated heightfield
+        if (m_pendingRockFrames > 0) {
+            m_pendingRockFrames--;
+            if (m_pendingRockFrames == 0) {
+                std::string rockPath = std::string(CMAKE_SOURCE_DIR) +
+                    "/examples/terrain_editor/assets/models/misc/rock_1.lime";
+                auto rockLoad = LimeLoader::load(rockPath);
+                if (rockLoad.success) {
+                    float holeFloor = m_terrain.getHeightAt(m_pendingRockX, m_pendingRockZ);
+                    glm::vec2 offsets[2] = {{-0.6f, -0.4f}, {0.5f, 0.3f}};
+                    for (int ri = 0; ri < 2; ri++) {
+                        auto rockObj = LimeLoader::createSceneObject(rockLoad.mesh, *m_modelRenderer);
+                        if (rockObj) {
+                            glm::vec3 scl = rockObj->getTransform().getScale();
+                            float rx = m_pendingRockX + offsets[ri].x;
+                            float rz = m_pendingRockZ + offsets[ri].y;
+                            AABB lb = rockObj->getLocalBounds();
+                            float bottomOffset = -lb.min.y * scl.y;
+                            float ry = holeFloor + bottomOffset + 0.3f;
+                            rockObj->getTransform().setPosition({rx, ry, rz});
+                            rockObj->setModelPath(rockPath);
+                            rockObj->setName("rock_1");
+                            rockObj->setBuildingType("salvage");
+                            rockObj->setBeingType(BeingType::INTERACTION);
+
+                            if (m_characterController && rockObj->hasMeshData()) {
+                                const auto& verts = rockObj->getVertices();
+                                std::vector<glm::vec3> positions;
+                                positions.reserve(verts.size());
+                                for (const auto& v : verts) positions.push_back(v.position);
+                                auto bodyResult = m_characterController->addDynamicConvexHull(
+                                    positions, {rx, ry, rz}, scl,
+                                    glm::vec3(0.0f), 5.0f, 0.7f, 0.15f);
+                                if (bodyResult.valid) {
+                                    PhysicsTrackedObject tracked;
+                                    tracked.objPtr = rockObj.get();
+                                    tracked.joltBodyId = bodyResult.bodyId;
+                                    tracked.settled = false;
+                                    m_physicsObjects.push_back(tracked);
+                                }
+                            }
+                            m_sceneObjects.push_back(std::move(rockObj));
+                        }
+                    }
+                }
+            }
+        }
+
+        // Settle dirt piles — if terrain was dug out from under them, drop to ground
+        for (auto& [stake, info] : m_stakeDigs) {
+            if (!info.dirtPile) continue;
+            glm::vec3 pos = info.dirtPile->getTransform().getPosition();
+            glm::vec3 scl = info.dirtPile->getTransform().getScale();
+            AABB lb = info.dirtPile->getLocalBounds();
+            float bottomOffset = -lb.min.y * scl.y; // distance from origin to bottom at current scale
+            float terrainY = m_terrain.getHeightAt(pos.x, pos.z);
+            float restY = terrainY + bottomOffset; // Y where bottom sits on terrain
+            if (pos.y > restY + 0.05f) {
+                // Gravity settle — fall toward terrain, stay upright
+                float fallSpeed = 9.8f * deltaTime;
+                float newY = std::max(restY, pos.y - fallSpeed);
+                info.dirtPile->getTransform().setPosition({pos.x, newY, pos.z});
+
+                // Update collision body to match new position
+                if (info.collisionBodyId != UINT32_MAX && m_characterController &&
+                    info.dirtPile->hasMeshData()) {
+                    m_characterController->removeStaticBody(info.collisionBodyId);
+                    const auto& verts = info.dirtPile->getVertices();
+                    const auto& inds = info.dirtPile->getIndices();
+                    std::vector<glm::vec3> positions;
+                    positions.reserve(verts.size());
+                    for (const auto& v : verts) positions.push_back(v.position);
+                    info.collisionBodyId = m_characterController->addStaticMeshWithId(
+                        positions, inds, info.dirtPile->getTransform().getMatrix());
+                }
+            }
         }
 
         // CullSession input (Up/Down arrow for accept/reject)
@@ -11868,6 +12649,8 @@ private:
                     obj->setLocalBounds(cached.bounds);
                     obj->getTransform().setScale(cached.scale);
                     obj->setEulerRotation(cached.rotation);
+                    obj->setBulletCollisionType(cached.collisionType);
+                    obj->setModelMetadata(cached.metadata);
                 } else {
                     bool isLime = modelPath.size() >= 5 && modelPath.substr(modelPath.size() - 5) == ".lime";
                     if (isLime) {
@@ -11891,6 +12674,8 @@ private:
                         cached.bounds = obj->getLocalBounds();
                         cached.scale = obj->getTransform().getScale();
                         cached.rotation = obj->getEulerRotation();
+                        cached.collisionType = obj->getBulletCollisionType();
+                        cached.metadata = obj->getModelMetadata();
                         m_modelCache[modelPath] = std::move(cached);
                     }
                 }
@@ -11967,6 +12752,8 @@ private:
                     obj->setLocalBounds(cached.bounds);
                     obj->getTransform().setScale(cached.scale);
                     obj->setEulerRotation(cached.rotation);
+                    obj->setBulletCollisionType(cached.collisionType);
+                    obj->setModelMetadata(cached.metadata);
                 } else {
                     bool isLime = modelPath.size() >= 5 && modelPath.substr(modelPath.size() - 5) == ".lime";
                     if (isLime) {
@@ -11990,6 +12777,8 @@ private:
                         cached.bounds = obj->getLocalBounds();
                         cached.scale = obj->getTransform().getScale();
                         cached.rotation = obj->getEulerRotation();
+                        cached.collisionType = obj->getBulletCollisionType();
+                        cached.metadata = obj->getModelMetadata();
                         m_modelCache[modelPath] = std::move(cached);
                     }
                 }
@@ -12063,6 +12852,8 @@ private:
                 obj->setLocalBounds(cached.bounds);
                 obj->getTransform().setScale(cached.scale);
                 obj->setEulerRotation(cached.rotation);
+                obj->setBulletCollisionType(cached.collisionType);
+                obj->setModelMetadata(cached.metadata);
                 std::cout << "[Grove CMD] model cache hit: " << modelPath << std::endl;
             } else {
                 // Cache miss — load from disk
@@ -12089,6 +12880,8 @@ private:
                     cached.bounds = obj->getLocalBounds();
                     cached.scale = obj->getTransform().getScale();
                     cached.rotation = obj->getEulerRotation();
+                    cached.collisionType = obj->getBulletCollisionType();
+                    cached.metadata = obj->getModelMetadata();
                     m_modelCache[modelPath] = std::move(cached);
                     std::cout << "[Grove CMD] model cached: " << modelPath << std::endl;
                 }
@@ -15339,7 +16132,7 @@ private:
             ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
             ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoMove |
             ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing |
-            ImGuiWindowFlags_NoNav)) {
+            ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoInputs)) {
 
             // FPS with color coding
             float frameMs = (m_fps > 0.0f) ? 1000.0f / m_fps : 0.0f;
@@ -15370,6 +16163,10 @@ private:
                 ImGui::TextColored(vramColor, "VRAM: %.1f GB", m_cachedVramMB / 1024.0f);
             else
                 ImGui::TextColored(vramColor, "VRAM: %.0f MB", m_cachedVramMB);
+
+            // Draw calls
+            ImGui::TextColored(ImVec4(0.8f, 0.7f, 1.0f, 1.0f), "Draws: %d | Objs: %d",
+                               m_modelDrawCalls, static_cast<int>(m_sceneObjects.size()));
 
             // Camera position
             glm::vec3 cp = m_camera.getPosition();
@@ -15903,20 +16700,85 @@ private:
             drawList->AddLine(ImVec2(cx, cy - size), ImVec2(cx, cy + size), color, thickness);
         }
 
+        // Hotbar tooltip (shown to the left of the hotbar)
+        if (m_hotbarTooltipTimer > 0.0f && !m_hotbarTooltip.empty() && m_isPlayMode) {
+            m_hotbarTooltipTimer -= ImGui::GetIO().DeltaTime;
+            float alpha = std::min(m_hotbarTooltipTimer, 1.0f);
+            float windowW = static_cast<float>(getWindow().getWidth());
+            float windowH = static_cast<float>(getWindow().getHeight());
+            constexpr float slotSize = 48.0f;
+            constexpr float slotGap = 4.0f;
+            float totalBarW = TOOLBAR_SLOT_COUNT * slotSize + (TOOLBAR_SLOT_COUNT - 1) * slotGap;
+            float barLeft = (windowW - totalBarW) * 0.5f;
+            float barY = windowH - 16.0f - slotSize;
+
+            ImVec2 textSize = ImGui::CalcTextSize(m_hotbarTooltip.c_str());
+            float tooltipX = barLeft - textSize.x - 15.0f;
+            float tooltipY = barY + slotSize * 0.5f - textSize.y * 0.5f;
+
+            ImDrawList* dl = ImGui::GetForegroundDrawList();
+            dl->AddRectFilled(
+                ImVec2(tooltipX - 5, tooltipY - 3),
+                ImVec2(tooltipX + textSize.x + 5, tooltipY + textSize.y + 3),
+                IM_COL32(0, 0, 0, static_cast<int>(180 * alpha)), 4.0f);
+            dl->AddText(ImVec2(tooltipX, tooltipY),
+                IM_COL32(255, 255, 200, static_cast<int>(255 * alpha)),
+                m_hotbarTooltip.c_str());
+
+            if (m_hotbarTooltipTimer <= 0.0f) m_hotbarTooltip.clear();
+        }
+
+        // Survival stats window (I key)
+        if (m_showSurvivalStats && m_isPlayMode) {
+            float windowW = static_cast<float>(getWindow().getWidth());
+            float windowH = static_cast<float>(getWindow().getHeight());
+            ImGui::SetNextWindowPos(ImVec2(windowW - 260, windowH * 0.5f - 60), ImGuiCond_Always);
+            ImGui::SetNextWindowSize(ImVec2(240, 120), ImGuiCond_Always);
+            ImGui::SetNextWindowBgAlpha(0.7f);
+            if (ImGui::Begin("##SurvivalStats", nullptr,
+                ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+                ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoScrollbar)) {
+                ImGui::Text("Survival");
+                ImGui::Separator();
+
+                // Thirst bar
+                ImVec4 thirstColor = m_thirst > 30.0f ? ImVec4(0.2f, 0.6f, 1.0f, 1.0f) : ImVec4(1.0f, 0.3f, 0.3f, 1.0f);
+                ImGui::TextColored(thirstColor, "Thirst");
+                ImGui::SameLine(70);
+                ImGui::PushStyleColor(ImGuiCol_PlotHistogram, thirstColor);
+                char thirstBuf[16];
+                snprintf(thirstBuf, sizeof(thirstBuf), "%.0f%%", m_thirst);
+                ImGui::ProgressBar(m_thirst / 100.0f, ImVec2(-1, 18), thirstBuf);
+                ImGui::PopStyleColor();
+
+                // Hunger bar
+                ImVec4 hungerColor = m_hunger > 30.0f ? ImVec4(0.8f, 0.6f, 0.2f, 1.0f) : ImVec4(1.0f, 0.3f, 0.3f, 1.0f);
+                ImGui::TextColored(hungerColor, "Hunger");
+                ImGui::SameLine(70);
+                ImGui::PushStyleColor(ImGuiCol_PlotHistogram, hungerColor);
+                char hungerBuf[16];
+                snprintf(hungerBuf, sizeof(hungerBuf), "%.0f%%", m_hunger);
+                ImGui::ProgressBar(m_hunger / 100.0f, ImVec2(-1, 18), hungerBuf);
+                ImGui::PopStyleColor();
+            }
+            ImGui::End();
+        }
+
         // Screen message HUD (timed messages like "Generator ON/OFF")
         if (m_screenMessageTimer > 0.0f) {
             m_screenMessageTimer -= ImGui::GetIO().DeltaTime;
-            float alpha = std::min(m_screenMessageTimer, 1.0f); // fade out in last second
+            float alpha = (m_screenMessageTimer < 1.0f) ? m_screenMessageTimer : 1.0f;
+            alpha = std::max(alpha, 0.85f); // Keep text readable, only fade at the very end
             float windowW = static_cast<float>(getWindow().getWidth());
             ImVec2 textSize = ImGui::CalcTextSize(m_screenMessage.c_str());
             float winW = textSize.x + 30.0f;
             ImGui::SetNextWindowPos(ImVec2((windowW - winW) * 0.5f, 100));
-            ImGui::SetNextWindowBgAlpha(0.6f * alpha);
+            ImGui::SetNextWindowBgAlpha(0.85f * alpha);
             if (ImGui::Begin("##ScreenMessage", nullptr,
                 ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
                 ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoMove |
                 ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoInputs)) {
-                ImGui::TextColored(ImVec4(1.0f, 1.0f, 0.4f, alpha), "%s", m_screenMessage.c_str());
+                ImGui::TextColored(ImVec4(1.0f, 1.0f, 1.0f, alpha), "%s", m_screenMessage.c_str());
             }
             ImGui::End();
             if (m_screenMessageTimer <= 0.0f) m_screenMessage.clear();
@@ -17852,9 +18714,8 @@ private:
             {"GLTF Model", "gltf"}
         };
 
-        // Default to models directory
-        std::filesystem::path modelsPath = std::filesystem::current_path() / "models";
-        std::string modelsDir = modelsPath.string();
+        // Default to assets/models directory (source tree, not build dir)
+        std::string modelsDir = std::string(CMAKE_SOURCE_DIR) + "/examples/terrain_editor/assets/models";
 
         nfdresult_t result = NFD_OpenDialog(&outPath, filters, 4, modelsDir.c_str());
 
@@ -18223,6 +19084,9 @@ private:
                             ports.push_back({p.name, p.position, p.forward, p.up});
                         obj->setPorts(ports);
                     }
+                    if (!limeResult.mesh.metadata.empty()) {
+                        obj->setModelMetadata(limeResult.mesh.metadata);
+                    }
                 }
             }
 
@@ -18492,7 +19356,7 @@ private:
                     std::cout << "Loaded skinned model: " << objData.modelPath << std::endl;
                 } else if (objData.modelPath.size() >= 5 &&
                            objData.modelPath.substr(objData.modelPath.size() - 5) == ".lime") {
-                    // LIME format model
+                    // LIME format model (deduplicate GPU buffers by path)
                     auto result = LimeLoader::load(objData.modelPath);
                     if (!result.success) {
                         std::cerr << "Failed to load LIME model: " << objData.modelPath << std::endl;
@@ -19912,8 +20776,8 @@ private:
                     float worldSizeZ = chunksZ * chunkSize;
 
                     // Sample count must be power of 2 + 1 for Jolt
-                    // Use 2049 samples for accurate terrain collision (captures small features like valleys)
-                    const int sampleCount = 2049;
+                    // 1025 captures 3m dig holes reliably (~2m per sample vs ~4m at 513)
+                    const int sampleCount = 1025;
                     float sampleSpacingX = worldSizeX / (sampleCount - 1);
                     float sampleSpacingZ = worldSizeZ / (sampleCount - 1);
 
@@ -19931,6 +20795,13 @@ private:
                     glm::vec3 offset(worldMinX, 0.0f, worldMinZ);
                     glm::vec3 scale(sampleSpacingX, 1.0f, sampleSpacingZ);
                     m_characterController->addTerrainHeightfield(heightData, sampleCount, offset, scale);
+                    // Cache for fast local patching on dig
+                    m_physicsHeightData = heightData;
+                    m_physicsHeightSC = sampleCount;
+                    m_physicsHeightMinX = worldMinX;
+                    m_physicsHeightMinZ = worldMinZ;
+                    m_physicsHeightSpX = sampleSpacingX;
+                    m_physicsHeightSpZ = sampleSpacingZ;
                     std::cout << "Added terrain heightfield to Jolt (" << sampleCount << "x" << sampleCount << " samples)" << std::endl;
                 }
             }
@@ -19975,13 +20846,83 @@ private:
                 // std::cout << "No kinematic platforms found in scene" << std::endl;
             }
 
+            // Apply collision metadata from source .lime files to legacy objects
+            // (handles objects placed before collision metadata was added)
+            for (auto& obj : m_sceneObjects) {
+                if (!obj || obj->hasBulletCollision()) continue;
+                const auto& path = obj->getModelPath();
+                if (path.size() < 5 || path.substr(path.size() - 5) != ".lime") continue;
+
+                // Check model cache first
+                auto cacheIt = m_modelCache.find(path);
+                if (cacheIt != m_modelCache.end() && cacheIt->second.collisionType != BulletCollisionType::NONE) {
+                    obj->setBulletCollisionType(cacheIt->second.collisionType);
+                    continue;
+                }
+
+                // Quick scan of .lime file for collision metadata
+                std::ifstream limeFile(path);
+                if (limeFile.is_open()) {
+                    std::string line;
+                    while (std::getline(limeFile, line)) {
+                        if (line.find("meta collision:") != std::string::npos) {
+                            if (line.find("box") != std::string::npos)
+                                obj->setBulletCollisionType(BulletCollisionType::BOX);
+                            else if (line.find("convex_hull") != std::string::npos)
+                                obj->setBulletCollisionType(BulletCollisionType::CONVEX_HULL);
+                            else if (line.find("mesh") != std::string::npos)
+                                obj->setBulletCollisionType(BulletCollisionType::MESH);
+                            break;
+                        }
+                    }
+                }
+            }
+
+            // Add building slabs/walls as Jolt static boxes (supports rotated ramps)
+            for (auto& obj : m_sceneObjects) {
+                if (!obj || !obj->isVisible()) continue;
+                const auto& bt = obj->getBuildingType();
+                if (bt != "platform_slab" && bt != "platform_wall") continue;
+                if (obj->isKinematicPlatform()) continue;
+
+                AABB localBounds = obj->getLocalBounds();
+                glm::vec3 localHalfExtents = (localBounds.max - localBounds.min) * 0.5f;
+                glm::vec3 localCenterOffset = (localBounds.min + localBounds.max) * 0.5f;
+                glm::vec3 scale = obj->getTransform().getScale();
+                localHalfExtents *= scale;
+                localCenterOffset *= scale;
+                glm::vec3 position = obj->getTransform().getPosition();
+                glm::quat rotation = obj->getTransform().getRotation();
+                glm::vec3 center = position + rotation * localCenterOffset;
+
+                m_characterController->addStaticBox(localHalfExtents, center, rotation);
+
+                // Disable AABB collision since Jolt handles it now
+                obj->setAABBCollision(false);
+            }
+
             // Add collision bodies from scene objects with Bullet collision
             for (auto& obj : m_sceneObjects) {
                 if (!obj || !obj->isVisible()) continue;
                 if (!obj->hasBulletCollision()) continue;
                 if (obj->isKinematicPlatform()) continue;  // Already added above
 
-                // Get mesh data for collision (static)
+                // BOX collision: use AABB as static box with rotation (cheap, good for blocks)
+                if (obj->getBulletCollisionType() == BulletCollisionType::BOX) {
+                    AABB localBounds = obj->getLocalBounds();
+                    glm::vec3 localHalfExtents = (localBounds.max - localBounds.min) * 0.5f;
+                    glm::vec3 localCenterOffset = (localBounds.min + localBounds.max) * 0.5f;
+                    glm::vec3 scale = obj->getTransform().getScale();
+                    localHalfExtents *= scale;
+                    localCenterOffset *= scale;
+                    glm::vec3 position = obj->getTransform().getPosition();
+                    glm::quat rotation = obj->getTransform().getRotation();
+                    glm::vec3 center = position + rotation * localCenterOffset;
+                    m_characterController->addStaticBox(localHalfExtents, center, rotation);
+                    continue;
+                }
+
+                // CONVEX_HULL or MESH: use full mesh data for collision
                 if (obj->hasMeshData()) {
                     const auto& modelVerts = obj->getVertices();
                     const auto& indices = obj->getIndices();
@@ -20010,6 +20951,21 @@ private:
                 glm::vec3 center = (bounds.min + bounds.max) * 0.5f;
                 glm::vec3 halfExtents = (bounds.max - bounds.min) * 0.5f;
                 m_characterController->addStaticBox(halfExtents, center);
+            }
+
+            // Recreate poly collision for dirt piles (lost on save/load)
+            for (auto& obj : m_sceneObjects) {
+                if (!obj || obj->getName().find("dirt_pile") == std::string::npos) continue;
+                std::cout << "[DirtPile] Found dirt_pile on load: desc='" << obj->getDescription()
+                          << "' name='" << obj->getName() << "'" << std::endl;
+                if (!obj->hasMeshData()) continue;
+                const auto& verts = obj->getVertices();
+                const auto& inds = obj->getIndices();
+                std::vector<glm::vec3> positions;
+                positions.reserve(verts.size());
+                for (const auto& v : verts) positions.push_back(v.position);
+                m_characterController->addStaticMeshWithId(
+                    positions, inds, obj->getTransform().getMatrix());
             }
 
             // For Homebrew physics, set up terrain height query as backup
@@ -20280,8 +21236,11 @@ private:
         float closestWidgetDist = std::numeric_limits<float>::max();
         SceneObject* closestWidget = nullptr;
 
-        for (auto& obj : m_sceneObjects) {
+        for (size_t si = 0; si < m_sceneObjects.size(); si++) {
+            auto& obj = m_sceneObjects[si];
             if (!obj) continue;
+            // Skip already-selected object so raycast passes through to items inside (containers)
+            if (m_selectedSalvageIndex >= 0 && static_cast<int>(si) == m_selectedSalvageIndex) continue;
             // Allow invisible hitbox lever and widget buttons/checkboxes through
             bool isWidgetInteractive = false;
             if (obj->getBuildingType() == "widget") {
@@ -20462,16 +21421,56 @@ private:
                     state = !state;
                     m_screenMessage = state ? "Switch ON" : "Switch OFF";
                     m_screenMessageTimer = 2.0f;
-                    std::cout << "[Switch] " << closestObj->getName() << " → " << (state ? "ON" : "OFF") << std::endl;
                     return;
                 }
             }
 
-            // Water tower flow interaction — toggle pipe flow on/off
+            // Valve interaction — toggle open/closed
+            if (eKey) {
+                std::string valveNameLower = closestObj->getName();
+                std::transform(valveNameLower.begin(), valveNameLower.end(), valveNameLower.begin(), ::tolower);
+                if (valveNameLower.find("valve") != std::string::npos) {
+                    bool& state = m_valveStates[closestObj];
+                    state = !state;
+                    m_screenMessage = state ? "Valve OPEN" : "Valve CLOSED";
+                    m_screenMessageTimer = 2.0f;
+                    // Recalculate flow if water is running
+                    if (m_flowSource) {
+                        m_flowResult = m_flowSystem.calculateFlow(m_flowSource, m_sceneObjects, 100.0f, 1.0f, &m_valveStates);
+                        m_flowResult.drainRateGPS = WaterTank::computeDrainRate(m_flowResult.openEnds);
+                        if (m_particleRenderer) {
+                            m_particleRenderer->clearDirectedEmitters();
+                            for (const auto& oe : m_flowResult.openEnds) {
+                                float speed = 1.0f + (oe.pressure / 100.0f) * 3.0f;
+                                m_particleRenderer->addDirectedEmitter(oe.position, oe.direction, speed);
+                            }
+                        }
+                        // Start/stop water sound based on whether there are open ends
+                        if (m_flowResult.openEnds.empty()) {
+                            if (m_waterLoopId >= 0) {
+                                Audio::getInstance().stopLoop(m_waterLoopId);
+                                Audio::getInstance().stopLoop(m_waterLoopId + 1);
+                                m_waterLoopId = -1;
+                            }
+                        } else {
+                            if (m_waterLoopId < 0) {
+                                m_waterLoopId = Audio::getInstance().startCrossfadeLoop("assets/sounds/water_flow.wav", 0.4f);
+                            }
+                        }
+                    }
+                    return;
+                }
+            }
+
+            // Water tower flow interaction — toggle pipe flow on/off (requires proximity)
             if (eKey && closestObj->hasPorts()) {
                 std::string nameLower = closestObj->getName();
                 std::transform(nameLower.begin(), nameLower.end(), nameLower.begin(), ::tolower);
                 if (nameLower.find("water") != std::string::npos || nameLower.find("tank") != std::string::npos) {
+                    float waterDist = glm::length(m_camera.getPosition() - closestObj->getTransform().getPosition());
+                    if (waterDist > 8.0f) {
+                        return;
+                    }
                     if (m_flowSource == closestObj) {
                         // Toggle off
                         m_flowSource = nullptr;
@@ -20492,7 +21491,7 @@ private:
                     } else {
                         // Toggle on — calculate flow and spawn emitters
                         m_flowSource = closestObj;
-                        m_flowResult = m_flowSystem.calculateFlow(closestObj, m_sceneObjects);
+                        m_flowResult = m_flowSystem.calculateFlow(closestObj, m_sceneObjects, 100.0f, 1.0f, &m_valveStates);
                         m_flowResult.drainRateGPS = WaterTank::computeDrainRate(m_flowResult.openEnds);
                         m_waterTank.flowing = true;
                         if (m_waterTank.currentGallons <= 0.0f) {
@@ -20505,8 +21504,8 @@ private:
                                 m_particleRenderer->addDirectedEmitter(oe.position, oe.direction, speed);
                             }
                         }
-                        // Start water sound
-                        if (m_waterLoopId < 0) {
+                        // Start water sound only if there are open ends (valve might be closed)
+                        if (m_waterLoopId < 0 && !m_flowResult.openEnds.empty()) {
                             m_waterLoopId = Audio::getInstance().startCrossfadeLoop("assets/sounds/water_flow.wav", 0.4f);
                         }
                         m_screenMessage = "Water ON — " + std::to_string(m_flowResult.openEnds.size()) + " outlets";
@@ -20516,10 +21515,14 @@ private:
                 }
             }
 
-            // Machine interaction — delegate to MachineManager
-            // [Interact] Hit logging removed — too noisy for normal gameplay
-            if (eKey && m_machineManager.tryInteract(closestObj)) {
-                return;
+            // Machine interaction — delegate to MachineManager (requires proximity)
+            if (eKey) {
+                glm::vec3 playerPos = m_camera.getPosition();
+                glm::vec3 objPos = closestObj->getTransform().getPosition();
+                float interactDist = glm::length(playerPos - objPos);
+                if (interactDist <= 8.0f && m_machineManager.tryInteract(closestObj)) {
+                    return;
+                }
             }
 
             closestObj->triggerBehavior(TriggerType::ON_INTERACT);
@@ -22122,6 +23125,82 @@ private:
         m_editorUI.setSelectedObjectIndex(m_selectedObjectIndex);
     }
 
+    std::string m_hotbarTooltip;
+    float m_hotbarTooltipTimer = 0.0f;
+
+    // Drinking animation state
+    bool m_isDrinking = false;
+    float m_drinkTimer = 0.0f;
+    float m_drinkDuration = 1.5f;  // Total animation time
+    int m_drinkSlot = -1;          // Which hotbar slot is being drunk from
+    bool m_drinkSoundPlayed = false; // Only play gulp sound once per drink
+
+    // Shovel hold-to-dig state
+    bool m_isDigging = false;       // Currently holding to dig
+    float m_digTimer = 0.0f;        // Time held so far
+    float m_digDuration = 10.0f;    // Seconds to complete one dig
+    float m_digSwingTimer = 0.0f;   // Looping swing animation timer
+    float m_digSwingDuration = 0.6f;// Single swing cycle time
+    glm::vec3 m_digLockPos{0.0f};   // Player position locked during dig
+    float m_digSnapX = 0.0f;        // Terrain target (saved at dig start)
+    float m_digSnapZ = 0.0f;
+    float m_digRadius = 0.0f;
+    SceneObject* m_digStake = nullptr; // Stake for this dig
+
+    // Deferred rock spawn — wait 2 frames after dig so Jolt processes new heightfield
+    int m_pendingRockFrames = 0;
+    float m_pendingRockX = 0.0f, m_pendingRockZ = 0.0f;
+
+    // Survival stats (I key to show)
+    bool m_showSurvivalStats = false;
+    float m_thirst = 100.0f;        // 0 = dying of thirst, 100 = fully hydrated
+    float m_hunger = 100.0f;        // 0 = starving, 100 = fully fed
+    float m_lastStatDecayTime = 0.0f;  // Game time of last decay tick
+
+    void showHotbarTooltip(int slot) {
+        if (slot < 0 || slot >= TOOLBAR_SLOT_COUNT) return;
+        auto& s = m_toolbarSlots[slot];
+        if (!s.occupied) {
+            m_hotbarTooltip.clear();
+            return;
+        }
+
+        std::string tooltip;
+
+        // Check if this item has container state (fill level)
+        // Find the container state by checking metadata
+        if (!s.metadata.empty()) {
+            auto capIt = s.metadata.find("capacity");
+            auto unitIt = s.metadata.find("unit");
+            std::string unit = (unitIt != s.metadata.end()) ? unitIt->second : "gal";
+
+            // Look for container state — search scene objects with same model path
+            // that were just picked up (fill level tracked by pointer, but we can show
+            // the metadata info at minimum)
+            if (capIt != s.metadata.end()) {
+                float capacity = std::stof(capIt->second);
+                float fillLevel = s.containerFill;
+                std::string liquidType = s.containerLiquid;
+                if (fillLevel > 0.001f) {
+                    char buf[64];
+                    snprintf(buf, sizeof(buf), "%.2f %s %s", fillLevel, unit.c_str(),
+                             liquidType.empty() ? "" : liquidType.c_str());
+                    tooltip = buf;
+                } else {
+                    tooltip = "Empty " + std::to_string(static_cast<int>(capacity)) + " " + unit;
+                }
+            }
+        }
+
+        // Fallback to display name
+        if (tooltip.empty()) {
+            tooltip = s.displayName;
+        }
+
+        m_hotbarTooltip = tooltip;
+        m_hotbarTooltipTimer = 2.0f;
+    }
+
     void deleteObject(int index) {
         if (index < 0 || index >= static_cast<int>(m_sceneObjects.size())) return;
 
@@ -22169,8 +23248,10 @@ private:
             m_wiresMeshDirty = true;
         }
 
-        // Clean up switch state
+        // Clean up switch, valve, and container state
         m_switchStates.erase(delPtr);
+        m_valveStates.erase(delPtr);
+        m_containerStates.erase(delPtr);
 
         // Clean up flow source reference
         if (m_flowSource == delPtr) {
@@ -23454,11 +24535,39 @@ private:
         int textureHeight = 0;
         std::vector<SceneObject::StoredControlPoint> controlPoints; // CPs for modular assembly
         std::vector<SceneObject::StoredPort> ports; // Connection ports for pipe/assembly snap
+        std::unordered_map<std::string, std::string> metadata; // Model metadata (material, capacity, etc.)
+        float containerFill = 0.0f;   // Fill level for containers
+        std::string containerLiquid;  // Liquid type in container
         glm::vec3 modelScale{1.0f}; // original model scale (preserved through pickup/place)
     };
     static constexpr int TOOLBAR_SLOT_COUNT = 10;
     ToolbarSlot m_toolbarSlots[10];
     int m_activeToolbarSlot = 0;
+
+    // Shovel dig system — tracks original heights at dug positions
+    std::unordered_map<int64_t, float> m_dugHoles;
+    // Per-stake dig tracking: stake ptr → (dig count, dirt pile ptr)
+    struct StakeDigInfo {
+        int digCount = 0;
+        SceneObject* dirtPile = nullptr;
+        uint32_t collisionBodyId = UINT32_MAX;
+        glm::vec3 nativeScale{1.0f}; // LIME model's original scale
+    };
+    std::unordered_map<SceneObject*, StakeDigInfo> m_stakeDigs;
+
+    // Cached physics heightfield — patched locally on dig instead of full resample
+    std::vector<float> m_physicsHeightData;
+    int m_physicsHeightSC = 0;       // sample count
+    float m_physicsHeightMinX = 0.0f;
+    float m_physicsHeightMinZ = 0.0f;
+    float m_physicsHeightSpX = 1.0f;
+    float m_physicsHeightSpZ = 1.0f;
+    int64_t digGridKey(float x, float z) const {
+        float ts = m_terrain.getConfig().tileSize;
+        int ix = static_cast<int>(std::round(x / ts));
+        int iz = static_cast<int>(std::round(z / ts));
+        return (static_cast<int64_t>(ix) << 32) | (static_cast<int64_t>(iz) & 0xFFFFFFFF);
+    }
 
     // Editor subsystems
     EditorUI m_editorUI;
@@ -23506,6 +24615,7 @@ private:
     float m_fps = 0.0f;
     float m_frameTimeAccum = 0.0f;
     int m_frameCount = 0;
+    int m_modelDrawCalls = 0;  // Draw calls per frame (instanced batches count as 1)
 
     // Time tracking for water animation
     float m_totalTime = 0.0f;
@@ -23582,6 +24692,8 @@ private:
         AABB bounds;
         glm::vec3 scale{1.0f};    // preserve LimeLoader's scale
         glm::vec3 rotation{0.0f}; // preserve LimeLoader's rotation
+        BulletCollisionType collisionType = BulletCollisionType::NONE;
+        std::unordered_map<std::string, std::string> metadata;  // preserve LIME metadata
     };
     std::unordered_map<std::string, CachedModel> m_modelCache;
 
@@ -23882,7 +24994,13 @@ private:
     SceneObject* m_flowSource = nullptr;  // Currently active water source
     int m_waterLoopId = -1;              // Audio loop for water flow
     WaterTank m_waterTank;               // Tracks water level in the active source
-    int m_objectRotationIndex = 0;  // 0-5: cardinal rotation for selected object (R key cycles)
+    int m_objectRotationIndex = 0;  // 0-23: cardinal rotation for selected object (R key cycles)
+
+    // Nudge key repeat state
+    bool m_nudgeHeld = false;
+    bool m_nudgeFirstPress = false;
+    float m_nudgeTimer = 0.0f;
+    float m_nudgeRepeatTimer = 0.0f;
     bool m_showCPsInGame = false;   // T key toggles CP visualization in play mode
     std::vector<GPUPointLight> m_activeLights;  // Point lights updated each frame
 
@@ -24014,10 +25132,29 @@ private:
 
     // Switch states: tracks on/off for each switch object
     std::unordered_map<SceneObject*, bool> m_switchStates;  // true = ON
+    std::unordered_map<SceneObject*, bool> m_valveStates;  // true = OPEN
+
+    // Container system — tracks fill level for bottles, jugs, barrels, etc.
+    struct ContainerState {
+        float fillLevel = 0.0f;      // Current amount in container units
+        std::string liquidType = ""; // "water", "fuel", etc. Empty = nothing
+    };
+    std::unordered_map<SceneObject*, ContainerState> m_containerStates;
+
+    // Parse structured description: "material:plastic capacity:1.0 unit:gallon"
+    static std::string parseDescField(const std::string& desc, const std::string& key) {
+        std::string needle = key + ":";
+        auto pos = desc.find(needle);
+        if (pos == std::string::npos) return "";
+        pos += needle.size();
+        auto end = desc.find(' ', pos);
+        if (end == std::string::npos) end = desc.size();
+        return desc.substr(pos, end - pos);
+    }
 
     // Check if power can reach a given object from a running generator
     // through the wire graph, stopping at OFF switches
-    bool canPowerReach(SceneObject* target) {
+    bool canPowerReach(SceneObject* target) override {
         std::unordered_set<SceneObject*> visited;
         std::vector<SceneObject*> queue = {target};
         visited.insert(target);

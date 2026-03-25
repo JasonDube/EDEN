@@ -29,6 +29,17 @@ struct ModelPushConstants {
     glm::vec4 colorAdjust;  // x=hue, y=saturation, z=brightness, w=alpha (0=opaque, >0=x-ray)
 };
 
+// Per-instance data for instanced rendering (80 bytes)
+struct InstanceData {
+    glm::mat4 model;        // 64 bytes — per-instance model matrix
+    glm::vec4 colorAdjust;  // 16 bytes — hue, saturation, brightness, indoor/xray flag
+};
+
+// Push constants for instanced rendering (64 bytes — just viewProj)
+struct InstancedPushConstants {
+    glm::mat4 viewProj;
+};
+
 // Point/spot light data for GPU (matches UBO layout in shader)
 struct GPUPointLight {
     glm::vec4 position;    // xyz = position, w = radius
@@ -104,6 +115,11 @@ public:
                 float hueShift = 0.0f, float saturation = 1.0f, float brightness = 1.0f,
                 bool twoSided = false, bool indoor = false);
 
+    // Render multiple instances of the same model in a single draw call
+    void renderInstanced(VkCommandBuffer commandBuffer, const glm::mat4& viewProj,
+                         uint32_t modelHandle,
+                         const InstanceData* instances, uint32_t instanceCount);
+
     // Render model wireframe with solid color
     void renderWireframe(VkCommandBuffer commandBuffer, const glm::mat4& viewProj,
                          uint32_t modelHandle, const glm::mat4& modelMatrix,
@@ -143,6 +159,7 @@ public:
 
 private:
     void createPipeline(VkRenderPass renderPass, VkExtent2D extent);
+    void createInstancedPipeline(VkRenderPass renderPass, VkExtent2D extent);
     void createWireframePipeline(VkRenderPass renderPass, VkExtent2D extent);
     void createSelectionPipeline(VkRenderPass renderPass, VkExtent2D extent);
     void createDescriptorSetLayout();
@@ -165,6 +182,16 @@ private:
     VkPipeline m_twoSidedPipeline = VK_NULL_HANDLE;  // Same as m_pipeline but no backface culling
     VkDescriptorSetLayout m_descriptorSetLayout = VK_NULL_HANDLE;
     VkDescriptorPool m_descriptorPool = VK_NULL_HANDLE;
+
+    // Instanced rendering pipeline
+    VkPipelineLayout m_instancedPipelineLayout = VK_NULL_HANDLE;
+    VkPipeline m_instancedPipeline = VK_NULL_HANDLE;
+
+    // Instance data buffer (persistently mapped, host-coherent)
+    static constexpr size_t MAX_INSTANCES = 4096;
+    VkBuffer m_instanceBuffer = VK_NULL_HANDLE;
+    VkDeviceMemory m_instanceMemory = VK_NULL_HANDLE;
+    void* m_instanceMapped = nullptr;
 
     // Wireframe pipeline
     VkPipelineLayout m_wireframePipelineLayout = VK_NULL_HANDLE;

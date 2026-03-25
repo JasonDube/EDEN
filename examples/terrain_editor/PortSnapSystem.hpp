@@ -104,15 +104,36 @@ public:
                 wantName.replace(endPos, 3, "start");
             }
         }
+        // Determine which keyword to look for on the new object
+        std::string seekKeyword;  // "start" if target has "end", vice versa
+        if (targetName.find("end") != std::string::npos) seekKeyword = "start";
+        else if (targetName.find("start") != std::string::npos) seekKeyword = "end";
+
+        // Pass 1: exact name swap match (side_end → side_start, pipe_start → pipe_end)
+        bool foundExact = false;
         for (int ni = 0; ni < static_cast<int>(newPorts.size()); ++ni) {
             if (!wantName.empty() && newPorts[ni].name == wantName) {
                 bestNewPort = ni;
+                foundExact = true;
                 break;
             }
-            // Fallback: if no start/end convention, use any port that ISN'T the same name
-            if (wantName.empty() && newPorts[ni].name != targetName) {
-                bestNewPort = ni;
-                break;
+        }
+        // Pass 2: keyword fallback only if exact match wasn't found
+        if (!foundExact) {
+            for (int ni = 0; ni < static_cast<int>(newPorts.size()); ++ni) {
+                if (!seekKeyword.empty() && newPorts[ni].name.find(seekKeyword) != std::string::npos) {
+                    bestNewPort = ni;
+                    break;
+                }
+            }
+        }
+        // Last fallback: use any port that isn't the same name
+        if (bestNewPort == 0 && seekKeyword.empty()) {
+            for (int ni = 0; ni < static_cast<int>(newPorts.size()); ++ni) {
+                if (newPorts[ni].name != targetName) {
+                    bestNewPort = ni;
+                    break;
+                }
             }
         }
 
@@ -124,9 +145,11 @@ public:
         const auto& np = newPorts[bestNewPort];
 
         // Get target port vectors in world space
+        // Use rotation-only matrix (strip scale) to avoid skewing directions
         glm::vec3 tPos = glm::vec3(targetModel * glm::vec4(tp.position, 1.0f));
-        glm::vec3 tFwd = glm::normalize(glm::vec3(targetModel * glm::vec4(tp.forward, 0.0f)));
-        glm::vec3 tUp = glm::normalize(glm::vec3(targetModel * glm::vec4(tp.up, 0.0f)));
+        glm::quat targetRot = targetObj->getTransform().getRotation();
+        glm::vec3 tFwd = glm::normalize(targetRot * tp.forward);
+        glm::vec3 tUp = glm::normalize(targetRot * tp.up);
 
         // The new object's port forward should point OPPOSITE to target's forward
         // (pipes face each other at the connection)
@@ -148,7 +171,9 @@ public:
 
         // Compute position: after rotating, the new port's local position moves.
         // We need the world position of newPort to land exactly on tPos.
-        glm::vec3 rotatedPortLocal = rot * np.position;
+        // Must account for the new object's scale (port is in unscaled local space).
+        glm::vec3 scaledPortLocal = np.position * newObj->getTransform().getScale();
+        glm::vec3 rotatedPortLocal = rot * scaledPortLocal;
         glm::vec3 translation = tPos - rotatedPortLocal;
 
         result.snapped = true;

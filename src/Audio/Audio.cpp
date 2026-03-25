@@ -8,6 +8,7 @@
 #include <eden/Audio.hpp>
 #include <iostream>
 #include <vector>
+#include <algorithm>
 #include <filesystem>
 #include <fstream>
 #include <mutex>
@@ -149,8 +150,28 @@ void Audio::playSound(const std::string& filepath, float volume) {
         absPath = std::filesystem::absolute(filepath).string();
     }
 
-    // Play the sound using the engine's one-shot API
-    ma_engine_play_sound(&m_impl->engine, absPath.c_str(), nullptr);
+    // Clean up finished one-shot sounds from previous calls
+    m_impl->sounds.erase(
+        std::remove_if(m_impl->sounds.begin(), m_impl->sounds.end(),
+            [](ma_sound* s) {
+                if (!ma_sound_is_playing(s)) {
+                    ma_sound_uninit(s);
+                    delete s;
+                    return true;
+                }
+                return false;
+            }),
+        m_impl->sounds.end());
+
+    // Play sound with volume control
+    ma_sound* sound = new ma_sound();
+    if (ma_sound_init_from_file(&m_impl->engine, absPath.c_str(), 0, nullptr, nullptr, sound) != MA_SUCCESS) {
+        delete sound;
+        return;
+    }
+    ma_sound_set_volume(sound, volume);
+    ma_sound_start(sound);
+    m_impl->sounds.push_back(sound);
 }
 
 int Audio::startLoop(const std::string& filepath, float volume) {
@@ -248,6 +269,14 @@ void Audio::stopLoop(int loopId) {
             delete it->second;
         }
         m_impl->loops.erase(it);
+    }
+}
+
+void Audio::setLoopVolume(int loopId, float volume) {
+    if (!m_initialized || !m_impl) return;
+    auto it = m_impl->loops.find(loopId);
+    if (it != m_impl->loops.end() && it->second) {
+        ma_sound_set_volume(it->second, volume);
     }
 }
 

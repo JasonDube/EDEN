@@ -25,7 +25,7 @@ struct Vertex3D {
     float holeMask;        // Terrain hole (0 = solid, 1 = discarded/invisible)
 };
 
-enum class BrushMode { Raise, Lower, Smooth, Flatten, Paint, Crack, Texture, Plateau, LevelMin, Grab, Select, Deselect, MoveObject, Spire, Ridged, Trench, PathMode, Terrace, FlattenToY, WallDraw, Foundation };
+enum class BrushMode { Raise, Lower, Smooth, Flatten, Paint, Crack, Texture, Plateau, LevelMin, Grab, Select, Deselect, MoveObject, Spire, Ridged, Trench, PathMode, Terrace, FlattenToY, WallDraw, Foundation, Furrow, Shovel };
 
 enum class BrushShape { Circle, Ellipse, Square };
 

@@ -84,6 +84,8 @@ if not STT_AVAILABLE:
 # Provider endpoints
 GROK_API_URL = "https://api.x.ai/v1/chat/completions"
 DEEPSEEK_API_URL = "https://api.deepseek.com/chat/completions"
+BITNET_URL = os.getenv("BITNET_URL", "http://127.0.0.1:8082")
+BITNET_MODEL = os.getenv("BITNET_MODEL", "bitnet-b1.58-2B-4T")
 
 # Vision model (ollama) — used when image analysis is requested
 VISION_MODEL = os.getenv("VISION_MODEL", "qwen3-vl:2b")
@@ -463,6 +465,27 @@ async def call_ollama(messages: list[dict], model: str = None) -> tuple[str, int
         )
 
 
+async def call_bitnet(messages: list[dict], model: str = None) -> tuple[str, int, int]:
+    """Call local BitNet server (OpenAI-compatible API). Returns (text, input_tokens, output_tokens)."""
+    async with httpx.AsyncClient() as client:
+        response = await client.post(
+            f"{BITNET_URL}/v1/chat/completions",
+            json={
+                "messages": messages,
+                "max_tokens": 512,
+                "temperature": 0.7
+            },
+            timeout=60.0
+        )
+        if response.status_code != 200:
+            raise HTTPException(status_code=502, detail=f"BitNet error: {response.text}")
+        result = response.json()
+        choice = result.get("choices", [{}])[0]
+        text = choice.get("message", {}).get("content", "...")
+        usage = result.get("usage", {})
+        return text, usage.get("prompt_tokens", 0), usage.get("completion_tokens", 0)
+
+
 async def call_vision(image_path: str, prompt: str) -> str:
     """Send an image to the local vision model (qwen3-vl) via Ollama. Returns description text."""
     import base64
@@ -653,6 +676,15 @@ async def call_provider(provider: str, messages: list[dict], model: str = None, 
             except Exception as e:
                 print(f"[provider] Grok failed ({e}), falling back to Ollama")
                 provider = "ollama"
+
+    if provider == "bitnet":
+        model = BITNET_MODEL
+        try:
+            text, in_tok, out_tok = await call_bitnet(messages, model)
+            return text, model, in_tok, out_tok
+        except Exception as e:
+            print(f"[provider] BitNet failed ({e}), falling back to Ollama")
+            provider = "ollama"
 
     if provider == "ollama":
         model = model or OLLAMA_MODEL

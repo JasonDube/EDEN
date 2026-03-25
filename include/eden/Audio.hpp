@@ -39,6 +39,9 @@ public:
     // Stop a looping sound by ID
     void stopLoop(int loopId);
 
+    // Set volume on a running loop (for distance attenuation)
+    void setLoopVolume(int loopId, float volume);
+
     // Check if a loop is playing
     bool isLoopPlaying(int loopId) const;
 

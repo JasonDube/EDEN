@@ -3,6 +3,7 @@
 #include <eden/ActionSystem.hpp>
 #include "SceneObject.hpp"
 #include "AINode.hpp"
+#include "LimeLoader.hpp"
 
 #include <nlohmann/json.hpp>
 #include <fstream>
@@ -435,7 +436,8 @@ bool LevelSerializer::save(const std::string& filepath,
 
             json objJson;
             objJson["name"] = obj->getName();
-            objJson["modelPath"] = obj->getModelPath();
+            // Save relative path if possible (for portability)
+            objJson["modelPath"] = LimeLoader::toRelativePath(obj->getModelPath());
             objJson["position"] = vec3ToJson(obj->getTransform().getPosition());
             // Use stored euler angles (avoids gimbal lock issues)
             objJson["rotation"] = vec3ToJson(obj->getEulerRotation());

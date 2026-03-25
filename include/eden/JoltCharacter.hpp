@@ -194,6 +194,11 @@ public:
                        const glm::vec3& position,
                        const glm::quat& rotation = glm::quat(1, 0, 0, 0)) override;
 
+    uint32_t addStaticMeshWithId(const std::vector<glm::vec3>& vertices,
+                                  const std::vector<uint32_t>& indices,
+                                  const glm::mat4& transform = glm::mat4(1.0f)) override;
+    void removeStaticBody(uint32_t bodyId) override;
+
     // Add terrain heightfield (much faster than mesh for terrain)
     // heightData: row-major height samples, sampleCount x sampleCount
     // offset: world position of heightfield center
@@ -202,6 +207,10 @@ public:
                                int sampleCount,
                                const glm::vec3& offset,
                                const glm::vec3& scale) override;
+    void updateTerrainHeightfield(const std::vector<float>& heightData,
+                                  int sampleCount,
+                                  const glm::vec3& offset,
+                                  const glm::vec3& scale) override;
 
     // Add kinematic (moving) platform - returns body index
     uint32_t addKinematicPlatform(const glm::vec3& halfExtents,
@@ -254,11 +263,19 @@ public:
                                     float mass = 1.0f,
                                     float friction = 0.5f,
                                     float restitution = 0.3f) override;
+    DynamicBodyResult addDynamicConvexHull(const std::vector<glm::vec3>& vertices,
+                                           const glm::vec3& position,
+                                           const glm::vec3& scale = glm::vec3(1.0f),
+                                           const glm::vec3& velocity = glm::vec3(0),
+                                           float mass = 1.0f,
+                                           float friction = 0.5f,
+                                           float restitution = 0.3f) override;
     void removeDynamicBody(uint32_t bodyId) override;
     bool isDynamicBodySleeping(uint32_t bodyId) const override;
     glm::vec3 getDynamicBodyPosition(uint32_t bodyId) const override;
     glm::vec3 getDynamicBodyVelocity(uint32_t bodyId) const override;
     glm::quat getDynamicBodyRotation(uint32_t bodyId) const override;
+    void wakeAllDynamicBodies() override;
     void stepPhysics(float deltaTime) override;
 
     // Clear all bodies (for level reset)
@@ -299,6 +316,8 @@ private:
     static constexpr float COYOTE_TIME = 0.12f;  // 120ms grace period
 
     // Track bodies for cleanup
+    JPH::BodyID m_terrainBodyId;  // Dedicated terrain heightfield body (for updates)
+    bool m_hasTerrainBody = false;
     std::vector<JPH::BodyID> m_staticBodies;
     std::vector<JPH::BodyID> m_kinematicBodies;
     std::vector<JPH::BodyID> m_dynamicBodies;

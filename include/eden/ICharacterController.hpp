@@ -36,11 +36,23 @@ public:
                                const glm::vec3& position,
                                const glm::quat& rotation = glm::quat(1, 0, 0, 0)) = 0;
 
+    // Add static mesh that can be removed later (returns body ID)
+    virtual uint32_t addStaticMeshWithId(const std::vector<glm::vec3>& vertices,
+                                          const std::vector<uint32_t>& indices,
+                                          const glm::mat4& transform = glm::mat4(1.0f)) = 0;
+    virtual void removeStaticBody(uint32_t bodyId) = 0;
+
     // Add terrain heightfield
     virtual void addTerrainHeightfield(const std::vector<float>& heightData,
                                        int sampleCount,
                                        const glm::vec3& offset,
                                        const glm::vec3& scale) = 0;
+
+    // Update terrain heightfield after terrain modification (e.g. digging)
+    virtual void updateTerrainHeightfield(const std::vector<float>& heightData,
+                                          int sampleCount,
+                                          const glm::vec3& offset,
+                                          const glm::vec3& scale) = 0;
 
     // Kinematic (moving) platforms
     // Returns a body ID that can be used to update the platform
@@ -110,11 +122,19 @@ public:
                                             float mass = 1.0f,
                                             float friction = 0.5f,
                                             float restitution = 0.3f) { return {}; }
+    virtual DynamicBodyResult addDynamicConvexHull(const std::vector<glm::vec3>& vertices,
+                                                    const glm::vec3& position,
+                                                    const glm::vec3& scale = glm::vec3(1.0f),
+                                                    const glm::vec3& velocity = glm::vec3(0),
+                                                    float mass = 1.0f,
+                                                    float friction = 0.5f,
+                                                    float restitution = 0.3f) { return {}; }
     virtual void removeDynamicBody(uint32_t bodyId) {}
     virtual bool isDynamicBodySleeping(uint32_t bodyId) const { return false; }
     virtual glm::vec3 getDynamicBodyPosition(uint32_t bodyId) const { return glm::vec3(0); }
     virtual glm::vec3 getDynamicBodyVelocity(uint32_t bodyId) const { return glm::vec3(0); }
     virtual glm::quat getDynamicBodyRotation(uint32_t bodyId) const { return glm::quat(1,0,0,0); }
+    virtual void wakeAllDynamicBodies() {}
     virtual void stepPhysics(float deltaTime) {}
 
     // Clear all bodies (for level reset)

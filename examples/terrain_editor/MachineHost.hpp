@@ -35,4 +35,10 @@ struct MachineHost {
 
     // Show a screen message to the player
     virtual void showScreenMessage(const std::string& msg, float duration) = 0;
+
+    // Player camera position (for distance-based sound attenuation)
+    virtual glm::vec3 getCameraPosition() const = 0;
+
+    // Check if power from a running generator can reach this object via wires
+    virtual bool canPowerReach(eden::SceneObject* obj) = 0;
 };

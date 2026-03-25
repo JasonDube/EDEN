@@ -90,6 +90,16 @@ void HomebrewCharacter::addConvexHull(const std::vector<glm::vec3>& points,
     m_staticBoxes.push_back(box);
 }
 
+uint32_t HomebrewCharacter::addStaticMeshWithId(const std::vector<glm::vec3>&,
+                                                  const std::vector<uint32_t>&,
+                                                  const glm::mat4&) {
+    return UINT32_MAX; // Homebrew doesn't support mesh collision
+}
+
+void HomebrewCharacter::removeStaticBody(uint32_t) {
+    // Homebrew doesn't track individual bodies
+}
+
 void HomebrewCharacter::addTerrainHeightfield(const std::vector<float>& heightData,
                                                int sampleCount,
                                                const glm::vec3& offset,
@@ -102,6 +112,18 @@ void HomebrewCharacter::addTerrainHeightfield(const std::vector<float>& heightDa
     hf.offset = offset;
     hf.scale = scale;
     m_heightfields.push_back(hf);
+}
+
+void HomebrewCharacter::updateTerrainHeightfield(const std::vector<float>& heightData,
+                                                  int sampleCount,
+                                                  const glm::vec3& offset,
+                                                  const glm::vec3& scale) {
+    if (!m_initialized || heightData.empty() || m_heightfields.empty()) return;
+    // Replace the first heightfield (terrain)
+    m_heightfields[0].data = heightData;
+    m_heightfields[0].sampleCount = sampleCount;
+    m_heightfields[0].offset = offset;
+    m_heightfields[0].scale = scale;
 }
 
 uint32_t HomebrewCharacter::addKinematicPlatform(const glm::vec3& halfExtents,

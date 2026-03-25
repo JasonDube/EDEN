@@ -279,13 +279,13 @@ void EditorUI::renderMainWindow() {
     ImGui::Text("Brush Settings");
 
     // Brush mode
-    const char* modeNames[] = { "Raise", "Lower", "Smooth", "Flatten", "Paint", "Crack", "Texture", "Plateau", "Level Min", "Grab", "Select", "Deselect", "Move Object", "Spire", "Ridged", "Trench", "Path", "Terrace", "Flatten to Y", "Wall Draw", "Foundation" };
+    const char* modeNames[] = { "Raise", "Lower", "Smooth", "Flatten", "Paint", "Crack", "Texture", "Plateau", "Level Min", "Grab", "Select", "Deselect", "Move Object", "Spire", "Ridged", "Trench", "Path", "Terrace", "Flatten to Y", "Wall Draw", "Foundation", "Furrow", "Shovel" };
     int currentMode = static_cast<int>(m_brushMode);
-    if (ImGui::Combo("Mode", &currentMode, modeNames, 21)) {
+    if (ImGui::Combo("Mode", &currentMode, modeNames, 23)) {
         m_brushMode = static_cast<BrushMode>(currentMode);
     }
 
-    ImGui::SliderFloat("Radius", &m_brushRadius, 1.0f, 50.0f);
+    ImGui::SliderFloat("Radius", &m_brushRadius, 0.5f, 50.0f);
     ImGui::SliderFloat("Strength", &m_brushStrength, 0.1f, 50.0f);
     ImGui::SliderFloat("Falloff", &m_brushFalloff, 0.0f, 1.0f);
 

@@ -48,7 +48,9 @@ public:
     }
 
     void update(float deltaTime, MachineHost& host) override {
-        // Drain fuel from running generators
+        glm::vec3 camPos = host.getCameraPosition();
+
+        // Drain fuel and update sound attenuation for running generators
         for (auto it = m_state.begin(); it != m_state.end(); ++it) {
             auto loopIt = m_loops.find(it->first);
             if (loopIt == m_loops.end() || loopIt->second < 0) continue;
@@ -57,11 +59,22 @@ public:
             it->second.fuelLevel -= it->second.fuelBurnRate * deltaTime / 60.0f;
             if (it->second.fuelLevel <= 0.0f) {
                 it->second.fuelLevel = 0.0f;
-                // Out of fuel — shut down
                 turnOff(it->first, host);
                 host.showScreenMessage("Generator out of fuel!", 3.0f);
-                break;  // Iterator invalidated by turnOff
+                break;
             }
+
+            // Distance-based sound attenuation
+            glm::vec3 machinePos = it->first->getTransform().getPosition();
+            float dist = glm::length(machinePos - camPos);
+            float vol = 0.0f;
+            if (dist < m_innerRadius) {
+                vol = m_baseVolume;
+            } else if (dist < m_outerRadius) {
+                vol = m_baseVolume * (1.0f - (dist - m_innerRadius) / (m_outerRadius - m_innerRadius));
+            }
+            Audio::getInstance().setLoopVolume(loopIt->second, vol);
+            Audio::getInstance().setLoopVolume(loopIt->second + 1, vol);
         }
 
         // Spin fans
@@ -170,6 +183,11 @@ private:
     std::unordered_map<SceneObject*, int> m_loops;            // generator → audio loop ID
     std::unordered_map<SceneObject*, GeneratorState> m_state; // generator → power/fuel state
     std::vector<SpinningFan> m_fans;                          // all spinning fans
+
+    // Sound attenuation settings (shared by all machine types)
+    static constexpr float m_baseVolume = 0.3f;    // Volume at full proximity
+    static constexpr float m_innerRadius = 5.0f;   // Full volume within this distance
+    static constexpr float m_outerRadius = 30.0f;  // Silent beyond this distance
 
     // ── Helpers ────────────────────────────────────────────
 

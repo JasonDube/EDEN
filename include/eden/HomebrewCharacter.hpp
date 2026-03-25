@@ -33,10 +33,19 @@ public:
                        const glm::quat& rotation = glm::quat(1, 0, 0, 0)) override;
 
     // Add terrain heightfield
+    uint32_t addStaticMeshWithId(const std::vector<glm::vec3>& vertices,
+                                  const std::vector<uint32_t>& indices,
+                                  const glm::mat4& transform = glm::mat4(1.0f)) override;
+    void removeStaticBody(uint32_t bodyId) override;
+
     void addTerrainHeightfield(const std::vector<float>& heightData,
                                int sampleCount,
                                const glm::vec3& offset,
                                const glm::vec3& scale) override;
+    void updateTerrainHeightfield(const std::vector<float>& heightData,
+                                  int sampleCount,
+                                  const glm::vec3& offset,
+                                  const glm::vec3& scale) override;
 
     // Kinematic platforms
     uint32_t addKinematicPlatform(const glm::vec3& halfExtents,

@@ -108,6 +108,14 @@ public:
     void setDescription(const std::string& desc) { m_description = desc; }
     const std::string& getDescription() const { return m_description; }
 
+    // Metadata from .lime files (key-value properties like material, capacity, etc.)
+    void setModelMetadata(const std::unordered_map<std::string, std::string>& meta) { m_modelMetadata = meta; }
+    const std::unordered_map<std::string, std::string>& getModelMetadata() const { return m_modelMetadata; }
+    std::string getMetaValue(const std::string& key) const {
+        auto it = m_modelMetadata.find(key);
+        return (it != m_modelMetadata.end()) ? it->second : "";
+    }
+
     // Building type (from building catalog, e.g. "farm", "house"). Empty = not a building.
     void setBuildingType(const std::string& type) { m_buildingType = type; }
     const std::string& getBuildingType() const { return m_buildingType; }
@@ -713,6 +721,7 @@ public:
 private:
     std::string m_name = "Object";
     std::string m_description;  // Description visible to AI perception
+    std::unordered_map<std::string, std::string> m_modelMetadata;  // Key-value from .lime file
     std::string m_buildingType; // Building catalog type (e.g. "farm"). Empty = not a building.
     std::string m_modelPath;  // Source file path for save/load
     std::string m_texturePath; // Custom texture image (for doors with icons)

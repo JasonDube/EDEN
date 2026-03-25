@@ -79,6 +79,18 @@ public:
      * @param renderer ModelRenderer to create GPU resources
      * @return Unique pointer to SceneObject, or nullptr on failure
      */
+    /**
+     * @brief Resolve a model path — handles both absolute and relative paths
+     * Checks: 1) path as-is, 2) relative to CWD, 3) assets/models/ subdirs
+     */
+    static std::string resolvePath(const std::string& path);
+
+    /**
+     * @brief Convert an absolute path to a relative asset path (for saving)
+     * e.g., "/home/user/Desktop/BLENDER_MODELS/bottle.lime" → "models/containers/bottle.lime"
+     */
+    static std::string toRelativePath(const std::string& absolutePath);
+
     static std::unique_ptr<class SceneObject> createSceneObject(
         const LoadedMesh& mesh,
         ModelRenderer& renderer

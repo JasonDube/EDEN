@@ -8,6 +8,45 @@
 
 namespace eden {
 
+std::string LimeLoader::resolvePath(const std::string& path) {
+    // 1) Try as-is (absolute or relative to CWD)
+    if (std::filesystem::exists(path)) return path;
+
+    // 2) Try under assets/models/ with just the filename
+    std::string filename = std::filesystem::path(path).filename().string();
+    std::string modelsDir = "assets/models";
+    if (std::filesystem::exists(modelsDir)) {
+        for (auto& entry : std::filesystem::recursive_directory_iterator(modelsDir)) {
+            if (entry.is_regular_file() && entry.path().filename().string() == filename) {
+                return entry.path().string();
+            }
+        }
+    }
+
+    // 3) Return original path (will fail on load, but error message shows what's missing)
+    return path;
+}
+
+std::string LimeLoader::toRelativePath(const std::string& absolutePath) {
+    // If already relative, return as-is
+    if (!std::filesystem::path(absolutePath).is_absolute()) return absolutePath;
+
+    std::string filename = std::filesystem::path(absolutePath).filename().string();
+
+    // Search assets/models/ for this filename and return relative path
+    std::string modelsDir = "assets/models";
+    if (std::filesystem::exists(modelsDir)) {
+        for (auto& entry : std::filesystem::recursive_directory_iterator(modelsDir)) {
+            if (entry.is_regular_file() && entry.path().filename().string() == filename) {
+                return entry.path().string();
+            }
+        }
+    }
+
+    // Fallback: return just the filename
+    return filename;
+}
+
 // Base64 decoding
 static const char* base64_chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
@@ -49,9 +88,11 @@ struct LimeFace {
 LimeLoader::LoadResult LimeLoader::load(const std::string& filepath) {
     LoadResult result;
 
-    std::ifstream file(filepath);
+    // Resolve path — handles absolute, relative, and asset paths
+    std::string resolvedPath = resolvePath(filepath);
+    std::ifstream file(resolvedPath);
     if (!file.is_open()) {
-        result.error = "Failed to open file: " + filepath;
+        result.error = "Failed to open file: " + filepath + " (resolved: " + resolvedPath + ")";
         return result;
     }
 
@@ -301,6 +342,22 @@ std::unique_ptr<SceneObject> LimeLoader::createSceneObject(
             storedPorts.push_back({p.name, p.position, p.forward, p.up});
         }
         obj->setPorts(storedPorts);
+    }
+
+    // Transfer metadata
+    if (!mesh.metadata.empty()) {
+        obj->setModelMetadata(mesh.metadata);
+
+        // Apply collision type from metadata
+        auto collIt = mesh.metadata.find("collision");
+        if (collIt != mesh.metadata.end()) {
+            if (collIt->second == "box")
+                obj->setBulletCollisionType(BulletCollisionType::BOX);
+            else if (collIt->second == "convex_hull")
+                obj->setBulletCollisionType(BulletCollisionType::CONVEX_HULL);
+            else if (collIt->second == "mesh")
+                obj->setBulletCollisionType(BulletCollisionType::MESH);
+        }
     }
 
     return obj;

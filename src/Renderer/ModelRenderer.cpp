@@ -52,6 +52,7 @@ ModelRenderer::ModelRenderer(VulkanContext& context, VkRenderPass renderPass, Vk
     createDescriptorSetLayout();
     createDescriptorPool();
     createPipeline(renderPass, extent);
+    createInstancedPipeline(renderPass, extent);
     createWireframePipeline(renderPass, extent);
     createSelectionPipeline(renderPass, extent);
     createDefaultTexture();
@@ -124,6 +125,16 @@ ModelRenderer::ModelRenderer(VulkanContext& context, VkRenderPass renderPass, Vk
         vkMapMemory(m_context.getDevice(), m_selectionIndexMemories[i], 0, selectionBufferSize, 0, &m_selectionIndexMapped[i]);
     }
     m_currentSelectionBuffer = 0;
+
+    // Create instance data buffer for instanced rendering
+    {
+        VkDeviceSize instanceBufSize = MAX_INSTANCES * sizeof(InstanceData);
+        m_context.createBuffer(instanceBufSize,
+                              VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+                              VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                              m_instanceBuffer, m_instanceMemory);
+        vkMapMemory(m_context.getDevice(), m_instanceMemory, 0, instanceBufSize, 0, &m_instanceMapped);
+    }
 }
 
 ModelRenderer::~ModelRenderer() {
@@ -152,6 +163,11 @@ ModelRenderer::~ModelRenderer() {
     if (m_pipeline) vkDestroyPipeline(device, m_pipeline, nullptr);
     if (m_twoSidedPipeline) vkDestroyPipeline(device, m_twoSidedPipeline, nullptr);
     if (m_pipelineLayout) vkDestroyPipelineLayout(device, m_pipelineLayout, nullptr);
+    if (m_instancedPipeline) vkDestroyPipeline(device, m_instancedPipeline, nullptr);
+    if (m_instancedPipelineLayout) vkDestroyPipelineLayout(device, m_instancedPipelineLayout, nullptr);
+    if (m_instanceMapped) vkUnmapMemory(device, m_instanceMemory);
+    if (m_instanceBuffer) vkDestroyBuffer(device, m_instanceBuffer, nullptr);
+    if (m_instanceMemory) { Buffer::trackVramFreeHandle(m_instanceMemory); vkFreeMemory(device, m_instanceMemory, nullptr); }
     if (m_wireframePipeline) vkDestroyPipeline(device, m_wireframePipeline, nullptr);
     if (m_linePipeline) vkDestroyPipeline(device, m_linePipeline, nullptr);
     if (m_pointPipeline) vkDestroyPipeline(device, m_pointPipeline, nullptr);
@@ -373,6 +389,160 @@ void ModelRenderer::createPipeline(VkRenderPass renderPass, VkExtent2D extent) {
     colorBlend.alphaBlendOp = VK_BLEND_OP_ADD;
     if (vkCreateGraphicsPipelines(m_context.getDevice(), VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &m_twoSidedPipeline) != VK_SUCCESS) {
         throw std::runtime_error("Failed to create x-ray model pipeline");
+    }
+
+    vkDestroyShaderModule(m_context.getDevice(), vertModule, nullptr);
+    vkDestroyShaderModule(m_context.getDevice(), fragModule, nullptr);
+}
+
+void ModelRenderer::createInstancedPipeline(VkRenderPass renderPass, VkExtent2D extent) {
+    auto vertCode = m_context.readFile("shaders/model_instanced.vert.spv");
+    auto fragCode = m_context.readFile("shaders/model.frag.spv");
+
+    VkShaderModule vertModule = m_context.createShaderModule(vertCode);
+    VkShaderModule fragModule = m_context.createShaderModule(fragCode);
+
+    VkPipelineShaderStageCreateInfo vertStage{};
+    vertStage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    vertStage.stage = VK_SHADER_STAGE_VERTEX_BIT;
+    vertStage.module = vertModule;
+    vertStage.pName = "main";
+
+    VkPipelineShaderStageCreateInfo fragStage{};
+    fragStage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    fragStage.stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+    fragStage.module = fragModule;
+    fragStage.pName = "main";
+
+    VkPipelineShaderStageCreateInfo stages[] = {vertStage, fragStage};
+
+    // Two vertex input bindings: binding 0 = per-vertex, binding 1 = per-instance
+    VkVertexInputBindingDescription bindings[2]{};
+    bindings[0] = ModelVertex::getBindingDescription();  // binding 0, per-vertex
+    bindings[1].binding = 1;
+    bindings[1].stride = sizeof(InstanceData);
+    bindings[1].inputRate = VK_VERTEX_INPUT_RATE_INSTANCE;
+
+    // Per-vertex attributes (locations 0-3) + per-instance attributes (locations 4-8)
+    auto vertexAttrs = ModelVertex::getAttributeDescriptions();  // locations 0-3
+    std::vector<VkVertexInputAttributeDescription> allAttrs(vertexAttrs.begin(), vertexAttrs.end());
+
+    // Instance model matrix: mat4 = 4 x vec4 at locations 4,5,6,7
+    for (uint32_t i = 0; i < 4; i++) {
+        VkVertexInputAttributeDescription attr{};
+        attr.binding = 1;
+        attr.location = 4 + i;
+        attr.format = VK_FORMAT_R32G32B32A32_SFLOAT;
+        attr.offset = static_cast<uint32_t>(i * sizeof(glm::vec4));
+        allAttrs.push_back(attr);
+    }
+    // Instance colorAdjust: vec4 at location 8
+    {
+        VkVertexInputAttributeDescription attr{};
+        attr.binding = 1;
+        attr.location = 8;
+        attr.format = VK_FORMAT_R32G32B32A32_SFLOAT;
+        attr.offset = static_cast<uint32_t>(offsetof(InstanceData, colorAdjust));
+        allAttrs.push_back(attr);
+    }
+
+    VkPipelineVertexInputStateCreateInfo vertexInput{};
+    vertexInput.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+    vertexInput.vertexBindingDescriptionCount = 2;
+    vertexInput.pVertexBindingDescriptions = bindings;
+    vertexInput.vertexAttributeDescriptionCount = static_cast<uint32_t>(allAttrs.size());
+    vertexInput.pVertexAttributeDescriptions = allAttrs.data();
+
+    VkPipelineInputAssemblyStateCreateInfo inputAssembly{};
+    inputAssembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+    inputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+
+    VkViewport viewport{};
+    viewport.width = static_cast<float>(extent.width);
+    viewport.height = static_cast<float>(extent.height);
+    viewport.maxDepth = 1.0f;
+
+    VkRect2D scissor{};
+    scissor.extent = extent;
+
+    VkPipelineViewportStateCreateInfo viewportState{};
+    viewportState.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
+    viewportState.viewportCount = 1;
+    viewportState.pViewports = &viewport;
+    viewportState.scissorCount = 1;
+    viewportState.pScissors = &scissor;
+
+    VkPipelineRasterizationStateCreateInfo rasterizer{};
+    rasterizer.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+    rasterizer.polygonMode = VK_POLYGON_MODE_FILL;
+    rasterizer.lineWidth = 1.0f;
+    rasterizer.cullMode = VK_CULL_MODE_BACK_BIT;
+    rasterizer.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+
+    VkPipelineMultisampleStateCreateInfo multisampling{};
+    multisampling.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
+    multisampling.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+
+    VkPipelineDepthStencilStateCreateInfo depthStencil{};
+    depthStencil.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
+    depthStencil.depthTestEnable = VK_TRUE;
+    depthStencil.depthWriteEnable = VK_TRUE;
+    depthStencil.depthCompareOp = VK_COMPARE_OP_LESS;
+
+    VkPipelineColorBlendAttachmentState colorBlend{};
+    colorBlend.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+                                VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+    colorBlend.blendEnable = VK_FALSE;
+
+    VkPipelineColorBlendStateCreateInfo colorBlending{};
+    colorBlending.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+    colorBlending.attachmentCount = 1;
+    colorBlending.pAttachments = &colorBlend;
+
+    std::vector<VkDynamicState> dynamicStates = {
+        VK_DYNAMIC_STATE_VIEWPORT,
+        VK_DYNAMIC_STATE_SCISSOR
+    };
+    VkPipelineDynamicStateCreateInfo dynamicState{};
+    dynamicState.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
+    dynamicState.dynamicStateCount = static_cast<uint32_t>(dynamicStates.size());
+    dynamicState.pDynamicStates = dynamicStates.data();
+
+    // Push constants: just viewProj (64 bytes)
+    VkPushConstantRange pushConstant{};
+    pushConstant.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+    pushConstant.offset = 0;
+    pushConstant.size = sizeof(InstancedPushConstants);
+
+    VkDescriptorSetLayout setLayouts[] = { m_descriptorSetLayout, m_lightDescriptorSetLayout };
+    VkPipelineLayoutCreateInfo layoutInfo{};
+    layoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+    layoutInfo.setLayoutCount = 2;
+    layoutInfo.pSetLayouts = setLayouts;
+    layoutInfo.pushConstantRangeCount = 1;
+    layoutInfo.pPushConstantRanges = &pushConstant;
+
+    if (vkCreatePipelineLayout(m_context.getDevice(), &layoutInfo, nullptr, &m_instancedPipelineLayout) != VK_SUCCESS) {
+        throw std::runtime_error("Failed to create instanced pipeline layout");
+    }
+
+    VkGraphicsPipelineCreateInfo pipelineInfo{};
+    pipelineInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+    pipelineInfo.stageCount = 2;
+    pipelineInfo.pStages = stages;
+    pipelineInfo.pVertexInputState = &vertexInput;
+    pipelineInfo.pInputAssemblyState = &inputAssembly;
+    pipelineInfo.pViewportState = &viewportState;
+    pipelineInfo.pRasterizationState = &rasterizer;
+    pipelineInfo.pMultisampleState = &multisampling;
+    pipelineInfo.pDepthStencilState = &depthStencil;
+    pipelineInfo.pColorBlendState = &colorBlending;
+    pipelineInfo.pDynamicState = &dynamicState;
+    pipelineInfo.layout = m_instancedPipelineLayout;
+    pipelineInfo.renderPass = renderPass;
+
+    if (vkCreateGraphicsPipelines(m_context.getDevice(), VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &m_instancedPipeline) != VK_SUCCESS) {
+        throw std::runtime_error("Failed to create instanced pipeline");
     }
 
     vkDestroyShaderModule(m_context.getDevice(), vertModule, nullptr);
@@ -1000,6 +1170,45 @@ void ModelRenderer::render(VkCommandBuffer commandBuffer, const glm::mat4& viewP
     vkCmdDrawIndexed(commandBuffer, data.indexCount, 1, 0, 0, 0);
 }
 
+void ModelRenderer::renderInstanced(VkCommandBuffer commandBuffer, const glm::mat4& viewProj,
+                                     uint32_t modelHandle,
+                                     const InstanceData* instances, uint32_t instanceCount) {
+    auto it = m_models.find(modelHandle);
+    if (it == m_models.end() || instanceCount == 0) return;
+
+    ModelGPUData& data = it->second;
+
+    // Clamp to buffer capacity
+    uint32_t count = std::min(instanceCount, static_cast<uint32_t>(MAX_INSTANCES));
+
+    // Upload instance data to persistently mapped buffer
+    memcpy(m_instanceMapped, instances, count * sizeof(InstanceData));
+
+    // Bind instanced pipeline
+    vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_instancedPipeline);
+
+    // Bind descriptor sets: set 0 = texture, set 1 = light UBO
+    VkDescriptorSet descSet = data.hasTexture ? data.descriptorSet : m_defaultDescriptorSet;
+    VkDescriptorSet descSets[] = { descSet, m_lightDescriptorSet };
+    vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                            m_instancedPipelineLayout, 0, 2, descSets, 0, nullptr);
+
+    // Push viewProj only
+    InstancedPushConstants pc{};
+    pc.viewProj = viewProj;
+    vkCmdPushConstants(commandBuffer, m_instancedPipelineLayout, VK_SHADER_STAGE_VERTEX_BIT,
+                       0, sizeof(InstancedPushConstants), &pc);
+
+    // Bind vertex buffer (binding 0) and instance buffer (binding 1)
+    VkBuffer buffers[] = { data.vertexBuffer, m_instanceBuffer };
+    VkDeviceSize offsets[] = { 0, 0 };
+    vkCmdBindVertexBuffers(commandBuffer, 0, 2, buffers, offsets);
+    vkCmdBindIndexBuffer(commandBuffer, data.indexBuffer, 0, VK_INDEX_TYPE_UINT32);
+
+    // Single instanced draw call for all instances
+    vkCmdDrawIndexed(commandBuffer, data.indexCount, count, 0, 0, 0);
+}
+
 void ModelRenderer::renderWireframe(VkCommandBuffer commandBuffer, const glm::mat4& viewProj,
                                      uint32_t modelHandle, const glm::mat4& modelMatrix,
                                      const glm::vec3& color) {
@@ -1507,6 +1716,16 @@ void ModelRenderer::recreatePipeline(VkRenderPass renderPass, VkExtent2D extent)
         m_pipelineLayout = VK_NULL_HANDLE;
     }
 
+    // Destroy old instanced pipeline and layout
+    if (m_instancedPipeline) {
+        vkDestroyPipeline(device, m_instancedPipeline, nullptr);
+        m_instancedPipeline = VK_NULL_HANDLE;
+    }
+    if (m_instancedPipelineLayout) {
+        vkDestroyPipelineLayout(device, m_instancedPipelineLayout, nullptr);
+        m_instancedPipelineLayout = VK_NULL_HANDLE;
+    }
+
     // Destroy old wireframe pipeline and layout
     if (m_wireframePipeline) {
         vkDestroyPipeline(device, m_wireframePipeline, nullptr);
@@ -1537,6 +1756,7 @@ void ModelRenderer::recreatePipeline(VkRenderPass renderPass, VkExtent2D extent)
 
     // Create new pipelines with new extent
     createPipeline(renderPass, extent);
+    createInstancedPipeline(renderPass, extent);
     createWireframePipeline(renderPass, extent);
     createSelectionPipeline(renderPass, extent);
 }

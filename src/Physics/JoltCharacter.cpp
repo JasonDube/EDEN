@@ -184,6 +184,47 @@ void JoltCharacter::addStaticMesh(const std::vector<glm::vec3>& vertices,
     m_staticBodies.push_back(bodyId);
 }
 
+uint32_t JoltCharacter::addStaticMeshWithId(const std::vector<glm::vec3>& vertices,
+                                             const std::vector<uint32_t>& indices,
+                                             const glm::mat4& transform) {
+    if (!m_initialized || vertices.empty() || indices.empty()) return UINT32_MAX;
+
+    JPH::TriangleList triangles;
+    for (size_t i = 0; i + 2 < indices.size(); i += 3) {
+        glm::vec4 v0 = transform * glm::vec4(vertices[indices[i]], 1.0f);
+        glm::vec4 v1 = transform * glm::vec4(vertices[indices[i + 1]], 1.0f);
+        glm::vec4 v2 = transform * glm::vec4(vertices[indices[i + 2]], 1.0f);
+        triangles.push_back(JPH::Triangle(
+            JPH::Float3(v0.x, v0.y, v0.z),
+            JPH::Float3(v1.x, v1.y, v1.z),
+            JPH::Float3(v2.x, v2.y, v2.z)));
+    }
+
+    JPH::MeshShapeSettings meshSettings(triangles);
+    JPH::ShapeSettings::ShapeResult result = meshSettings.Create();
+    if (result.HasError()) return UINT32_MAX;
+
+    JPH::BodyCreationSettings bodySettings(
+        result.Get(), JPH::RVec3::sZero(), JPH::Quat::sIdentity(),
+        JPH::EMotionType::Static, ObjectLayers::NON_MOVING);
+
+    JPH::BodyInterface& bodyInterface = m_physicsSystem->GetBodyInterface();
+    JPH::BodyID bodyId = bodyInterface.CreateAndAddBody(bodySettings, JPH::EActivation::DontActivate);
+    m_staticBodies.push_back(bodyId);
+    return bodyId.GetIndexAndSequenceNumber();
+}
+
+void JoltCharacter::removeStaticBody(uint32_t id) {
+    if (!m_initialized) return;
+    JPH::BodyID bodyId(id);
+    JPH::BodyInterface& bodyInterface = m_physicsSystem->GetBodyInterface();
+    bodyInterface.RemoveBody(bodyId);
+    bodyInterface.DestroyBody(bodyId);
+    m_staticBodies.erase(
+        std::remove(m_staticBodies.begin(), m_staticBodies.end(), bodyId),
+        m_staticBodies.end());
+}
+
 void JoltCharacter::addStaticBox(const glm::vec3& halfExtents,
                                   const glm::vec3& position,
                                   const glm::quat& rotation) {
@@ -278,7 +319,49 @@ void JoltCharacter::addTerrainHeightfield(const std::vector<float>& heightData,
 
     JPH::BodyInterface& bodyInterface = m_physicsSystem->GetBodyInterface();
     JPH::BodyID bodyId = bodyInterface.CreateAndAddBody(bodySettings, JPH::EActivation::DontActivate);
+    m_terrainBodyId = bodyId;
+    m_hasTerrainBody = true;
     m_staticBodies.push_back(bodyId);
+}
+
+void JoltCharacter::updateTerrainHeightfield(const std::vector<float>& heightData,
+                                              int sampleCount,
+                                              const glm::vec3& offset,
+                                              const glm::vec3& scale) {
+    if (!m_initialized || !m_hasTerrainBody || heightData.empty()) return;
+
+    // Build new heightfield shape
+    JPH::HeightFieldShapeSettings settings(
+        heightData.data(),
+        JPH::Vec3(offset.x, offset.y, offset.z),
+        JPH::Vec3(scale.x, scale.y, scale.z),
+        sampleCount
+    );
+
+    JPH::ShapeSettings::ShapeResult result = settings.Create();
+    if (result.HasError()) {
+        std::cerr << "Failed to update heightfield shape: " << result.GetError() << std::endl;
+        return;
+    }
+
+    // Remove old terrain body and create fresh one (SetShape doesn't reliably update broad phase)
+    JPH::BodyInterface& bodyInterface = m_physicsSystem->GetBodyInterface();
+    bodyInterface.RemoveBody(m_terrainBodyId);
+    bodyInterface.DestroyBody(m_terrainBodyId);
+    m_staticBodies.erase(
+        std::remove(m_staticBodies.begin(), m_staticBodies.end(), m_terrainBodyId),
+        m_staticBodies.end());
+
+    JPH::BodyCreationSettings bodySettings(
+        result.Get(),
+        JPH::RVec3::sZero(),
+        JPH::Quat::sIdentity(),
+        JPH::EMotionType::Static,
+        ObjectLayers::NON_MOVING
+    );
+
+    m_terrainBodyId = bodyInterface.CreateAndAddBody(bodySettings, JPH::EActivation::DontActivate);
+    m_staticBodies.push_back(m_terrainBodyId);
 }
 
 uint32_t JoltCharacter::addKinematicPlatform(const glm::vec3& halfExtents,
@@ -738,6 +821,61 @@ ICharacterController::DynamicBodyResult JoltCharacter::addDynamicBox(
     return result;
 }
 
+ICharacterController::DynamicBodyResult JoltCharacter::addDynamicConvexHull(
+    const std::vector<glm::vec3>& vertices,
+    const glm::vec3& position,
+    const glm::vec3& scale,
+    const glm::vec3& velocity,
+    float mass, float friction, float restitution) {
+
+    DynamicBodyResult result;
+    if (!m_initialized || vertices.empty()) return result;
+
+    // Scale vertices and build Jolt convex hull
+    JPH::Array<JPH::Vec3> joltPoints;
+    joltPoints.reserve(vertices.size());
+    for (const auto& v : vertices) {
+        joltPoints.push_back(JPH::Vec3(v.x * scale.x, v.y * scale.y, v.z * scale.z));
+    }
+
+    JPH::ConvexHullShapeSettings hullSettings(joltPoints);
+    hullSettings.mMaxConvexRadius = 0.05f;
+    JPH::ShapeSettings::ShapeResult shapeResult = hullSettings.Create();
+    if (!shapeResult.IsValid()) {
+        std::cerr << "[Physics] Failed to create convex hull for dynamic body" << std::endl;
+        return result;
+    }
+
+    JPH::BodyCreationSettings bodySettings(
+        shapeResult.Get(),
+        JPH::RVec3(position.x, position.y, position.z),
+        JPH::Quat::sIdentity(),
+        JPH::EMotionType::Dynamic,
+        ObjectLayers::MOVING
+    );
+
+    bodySettings.mOverrideMassProperties = JPH::EOverrideMassProperties::CalculateInertia;
+    bodySettings.mMassPropertiesOverride.mMass = mass;
+    bodySettings.mFriction = friction;
+    bodySettings.mRestitution = restitution;
+    bodySettings.mLinearDamping = 0.1f;
+    bodySettings.mAngularDamping = 0.2f;
+    bodySettings.mAllowSleeping = true;
+    bodySettings.mAllowDynamicOrKinematic = true;
+    bodySettings.mLinearVelocity = toJolt(velocity);
+    bodySettings.mAngularVelocity = JPH::Vec3(1.5f, 0.5f, 1.0f);
+
+    JPH::BodyInterface& bodyInterface = m_physicsSystem->GetBodyInterface();
+    JPH::BodyID bodyId = bodyInterface.CreateAndAddBody(bodySettings, JPH::EActivation::Activate);
+
+    if (bodyId.IsInvalid()) return result;
+
+    m_dynamicBodies.push_back(bodyId);
+    result.bodyId = bodyId.GetIndexAndSequenceNumber();
+    result.valid = true;
+    return result;
+}
+
 void JoltCharacter::removeDynamicBody(uint32_t bodyId) {
     if (!m_physicsSystem) return;
     JPH::BodyID joltId(bodyId);
@@ -775,6 +913,16 @@ glm::quat JoltCharacter::getDynamicBodyRotation(uint32_t bodyId) const {
     JPH::BodyID joltId(bodyId);
     JPH::BodyInterface& bodyInterface = m_physicsSystem->GetBodyInterface();
     return toGlm(bodyInterface.GetRotation(joltId));
+}
+
+void JoltCharacter::wakeAllDynamicBodies() {
+    if (!m_physicsSystem) return;
+    JPH::BodyInterface& bodyInterface = m_physicsSystem->GetBodyInterface();
+    for (const auto& bodyId : m_dynamicBodies) {
+        if (!bodyId.IsInvalid()) {
+            bodyInterface.ActivateBody(bodyId);
+        }
+    }
 }
 
 void JoltCharacter::stepPhysics(float deltaTime) {

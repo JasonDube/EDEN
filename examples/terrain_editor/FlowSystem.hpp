@@ -49,8 +49,8 @@ struct WaterTank {
     static float computeDrainRate(const std::vector<FlowOutput>& openEnds) {
         float total = 0.0f;
         for (const auto& oe : openEnds) {
-            // ~5 gallons/min at full pressure per outlet
-            total += (oe.pressure / 100.0f) * 5.0f / 60.0f;
+            // ~1 gallon/sec at full pressure per outlet (matches fill rate)
+            total += oe.pressure / 100.0f;
         }
         return total;
     }
@@ -90,7 +90,8 @@ public:
         SceneObject* source,
         const std::vector<std::unique_ptr<SceneObject>>& sceneObjects,
         float startPressure = 100.0f,
-        float snapDist = 0.5f
+        float snapDist = 0.5f,
+        const std::unordered_map<SceneObject*, bool>* valveStates = nullptr
     ) {
         FlowResult result;
         if (!source || !source->hasPorts()) return result;
@@ -161,6 +162,17 @@ public:
             float pressure = current.pressure;
 
             if (!obj->hasPorts()) continue;
+
+            // Check if this object is a closed valve — block flow
+            if (valveStates) {
+                std::string objName = obj->getName();
+                std::transform(objName.begin(), objName.end(), objName.begin(), ::tolower);
+                if (objName.find("valve") != std::string::npos) {
+                    auto vit = valveStates->find(obj);
+                    bool isOpen = (vit != valveStates->end()) ? vit->second : false;
+                    if (!isOpen) continue;  // Closed valve — flow stops here
+                }
+            }
 
             float afterLoss = applyPressureLoss(obj, pressure);
 
@@ -241,12 +253,12 @@ private:
 
         // T-connector: 3+ ports
         if (ports.size() >= 3) {
-            return inputPressure * 0.80f;  // 20% loss at T-junction
+            return inputPressure * 0.95f;  // 5% loss at T-junction
         }
 
         // 90-degree bend: check name or port directions
         if (name.find("90") != std::string::npos || name.find("elbow") != std::string::npos) {
-            return inputPressure * 0.85f;  // 15% loss at bend
+            return inputPressure * 0.95f;  // 5% loss at bend
         }
 
         // Check if port directions differ significantly (another way to detect a bend)
@@ -254,11 +266,11 @@ private:
             float dot = glm::dot(ports[0].forward, ports[1].forward);
             if (dot > -0.5f && dot < 0.5f) {
                 // Ports face in different directions — it's a bend
-                return inputPressure * 0.85f;
+                return inputPressure * 0.95f;
             }
         }
 
         // Straight pipe: 2 ports facing opposite directions
-        return inputPressure * 0.95f;  // 5% loss
+        return inputPressure * 0.98f;  // 2% loss
     }
 };

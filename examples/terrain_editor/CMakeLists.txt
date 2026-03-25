@@ -43,6 +43,7 @@ add_custom_command(TARGET terrain_editor POST_BUILD
         ${CMAKE_BINARY_DIR}/shaders/gizmo.frag.spv
         ${CMAKE_BINARY_DIR}/shaders/model.vert.spv
         ${CMAKE_BINARY_DIR}/shaders/model.frag.spv
+        ${CMAKE_BINARY_DIR}/shaders/model_instanced.vert.spv
         ${CMAKE_BINARY_DIR}/shaders/water.vert.spv
         ${CMAKE_BINARY_DIR}/shaders/water.frag.spv
         ${CMAKE_BINARY_DIR}/shaders/wireframe.vert.spv
@@ -77,6 +78,13 @@ add_custom_command(TARGET terrain_editor POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
         ${CMAKE_CURRENT_SOURCE_DIR}/assets/eden_splash.jpg
         $<TARGET_FILE_DIR:terrain_editor>/eden_splash.jpg
+)
+
+# Copy model assets to build directory
+add_custom_command(TARGET terrain_editor POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+        ${CMAKE_CURRENT_SOURCE_DIR}/assets/models
+        $<TARGET_FILE_DIR:terrain_editor>/assets/models
 )
 
 # Copy terrain textures to build directory
