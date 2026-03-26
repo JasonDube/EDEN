@@ -11,6 +11,8 @@ struct PointLight {
 layout(set = 1, binding = 0) uniform LightUBO {
     PointLight lights[16];
     int numLights;
+    float sunY;
+    float ambientLevel;
 } lightData;
 
 layout(location = 0) flat in vec3 fragNormal;  // flat shading - no interpolation
@@ -72,11 +74,11 @@ void main() {
 
     // Directional lighting (sun) — indoor blocks get minimal ambient
     vec3 normal = normalize(fragNormal);
-    vec3 sunDir = normalize(vec3(0.5, 1.0, 0.3));
+    vec3 sunDir = normalize(vec3(0.5, lightData.sunY, 0.3));
     float sunDiffuse = max(dot(normal, sunDir), 0.0);
     bool isIndoor = fragColorAdjust.w < -0.5;
-    float ambient = isIndoor ? 0.05 : 0.4;
-    float sunContrib = isIndoor ? 0.0 : 0.4;
+    float ambient = isIndoor ? 0.05 : lightData.ambientLevel;
+    float sunContrib = isIndoor ? 0.0 : lightData.ambientLevel;
     float lighting = ambient + sunDiffuse * sunContrib;
 
     vec3 finalColor = adjustedColor * lighting;

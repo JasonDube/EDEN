@@ -87,6 +87,18 @@ add_custom_command(TARGET terrain_editor POST_BUILD
         $<TARGET_FILE_DIR:terrain_editor>/assets/models
 )
 
+# Sync textures (terrain + building) to build directory
+# Building textures live at project root: textures/building/
+# Terrain textures live at: examples/terrain_editor/assets/textures/
+add_custom_command(TARGET terrain_editor POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+        ${CMAKE_CURRENT_SOURCE_DIR}/assets/textures
+        $<TARGET_FILE_DIR:terrain_editor>/assets/textures
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+        ${CMAKE_SOURCE_DIR}/textures
+        $<TARGET_FILE_DIR:terrain_editor>/textures
+)
+
 # Copy terrain textures to build directory
 add_custom_command(TARGET terrain_editor POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E make_directory $<TARGET_FILE_DIR:terrain_editor>/textures

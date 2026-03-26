@@ -201,6 +201,8 @@ public:
     void setVisible(bool visible) { m_visible = visible; }
     void setIndoor(bool indoor) { m_indoor = indoor; }
     bool isIndoor() const { return m_indoor; }
+    void setTransparent(bool t) { m_transparent = t; }
+    bool isTransparent() const { return m_transparent; }
     bool isVisible() const { return m_visible; }
 
     // X-Ray mode (render both sides, see through backfaces)
@@ -748,6 +750,7 @@ private:
     bool m_selected = false;
     bool m_visible = true;
     bool m_indoor = false;  // If true, no sun ambient — only lit by point lights
+    bool m_transparent = false; // If true, render with alpha blending
     bool m_xray = false;             // X-Ray mode (render both sides)
     bool m_aabbCollision = false;    // AABB collision (default off)
     bool m_polygonCollision = false; // Polygon collision (default off)

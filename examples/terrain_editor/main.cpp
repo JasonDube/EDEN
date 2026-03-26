@@ -126,8 +126,8 @@ struct TerrainPushConstants {
     glm::vec4 fogColor;
     float fogStart;
     float fogEnd;
-    float pad0;
-    float pad1;
+    float sunY;       // Sun height (-1 to 1), controls light direction
+    float ambientLevel; // Ambient light level (0 to 1)
     glm::vec4 cameraPos;   // xyz = world-space camera position
 };
 
@@ -1304,6 +1304,13 @@ protected:
             m_activeLights.insert(m_activeLights.end(), hingeLights.begin(), hingeLights.end());
 
             if (m_modelRenderer) {
+                // Compute day/night for model lighting
+                float dnPhase = (m_gameTimeMinutes / 1440.0f) * 2.0f * 3.14159f - 1.5708f;
+                float dnSunY = std::sin(dnPhase);
+                float dnDay = std::clamp((dnSunY + 0.2f) / 1.2f, 0.0f, 1.0f);
+                float dnAmbient = 0.08f + dnDay * 0.32f;
+                float dnSunH = std::max(dnSunY, 0.05f);
+                m_modelRenderer->setDayNight(dnSunH, dnAmbient);
                 m_modelRenderer->setLights(m_activeLights);
             }
             // Update power usage on all running generators
@@ -1723,6 +1730,53 @@ protected:
             m_chunkManager->uploadPendingChunks(m_terrain);
         }
 
+        // Handle building texture import (works in both play and editor mode)
+        if (m_editorUI.wantImportBuildingTexture()) {
+            m_editorUI.clearImportBuildingTexture();
+            // Release mouse capture so file dialog can work
+            Input::setMouseCaptured(false);
+
+            nfdchar_t* outPath = nullptr;
+            nfdfilteritem_t filters[] = {{"Images", "png,jpg,jpeg"}};
+            std::cout << "[Import] Opening file dialog..." << std::endl;
+            nfdresult_t result = NFD_OpenDialog(&outPath, filters, 1, nullptr);
+            std::cout << "[Import] Dialog result: " << result << " (0=OK, 1=Cancel, 2=Error)" << std::endl;
+            if (result == NFD_OKAY && outPath) {
+                namespace fs = std::filesystem;
+                fs::path srcPath(outPath);
+                std::cout << "[Import] Selected: " << srcPath << std::endl;
+                try {
+                    std::string destDir = std::string(CMAKE_SOURCE_DIR) + "/examples/terrain_editor/textures/building";
+                    if (!fs::exists(destDir)) fs::create_directories(destDir);
+                    fs::path dest1 = fs::path(destDir) / srcPath.filename();
+                    if (fs::canonical(srcPath) != fs::canonical(dest1)) {
+                        if (fs::exists(dest1)) fs::remove(dest1);
+                        fs::copy_file(srcPath, dest1);
+                        std::cout << "[Import] Copied to: " << dest1 << std::endl;
+                    } else {
+                        std::cout << "[Import] File already in textures folder" << std::endl;
+                    }
+
+                    std::string rootDir = std::string(CMAKE_SOURCE_DIR) + "/textures/building";
+                    if (fs::exists(rootDir)) {
+                        fs::path dest2 = fs::path(rootDir) / srcPath.filename();
+                        if (!fs::exists(dest2) || fs::canonical(srcPath) != fs::canonical(dest2)) {
+                            if (fs::exists(dest2)) fs::remove(dest2);
+                            fs::copy_file(srcPath, dest2);
+                        }
+                    }
+                } catch (const fs::filesystem_error& e) {
+                    std::cerr << "[Import] Copy failed: " << e.what() << std::endl;
+                }
+                cleanupBuildingTextures();
+                loadBuildingTextures();
+                std::cout << "[Import] Done — " << m_buildingTextures.size() << " textures loaded" << std::endl;
+                NFD_FreePath(outPath);
+            } else if (result == NFD_ERROR) {
+                std::cerr << "[Import] NFD error: " << NFD_GetError() << std::endl;
+            }
+        }
+
         if (m_isPlayMode) {
             updatePlayMode(deltaTime);
             return;
@@ -2041,10 +2095,60 @@ protected:
         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                                 m_pipeline->getLayout(), 0, 1, &texDescSet, 0, nullptr);
 
+        // Compute day/night lighting from game time
+        // 0600 = sunrise, 1200 = noon, 1800 = sunset, 0000 = midnight
+        float dayPhase = (m_gameTimeMinutes / 1440.0f) * 2.0f * 3.14159f - 1.5708f; // -PI/2 at midnight
+        float sunY = std::sin(dayPhase); // -1 at midnight, +1 at noon
+        float dayFactor = std::clamp((sunY + 0.2f) / 1.2f, 0.0f, 1.0f); // 0 at night, 1 at day
+        float ambientLevel = 0.08f + dayFactor * 0.32f; // 0.08 at night, 0.4 at day
+        float sunHeight = std::max(sunY, 0.05f); // Keep sun slightly above horizon for fill
+
+        // Update skybox for day/night — blend from night sky to blue daytime
+        if (m_skybox) {
+            auto& sky = m_skybox->getParameters();
+            // Night colors (original purple/dark theme)
+            glm::vec3 nightZenith{0.02f, 0.008f, 0.04f};
+            glm::vec3 nightMid{0.08f, 0.03f, 0.15f};
+            glm::vec3 nightHorizon1{0.35f, 0.15f, 0.45f};
+            glm::vec3 nightHorizon2{0.45f, 0.18f, 0.40f};
+            glm::vec3 nightHorizon3{0.30f, 0.12f, 0.50f};
+            glm::vec3 nightHorizon4{0.40f, 0.20f, 0.35f};
+            // Day colors (blue sky)
+            glm::vec3 dayZenith{0.15f, 0.35f, 0.65f};
+            glm::vec3 dayMid{0.35f, 0.55f, 0.80f};
+            glm::vec3 dayHorizon{0.65f, 0.75f, 0.90f};
+
+            sky.zenithColor = glm::mix(nightZenith, dayZenith, dayFactor);
+            sky.midSkyColor = glm::mix(nightMid, dayMid, dayFactor);
+            sky.horizonColor1 = glm::mix(nightHorizon1, dayHorizon, dayFactor);
+            sky.horizonColor2 = glm::mix(nightHorizon2, dayHorizon, dayFactor);
+            sky.horizonColor3 = glm::mix(nightHorizon3, dayHorizon, dayFactor);
+            sky.horizonColor4 = glm::mix(nightHorizon4, dayHorizon, dayFactor);
+            // Stars: fully gone 0600-1800, fade in/out during dawn/dusk
+            float starFactor = 0.0f;
+            float mins = m_gameTimeMinutes;
+            if (mins < 300.0f) {           // Before 5AM — full stars
+                starFactor = 1.0f;
+            } else if (mins < 360.0f) {    // 5AM-6AM — fade out
+                starFactor = 1.0f - (mins - 300.0f) / 60.0f;
+            } else if (mins < 1080.0f) {   // 6AM-6PM — no stars at all
+                starFactor = 0.0f;
+            } else if (mins < 1140.0f) {   // 6PM-7PM — fade in
+                starFactor = (mins - 1080.0f) / 60.0f;
+            } else {                        // After 7PM — full stars
+                starFactor = 1.0f;
+            }
+            sky.starBrightness = starFactor;
+            sky.nebulaIntensity = 0.25f * starFactor;
+            m_skybox->updateParameters(sky);
+        }
+
         TerrainPushConstants pushConstants{};
         pushConstants.fogColor = glm::vec4(m_editorUI.getFogColor(), 1.0f);
         pushConstants.fogStart = m_editorUI.getFogStart();
         pushConstants.fogEnd = m_editorUI.getFogEnd();
+        pushConstants.sunY = sunHeight;
+        pushConstants.ambientLevel = ambientLevel;
         pushConstants.cameraPos = glm::vec4(m_camera.getPosition(), 1.0f);
 
         // Skip terrain rendering in test/space level mode or EDEN OS mode
@@ -2118,10 +2222,17 @@ protected:
                     drawCalls++;
                 } else {
                     float wVal = objPtr->isIndoor() ? -1.0f : 0.0f;
-                    eden::InstanceData inst;
-                    inst.model = modelMatrix;
-                    inst.colorAdjust = glm::vec4(hue, sat, bright, wVal);
-                    batches[objPtr->getBufferHandle()].push_back(inst);
+                    if (objPtr->isTransparent()) {
+                        // Render transparent objects separately with blending
+                        m_modelRenderer->render(cmd, vp, objPtr->getBufferHandle(), modelMatrix,
+                                                hue, sat, bright, true, objPtr->isIndoor());
+                        drawCalls++;
+                    } else {
+                        eden::InstanceData inst;
+                        inst.model = modelMatrix;
+                        inst.colorAdjust = glm::vec4(hue, sat, bright, wVal);
+                        batches[objPtr->getBufferHandle()].push_back(inst);
+                    }
                 }
             }
 
@@ -2286,6 +2397,112 @@ protected:
                     heldMatrix = glm::rotate(heldMatrix, glm::radians(-30.0f + swingAngle),
                                              glm::vec3(1.0f, 0.0f, 0.0f));
                     // Slight rotation so handle faces right
+                    heldMatrix = glm::rotate(heldMatrix, glm::radians(15.0f),
+                                             glm::vec3(0.0f, 0.0f, 1.0f));
+                    heldMatrix = glm::scale(heldMatrix, glm::vec3(0.15f));
+
+                    m_modelRenderer->render(cmd, vp, heldSlot.gpuHandle, heldMatrix);
+                }
+                // Held wheelbarrow — centered, lower, like pushing it
+                else if (heldName.find("wheelbarrow") != std::string::npos) {
+                    glm::vec3 camPos3 = m_camera.getPosition();
+                    glm::vec3 camFront3 = m_camera.getFront();
+                    glm::vec3 camRight3 = m_camera.getRight();
+                    glm::vec3 camUp3 = m_camera.getUp();
+
+                    float xOff = 0.0f;    // Centered
+                    float yOff = -0.35f;   // Below center — handles at waist
+                    float zDist = 1.1f;    // Pushed out in front
+
+                    glm::vec3 heldPos = camPos3 + camFront3 * zDist
+                                      + camRight3 * xOff + camUp3 * yOff;
+
+                    glm::mat4 heldMatrix = glm::translate(glm::mat4(1.0f), heldPos);
+                    // Orient to camera
+                    glm::mat4 camOrient2(1.0f);
+                    camOrient2[0] = glm::vec4(camRight3, 0.0f);
+                    camOrient2[1] = glm::vec4(camUp3, 0.0f);
+                    camOrient2[2] = glm::vec4(-camFront3, 0.0f);
+                    heldMatrix *= camOrient2;
+                    // Rotate 90 so basin faces forward (away from player)
+                    heldMatrix = glm::rotate(heldMatrix, glm::radians(90.0f),
+                                             glm::vec3(0.0f, 1.0f, 0.0f));
+                    // Roll basin toward player so you can see inside
+                    heldMatrix = glm::rotate(heldMatrix, glm::radians(5.0f),
+                                             glm::vec3(0.0f, 0.0f, 1.0f));
+
+                    // Dump tilt animation — tip forward when dumping
+                    float dumpTilt = 0.0f;
+                    if (m_isDumping) {
+                        float t = m_dumpTimer / m_dumpDuration;
+                        if (t < 0.4f) {
+                            dumpTilt = (t / 0.4f) * 60.0f; // Tilt forward
+                        } else if (t < 0.7f) {
+                            dumpTilt = 60.0f; // Hold tipped
+                        } else {
+                            dumpTilt = 60.0f * (1.0f - (t - 0.7f) / 0.3f); // Return
+                        }
+                        heldMatrix = glm::rotate(heldMatrix, glm::radians(dumpTilt),
+                                                 glm::vec3(1.0f, 0.0f, 0.0f));
+                    }
+
+                    m_modelRenderer->render(cmd, vp, heldSlot.gpuHandle, heldMatrix);
+
+                    // Render dirt inside the basin when loaded (hide during dump)
+                    bool showDirt = !m_isDumping || (m_dumpTimer / m_dumpDuration) < 0.5f;
+                    if (heldSlot.containerFill >= 6.0f && showDirt) {
+                        // Lazy-load dirt pile GPU handle
+                        if (m_dirtPileGpuHandle == 0) {
+                            std::string dirtPath = std::string(CMAKE_SOURCE_DIR) +
+                                "/examples/terrain_editor/assets/models/misc/dirt_pile.lime";
+                            auto dirtLoad = LimeLoader::load(dirtPath);
+                            if (dirtLoad.success) {
+                                m_dirtPileGpuHandle = m_modelRenderer->createModel(
+                                    dirtLoad.mesh.vertices, dirtLoad.mesh.indices,
+                                    dirtLoad.mesh.hasTexture ? dirtLoad.mesh.textureData.data() : nullptr,
+                                    dirtLoad.mesh.textureWidth, dirtLoad.mesh.textureHeight);
+                            }
+                        }
+                        if (m_dirtPileGpuHandle != 0) {
+                            // Position dirt inside the basin — slightly above the wheelbarrow center
+                            glm::vec3 dirtPos = heldPos + camUp3 * 0.3f + camFront3 * 0.3f;
+                            glm::mat4 dirtMatrix = glm::translate(glm::mat4(1.0f), dirtPos);
+                            dirtMatrix *= camOrient2;
+                            dirtMatrix = glm::scale(dirtMatrix, glm::vec3(0.25f));
+                            m_modelRenderer->render(cmd, vp, m_dirtPileGpuHandle, dirtMatrix);
+                        }
+                    }
+                }
+                // Held rake — lower-right like shovel
+                else if (heldName.find("rake") != std::string::npos) {
+                    glm::vec3 camPos3 = m_camera.getPosition();
+                    glm::vec3 camFront3 = m_camera.getFront();
+                    glm::vec3 camRight3 = m_camera.getRight();
+                    glm::vec3 camUp3 = m_camera.getUp();
+
+                    float rakeXOff = 0.25f;
+                    float rakeYOff = -0.25f;
+
+                    // Rake swing animation while raking
+                    float rakeSwing = 0.0f;
+                    if (m_isRaking) {
+                        float t = m_rakeSwingTimer / m_rakeSwingDuration;
+                        // Back-and-forth horizontal sweep
+                        rakeSwing = std::sin(t * 3.14159f * 2.0f) * 15.0f;
+                        rakeYOff -= 0.05f; // Lower while working
+                    }
+
+                    glm::vec3 heldPos = camPos3 + camFront3 * 0.5f
+                                      + camRight3 * rakeXOff + camUp3 * rakeYOff;
+
+                    glm::mat4 heldMatrix = glm::translate(glm::mat4(1.0f), heldPos);
+                    glm::mat4 camOrient2(1.0f);
+                    camOrient2[0] = glm::vec4(camRight3, 0.0f);
+                    camOrient2[1] = glm::vec4(camUp3, 0.0f);
+                    camOrient2[2] = glm::vec4(-camFront3, 0.0f);
+                    heldMatrix *= camOrient2;
+                    heldMatrix = glm::rotate(heldMatrix, glm::radians(-30.0f + rakeSwing),
+                                             glm::vec3(1.0f, 0.0f, 0.0f));
                     heldMatrix = glm::rotate(heldMatrix, glm::radians(15.0f),
                                              glm::vec3(0.0f, 0.0f, 1.0f));
                     heldMatrix = glm::scale(heldMatrix, glm::vec3(0.15f));
@@ -3263,8 +3480,16 @@ private:
         m_editorUI.setApplyBuildingTextureCallback([this](SceneObject* target, int textureIndex, float uScale, float vScale, int rotationDeg) {
             if (!target || textureIndex < 0 || textureIndex >= static_cast<int>(m_buildingTextures.size())) return;
             auto& tex = m_buildingTextures[textureIndex];
-            target->setTextureData(tex.pixels, tex.width, tex.height);
-            m_modelRenderer->updateTexture(target->getBufferHandle(), tex.pixels.data(), tex.width, tex.height);
+            // For alpha textures, boost transparency toward frosted glass (min 40% opaque)
+            auto pixels = tex.pixels;
+            if (tex.hasAlpha) {
+                for (size_t pi = 3; pi < pixels.size(); pi += 4) {
+                    pixels[pi] = static_cast<unsigned char>(std::min(255, (int)pixels[pi] + 40));
+                }
+            }
+            target->setTextureData(pixels, tex.width, tex.height);
+            target->setTransparent(tex.hasAlpha);
+            m_modelRenderer->updateTexture(target->getBufferHandle(), pixels.data(), tex.width, tex.height);
 
             // Set vertex colors to white so texture shows through, and apply UV scale + rotation from fresh base UVs
             if (target->hasMeshData() && target->getPrimitiveType() == PrimitiveType::Cube) {
@@ -3286,8 +3511,11 @@ private:
                     } else {
                         faceW = sc.x; faceH = sc.y;
                     }
-                    v.texCoord.x *= faceW * uScale;
-                    v.texCoord.y *= faceH * vScale;
+                    // Negative scale = fill face (1 texture per face, no tiling)
+                    float finalU = (uScale < 0.0f) ? 1.0f : (faceW * uScale);
+                    float finalV = (vScale < 0.0f) ? 1.0f : (faceH * vScale);
+                    v.texCoord.x *= finalU;
+                    v.texCoord.y *= finalV;
                     // Rotate UV around (0.5, 0.5) center
                     if (rotationDeg != 0) {
                         float cu = v.texCoord.x - 0.5f;
@@ -3333,12 +3561,19 @@ private:
                 // Set vertex colors to white so texture shows through
                 if (obj->hasMeshData()) {
                     auto vertices = obj->getVertices();
+                    glm::vec3 sc = obj->getTransform().getScale();
                     float rotRad = glm::radians(static_cast<float>(rotationDeg));
                     float cosR = std::cos(rotRad), sinR = std::sin(rotRad);
                     for (auto& v : vertices) {
                         v.color = glm::vec4(1.0f, 1.0f, 1.0f, 1.0f);
-                        v.texCoord.x *= uScale;
-                        v.texCoord.y *= vScale;
+                        if (uScale < 0.0f) {
+                            // Fill face mode — compute per-face UV
+                            v.texCoord.x *= 1.0f;
+                            v.texCoord.y *= 1.0f;
+                        } else {
+                            v.texCoord.x *= uScale;
+                            v.texCoord.y *= vScale;
+                        }
                         if (rotationDeg != 0) {
                             float cu = v.texCoord.x - 0.5f;
                             float cv = v.texCoord.y - 0.5f;
@@ -4627,8 +4862,11 @@ private:
     }
 
     void loadBuildingTextures() {
-        // Prefer project source dir (safe from clean builds), fall back to CWD
-        std::string dir = std::string(CMAKE_SOURCE_DIR) + "/textures/building";
+        // Check both possible texture locations
+        std::string dir = std::string(CMAKE_SOURCE_DIR) + "/examples/terrain_editor/textures/building";
+        if (!std::filesystem::exists(dir)) {
+            dir = std::string(CMAKE_SOURCE_DIR) + "/textures/building";
+        }
         if (!std::filesystem::exists(dir)) {
             dir = "textures/building";
         }
@@ -4659,6 +4897,11 @@ private:
             tex.height = h;
             // Store full-res pixels in CPU memory only (for applying later)
             tex.pixels.assign(pixels, pixels + w * h * 4);
+            // Check if texture has actual transparency
+            tex.hasAlpha = false;
+            for (int pi = 3; pi < w * h * 4; pi += 4) {
+                if (pixels[pi] < 250) { tex.hasAlpha = true; break; }
+            }
 
             // Create a small thumbnail for the ImGui catalog (not the full-res image)
             std::vector<unsigned char> thumbPixels(THUMB_SIZE * THUMB_SIZE * 4);
@@ -4786,6 +5029,7 @@ private:
             uiTex.height = tex.height;
             uiTextures.push_back(uiTex);
 
+            std::cout << "  [BuildTex] " << tex.name << " (" << tex.width << "x" << tex.height << ")" << std::endl;
             m_buildingTextures.push_back(std::move(tex));
         }
 
@@ -11389,9 +11633,9 @@ private:
         // Shovel hold-to-dig system
         bool shovelDigged = false;
 
-        // Start dig on press — validate and lock in target
-        if (!m_isDigging && Input::isMouseButtonPressed(Input::MOUSE_LEFT) && !buildSelectClick && !salvageSelectClick
-            && !m_inConversation && !ImGui::GetIO().WantCaptureMouse && !m_isEdenOSLevel) {
+        // Start dig on E key — validate and lock in target
+        if (!m_isDigging && !m_isRaking && Input::isKeyPressed(Input::KEY_E)
+            && !m_inConversation && !ImGui::GetIO().WantTextInput && !m_isEdenOSLevel) {
             auto& slot = m_toolbarSlots[m_activeToolbarSlot];
             if (slot.occupied && slot.is3DModel) {
                 std::string nameLower = slot.displayName;
@@ -11466,7 +11710,7 @@ private:
         // Continue or cancel dig while holding
         if (m_isDigging) {
             shovelDigged = true;
-            bool stillHolding = Input::isMouseButtonDown(Input::MOUSE_LEFT);
+            bool stillHolding = Input::isKeyDown(Input::KEY_E);
             if (!stillHolding) {
                 // Released early — cancel
                 m_isDigging = false;
@@ -11603,6 +11847,167 @@ private:
             }
         }
 
+        // Rake tool — hold E to rake (10 seconds). Press E to start, hold to continue.
+        // Start rake
+        if (!m_isRaking && !shovelDigged && !m_isDigging &&
+            Input::isKeyPressed(Input::KEY_E)
+            && !m_inConversation && !ImGui::GetIO().WantTextInput && !m_isEdenOSLevel) {
+            auto& rakeSlot = m_toolbarSlots[m_activeToolbarSlot];
+            if (rakeSlot.occupied && rakeSlot.is3DModel) {
+                std::string rakeName = rakeSlot.displayName;
+                std::transform(rakeName.begin(), rakeName.end(), rakeName.begin(), ::tolower);
+                if (rakeName.find("rake") != std::string::npos) {
+                    float aspect = static_cast<float>(getWindow().getWidth()) / getWindow().getHeight();
+                    glm::vec3 rayDir = m_camera.screenToWorldRay(0.5f, 0.5f, aspect);
+                    glm::vec3 camPos = m_camera.getPosition();
+
+                    // Check for dirt pile first
+                    SceneObject* targetPile = nullptr;
+                    float bestDist = 10.0f;
+                    for (auto& obj : m_sceneObjects) {
+                        if (!obj || !obj->isVisible()) continue;
+                        if (obj->getName().find("dirt_pile") == std::string::npos) continue;
+                        float d = obj->getWorldBounds().intersect(camPos, rayDir);
+                        if (d >= 0 && d < bestDist) {
+                            bestDist = d;
+                            targetPile = obj.get();
+                        }
+                    }
+
+                    if (targetPile) {
+                        const std::string& desc = targetPile->getDescription();
+                        int pileLoads = 0;
+                        if (desc.rfind("dig_count:", 0) == 0)
+                            pileLoads = std::stoi(desc.substr(10));
+                        if (pileLoads == 1) {
+                            m_isRaking = true;
+                            m_rakeTimer = 0.0f;
+                            m_rakeSwingTimer = 0.0f;
+                            m_rakeMode = 1; // spread dirt pile
+                            m_rakeTargetPile = targetPile;
+                            glm::vec3 pp = targetPile->getTransform().getPosition();
+                            float ts = m_terrain.getConfig().tileSize;
+                            m_rakeSnapX = std::round(pp.x / ts) * ts;
+                            m_rakeSnapZ = std::round(pp.z / ts) * ts;
+                            m_rakeLockPos = m_camera.getPosition();
+                        } else if (pileLoads > 1) {
+                            m_screenMessage = "Too much dirt to spread by hand — use wheelbarrow first";
+                            m_screenMessageTimer = 2.5f;
+                        }
+                    } else {
+                        // Flatten terrain
+                        glm::vec3 hitPos;
+                        if (m_terrain.raycast(camPos, rayDir, hitPos) &&
+                            glm::length(hitPos - camPos) < 15.0f) {
+                            float ts = m_terrain.getConfig().tileSize;
+                            m_isRaking = true;
+                            m_rakeTimer = 0.0f;
+                            m_rakeSwingTimer = 0.0f;
+                            m_rakeMode = 2; // flatten terrain
+                            m_rakeTargetPile = nullptr;
+                            m_rakeSnapX = std::round(hitPos.x / ts) * ts;
+                            m_rakeSnapZ = std::round(hitPos.z / ts) * ts;
+                            m_rakeLockPos = m_camera.getPosition();
+                        }
+                    }
+                    shovelDigged = true;
+                }
+            }
+        }
+
+        // Continue or cancel rake while holding E
+        if (m_isRaking) {
+            shovelDigged = true;
+            if (!Input::isKeyDown(Input::KEY_E)) {
+                m_isRaking = false;
+                m_screenMessage = "Raking cancelled";
+                m_screenMessageTimer = 1.0f;
+            } else {
+                m_camera.setPosition(m_rakeLockPos);
+                m_rakeTimer += deltaTime;
+                m_rakeSwingTimer += deltaTime;
+                if (m_rakeSwingTimer >= m_rakeSwingDuration) {
+                    m_rakeSwingTimer -= m_rakeSwingDuration;
+                    Audio::getInstance().playSound("assets/sounds/rake.wav", 0.15f);
+                }
+
+                float progress = m_rakeTimer / m_rakeDuration;
+                int pct = static_cast<int>(progress * 100.0f);
+                m_screenMessage = "Raking... " + std::to_string(std::min(pct, 100)) + "%";
+                m_screenMessageTimer = 0.2f;
+
+                // Rake complete
+                if (m_rakeTimer >= m_rakeDuration) {
+                    m_isRaking = false;
+                    float ts = m_terrain.getConfig().tileSize;
+                    float snapX = m_rakeSnapX, snapZ = m_rakeSnapZ;
+
+                    if (m_rakeMode == 1 && m_rakeTargetPile) {
+                        // Spread dirt pile — raise terrain
+                        float currentH = m_terrain.getHeightAt(snapX, snapZ);
+                        float raiseTarget = currentH + 1.15f;
+                        m_terrain.applyBrush(snapX, snapZ, ts * 1.5f, 100.0f, 0.0f,
+                                             BrushMode::Plateau, {}, raiseTarget);
+                        m_terrain.applyTextureBrush(snapX, snapZ, ts * 1.8f, 500.0f, 0.0f, 6);
+                        m_chunkManager->updateModifiedChunks(m_terrain);
+
+                        // Remove pile and collision
+                        for (auto& [stake, sinfo] : m_stakeDigs) {
+                            if (sinfo.dirtPile == m_rakeTargetPile) {
+                                if (sinfo.collisionBodyId != UINT32_MAX && m_characterController)
+                                    m_characterController->removeStaticBody(sinfo.collisionBodyId);
+                                sinfo.collisionBodyId = UINT32_MAX;
+                                sinfo.dirtPile = nullptr;
+                                sinfo.digCount = 0;
+                                break;
+                            }
+                        }
+                        auto collIt = m_dirtPileCollisionIds.find(m_rakeTargetPile);
+                        if (collIt != m_dirtPileCollisionIds.end()) {
+                            if (m_characterController)
+                                m_characterController->removeStaticBody(collIt->second);
+                            m_dirtPileCollisionIds.erase(collIt);
+                        }
+                        m_rakeTargetPile->setVisible(false);
+                        m_rakeTargetPile->setName("__dirt_pile_remove__");
+                        m_screenMessage = "Spread dirt — terrain raised";
+                    } else if (m_rakeMode == 2) {
+                        // Flatten terrain
+                        float flattenRadius = ts * 4.0f;
+                        for (int pass = 0; pass < 5; pass++) {
+                            m_terrain.applyBrush(snapX, snapZ, flattenRadius, 1.0f, 0.0f,
+                                                 BrushMode::Smooth);
+                        }
+                        m_chunkManager->updateModifiedChunks(m_terrain);
+                        m_screenMessage = "Terrain flattened";
+                    }
+
+                    // Update physics heightfield for both modes
+                    if (m_characterController && !m_physicsHeightData.empty()) {
+                        int sc = m_physicsHeightSC;
+                        float patchR = ts * 4.0f + 2.0f;
+                        int sMinX = std::max(0, (int)((snapX - patchR - m_physicsHeightMinX) / m_physicsHeightSpX));
+                        int sMaxX = std::min(sc - 1, (int)((snapX + patchR - m_physicsHeightMinX) / m_physicsHeightSpX) + 1);
+                        int sMinZ = std::max(0, (int)((snapZ - patchR - m_physicsHeightMinZ) / m_physicsHeightSpZ));
+                        int sMaxZ = std::min(sc - 1, (int)((snapZ + patchR - m_physicsHeightMinZ) / m_physicsHeightSpZ) + 1);
+                        for (int hz = sMinZ; hz <= sMaxZ; hz++) {
+                            for (int hx = sMinX; hx <= sMaxX; hx++) {
+                                float wx = m_physicsHeightMinX + hx * m_physicsHeightSpX;
+                                float wz = m_physicsHeightMinZ + hz * m_physicsHeightSpZ;
+                                m_physicsHeightData[hz * sc + hx] = m_terrain.getHeightAt(wx, wz);
+                            }
+                        }
+                        m_characterController->updateTerrainHeightfield(
+                            m_physicsHeightData, sc,
+                            {m_physicsHeightMinX, 0.0f, m_physicsHeightMinZ},
+                            {m_physicsHeightSpX, 1.0f, m_physicsHeightSpZ});
+                    }
+                    m_screenMessageTimer = 2.0f;
+                    m_rakeTargetPile = nullptr;
+                }
+            }
+        }
+
         // E key or left-click for interaction (skip if building/salvage selection consumed the click)
         if (!shovelDigged &&
             (Input::isKeyPressed(Input::KEY_E) || (Input::isMouseButtonPressed(Input::MOUSE_LEFT) && !buildSelectClick && !salvageSelectClick))
@@ -11616,7 +12021,11 @@ private:
             && Input::isKeyPressed(Input::KEY_E) && !ImGui::GetIO().WantTextInput) {
             int slot = m_activeToolbarSlot;
             auto& s = m_toolbarSlots[slot];
-            if (s.occupied && s.is3DModel && s.containerFill > 0.01f) {
+            std::string drinkName = s.displayName;
+            std::transform(drinkName.begin(), drinkName.end(), drinkName.begin(), ::tolower);
+            bool isDrinkable = s.occupied && s.is3DModel && s.containerFill > 0.01f
+                               && drinkName.find("wheelbarrow") == std::string::npos;
+            if (isDrinkable) {
                 m_isDrinking = true;
                 m_drinkTimer = 0.0f;
                 m_drinkSlot = slot;
@@ -11697,6 +12106,258 @@ private:
                 }
             }
         }
+
+        // Wheelbarrow rolling sound — loop while moving with wheelbarrow selected
+        {
+            auto& wbSlot = m_toolbarSlots[m_activeToolbarSlot];
+            std::string wbName = wbSlot.displayName;
+            std::transform(wbName.begin(), wbName.end(), wbName.begin(), ::tolower);
+            bool holdingWheelbarrow = wbSlot.occupied && wbSlot.is3DModel &&
+                                      wbName.find("wheelbarrow") != std::string::npos;
+            bool isMoving = (Input::isKeyDown(Input::KEY_W) || Input::isKeyDown(Input::KEY_A) ||
+                             Input::isKeyDown(Input::KEY_S) || Input::isKeyDown(Input::KEY_D));
+
+            if (holdingWheelbarrow && isMoving && !m_wheelbarrowSoundActive) {
+                m_wheelbarrowLoopId = Audio::getInstance().startLoop("assets/sounds/wheelbarrow_roll.wav", 0.3f);
+                m_wheelbarrowSoundActive = true;
+            } else if ((!holdingWheelbarrow || !isMoving) && m_wheelbarrowSoundActive) {
+                Audio::getInstance().stopLoop(m_wheelbarrowLoopId);
+                m_wheelbarrowLoopId = -1;
+                m_wheelbarrowSoundActive = false;
+            }
+        }
+
+        // Wheelbarrow dump — E key tips and places dirt on ground
+        if (m_isDumping) {
+            m_dumpTimer += deltaTime;
+            if (m_dumpTimer >= m_dumpDuration) {
+                m_isDumping = false;
+                auto& dumpSlot = m_toolbarSlots[m_activeToolbarSlot];
+                if (dumpSlot.containerFill >= 6.0f) {
+                    if (m_dumpTargetPile && m_dumpTargetPile->isVisible()) {
+                        // Add to existing pile
+                        const std::string& desc = m_dumpTargetPile->getDescription();
+                        int pileLoads = 0;
+                        if (desc.rfind("dig_count:", 0) == 0)
+                            pileLoads = std::stoi(desc.substr(10));
+                        pileLoads++;
+                        m_dumpTargetPile->setDescription("dig_count:" + std::to_string(pileLoads));
+
+                        // Rescale: grow by sqrt ratio
+                        glm::vec3 currentScale = m_dumpTargetPile->getTransform().getScale();
+                        float oldGrowth = std::sqrt(static_cast<float>(pileLoads - 1));
+                        float newGrowth = std::sqrt(static_cast<float>(pileLoads));
+                        glm::vec3 newScale = (oldGrowth > 0.01f)
+                            ? currentScale * (newGrowth / oldGrowth)
+                            : currentScale * newGrowth;
+                        m_dumpTargetPile->getTransform().setScale(newScale);
+
+                        // Reposition so bottom stays on ground
+                        AABB lb = m_dumpTargetPile->getLocalBounds();
+                        glm::vec3 pos = m_dumpTargetPile->getTransform().getPosition();
+                        float terrainY = m_terrain.getHeightAt(pos.x, pos.z);
+                        m_dumpTargetPile->getTransform().setPosition(
+                            {pos.x, terrainY + (-lb.min.y * newScale.y), pos.z});
+
+                        // Update stake map if tracked
+                        for (auto& [stake, sinfo] : m_stakeDigs) {
+                            if (sinfo.dirtPile == m_dumpTargetPile) {
+                                sinfo.digCount = pileLoads;
+                                break;
+                            }
+                        }
+
+                        int cuFt = pileLoads * 6;
+                        char buf[128];
+                        snprintf(buf, sizeof(buf), "Added to pile: %d cu ft (%d loads)", cuFt, pileLoads);
+                        m_screenMessage = buf;
+                    } else {
+                        // Dump fresh pile on ground
+                        std::string dirtPath = std::string(CMAKE_SOURCE_DIR) +
+                            "/examples/terrain_editor/assets/models/misc/dirt_pile.lime";
+                        glm::vec3 spawnPos = m_camera.getPosition() + m_camera.getFront() * 3.0f;
+                        spawnPos.y = m_terrain.getHeightAt(spawnPos.x, spawnPos.z);
+                        auto loadResult = LimeLoader::load(dirtPath);
+                        if (loadResult.success) {
+                            auto pileObj = LimeLoader::createSceneObject(loadResult.mesh, *m_modelRenderer);
+                            if (pileObj) {
+                                glm::vec3 scl = pileObj->getTransform().getScale();
+                                AABB lb = pileObj->getLocalBounds();
+                                spawnPos.y += -lb.min.y * scl.y;
+                                pileObj->getTransform().setPosition(spawnPos);
+                                pileObj->setModelPath(dirtPath);
+                                pileObj->setName("dirt_pile");
+                                pileObj->setDescription("dig_count:1");
+                                pileObj->setBuildingType("salvage");
+                                pileObj->setBeingType(BeingType::INTERACTION);
+                                m_sceneObjects.push_back(std::move(pileObj));
+                            }
+                        }
+                        m_screenMessage = "Dumped dirt";
+                    }
+                    dumpSlot.containerFill = 0.0f;
+                    dumpSlot.containerLiquid.clear();
+                    m_wheelbarrowLoadCooldown = 3.0f;
+                    m_screenMessageTimer = 1.5f;
+                    m_dumpTargetPile = nullptr;
+                }
+            }
+        }
+        // E key to start dump when holding loaded wheelbarrow
+        if (!m_isDumping && Input::isKeyPressed(Input::KEY_E) && !ImGui::GetIO().WantTextInput) {
+            auto& wbSlot = m_toolbarSlots[m_activeToolbarSlot];
+            std::string wbName = wbSlot.displayName;
+            std::transform(wbName.begin(), wbName.end(), wbName.begin(), ::tolower);
+            if (wbSlot.occupied && wbSlot.is3DModel && wbName.find("wheelbarrow") != std::string::npos
+                && wbSlot.containerFill >= 6.0f) {
+                // Check if we're touching a dirt pile — add to it, otherwise dump fresh
+                m_dumpTargetPile = nullptr;
+                glm::vec3 wbPos = m_camera.getPosition() + m_camera.getFront() * 1.1f;
+                for (auto& obj : m_sceneObjects) {
+                    if (!obj || !obj->isVisible()) continue;
+                    if (obj->getName().find("dirt_pile") == std::string::npos) continue;
+                    // Use expanded AABB for contact detection (works with large piles)
+                    AABB bounds = obj->getWorldBounds();
+                    bounds.min -= glm::vec3(1.0f); // Expand slightly for easier contact
+                    bounds.max += glm::vec3(1.0f);
+                    if (wbPos.x >= bounds.min.x && wbPos.x <= bounds.max.x &&
+                        wbPos.z >= bounds.min.z && wbPos.z <= bounds.max.z &&
+                        wbPos.y >= bounds.min.y - 1.0f && wbPos.y <= bounds.max.y + 2.0f) {
+                        m_dumpTargetPile = obj.get();
+                        break;
+                    }
+                }
+                m_isDumping = true;
+                m_dumpTimer = 0.0f;
+                Audio::getInstance().playSound("assets/sounds/wheelbarrow_dump.wav", 0.3f);
+            }
+        }
+
+        // Wheelbarrow auto-load — contact with dirt pile takes one load
+        if (m_wheelbarrowLoadCooldown > 0.0f) m_wheelbarrowLoadCooldown -= deltaTime;
+        {
+            auto& wbSlot = m_toolbarSlots[m_activeToolbarSlot];
+            std::string wbName = wbSlot.displayName;
+            std::transform(wbName.begin(), wbName.end(), wbName.begin(), ::tolower);
+            bool holdingWB = wbSlot.occupied && wbSlot.is3DModel &&
+                             wbName.find("wheelbarrow") != std::string::npos;
+
+            if (holdingWB && m_wheelbarrowLoadCooldown <= 0.0f && wbSlot.containerFill >= 6.0f) {
+                // Full — check if near a pile to show message
+                glm::vec3 wbCheck = m_camera.getPosition() + m_camera.getFront() * 1.1f;
+                for (auto& obj : m_sceneObjects) {
+                    if (!obj || !obj->isVisible() || obj->getName().find("dirt_pile") == std::string::npos) continue;
+                    AABB b = obj->getWorldBounds();
+                    b.min -= glm::vec3(1.0f); b.max += glm::vec3(1.0f);
+                    if (wbCheck.x >= b.min.x && wbCheck.x <= b.max.x &&
+                        wbCheck.z >= b.min.z && wbCheck.z <= b.max.z &&
+                        wbCheck.y >= b.min.y - 1.0f && wbCheck.y <= b.max.y + 2.0f) {
+                        m_screenMessage = "Wheelbarrow full — dump first (E key)";
+                        m_screenMessageTimer = 0.5f;
+                        m_wheelbarrowLoadCooldown = 1.0f;
+                        break;
+                    }
+                }
+            }
+            if (holdingWB && m_wheelbarrowLoadCooldown <= 0.0f && wbSlot.containerFill < 6.0f) {
+                // Wheelbarrow world position: in front of camera
+                glm::vec3 wbWorldPos = m_camera.getPosition() + m_camera.getFront() * 1.1f;
+
+                for (auto& obj : m_sceneObjects) {
+                    if (!obj || !obj->isVisible() || obj->getName().find("dirt_pile") == std::string::npos) continue;
+
+                    // Get pile's dig count
+                    const std::string& desc = obj->getDescription();
+                    if (desc.rfind("dig_count:", 0) != 0) continue;
+                    int pileLoads = std::stoi(desc.substr(10));
+                    if (pileLoads <= 0) continue;
+
+                    // Use expanded AABB for contact
+                    AABB bounds = obj->getWorldBounds();
+                    bounds.min -= glm::vec3(1.0f); bounds.max += glm::vec3(1.0f);
+                    if (wbWorldPos.x >= bounds.min.x && wbWorldPos.x <= bounds.max.x &&
+                        wbWorldPos.z >= bounds.min.z && wbWorldPos.z <= bounds.max.z &&
+                        wbWorldPos.y >= bounds.min.y - 1.0f && wbWorldPos.y <= bounds.max.y + 2.0f) {
+                        // Take one load
+                        pileLoads--;
+                        wbSlot.containerFill += 6.0f; // 6 cu ft per load
+                        wbSlot.containerLiquid = "dirt";
+                        m_wheelbarrowLoadCooldown = 1.0f; // 1 second between loads
+
+                        if (pileLoads <= 0) {
+                            // Pile is empty — remove collision and mark for removal
+                            // Check stake-tracked collision
+                            for (auto& [stake, sinfo] : m_stakeDigs) {
+                                if (sinfo.dirtPile == obj.get()) {
+                                    if (sinfo.collisionBodyId != UINT32_MAX && m_characterController) {
+                                        m_characterController->removeStaticBody(sinfo.collisionBodyId);
+                                        sinfo.collisionBodyId = UINT32_MAX;
+                                    }
+                                    sinfo.dirtPile = nullptr;
+                                    sinfo.digCount = 0;
+                                    break;
+                                }
+                            }
+                            // Check load-created collision
+                            auto collIt = m_dirtPileCollisionIds.find(obj.get());
+                            if (collIt != m_dirtPileCollisionIds.end()) {
+                                if (m_characterController)
+                                    m_characterController->removeStaticBody(collIt->second);
+                                m_dirtPileCollisionIds.erase(collIt);
+                            }
+                            obj->setVisible(false);
+                            obj->setName("__dirt_pile_remove__");
+                            m_screenMessage = "Wheelbarrow: 6 cu ft (dirt pile empty)";
+                        } else {
+                            // Shrink the pile
+                            obj->setDescription("dig_count:" + std::to_string(pileLoads));
+
+                            // Recalculate scale — find native scale from stake map or estimate
+                            glm::vec3 currentScale = obj->getTransform().getScale();
+                            float oldGrowth = std::sqrt(static_cast<float>(pileLoads + 1));
+                            float newGrowth = std::sqrt(static_cast<float>(pileLoads));
+                            glm::vec3 nativeScale = currentScale / oldGrowth;
+                            glm::vec3 newScale = nativeScale * newGrowth;
+                            obj->getTransform().setScale(newScale);
+
+                            // Reposition so bottom stays on ground
+                            AABB lb = obj->getLocalBounds();
+                            glm::vec3 pPos = obj->getTransform().getPosition();
+                            float terrainY = m_terrain.getHeightAt(pPos.x, pPos.z);
+                            obj->getTransform().setPosition(
+                                glm::vec3(pPos.x, terrainY + (-lb.min.y * newScale.y), pPos.z));
+
+                            int cuFt = pileLoads * 6;
+                            char buf[128];
+                            snprintf(buf, sizeof(buf), "Loaded 1 — Pile: %d cu ft (%d loads left)",
+                                     cuFt, pileLoads);
+                            m_screenMessage = buf;
+                        }
+                        m_screenMessageTimer = 2.0f;
+
+                        // Update in-memory stake map if it exists
+                        for (auto& [stake, sinfo] : m_stakeDigs) {
+                            if (sinfo.dirtPile == obj.get()) {
+                                sinfo.digCount = pileLoads;
+                                if (pileLoads <= 0) {
+                                    sinfo.dirtPile = nullptr; // Clear so next dig creates a fresh pile
+                                }
+                                break;
+                            }
+                        }
+                        break; // Only load from one pile per frame
+                    }
+                }
+            }
+        }
+
+        // Remove emptied dirt piles from scene
+        m_sceneObjects.erase(
+            std::remove_if(m_sceneObjects.begin(), m_sceneObjects.end(),
+                [](const std::unique_ptr<SceneObject>& o) {
+                    return o && o->getName() == "__dirt_pile_remove__";
+                }),
+            m_sceneObjects.end());
 
         // Settle dirt piles — if terrain was dug out from under them, drop to ground
         for (auto& [stake, info] : m_stakeDigs) {
@@ -20953,19 +21614,37 @@ private:
                 m_characterController->addStaticBox(halfExtents, center);
             }
 
-            // Recreate poly collision for dirt piles (lost on save/load)
+            // Clean up stale/empty dirt piles from save, then recreate collision for valid ones
+            m_sceneObjects.erase(
+                std::remove_if(m_sceneObjects.begin(), m_sceneObjects.end(),
+                    [](const std::unique_ptr<SceneObject>& o) {
+                        if (!o || o->getName().find("dirt_pile") == std::string::npos) return false;
+                        // Remove if invisible, no description, or dig_count is 0
+                        if (!o->isVisible()) return true;
+                        const std::string& d = o->getDescription();
+                        if (d.empty() || d == "dig_count:0") return true;
+                        if (d.rfind("dig_count:", 0) == 0) {
+                            int count = std::stoi(d.substr(10));
+                            if (count <= 0) return true;
+                        }
+                        return false;
+                    }),
+                m_sceneObjects.end());
+
+            // Recreate poly collision for remaining valid dirt piles
             for (auto& obj : m_sceneObjects) {
                 if (!obj || obj->getName().find("dirt_pile") == std::string::npos) continue;
-                std::cout << "[DirtPile] Found dirt_pile on load: desc='" << obj->getDescription()
-                          << "' name='" << obj->getName() << "'" << std::endl;
                 if (!obj->hasMeshData()) continue;
                 const auto& verts = obj->getVertices();
                 const auto& inds = obj->getIndices();
                 std::vector<glm::vec3> positions;
                 positions.reserve(verts.size());
                 for (const auto& v : verts) positions.push_back(v.position);
-                m_characterController->addStaticMeshWithId(
+                uint32_t bodyId = m_characterController->addStaticMeshWithId(
                     positions, inds, obj->getTransform().getMatrix());
+                if (bodyId != UINT32_MAX) {
+                    m_dirtPileCollisionIds[obj.get()] = bodyId;
+                }
             }
 
             // For Homebrew physics, set up terrain height query as backup
@@ -23151,6 +23830,30 @@ private:
     int m_pendingRockFrames = 0;
     float m_pendingRockX = 0.0f, m_pendingRockZ = 0.0f;
 
+    // Wheelbarrow rolling sound
+    int m_wheelbarrowLoopId = -1;
+    bool m_wheelbarrowSoundActive = false;
+    float m_wheelbarrowLoadCooldown = 0.0f; // Prevents instant multi-load
+    std::unordered_map<SceneObject*, uint32_t> m_dirtPileCollisionIds; // Loaded pile collision tracking
+    uint32_t m_dirtPileGpuHandle = 0; // Cached GPU handle for rendering dirt in wheelbarrow
+
+    // Wheelbarrow dump animation
+    bool m_isDumping = false;
+    float m_dumpTimer = 0.0f;
+    float m_dumpDuration = 1.5f;
+    SceneObject* m_dumpTargetPile = nullptr; // If set, add to this pile; if null, dump new
+
+    // Rake hold-to-rake state
+    bool m_isRaking = false;
+    float m_rakeTimer = 0.0f;
+    float m_rakeDuration = 10.0f;
+    float m_rakeSwingTimer = 0.0f;
+    float m_rakeSwingDuration = 0.6f;
+    int m_rakeMode = 0;             // 0=none, 1=spread dirt pile, 2=flatten terrain
+    SceneObject* m_rakeTargetPile = nullptr;
+    float m_rakeSnapX = 0.0f, m_rakeSnapZ = 0.0f;
+    glm::vec3 m_rakeLockPos{0.0f};
+
     // Survival stats (I key to show)
     bool m_showSurvivalStats = false;
     float m_thirst = 100.0f;        // 0 = dying of thirst, 100 = fully hydrated
@@ -24651,6 +25354,7 @@ private:
         std::string name;
         std::vector<unsigned char> pixels;
         int width = 0, height = 0;
+        bool hasAlpha = false;
         // Vulkan resources for ImGui preview
         VkImage image = VK_NULL_HANDLE;
         VkDeviceMemory memory = VK_NULL_HANDLE;

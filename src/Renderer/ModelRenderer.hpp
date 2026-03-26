@@ -50,7 +50,9 @@ struct GPUPointLight {
 struct LightUBO {
     GPUPointLight lights[16];
     int numLights = 0;
-    float pad[3];  // Alignment padding
+    float sunY = 1.0f;        // Sun height for day/night
+    float ambientLevel = 0.4f; // Ambient light level
+    float pad;                 // Alignment padding
 };
 
 struct WireframePushConstants {
@@ -108,6 +110,7 @@ public:
 
     // Update point light data for this frame (call before rendering)
     void setLights(const std::vector<GPUPointLight>& lights);
+    void setDayNight(float sunY, float ambientLevel);
 
     // Render a model with optional color adjustments
     void render(VkCommandBuffer commandBuffer, const glm::mat4& viewProj,
@@ -209,6 +212,8 @@ private:
     void* m_lightUBOMapped = nullptr;
     VkDescriptorSetLayout m_lightDescriptorSetLayout = VK_NULL_HANDLE;
     VkDescriptorSet m_lightDescriptorSet = VK_NULL_HANDLE;
+    float m_cachedSunY = 1.0f;
+    float m_cachedAmbient = 0.4f;
 
     // Default white texture for untextured models
     VkImage m_defaultTexture = VK_NULL_HANDLE;

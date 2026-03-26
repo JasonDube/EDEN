@@ -1130,7 +1130,14 @@ void ModelRenderer::setLights(const std::vector<GPUPointLight>& lights) {
     for (int i = 0; i < ubo.numLights; ++i) {
         ubo.lights[i] = lights[i];
     }
+    ubo.sunY = m_cachedSunY;
+    ubo.ambientLevel = m_cachedAmbient;
     memcpy(m_lightUBOMapped, &ubo, sizeof(LightUBO));
+}
+
+void ModelRenderer::setDayNight(float sunY, float ambientLevel) {
+    m_cachedSunY = sunY;
+    m_cachedAmbient = ambientLevel;
 }
 
 void ModelRenderer::render(VkCommandBuffer commandBuffer, const glm::mat4& viewProj,

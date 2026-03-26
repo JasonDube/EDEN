@@ -442,6 +442,8 @@ public:
     float getBuildingTexScaleU() const { return m_buildingTexScaleU; }
     float getBuildingTexScaleV() const { return m_buildingTexScaleV; }
     int getBuildingTexRotation() const { return m_buildingTexRotation; }
+    bool wantImportBuildingTexture() const { return m_wantImportBuildingTexture; }
+    void clearImportBuildingTexture() { m_wantImportBuildingTexture = false; }
     void setApplyBuildingTextureCallback(ApplyBuildingTextureCallback cb) { m_onApplyBuildingTexture = std::move(cb); }
     void setApplyFaceTextureCallback(ApplyFaceTextureCallback cb) { m_onApplyFaceTexture = std::move(cb); }
     void setFaceSelectedIndices(const std::vector<int>& indices) { m_faceSelectedIndices = indices; }
@@ -755,6 +757,8 @@ private:
     float m_buildingTexScaleU = 1.0f;
     float m_buildingTexScaleV = 1.0f;
     int m_buildingTexRotation = 0; // 0, 90, 180, 270 degrees
+    bool m_buildingTexFillFace = false;
+    bool m_wantImportBuildingTexture = false;
     ApplyBuildingTextureCallback m_onApplyBuildingTexture;
     ApplyFaceTextureCallback m_onApplyFaceTexture;
     std::vector<int> m_faceSelectedIndices;  // Object indices from Alt+click face selection

@@ -3624,6 +3624,7 @@ void EditorUI::renderBuildingTextureWindow() {
         m_buildingTexScaleU = 1.0f;
         m_buildingTexScaleV = 1.0f;
         m_buildingTexRotation = 0;
+        m_buildingTexFillFace = false;
     }
     ImGui::SameLine();
     if (ImGui::Button("Lock UV")) {
@@ -3633,9 +3634,24 @@ void EditorUI::renderBuildingTextureWindow() {
     if (ImGui::Button("Rotate 90")) {
         m_buildingTexRotation = (m_buildingTexRotation + 90) % 360;
     }
+    if (ImGui::Button("Fill Face")) {
+        m_buildingTexFillFace = true;
+        m_buildingTexScaleU = -1.0f; // Sentinel: callback computes 1/faceSize
+        m_buildingTexScaleV = -1.0f;
+    }
+    if (m_buildingTexFillFace) {
+        ImGui::SameLine();
+        ImGui::TextColored(ImVec4(0.3f, 1.0f, 0.3f, 1.0f), "FILL");
+    }
     if (m_buildingTexRotation != 0) {
         ImGui::SameLine();
         ImGui::Text("%d deg", m_buildingTexRotation);
+    }
+
+    ImGui::Separator();
+
+    if (ImGui::Button("Import Texture...")) {
+        m_wantImportBuildingTexture = true;
     }
 
     ImGui::Separator();

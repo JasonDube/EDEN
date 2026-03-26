@@ -1005,8 +1005,10 @@ void Terrain::applyBrush(float worldX, float worldZ, float radius, float strengt
     } else if (mode == BrushMode::Flatten) {
         targetHeight = getHeightAt(worldX, worldZ);
     } else if (mode == BrushMode::Plateau) {
-        // Plateau mode: extrude the center point upward by strength amount
-        targetHeight = getHeightAt(worldX, worldZ) + strength;
+        // Plateau mode: set to absolute target if override provided, else extrude by strength
+        targetHeight = (targetHeightOverride != 0.0f)
+            ? targetHeightOverride
+            : (getHeightAt(worldX, worldZ) + strength);
     } else if (mode == BrushMode::Trench || mode == BrushMode::Furrow) {
         // Trench/Furrow: get center height as reference
         targetHeight = getHeightAt(worldX, worldZ);

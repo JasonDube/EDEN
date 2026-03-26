@@ -117,8 +117,8 @@ void main() {
     vec3 worldNormal = normalize(TBN * tangentNormal);
 
     // Directional lighting using the normal-mapped normal
-    vec3 lightDir = normalize(vec3(0.5, 1.0, 0.3));
-    float ambient = 0.3;
+    vec3 lightDir = normalize(vec3(0.5, pc.pad0, 0.3)); // pad0 = sunY
+    float ambient = pc.pad1; // pad1 = ambientLevel
     float diffuse = max(dot(worldNormal, lightDir), 0.0) * 0.7;
 
     // Specular (Blinn-Phong) — makes normal map bumps catch the light
