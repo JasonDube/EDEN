@@ -228,11 +228,17 @@ void JoltCharacter::removeStaticBody(uint32_t id) {
 void JoltCharacter::addStaticBox(const glm::vec3& halfExtents,
                                   const glm::vec3& position,
                                   const glm::quat& rotation) {
-    if (!m_initialized) return;
+    addStaticBoxWithId(halfExtents, position, rotation);
+}
+
+uint32_t JoltCharacter::addStaticBoxWithId(const glm::vec3& halfExtents,
+                                            const glm::vec3& position,
+                                            const glm::quat& rotation) {
+    if (!m_initialized) return UINT32_MAX;
 
     // Skip degenerate boxes
     float minExtent = std::min({halfExtents.x, halfExtents.y, halfExtents.z});
-    if (minExtent <= 0.001f) return;
+    if (minExtent <= 0.001f) return UINT32_MAX;
 
     // Adapt convex radius for thin boxes
     float convexRadius = std::min(JPH::cDefaultConvexRadius, minExtent * 0.5f);
@@ -240,7 +246,7 @@ void JoltCharacter::addStaticBox(const glm::vec3& halfExtents,
     JPH::BoxShapeSettings boxSettings(toJolt(halfExtents), convexRadius);
     JPH::ShapeSettings::ShapeResult result = boxSettings.Create();
     if (result.HasError()) {
-        return;  // Silently skip invalid boxes
+        return UINT32_MAX;
     }
 
     JPH::BodyCreationSettings bodySettings(
@@ -254,6 +260,7 @@ void JoltCharacter::addStaticBox(const glm::vec3& halfExtents,
     JPH::BodyInterface& bodyInterface = m_physicsSystem->GetBodyInterface();
     JPH::BodyID bodyId = bodyInterface.CreateAndAddBody(bodySettings, JPH::EActivation::DontActivate);
     m_staticBodies.push_back(bodyId);
+    return bodyId.GetIndexAndSequenceNumber();
 }
 
 void JoltCharacter::addConvexHull(const std::vector<glm::vec3>& points,

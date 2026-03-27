@@ -186,6 +186,9 @@ public:
                        const std::vector<uint32_t>& indices,
                        const glm::mat4& transform = glm::mat4(1.0f)) override;
 
+    uint32_t addStaticBoxWithId(const glm::vec3& halfExtents,
+                                 const glm::vec3& position,
+                                 const glm::quat& rotation = glm::quat(1, 0, 0, 0)) override;
     void addStaticBox(const glm::vec3& halfExtents,
                       const glm::vec3& position,
                       const glm::quat& rotation = glm::quat(1, 0, 0, 0)) override;

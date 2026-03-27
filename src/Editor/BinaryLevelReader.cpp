@@ -250,6 +250,8 @@ bool BinaryLevelReader::readObjects(std::ifstream& file, const BinaryLevelHeader
         obj.isSkinned = (entry.flags & BOF_IS_SKINNED) != 0;
         obj.isPrimitive = (entry.flags & BOF_IS_PRIMITIVE) != 0;
         obj.isDoor = (entry.flags & BOF_IS_DOOR) != 0;
+        obj.transparent = (entry.flags & BOF_TRANSPARENT) != 0;
+        obj.indoor = (entry.flags & BOF_INDOOR) != 0;
 
         // Frozen transform
         if (obj.hasFrozenTransform) {

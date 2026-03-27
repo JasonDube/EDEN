@@ -56,6 +56,13 @@ void HomebrewCharacter::addStaticMesh(const std::vector<glm::vec3>& vertices,
     }
 }
 
+uint32_t HomebrewCharacter::addStaticBoxWithId(const glm::vec3& halfExtents,
+                                                const glm::vec3& position,
+                                                const glm::quat& rotation) {
+    addStaticBox(halfExtents, position, rotation);
+    return UINT32_MAX;
+}
+
 void HomebrewCharacter::addStaticBox(const glm::vec3& halfExtents,
                                       const glm::vec3& position,
                                       const glm::quat& rotation) {

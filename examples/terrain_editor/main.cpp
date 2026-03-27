@@ -1730,6 +1730,24 @@ protected:
             m_chunkManager->uploadPendingChunks(m_terrain);
         }
 
+        // Apply opacity slider to selected object
+        if (m_editorUI.wantApplyOpacity()) {
+            m_editorUI.clearApplyOpacity();
+            if (m_selectedObjectIndex >= 0 && m_selectedObjectIndex < static_cast<int>(m_sceneObjects.size())) {
+                auto* obj = m_sceneObjects[m_selectedObjectIndex].get();
+                if (obj && obj->hasMeshData()) {
+                    float alpha = m_editorUI.getBlockOpacity();
+                    obj->setTransparent(alpha < 0.99f);
+                    auto vertices = obj->getVertices();
+                    for (auto& v : vertices) {
+                        v.color.a = alpha;
+                    }
+                    obj->setMeshData(vertices, obj->getIndices());
+                    m_modelRenderer->updateVertices(obj->getBufferHandle(), vertices);
+                }
+            }
+        }
+
         // Handle building texture import (works in both play and editor mode)
         if (m_editorUI.wantImportBuildingTexture()) {
             m_editorUI.clearImportBuildingTexture();
@@ -1817,6 +1835,7 @@ protected:
 
         if (m_isPlayMode) {
             renderPlayModeUI();
+            renderUVViewer();
         } else {
             m_editorUI.render();
             renderModulePanel();
@@ -2223,10 +2242,7 @@ protected:
                 } else {
                     float wVal = objPtr->isIndoor() ? -1.0f : 0.0f;
                     if (objPtr->isTransparent()) {
-                        // Render transparent objects separately with blending
-                        m_modelRenderer->render(cmd, vp, objPtr->getBufferHandle(), modelMatrix,
-                                                hue, sat, bright, true, objPtr->isIndoor());
-                        drawCalls++;
+                        // Defer — will render after all opaques
                     } else {
                         eden::InstanceData inst;
                         inst.model = modelMatrix;
@@ -2252,6 +2268,18 @@ protected:
                 drawCalls++;
             }
             m_modelDrawCalls = drawCalls;
+
+            // Render transparent objects AFTER all opaques so they blend correctly
+            for (size_t i = 0; i < m_sceneObjects.size(); i++) {
+                auto& objPtr = m_sceneObjects[i];
+                if (!objPtr || !objPtr->isVisible() || !objPtr->isTransparent()) continue;
+                if (m_isPlayMode && objPtr->isDoor() && objPtr->getBuildingType() != "filesystem" && objPtr->getBuildingType() != "wall_widget") continue;
+                glm::mat4 mm = const_cast<SceneObject*>(objPtr.get())->getTransform().getMatrix();
+                float h = objPtr->getHueShift(), s = objPtr->getSaturation(), b = objPtr->getBrightness();
+                m_modelRenderer->render(cmd, vp, objPtr->getBufferHandle(), mm,
+                                        h, s, b, false, objPtr->isIndoor(), true);
+                drawCalls++;
+            }
         }
 
         // Render 3D wire meshes (only in play mode, not in T-mode where overlay lines are used)
@@ -3099,10 +3127,11 @@ protected:
                 float yawRad = m_framePreviewYaw * static_cast<float>(M_PI) / 180.0f;
                 glm::vec3 right = {cosf(yawRad), 0.0f, -sinf(yawRad)};
                 glm::vec3 up = {0.0f, 1.0f, 0.0f};
+                float fhp = m_framePreviewHeight;
                 glm::vec3 c0 = p + right * (-hs);
                 glm::vec3 c1 = p + right * ( hs);
-                glm::vec3 c2 = p + right * ( hs) + up * fs;
-                glm::vec3 c3 = p + right * (-hs) + up * fs;
+                glm::vec3 c2 = p + right * ( hs) + up * fhp;
+                glm::vec3 c3 = p + right * (-hs) + up * fhp;
                 previewLines.insert(previewLines.end(), { c0, c1, c1, c2, c2, c3, c3, c0 });
                 previewLines.push_back(c0); previewLines.push_back(c2);
                 previewLines.push_back(c1); previewLines.push_back(c3);
@@ -4788,6 +4817,441 @@ private:
     }
 
     // Clear selection highlight from ALL building pieces (slabs, walls, frames)
+    void cutWallHoleAtSelectedFrame() {
+        // Find selected wall_frame — check both editor and build selection
+        int selIdx = m_selectedObjectIndex;
+        if (selIdx < 0 || selIdx >= static_cast<int>(m_sceneObjects.size()) ||
+            !m_sceneObjects[selIdx] || m_sceneObjects[selIdx]->getBuildingType() != "wall_frame") {
+            selIdx = m_selectedBuildPiece;
+        }
+        if (selIdx < 0 || selIdx >= static_cast<int>(m_sceneObjects.size()) ||
+            !m_sceneObjects[selIdx] || m_sceneObjects[selIdx]->getBuildingType() != "wall_frame") {
+            selIdx = m_selectedSalvageIndex;
+        }
+        if (selIdx < 0 || selIdx >= static_cast<int>(m_sceneObjects.size())) {
+            m_screenMessage = "Select a frame first";
+            m_screenMessageTimer = 2.0f;
+            return;
+        }
+        auto* frame = m_sceneObjects[selIdx].get();
+        if (!frame || frame->getBuildingType() != "wall_frame") {
+            m_screenMessage = "Selected object is not a wall frame";
+            m_screenMessageTimer = 2.0f;
+            return;
+        }
+
+        glm::vec3 framePos = frame->getTransform().getPosition();
+        glm::vec3 frameScl = frame->getTransform().getScale();
+
+        // Find the wall this frame is attached to (nearest platform_wall)
+        SceneObject* wall = nullptr;
+        float bestDist = 2.0f; // must be very close
+        for (auto& obj : m_sceneObjects) {
+            if (!obj || obj->getBuildingType() != "platform_wall") continue;
+            AABB wb = obj->getWorldBounds();
+            // Expand slightly to catch frames placed on the surface
+            wb.min -= glm::vec3(0.2f);
+            wb.max += glm::vec3(0.2f);
+            if (framePos.x >= wb.min.x && framePos.x <= wb.max.x &&
+                framePos.y >= wb.min.y && framePos.y <= wb.max.y &&
+                framePos.z >= wb.min.z && framePos.z <= wb.max.z) {
+                wall = obj.get();
+                break;
+            }
+        }
+
+        if (!wall) {
+            m_screenMessage = "No wall found near this frame";
+            m_screenMessageTimer = 2.0f;
+            return;
+        }
+
+        if (!wall->hasMeshData()) {
+            m_screenMessage = "Wall has no mesh data";
+            m_screenMessageTimer = 2.0f;
+            return;
+        }
+
+        // Get wall transform info
+        glm::vec3 wallPos = wall->getTransform().getPosition();
+        glm::vec3 wallScl = wall->getTransform().getScale();
+
+        // Frame hole in wall local space (wall cube: X centered, Y bottom-anchored, Z centered)
+        // Frame center relative to wall position
+        float relX = framePos.x - wallPos.x;
+        float relY = framePos.y - wallPos.y;
+        float relZ = framePos.z - wallPos.z;
+
+        // Normalize to unit cube space (divide by scale)
+        float normX = relX / wallScl.x;
+        float normY = relY / wallScl.y;
+        float normZ = relZ / wallScl.z;
+
+        // Frame half-sizes in normalized wall space
+        float holeHW = (frameScl.x * 0.5f) / wallScl.x;
+        float holeHH = (frameScl.y * 0.5f) / wallScl.y;
+
+        // Determine which axis the frame is on based on the frame's thin dimension
+        // Frame scale Z is 0.1 for wall frames → it's on the Z face
+        // We need to figure out which pair of faces to cut
+        float frameYaw = frame->getEulerRotation().y;
+        bool isXFace = (std::abs(std::fmod(frameYaw + 360.0f, 180.0f) - 90.0f) < 10.0f);
+
+        // Single-mesh approach with continuous position-based UVs
+        auto oldVerts = wall->getVertices();
+        glm::vec4 wallColor = oldVerts.empty() ? glm::vec4(0.7f) : oldVerts[0].color;
+        glm::vec4 vertColor = wall->hasTextureData() ? glm::vec4(1.0f) : wallColor;
+
+        // UV scale from wall's physical dimensions — 1 texture tile per meter
+        float uvScaleU = (!isXFace) ? wallScl.x : wallScl.z;
+        float uvScaleV = wallScl.y;
+
+        std::vector<ModelVertex> newVerts;
+        std::vector<uint32_t> newInds;
+        float cubeH = 0.5f;
+
+        // Hole bounds in unit-cube space
+        float hL, hR, hB, hT; // left, right, bottom, top of hole
+        if (!isXFace) {
+            hL = normX - holeHW;
+            hR = normX + holeHW;
+        } else {
+            hL = normZ - (frameScl.x * 0.5f) / wallScl.z;
+            hR = normZ + (frameScl.x * 0.5f) / wallScl.z;
+        }
+        hB = normY;
+        hT = normY + (frameScl.y / wallScl.y);
+
+        // Helper: add quad with position-based UVs for continuous tiling
+        // uAxis/vAxis select which position components map to U and V
+        auto addQuad = [&](glm::vec3 a, glm::vec3 b, glm::vec3 c, glm::vec3 d, glm::vec3 normal) {
+            uint32_t base = static_cast<uint32_t>(newVerts.size());
+            // Planar UV — same projection for ALL faces regardless of normal
+            auto planarUV = [&](glm::vec3 p) -> glm::vec2 {
+                if (!isXFace)
+                    return {(p.x + cubeH) * uvScaleU, (p.y + cubeH) * uvScaleV};
+                else
+                    return {(p.z + cubeH) * uvScaleU, (p.y + cubeH) * uvScaleV};
+            };
+            glm::vec2 uvA = planarUV(a), uvB = planarUV(b), uvC = planarUV(c), uvD = planarUV(d);
+
+            // Expand quad edges slightly outward to seal T-junction pinholes between cuts
+            {
+                const float seamEps = 0.0f; // disabled to test if expansion causes flipped faces
+                glm::vec3 absN = glm::abs(normal);
+                if (absN.z >= absN.x && absN.z >= absN.y) {
+                    float midX = (a.x + b.x + c.x + d.x) * 0.25f;
+                    float midY = (a.y + b.y + c.y + d.y) * 0.25f;
+                    a.x += (a.x < midX) ? -seamEps : seamEps;
+                    b.x += (b.x < midX) ? -seamEps : seamEps;
+                    c.x += (c.x < midX) ? -seamEps : seamEps;
+                    d.x += (d.x < midX) ? -seamEps : seamEps;
+                    a.y += (a.y < midY) ? -seamEps : seamEps;
+                    b.y += (b.y < midY) ? -seamEps : seamEps;
+                    c.y += (c.y < midY) ? -seamEps : seamEps;
+                    d.y += (d.y < midY) ? -seamEps : seamEps;
+                } else if (absN.x >= absN.y) {
+                    float midY = (a.y + b.y + c.y + d.y) * 0.25f;
+                    float midZ = (a.z + b.z + c.z + d.z) * 0.25f;
+                    a.y += (a.y < midY) ? -seamEps : seamEps;
+                    b.y += (b.y < midY) ? -seamEps : seamEps;
+                    c.y += (c.y < midY) ? -seamEps : seamEps;
+                    d.y += (d.y < midY) ? -seamEps : seamEps;
+                    a.z += (a.z < midZ) ? -seamEps : seamEps;
+                    b.z += (b.z < midZ) ? -seamEps : seamEps;
+                    c.z += (c.z < midZ) ? -seamEps : seamEps;
+                    d.z += (d.z < midZ) ? -seamEps : seamEps;
+                } else {
+                    float midX = (a.x + b.x + c.x + d.x) * 0.25f;
+                    float midZ = (a.z + b.z + c.z + d.z) * 0.25f;
+                    a.x += (a.x < midX) ? -seamEps : seamEps;
+                    b.x += (b.x < midX) ? -seamEps : seamEps;
+                    c.x += (c.x < midX) ? -seamEps : seamEps;
+                    d.x += (d.x < midX) ? -seamEps : seamEps;
+                    a.z += (a.z < midZ) ? -seamEps : seamEps;
+                    b.z += (b.z < midZ) ? -seamEps : seamEps;
+                    c.z += (c.z < midZ) ? -seamEps : seamEps;
+                    d.z += (d.z < midZ) ? -seamEps : seamEps;
+                }
+            }
+
+            ModelVertex v; v.color = vertColor; v.normal = normal;
+            v.position = a; v.texCoord = uvA; newVerts.push_back(v);
+            v.position = b; v.texCoord = uvB; newVerts.push_back(v);
+            v.position = c; v.texCoord = uvC; newVerts.push_back(v);
+            v.position = d; v.texCoord = uvD; newVerts.push_back(v);
+            newInds.push_back(base); newInds.push_back(base+1); newInds.push_back(base+2);
+            newInds.push_back(base); newInds.push_back(base+2); newInds.push_back(base+3);
+        };
+
+        // Process ALL quads in the mesh (works on already-cut walls too)
+        int numQuads = static_cast<int>(oldVerts.size()) / 4;
+        for (int face = 0; face < numQuads; face++) {
+            int vi = face * 4;
+            if (vi + 3 >= static_cast<int>(oldVerts.size())) continue;
+            glm::vec3 n = oldVerts[vi].normal;
+            bool onCutAxis = false;
+            if (!isXFace && std::abs(n.z) > 0.5f) onCutAxis = true;
+            else if (isXFace && std::abs(n.x) > 0.5f) onCutAxis = true;
+
+            // Check if this quad actually overlaps the hole
+            bool shouldCut = false;
+            if (onCutAxis) {
+                // Find quad bounds in the cut plane
+                float qMinH = 1e9f, qMaxH = -1e9f, qMinV = 1e9f, qMaxV = -1e9f;
+                for (int k = 0; k < 4; k++) {
+                    glm::vec3 p = oldVerts[vi+k].position;
+                    float h = (!isXFace) ? p.x : p.z;
+                    float v = p.y;
+                    qMinH = std::min(qMinH, h); qMaxH = std::max(qMaxH, h);
+                    qMinV = std::min(qMinV, v); qMaxV = std::max(qMaxV, v);
+                }
+                // Check overlap with hole
+                bool overlapH = (qMaxH > hL + 0.001f && qMinH < hR - 0.001f);
+                bool overlapV = (qMaxV > hB + 0.001f && qMinV < hT - 0.001f);
+                shouldCut = overlapH && overlapV;
+            }
+
+            if (!shouldCut) {
+                // Keep face geometry, apply planar UV and uniform color
+                uint32_t base = static_cast<uint32_t>(newVerts.size());
+                for (int k = 0; k < 4; k++) {
+                    ModelVertex mv = oldVerts[vi + k];
+                    mv.color = vertColor; // force consistent color (white for textured walls)
+                    if (!isXFace)
+                        mv.texCoord = {(mv.position.x + cubeH) * uvScaleU, (mv.position.y + cubeH) * uvScaleV};
+                    else
+                        mv.texCoord = {(mv.position.z + cubeH) * uvScaleU, (mv.position.y + cubeH) * uvScaleV};
+                    newVerts.push_back(mv);
+                }
+                newInds.push_back(base); newInds.push_back(base+1); newInds.push_back(base+2);
+                newInds.push_back(base); newInds.push_back(base+2); newInds.push_back(base+3);
+                continue;
+            }
+
+            // Cut face: use actual quad bounds (works for already-cut walls)
+            float qMinH = 1e9f, qMaxH = -1e9f, qMinV = 1e9f, qMaxV = -1e9f;
+            for (int k = 0; k < 4; k++) {
+                glm::vec3 p = oldVerts[vi+k].position;
+                float h = (!isXFace) ? p.x : p.z;
+                qMinH = std::min(qMinH, h); qMaxH = std::max(qMaxH, h);
+                qMinV = std::min(qMinV, p.y); qMaxV = std::max(qMaxV, p.y);
+            }
+            // Clamp hole to this quad's extent
+            float cL = std::max(hL, qMinH), cR = std::min(hR, qMaxH);
+            float cB = std::max(hB, qMinV), cT = std::min(hT, qMaxV);
+
+            if (std::abs(n.z) > 0.5f) {
+                float z = oldVerts[vi].position.z;
+                glm::vec3 N = n;
+                bool back = n.z < 0;
+                float eL = back ? qMaxH : qMinH;
+                float eR = back ? qMinH : qMaxH;
+                float ecL = back ? cR : cL;
+                float ecR = back ? cL : cR;
+                bool hasLeft = (cL > qMinH + 0.001f);
+                bool hasRight = (cR < qMaxH - 0.001f);
+                if (cB > qMinV + 0.001f) {
+                    if (hasLeft)
+                        addQuad(glm::vec3(eL, qMinV, z), glm::vec3(ecL, qMinV, z),
+                                     glm::vec3(ecL, cB, z), glm::vec3(eL, cB, z), N);
+                    addQuad(glm::vec3(ecL, qMinV, z), glm::vec3(ecR, qMinV, z),
+                                 glm::vec3(ecR, cB, z), glm::vec3(ecL, cB, z), N);
+                    if (hasRight)
+                        addQuad(glm::vec3(ecR, qMinV, z), glm::vec3(eR, qMinV, z),
+                                     glm::vec3(eR, cB, z), glm::vec3(ecR, cB, z), N);
+                }
+                if (cT < qMaxV - 0.001f) {
+                    if (hasLeft)
+                        addQuad(glm::vec3(eL, cT, z), glm::vec3(ecL, cT, z),
+                                     glm::vec3(ecL, qMaxV, z), glm::vec3(eL, qMaxV, z), N);
+                    addQuad(glm::vec3(ecL, cT, z), glm::vec3(ecR, cT, z),
+                                 glm::vec3(ecR, qMaxV, z), glm::vec3(ecL, qMaxV, z), N);
+                    if (hasRight)
+                        addQuad(glm::vec3(ecR, cT, z), glm::vec3(eR, cT, z),
+                                     glm::vec3(eR, qMaxV, z), glm::vec3(ecR, qMaxV, z), N);
+                }
+                if (hasLeft)
+                    addQuad(glm::vec3(eL, cB, z), glm::vec3(ecL, cB, z),
+                                 glm::vec3(ecL, cT, z), glm::vec3(eL, cT, z), N);
+                if (hasRight)
+                    addQuad(glm::vec3(ecR, cB, z), glm::vec3(eR, cB, z),
+                                 glm::vec3(eR, cT, z), glm::vec3(ecR, cT, z), N);
+            } else {
+                float x = oldVerts[vi].position.x;
+                glm::vec3 N = n;
+                bool flip = n.x > 0;
+                float eL = flip ? qMaxH : qMinH;
+                float eR = flip ? qMinH : qMaxH;
+                float ecL = flip ? cR : cL;
+                float ecR = flip ? cL : cR;
+                bool hasLeft = (cL > qMinH + 0.001f);
+                bool hasRight = (cR < qMaxH - 0.001f);
+                if (cB > qMinV + 0.001f) {
+                    if (hasLeft)
+                        addQuad(glm::vec3(x, qMinV, eL), glm::vec3(x, qMinV, ecL),
+                                     glm::vec3(x, cB, ecL), glm::vec3(x, cB, eL), N);
+                    addQuad(glm::vec3(x, qMinV, ecL), glm::vec3(x, qMinV, ecR),
+                                 glm::vec3(x, cB, ecR), glm::vec3(x, cB, ecL), N);
+                    if (hasRight)
+                        addQuad(glm::vec3(x, qMinV, ecR), glm::vec3(x, qMinV, eR),
+                                     glm::vec3(x, cB, eR), glm::vec3(x, cB, ecR), N);
+                }
+                if (cT < qMaxV - 0.001f) {
+                    if (hasLeft)
+                        addQuad(glm::vec3(x, cT, eL), glm::vec3(x, cT, ecL),
+                                     glm::vec3(x, qMaxV, ecL), glm::vec3(x, qMaxV, eL), N);
+                    addQuad(glm::vec3(x, cT, ecL), glm::vec3(x, cT, ecR),
+                                 glm::vec3(x, qMaxV, ecR), glm::vec3(x, qMaxV, ecL), N);
+                    if (hasRight)
+                        addQuad(glm::vec3(x, cT, ecR), glm::vec3(x, cT, eR),
+                                     glm::vec3(x, qMaxV, eR), glm::vec3(x, qMaxV, ecR), N);
+                }
+                if (hasLeft)
+                    addQuad(glm::vec3(x, cB, eL), glm::vec3(x, cB, ecL),
+                                 glm::vec3(x, cT, ecL), glm::vec3(x, cT, eL), N);
+                if (hasRight)
+                    addQuad(glm::vec3(x, cB, ecR), glm::vec3(x, cB, eR),
+                                 glm::vec3(x, cT, eR), glm::vec3(x, cT, ecR), N);
+            }
+        }
+
+        // Jamb faces (inner walls of the hole connecting front and back)
+        if (!isXFace) {
+            float zF = cubeH, zB = -cubeH;
+            // Top jamb (normal pointing down into hole)
+            addQuad(glm::vec3(hL, hT, zB), glm::vec3(hR, hT, zB),
+                    glm::vec3(hR, hT, zF), glm::vec3(hL, hT, zF), glm::vec3(0,-1,0));
+            // Bottom jamb (normal pointing up into hole)
+            addQuad(glm::vec3(hL, hB, zF), glm::vec3(hR, hB, zF),
+                    glm::vec3(hR, hB, zB), glm::vec3(hL, hB, zB), glm::vec3(0,1,0));
+            // Left jamb (normal pointing right into hole)
+            addQuad(glm::vec3(hL, hT, zB), glm::vec3(hL, hT, zF),
+                    glm::vec3(hL, hB, zF), glm::vec3(hL, hB, zB), glm::vec3(1,0,0));
+            // Right jamb (normal pointing left into hole)
+            addQuad(glm::vec3(hR, hT, zF), glm::vec3(hR, hT, zB),
+                    glm::vec3(hR, hB, zB), glm::vec3(hR, hB, zF), glm::vec3(-1,0,0));
+        } else {
+            float xF = cubeH, xB = -cubeH;
+            // Top jamb
+            addQuad(glm::vec3(xF, hT, hL), glm::vec3(xF, hT, hR),
+                    glm::vec3(xB, hT, hR), glm::vec3(xB, hT, hL), glm::vec3(0,-1,0));
+            // Bottom jamb
+            addQuad(glm::vec3(xB, hB, hL), glm::vec3(xB, hB, hR),
+                    glm::vec3(xF, hB, hR), glm::vec3(xF, hB, hL), glm::vec3(0,1,0));
+            // Left jamb
+            addQuad(glm::vec3(xB, hB, hL), glm::vec3(xF, hB, hL),
+                    glm::vec3(xF, hT, hL), glm::vec3(xB, hT, hL), glm::vec3(0,0,1));
+            // Right jamb
+            addQuad(glm::vec3(xF, hB, hR), glm::vec3(xB, hB, hR),
+                    glm::vec3(xB, hT, hR), glm::vec3(xF, hT, hR), glm::vec3(0,0,-1));
+        }
+
+        // Compute bounds and update wall as single mesh
+        AABB newBounds;
+        newBounds.min = glm::vec3(INFINITY);
+        newBounds.max = glm::vec3(-INFINITY);
+        for (const auto& v : newVerts) {
+            newBounds.min = glm::min(newBounds.min, v.position);
+            newBounds.max = glm::max(newBounds.max, v.position);
+        }
+
+        // Debug: dump UV stats per face normal
+        {
+            std::map<std::string, int> normalCounts;
+            for (size_t i = 0; i < newVerts.size(); i += 4) {
+                auto& n2 = newVerts[i].normal;
+                char buf[64];
+                snprintf(buf, sizeof(buf), "(%.0f,%.0f,%.0f)", n2.x, n2.y, n2.z);
+                normalCounts[buf] += 4;
+            }
+            std::cout << "[CutMesh] isXFace=" << isXFace << " uvScale=(" << uvScaleU << "," << uvScaleV
+                      << ") wallScl=(" << wallScl.x << "," << wallScl.y << "," << wallScl.z << ")" << std::endl;
+            for (auto& [norm, count] : normalCounts)
+                std::cout << "  normal" << norm << ": " << count << " verts" << std::endl;
+            // Show UV range for each normal direction
+            for (auto& [norm, count] : normalCounts) {
+                float uMin=1e9, uMax=-1e9, vMin=1e9, vMax=-1e9;
+                for (auto& v : newVerts) {
+                    char b2[64];
+                    snprintf(b2, sizeof(b2), "(%.0f,%.0f,%.0f)", v.normal.x, v.normal.y, v.normal.z);
+                    if (std::string(b2) == norm) {
+                        uMin = std::min(uMin, v.texCoord.x); uMax = std::max(uMax, v.texCoord.x);
+                        vMin = std::min(vMin, v.texCoord.y); vMax = std::max(vMax, v.texCoord.y);
+                    }
+                }
+                std::cout << "  " << norm << " UV: u(" << uMin << "-" << uMax << ") v(" << vMin << "-" << vMax << ")" << std::endl;
+            }
+        }
+
+        // Destroy old GPU model before creating new one
+        uint32_t oldHandle = wall->getBufferHandle();
+        uint32_t newHandle = m_modelRenderer->createModel(newVerts, newInds);
+        if (wall->hasTextureData()) {
+            m_modelRenderer->updateTexture(newHandle, wall->getTextureData().data(),
+                                           wall->getTextureWidth(), wall->getTextureHeight());
+        }
+        if (oldHandle != 0) m_modelRenderer->destroyModel(oldHandle);
+        wall->setBufferHandle(newHandle);
+        wall->setIndexCount(static_cast<uint32_t>(newInds.size()));
+        wall->setVertexCount(static_cast<uint32_t>(newVerts.size()));
+        wall->setMeshData(newVerts, newInds);
+        wall->setLocalBounds(newBounds);
+
+        // Store world-space hole bounds so AABB collision skips the hole area
+        {
+            glm::vec3 wPos = wallPos;
+            glm::vec3 wScl = wallScl;
+            glm::quat wRot = wall->getTransform().getRotation();
+            glm::mat3 rotMat = glm::mat3_cast(wRot);
+
+            // Hole bounds in local space (offset from wall center)
+            glm::vec3 holeLocalMin, holeLocalMax;
+            if (!isXFace) {
+                holeLocalMin = glm::vec3(hL * wScl.x, hB * wScl.y, -wScl.z * 0.5f);
+                holeLocalMax = glm::vec3(hR * wScl.x, hT * wScl.y,  wScl.z * 0.5f);
+            } else {
+                holeLocalMin = glm::vec3(-wScl.x * 0.5f, hB * wScl.y, hL * wScl.z);
+                holeLocalMax = glm::vec3( wScl.x * 0.5f, hT * wScl.y, hR * wScl.z);
+            }
+            // Transform all 8 corners to world space to get world AABB
+            glm::vec3 worldMin(INFINITY), worldMax(-INFINITY);
+            for (int c = 0; c < 8; c++) {
+                glm::vec3 corner(
+                    (c & 1) ? holeLocalMax.x : holeLocalMin.x,
+                    (c & 2) ? holeLocalMax.y : holeLocalMin.y,
+                    (c & 4) ? holeLocalMax.z : holeLocalMin.z);
+                glm::vec3 wc = wPos + rotMat * corner;
+                worldMin = glm::min(worldMin, wc);
+                worldMax = glm::max(worldMax, wc);
+            }
+            // Expand hole bounds in the wall's thin direction so the player is
+            // detected as "in the hole" when approaching from either side
+            const float holeApproachDist = 1.5f;
+            if (!isXFace) {
+                worldMin.z -= holeApproachDist;
+                worldMax.z += holeApproachDist;
+            } else {
+                worldMin.x -= holeApproachDist;
+                worldMax.x += holeApproachDist;
+            }
+            wall->addWallHole(worldMin, worldMax);
+        }
+
+        // Delete the frame since the hole replaces it
+        frame->setVisible(false);
+        frame->setName("__wall_remove__"); m_pendingObjectRemoval = true;
+
+        // Clear selection — the frame is about to be removed
+        m_selectedObjectIndex = -1;
+        m_selectedBuildPiece = -1;
+        m_selectedSalvageIndex = -1;
+        m_editorUI.setSelectedObjectIndex(-1);
+
+        m_screenMessage = "Hole cut in wall";
+        m_screenMessageTimer = 2.0f;
+    }
+
     void clearBuildSelection() {
         for (auto& obj : m_sceneObjects) {
             if (!obj) continue;
@@ -5457,7 +5921,7 @@ private:
                 if (scroll != 0) {
                     float orbitDistance = glm::length(m_camera.getPosition() - m_orbitTarget);
                     if (orbitDistance < 0.01f) orbitDistance = 5.0f;
-                    float dollySpeed = std::max(orbitDistance * 0.08f, 2.0f);
+                    float dollySpeed = std::max(orbitDistance * 0.04f, 0.5f);
                     glm::vec3 forward = glm::normalize(m_orbitTarget - m_camera.getPosition());
                     glm::vec3 move = forward * scroll * dollySpeed;
                     glm::vec3 newPos = m_camera.getPosition() + move;
@@ -5586,7 +6050,7 @@ private:
             if (scroll != 0 && !mouseOverImGui) {
                 float orbitDistance = glm::length(m_camera.getPosition() - m_orbitTarget);
                 if (orbitDistance < 0.01f) orbitDistance = 5.0f;
-                float dollySpeed = std::max(orbitDistance * 0.08f, 2.0f);
+                float dollySpeed = std::max(orbitDistance * 0.04f, 0.5f);
                 glm::vec3 forward = glm::normalize(m_orbitTarget - m_camera.getPosition());
                 glm::vec3 move = forward * scroll * dollySpeed;
                 glm::vec3 newPos = m_camera.getPosition() + move;
@@ -6084,8 +6548,9 @@ private:
             m_thirdPersonPlayerPos = m_camera.getPosition();
         }
 
-        // Post-movement AABB collision for play mode walk (fallback for non-Jolt objects)
-        if (m_isPlayMode && m_camera.getMovementMode() == MovementMode::Walk && !useCharacterController) {
+        // Post-movement AABB collision for play mode walk (all modes)
+        // Building pieces use AABB exclusively (not Jolt) so wall holes work
+        if (m_isPlayMode && m_camera.getMovementMode() == MovementMode::Walk) {
             glm::vec3 newPos = m_camera.getPosition();
             const float playerRadius = 0.25f;
             const float playerHeight = 0.85f;
@@ -6098,6 +6563,22 @@ private:
 
                 // Check for AABB collision (fast box-based) - only if no Bullet collision
                 if (obj->hasAABBCollision()) {
+                    // Skip collision if player is inside a wall hole opening
+                    if (obj->hasWallHoles()) {
+                        bool inHole = false;
+                        float feetY = newPos.y - playerHeight;
+                        for (const auto& hole : obj->getWallHoles()) {
+                            if (newPos.x > hole.min.x && newPos.x < hole.max.x &&
+                                feetY > hole.min.y - 0.1f && newPos.y < hole.max.y + 0.1f &&
+                                newPos.z > hole.min.z && newPos.z < hole.max.z) {
+                                inHole = true;
+                                break;
+                            }
+                        }
+                        if (inHole) continue;
+                    }
+
+
                     AABB bounds = obj->getWorldBounds();
                     // Expand bounds slightly for player radius
                     bounds.min -= glm::vec3(playerRadius, 0, playerRadius);
@@ -6114,16 +6595,16 @@ private:
                         // Collision! Try to slide along the object
                         glm::vec3 slidePos = newPos;
 
-                        // Try X movement only
-                        slidePos = glm::vec3(newPos.x, oldCameraPos.y, oldCameraPos.z);
+                        // Try X movement only (keep current Y so jump/push doesn't bypass)
+                        slidePos = glm::vec3(newPos.x, newPos.y, oldCameraPos.z);
                         playerMin = glm::vec3(slidePos.x - playerRadius, slidePos.y - playerHeight, slidePos.z - playerRadius);
                         playerMax = glm::vec3(slidePos.x + playerRadius, slidePos.y + 0.1f, slidePos.z + playerRadius);
                         bool xOk = !(playerMax.x > bounds.min.x && playerMin.x < bounds.max.x &&
                                      playerMax.y > bounds.min.y && playerMin.y < bounds.max.y &&
                                      playerMax.z > bounds.min.z && playerMin.z < bounds.max.z);
 
-                        // Try Z movement only
-                        slidePos = glm::vec3(oldCameraPos.x, oldCameraPos.y, newPos.z);
+                        // Try Z movement only (keep current Y so jump/push doesn't bypass)
+                        slidePos = glm::vec3(oldCameraPos.x, newPos.y, newPos.z);
                         playerMin = glm::vec3(slidePos.x - playerRadius, slidePos.y - playerHeight, slidePos.z - playerRadius);
                         playerMax = glm::vec3(slidePos.x + playerRadius, slidePos.y + 0.1f, slidePos.z + playerRadius);
                         bool zOk = !(playerMax.x > bounds.min.x && playerMin.x < bounds.max.x &&
@@ -6139,6 +6620,12 @@ private:
                             newPos = glm::vec3(oldCameraPos.x, newPos.y, oldCameraPos.z);
                         }
                         m_camera.setPosition(newPos);
+                        // Sync only X/Z to Jolt — keep Jolt's Y (handles gravity/jump/terrain)
+                        // Camera Y includes eye offset which would compound if synced
+                        if (useCharacterController && m_characterController) {
+                            glm::vec3 joltPos = m_characterController->getPosition();
+                            m_characterController->setPosition(glm::vec3(newPos.x, joltPos.y, newPos.z));
+                        }
                         break;  // Only handle one collision per frame
                     }
                 }
@@ -11107,7 +11594,9 @@ private:
                 glm::vec3 hitPt = rayO + rayD * bestDist;
                 glm::vec3 objPos = hitObj->getTransform().getPosition();
                 glm::vec3 objScl = hitObj->getTransform().getScale();
-                float s = static_cast<float>(m_frameSizeSetting);
+                float fw = static_cast<float>(m_frameSizeSetting);    // frame width
+                float fh = static_cast<float>(m_frameHeightSetting); // frame height
+                float s = fw; // horizontal size for snapping
                 float hs = s * 0.5f;
 
                 float frameX = 0, frameY = 0, frameZ = 0;
@@ -11157,7 +11646,7 @@ private:
                     // Y snaps relative to wall base (local 1m grid)
                     float relY = hitPt.y - wallMinY;
                     float snappedRelY = std::floor(relY / 1.0f) * 1.0f;
-                    frameY = std::clamp(wallMinY + snappedRelY, wallMinY, wallMaxY - s);
+                    frameY = std::clamp(wallMinY + snappedRelY, wallMinY, wallMaxY - fh);
                 } else {
                     // Slab frame — use ray direction to determine top vs underside
                     frameX = std::round(hitPt.x - hs) + hs;
@@ -11176,7 +11665,8 @@ private:
                 }
 
                 m_framePreviewPos = {frameX, frameY, frameZ};
-                m_framePreviewSize = s;
+                m_framePreviewSize = fw;
+                m_framePreviewHeight = fh;
                 m_framePreviewNX = normalX;
                 m_framePreviewNY = normalY;
                 m_framePreviewNZ = normalZ;
@@ -11203,9 +11693,9 @@ private:
 
                     glm::vec3 frameScale;
                     if (std::abs(normalY) > 0.5f) {
-                        frameScale = {s, 0.1f, s}; // floor/ceiling frame
+                        frameScale = {fw, 0.1f, fw}; // floor/ceiling frame
                     } else {
-                        frameScale = {s, s, 0.1f}; // wall frame
+                        frameScale = {fw, fh, 0.1f}; // wall frame: width x height
                     }
                     obj->getTransform().setPosition(m_framePreviewPos);
                     obj->getTransform().setScale(frameScale);
@@ -11969,7 +12459,7 @@ private:
                             m_dirtPileCollisionIds.erase(collIt);
                         }
                         m_rakeTargetPile->setVisible(false);
-                        m_rakeTargetPile->setName("__dirt_pile_remove__");
+                        m_rakeTargetPile->setName("__dirt_pile_remove__"); m_pendingObjectRemoval = true;
                         m_screenMessage = "Spread dirt — terrain raised";
                     } else if (m_rakeMode == 2) {
                         // Flatten terrain
@@ -12306,7 +12796,7 @@ private:
                                 m_dirtPileCollisionIds.erase(collIt);
                             }
                             obj->setVisible(false);
-                            obj->setName("__dirt_pile_remove__");
+                            obj->setName("__dirt_pile_remove__"); m_pendingObjectRemoval = true;
                             m_screenMessage = "Wheelbarrow: 6 cu ft (dirt pile empty)";
                         } else {
                             // Shrink the pile
@@ -12351,13 +12841,18 @@ private:
             }
         }
 
-        // Remove emptied dirt piles from scene
-        m_sceneObjects.erase(
-            std::remove_if(m_sceneObjects.begin(), m_sceneObjects.end(),
-                [](const std::unique_ptr<SceneObject>& o) {
-                    return o && o->getName() == "__dirt_pile_remove__";
-                }),
-            m_sceneObjects.end());
+        // Remove marked-for-deletion objects
+        {
+            auto oldSize = m_sceneObjects.size();
+            m_sceneObjects.erase(
+                std::remove_if(m_sceneObjects.begin(), m_sceneObjects.end(),
+                    [](const std::unique_ptr<SceneObject>& o) {
+                        return o && (o->getName() == "__dirt_pile_remove__" || o->getName() == "__wall_remove__");
+                    }),
+                m_sceneObjects.end());
+            if (m_sceneObjects.size() != oldSize)
+                updateSceneObjectsList();
+        }
 
         // Settle dirt piles — if terrain was dug out from under them, drop to ground
         for (auto& [stake, info] : m_stakeDigs) {
@@ -12365,16 +12860,14 @@ private:
             glm::vec3 pos = info.dirtPile->getTransform().getPosition();
             glm::vec3 scl = info.dirtPile->getTransform().getScale();
             AABB lb = info.dirtPile->getLocalBounds();
-            float bottomOffset = -lb.min.y * scl.y; // distance from origin to bottom at current scale
+            float bottomOffset = -lb.min.y * scl.y;
             float terrainY = m_terrain.getHeightAt(pos.x, pos.z);
-            float restY = terrainY + bottomOffset; // Y where bottom sits on terrain
+            float restY = terrainY + bottomOffset;
             if (pos.y > restY + 0.05f) {
-                // Gravity settle — fall toward terrain, stay upright
                 float fallSpeed = 9.8f * deltaTime;
                 float newY = std::max(restY, pos.y - fallSpeed);
                 info.dirtPile->getTransform().setPosition({pos.x, newY, pos.z});
 
-                // Update collision body to match new position
                 if (info.collisionBodyId != UINT32_MAX && m_characterController &&
                     info.dirtPile->hasMeshData()) {
                     m_characterController->removeStaticBody(info.collisionBodyId);
@@ -12388,7 +12881,6 @@ private:
                 }
             }
         }
-
         // CullSession input (Up/Down arrow for accept/reject)
         if (auto* cull = m_filesystemBrowser.getCullSession(); cull && cull->isActive()) {
             cull->handleInput();
@@ -14966,6 +15458,8 @@ private:
                         obj->setLocalBounds(md.bounds);
                         obj->setModelPath("");
                         obj->setMeshData(md.vertices, md.indices);
+                        obj->setPrimitiveType(PrimitiveType::Cube);
+                        obj->setPrimitiveSize(1.0f);
                         m_sceneObjects.push_back(std::move(obj));
                     };
 
@@ -16620,14 +17114,15 @@ private:
 
                 ImGui::Separator();
                 ImGui::Text("Wall Frames");
-                ImGui::SliderInt("Frame Size", &m_frameSizeSetting, 1, 16, "%dm");
+                ImGui::SliderInt("Frame Width##fw", &m_frameSizeSetting, 1, 16, "%dm");
+                ImGui::SliderInt("Frame Height##fh", &m_frameHeightSetting, 1, 16, "%dm");
                 ImGui::Checkbox("Frame Placement Mode", &m_framePlacementMode);
                 if (m_framePlacementMode) {
                     m_wallBrushMode = false;
                     m_buildMoveMode = false;
                     clearBuildSelection();
                     ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f),
-                        "Click on a platform wall to place a %dm frame", m_frameSizeSetting);
+                        "Click on a platform wall to place a %dx%dm frame", m_frameSizeSetting, m_frameHeightSetting);
                 }
                 ImGui::Text("Frames: %d", (int)pg.grid().frames.size());
                 if (ImGui::Button("Clear All Frames")) {
@@ -16737,8 +17232,99 @@ private:
                 }
 
                 ImGui::Separator();
+                ImGui::Text("Window Frame");
+                ImGui::SliderFloat("Frame Width", &m_winFrameWidth, 0.5f, 8.0f, "%.1fm");
+                ImGui::SliderFloat("Frame Height", &m_winFrameHeight, 0.5f, 8.0f, "%.1fm");
+                ImGui::SliderInt("Columns", &m_winFrameCols, 1, 8);
+                ImGui::SliderInt("Rows", &m_winFrameRows, 1, 8);
+                ImGui::SliderFloat("Bar Thickness", &m_winFrameThickness, 0.03f, 0.2f, "%.2fm");
+                ImGui::SliderFloat("Frame Depth", &m_winFrameDepth, 0.05f, 0.5f, "%.2fm");
+                ImGui::ColorEdit3("Frame Color", &m_winFrameColor.x);
+
+                if (ImGui::Button("Create Window Frame")) {
+                    glm::vec3 camPos = m_camera.getPosition();
+                    glm::vec3 camFront = m_camera.getFront();
+                    glm::vec3 placePos = camPos + camFront * 5.0f;
+                    placePos.x = std::round(placePos.x * 4.0f) / 4.0f;
+                    placePos.z = std::round(placePos.z * 4.0f) / 4.0f;
+                    placePos.y = std::round(placePos.y * 4.0f) / 4.0f;
+
+                    float w = m_winFrameWidth, h = m_winFrameHeight;
+                    float t = m_winFrameThickness, d = m_winFrameDepth;
+                    int cols = m_winFrameCols, rows = m_winFrameRows;
+                    glm::vec4 color(m_winFrameColor, 1.0f);
+
+                    // Build combined mesh — all bars merged into one object
+                    std::vector<ModelVertex> allVerts;
+                    std::vector<uint32_t> allIndices;
+
+                    auto addBar = [&](glm::vec3 offset, glm::vec3 scale) {
+                        auto mesh = PrimitiveMeshBuilder::createCube(1.0f, color);
+                        uint32_t base = static_cast<uint32_t>(allVerts.size());
+                        for (auto& v : mesh.vertices) {
+                            v.position.x = v.position.x * scale.x + offset.x;
+                            v.position.y = v.position.y * scale.y + offset.y;
+                            v.position.z = v.position.z * scale.z + offset.z;
+                            allVerts.push_back(v);
+                        }
+                        for (auto idx : mesh.indices) {
+                            allIndices.push_back(base + idx);
+                        }
+                    };
+
+                    float halfW = w * 0.5f;
+                    float innerW = w - 2.0f * t;
+                    float innerH = h - 2.0f * t;
+
+                    // Outer frame
+                    addBar({-halfW + t * 0.5f, 0, 0}, {t, h, d});      // Left
+                    addBar({halfW - t * 0.5f, 0, 0}, {t, h, d});       // Right
+                    addBar({0, h - t, 0}, {innerW, t, d});              // Top
+                    addBar({0, 0, 0}, {innerW, t, d});                  // Bottom
+
+                    // Vertical dividers
+                    for (int c = 1; c < cols; c++) {
+                        float cx = -halfW + t + (innerW / cols) * c;
+                        addBar({cx, t, 0}, {t, innerH, d});
+                    }
+
+                    // Horizontal dividers
+                    for (int r = 1; r < rows; r++) {
+                        float cy = t + (innerH / rows) * r;
+                        addBar({0, cy, 0}, {innerW, t, d});
+                    }
+
+                    // Compute bounds
+                    AABB frameBounds;
+                    frameBounds.min = glm::vec3(INFINITY);
+                    frameBounds.max = glm::vec3(-INFINITY);
+                    for (const auto& v : allVerts) {
+                        frameBounds.min = glm::min(frameBounds.min, v.position);
+                        frameBounds.max = glm::max(frameBounds.max, v.position);
+                    }
+
+                    // Create single scene object
+                    uint32_t handle = m_modelRenderer->createModel(allVerts, allIndices);
+                    auto obj = std::make_unique<SceneObject>("WinFrame_" + std::to_string(m_sceneObjects.size()));
+                    obj->setBufferHandle(handle);
+                    obj->setIndexCount(static_cast<uint32_t>(allIndices.size()));
+                    obj->setVertexCount(static_cast<uint32_t>(allVerts.size()));
+                    obj->setLocalBounds(frameBounds);
+                    obj->setMeshData(allVerts, allIndices);
+                    obj->setPrimitiveType(PrimitiveType::Cube);
+                    obj->setPrimitiveSize(1.0f);
+                    obj->setPrimitiveColor(color);
+                    obj->setBuildingType("platform_wall");
+                    obj->getTransform().setPosition(placePos);
+                    m_sceneObjects.push_back(std::move(obj));
+
+                    m_screenMessage = "Window frame created";
+                    m_screenMessageTimer = 1.5f;
+                }
+
+                ImGui::Separator();
                 ImGui::Text("Move/Rotate");
-                ImGui::SliderFloat("Move Snap", &m_buildSnapAmount, 0.1f, 2.0f, "%.1fm");
+                ImGui::SliderFloat("Move Snap", &m_buildSnapAmount, 0.01f, 2.0f, "%.2fm");
                 ImGui::SliderFloat("Rotate Snap", &m_buildRotateSnap, 5.0f, 90.0f, "%.0f\xC2\xB0");
 
                 ImGui::Separator();
@@ -16748,17 +17334,172 @@ private:
 
                 ImGui::Separator();
                 ImGui::Text("Frames");
-                ImGui::SliderInt("Frame Size", &m_frameSizeSetting, 1, 16, "%dm");
+                ImGui::SliderInt("Frame Width##fw", &m_frameSizeSetting, 1, 16, "%dm");
+                ImGui::SliderInt("Frame Height##fh", &m_frameHeightSetting, 1, 16, "%dm");
                 ImGui::Checkbox("Frame Placement Mode", &m_framePlacementMode);
                 if (m_framePlacementMode) {
                     m_wallBrushMode = false;
                     m_hSlabBrushMode = false;
                     ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f),
-                        "Click to place a %dm frame", m_frameSizeSetting);
+                        "Click to place a %dx%dm frame", m_frameSizeSetting, m_frameHeightSetting);
+                } else {
+                    m_framePreviewValid = false;
+                }
+
+                if (ImGui::Button("Cut Hole in Wall")) {
+                    cutWallHoleAtSelectedFrame();
+                }
+                ImGui::SameLine();
+                ImGui::TextDisabled("(select a frame first)");
+
+                if (ImGui::Button("UV Viewer")) {
+                    m_showUVViewer = !m_showUVViewer;
                 }
 
             }
         }
+        ImGui::End();
+    }
+
+    bool m_showUVViewer = false;
+
+    void renderUVViewer() {
+        if (!m_showUVViewer) return;
+
+        ImGui::SetNextWindowSize(ImVec2(500, 500), ImGuiCond_FirstUseEver);
+        if (!ImGui::Begin("UV Map Viewer", &m_showUVViewer)) {
+            ImGui::End();
+            return;
+        }
+
+        // Find selected wall
+        int selIdx = m_selectedBuildPiece >= 0 ? m_selectedBuildPiece : m_selectedObjectIndex;
+        SceneObject* sel = nullptr;
+        if (selIdx >= 0 && selIdx < static_cast<int>(m_sceneObjects.size()) && m_sceneObjects[selIdx])
+            sel = m_sceneObjects[selIdx].get();
+
+        if (!sel || !sel->hasMeshData()) {
+            ImGui::Text("Select a wall/slab with mesh data");
+            ImGui::End();
+            return;
+        }
+
+        ImGui::Text("%s (%d verts, %d tris)", sel->getName().c_str(),
+                    sel->getVertexCount(), static_cast<int>(sel->getIndices().size()) / 3);
+
+        // Filter by normal
+        static int normalFilter = 0; // 0=all, 1=+X, 2=-X, 3=+Y, 4=-Y, 5=+Z, 6=-Z
+        ImGui::Combo("Normal Filter", &normalFilter,
+                     "All\0+X\0-X\0+Y\0-Y\0+Z\0-Z\0");
+
+        ImVec2 canvasPos = ImGui::GetCursorScreenPos();
+        ImVec2 canvasSize = ImGui::GetContentRegionAvail();
+        if (canvasSize.x < 50) canvasSize.x = 50;
+        if (canvasSize.y < 50) canvasSize.y = 50;
+
+        // Draw background
+        ImDrawList* draw = ImGui::GetWindowDrawList();
+        draw->AddRectFilled(canvasPos, ImVec2(canvasPos.x + canvasSize.x, canvasPos.y + canvasSize.y),
+                            IM_COL32(30, 30, 30, 255));
+
+        {
+            float gridStep = 1.0f;
+            ImU32 gridCol = IM_COL32(60, 60, 60, 255);
+
+            const auto& verts = sel->getVertices();
+            float uMin = 1e9f, uMax = -1e9f, vMin = 1e9f, vMax = -1e9f;
+            for (const auto& v : verts) {
+                uMin = std::min(uMin, v.texCoord.x); uMax = std::max(uMax, v.texCoord.x);
+                vMin = std::min(vMin, v.texCoord.y); vMax = std::max(vMax, v.texCoord.y);
+            }
+            float uvW = uMax - uMin, uvH = vMax - vMin;
+            if (uvW < 0.001f) uvW = 1.0f;
+            if (uvH < 0.001f) uvH = 1.0f;
+
+            // Add margin
+            float margin = 0.5f;
+            uMin -= margin; uMax += margin;
+            vMin -= margin; vMax += margin;
+            uvW = uMax - uMin;
+            uvH = vMax - vMin;
+
+            // Scale to fit canvas (preserve aspect ratio)
+            float scaleX = canvasSize.x / uvW;
+            float scaleY = canvasSize.y / uvH;
+            float scale = std::min(scaleX, scaleY);
+
+            float offsetX = canvasPos.x + (canvasSize.x - uvW * scale) * 0.5f;
+            float offsetY = canvasPos.y + (canvasSize.y - uvH * scale) * 0.5f;
+
+            auto uvToScreen = [&](float u, float v) -> ImVec2 {
+                return ImVec2(offsetX + (u - uMin) * scale,
+                              offsetY + (vMax - v) * scale); // flip V (UV origin bottom-left)
+            };
+
+            // Draw grid
+            for (float u = std::floor(uMin); u <= uMax; u += gridStep) {
+                ImVec2 a = uvToScreen(u, vMin), b = uvToScreen(u, vMax);
+                draw->AddLine(a, b, gridCol);
+            }
+            for (float v = std::floor(vMin); v <= vMax; v += gridStep) {
+                ImVec2 a = uvToScreen(uMin, v), b = uvToScreen(uMax, v);
+                draw->AddLine(a, b, gridCol);
+            }
+
+            // Draw UV triangles
+            const auto& indices = sel->getIndices();
+            ImU32 colors[] = {
+                IM_COL32(0, 200, 255, 180),   // +X cyan
+                IM_COL32(0, 100, 200, 180),   // -X dark cyan
+                IM_COL32(0, 255, 100, 180),   // +Y green
+                IM_COL32(100, 200, 0, 180),   // -Y dark green
+                IM_COL32(255, 200, 0, 180),   // +Z yellow
+                IM_COL32(200, 100, 0, 180),   // -Z orange
+                IM_COL32(255, 255, 255, 180), // other
+            };
+
+            for (size_t i = 0; i + 2 < indices.size(); i += 3) {
+                const auto& v0 = verts[indices[i]];
+                const auto& v1 = verts[indices[i + 1]];
+                const auto& v2 = verts[indices[i + 2]];
+
+                // Determine normal category
+                glm::vec3 n = v0.normal;
+                int cat = 6; // other
+                if (n.x > 0.5f) cat = 0;
+                else if (n.x < -0.5f) cat = 1;
+                else if (n.y > 0.5f) cat = 2;
+                else if (n.y < -0.5f) cat = 3;
+                else if (n.z > 0.5f) cat = 4;
+                else if (n.z < -0.5f) cat = 5;
+
+                // Apply filter
+                if (normalFilter > 0 && cat != normalFilter - 1) continue;
+
+                ImVec2 p0 = uvToScreen(v0.texCoord.x, v0.texCoord.y);
+                ImVec2 p1 = uvToScreen(v1.texCoord.x, v1.texCoord.y);
+                ImVec2 p2 = uvToScreen(v2.texCoord.x, v2.texCoord.y);
+
+                // Filled triangle
+                draw->AddTriangleFilled(p0, p1, p2, IM_COL32(colors[cat] & 0xFF,
+                    (colors[cat] >> 8) & 0xFF, (colors[cat] >> 16) & 0xFF, 40));
+                // Wireframe
+                draw->AddTriangle(p0, p1, p2, colors[cat], 1.0f);
+            }
+
+            // Legend
+            ImVec2 legendPos(canvasPos.x + 5, canvasPos.y + 5);
+            const char* labels[] = {"+X", "-X", "+Y", "-Y", "+Z", "-Z"};
+            for (int i = 0; i < 6; i++) {
+                draw->AddRectFilled(legendPos, ImVec2(legendPos.x + 12, legendPos.y + 12), colors[i]);
+                draw->AddText(ImVec2(legendPos.x + 16, legendPos.y - 1), IM_COL32(255,255,255,255), labels[i]);
+                legendPos.y += 16;
+            }
+
+            ImGui::Text("UV range: u(%.1f-%.1f) v(%.1f-%.1f)", uMin + margin, uMax - margin, vMin + margin, vMax - margin);
+        }
+
+        ImGui::Dummy(canvasSize); // reserve space
         ImGui::End();
     }
 
@@ -19522,6 +20263,10 @@ private:
 
         // Add all scene objects and their mesh data
         for (const auto& obj : m_sceneObjects) {
+            if (!obj) continue;
+            // Skip objects that JSON serializer also skips (must match to prevent count mismatch)
+            if (obj->getModelPath().empty() && !obj->isPrimitive()) continue;
+
             // Skip skinned models for now (V1 limitation - they'll load from GLB)
             if (obj->isSkinned()) {
                 // Add skinned object with no mesh (it will fallback to GLB loading)
@@ -19771,6 +20516,8 @@ private:
             if (!binObj.buildingType.empty()) {
                 obj->setBuildingType(binObj.buildingType);
             }
+            obj->setTransparent(binObj.transparent);
+            obj->setIndoor(binObj.indoor);
 
             // Primitive properties
             if (binObj.isPrimitive) {
@@ -21546,20 +22293,11 @@ private:
                 if (bt != "platform_slab" && bt != "platform_wall") continue;
                 if (obj->isKinematicPlatform()) continue;
 
-                AABB localBounds = obj->getLocalBounds();
-                glm::vec3 localHalfExtents = (localBounds.max - localBounds.min) * 0.5f;
-                glm::vec3 localCenterOffset = (localBounds.min + localBounds.max) * 0.5f;
-                glm::vec3 scale = obj->getTransform().getScale();
-                localHalfExtents *= scale;
-                localCenterOffset *= scale;
-                glm::vec3 position = obj->getTransform().getPosition();
-                glm::quat rotation = obj->getTransform().getRotation();
-                glm::vec3 center = position + rotation * localCenterOffset;
-
-                m_characterController->addStaticBox(localHalfExtents, center, rotation);
-
-                // Disable AABB collision since Jolt handles it now
-                obj->setAABBCollision(false);
+                // Building pieces use AABB collision exclusively (NOT Jolt).
+                // AABB runs in all modes and supports wall hole skip.
+                obj->setAABBCollision(true);
+                // Clear any stale Bullet/Jolt collision from old saves
+                obj->setBulletCollisionType(BulletCollisionType::NONE);
             }
 
             // Add collision bodies from scene objects with Bullet collision
@@ -21600,13 +22338,16 @@ private:
                 }
             }
 
-            // Add AABB collision objects as boxes
+            // Add AABB collision objects as Jolt boxes (NOT building pieces — those use AABB only)
             for (auto& obj : m_sceneObjects) {
                 if (!obj || !obj->isVisible()) continue;
                 if (!obj->hasAABBCollision() && !obj->hasCollision()) continue;
                 if (obj->hasBulletCollision()) continue;  // Already added as mesh
                 if (obj->isKinematicPlatform()) continue;  // Already added above
                 if (obj->getBeingType() == BeingType::INTERACTION) continue;  // Dynamic, not static
+                // Skip building pieces — they use AABB collision with hole skip, not Jolt
+                const auto& bt = obj->getBuildingType();
+                if (bt == "platform_slab" || bt == "platform_wall") continue;
 
                 AABB bounds = obj->getWorldBounds();
                 glm::vec3 center = (bounds.min + bounds.max) * 0.5f;
@@ -23828,6 +24569,7 @@ private:
 
     // Deferred rock spawn — wait 2 frames after dig so Jolt processes new heightfield
     int m_pendingRockFrames = 0;
+    bool m_pendingObjectRemoval = false;
     float m_pendingRockX = 0.0f, m_pendingRockZ = 0.0f;
 
     // Wheelbarrow rolling sound
@@ -25606,12 +26348,14 @@ private:
     std::vector<AIContextSession> m_aiContextFull;
 
     // Wall frame placement
-    int m_frameSizeSetting = 4;
+    int m_frameSizeSetting = 4;   // Frame width
+    int m_frameHeightSetting = 4; // Frame height
     bool m_framePlacementMode = false;
     bool m_framePreviewValid = false;
     glm::vec3 m_framePreviewPos{0.0f};
     float m_framePreviewYaw = 0.0f;
     float m_framePreviewSize = 4.0f;
+    float m_framePreviewHeight = 4.0f;
     float m_framePreviewNX = 0.0f;
     float m_framePreviewNY = 0.0f;
     float m_framePreviewNZ = 1.0f;
@@ -25636,6 +26380,15 @@ private:
     float m_hSlabLength = 4.0f;   // H-slab X dimension for Place button
     float m_hSlabWidth = 4.0f;    // H-slab Z dimension for Place button
     float m_vSlabLength = 4.0f;   // V-slab X dimension for Place button
+
+    // Window frame creator
+    float m_winFrameWidth = 2.0f;
+    float m_winFrameHeight = 2.0f;
+    int m_winFrameCols = 2;
+    int m_winFrameRows = 1;
+    float m_winFrameThickness = 0.08f;
+    float m_winFrameDepth = 0.15f;
+    glm::vec3 m_winFrameColor{0.25f, 0.2f, 0.15f}; // Dark brown default
 
     // Platform grid map mode
     bool m_mapModeActive = false;

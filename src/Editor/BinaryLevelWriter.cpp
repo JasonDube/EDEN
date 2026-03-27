@@ -138,6 +138,8 @@ void BinaryLevelWriter::addObject(const SceneObject& obj, int32_t meshId, const 
     if (obj.isSkinned()) entry.flags |= BOF_IS_SKINNED;
     if (obj.isPrimitive()) entry.flags |= BOF_IS_PRIMITIVE;
     if (obj.isDoor()) entry.flags |= BOF_IS_DOOR;
+    if (obj.isTransparent()) entry.flags |= BOF_TRANSPARENT;
+    if (obj.isIndoor()) entry.flags |= BOF_INDOOR;
 
     // Frozen transform
     if (obj.hasFrozenTransform()) {

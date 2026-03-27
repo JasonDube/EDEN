@@ -391,6 +391,15 @@ void ModelRenderer::createPipeline(VkRenderPass renderPass, VkExtent2D extent) {
         throw std::runtime_error("Failed to create x-ray model pipeline");
     }
 
+    // Create transparent pipeline (backface culling ON, depth write ON, alpha blending)
+    // This renders only the nearest face with blending — looks correct from both sides
+    rasterizer.cullMode = VK_CULL_MODE_BACK_BIT;
+    depthStencil.depthWriteEnable = VK_TRUE;
+    // Keep blend settings from above
+    if (vkCreateGraphicsPipelines(m_context.getDevice(), VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &m_transparentPipeline) != VK_SUCCESS) {
+        throw std::runtime_error("Failed to create transparent model pipeline");
+    }
+
     vkDestroyShaderModule(m_context.getDevice(), vertModule, nullptr);
     vkDestroyShaderModule(m_context.getDevice(), fragModule, nullptr);
 }
@@ -1143,14 +1152,16 @@ void ModelRenderer::setDayNight(float sunY, float ambientLevel) {
 void ModelRenderer::render(VkCommandBuffer commandBuffer, const glm::mat4& viewProj,
                            uint32_t modelHandle, const glm::mat4& modelMatrix,
                            float hueShift, float saturation, float brightness,
-                           bool twoSided, bool indoor) {
+                           bool twoSided, bool indoor, bool transparent) {
     auto it = m_models.find(modelHandle);
     if (it == m_models.end()) return;
 
     ModelGPUData& data = it->second;
 
-    vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                      twoSided ? m_twoSidedPipeline : m_pipeline);
+    VkPipeline pipe = m_pipeline;
+    if (transparent && m_transparentPipeline) pipe = m_transparentPipeline;
+    else if (twoSided) pipe = m_twoSidedPipeline;
+    vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
 
     // Bind descriptor sets: set 0 = texture, set 1 = light UBO
     VkDescriptorSet descSet = data.hasTexture ? data.descriptorSet : m_defaultDescriptorSet;
@@ -1717,6 +1728,10 @@ void ModelRenderer::recreatePipeline(VkRenderPass renderPass, VkExtent2D extent)
     if (m_twoSidedPipeline) {
         vkDestroyPipeline(device, m_twoSidedPipeline, nullptr);
         m_twoSidedPipeline = VK_NULL_HANDLE;
+    }
+    if (m_transparentPipeline) {
+        vkDestroyPipeline(device, m_transparentPipeline, nullptr);
+        m_transparentPipeline = VK_NULL_HANDLE;
     }
     if (m_pipelineLayout) {
         vkDestroyPipelineLayout(device, m_pipelineLayout, nullptr);

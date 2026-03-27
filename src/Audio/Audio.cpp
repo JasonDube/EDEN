@@ -144,33 +144,36 @@ void Audio::playSound(int handle, float volume) {
 void Audio::playSound(const std::string& filepath, float volume) {
     if (!m_initialized) return;
 
-    // Get absolute path for miniaudio
-    std::string absPath = filepath;
-    if (!std::filesystem::path(filepath).is_absolute()) {
-        absPath = std::filesystem::absolute(filepath).string();
-    }
-
-    // Clean up finished one-shot sounds from previous calls
-    m_impl->sounds.erase(
-        std::remove_if(m_impl->sounds.begin(), m_impl->sounds.end(),
-            [](ma_sound* s) {
-                if (!ma_sound_is_playing(s)) {
-                    ma_sound_uninit(s);
-                    delete s;
-                    return true;
-                }
-                return false;
-            }),
-        m_impl->sounds.end());
-
-    // Play sound with volume control
+    // Play the sound using the engine's one-shot API
+    // Volume is baked into the sound object for proper control
     ma_sound* sound = new ma_sound();
-    if (ma_sound_init_from_file(&m_impl->engine, absPath.c_str(), 0, nullptr, nullptr, sound) != MA_SUCCESS) {
-        delete sound;
-        return;
+    if (ma_sound_init_from_file(&m_impl->engine, filepath.c_str(), MA_SOUND_FLAG_DECODE,
+                                nullptr, nullptr, sound) != MA_SUCCESS) {
+        // Try absolute path as fallback
+        std::string absPath = std::filesystem::absolute(filepath).string();
+        if (ma_sound_init_from_file(&m_impl->engine, absPath.c_str(), MA_SOUND_FLAG_DECODE,
+                                    nullptr, nullptr, sound) != MA_SUCCESS) {
+            delete sound;
+            return;
+        }
     }
     ma_sound_set_volume(sound, volume);
     ma_sound_start(sound);
+
+    // Clean up finished sounds (limit check frequency)
+    if (m_impl->sounds.size() > 8) {
+        m_impl->sounds.erase(
+            std::remove_if(m_impl->sounds.begin(), m_impl->sounds.end(),
+                [](ma_sound* s) {
+                    if (!ma_sound_is_playing(s)) {
+                        ma_sound_uninit(s);
+                        delete s;
+                        return true;
+                    }
+                    return false;
+                }),
+            m_impl->sounds.end());
+    }
     m_impl->sounds.push_back(sound);
 }
 

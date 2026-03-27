@@ -85,6 +85,8 @@ enum BinaryObjectFlags : uint32_t {
     BOF_IS_SKINNED       = 1 << 6,
     BOF_IS_PRIMITIVE     = 1 << 7,
     BOF_IS_DOOR          = 1 << 8,
+    BOF_TRANSPARENT      = 1 << 9,
+    BOF_INDOOR           = 1 << 10,
 };
 
 // Object entry - describes one scene object

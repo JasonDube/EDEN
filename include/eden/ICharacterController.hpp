@@ -36,7 +36,10 @@ public:
                                const glm::vec3& position,
                                const glm::quat& rotation = glm::quat(1, 0, 0, 0)) = 0;
 
-    // Add static mesh that can be removed later (returns body ID)
+    // Add static bodies that can be removed later (returns body ID)
+    virtual uint32_t addStaticBoxWithId(const glm::vec3& halfExtents,
+                                         const glm::vec3& position,
+                                         const glm::quat& rotation = glm::quat(1, 0, 0, 0)) = 0;
     virtual uint32_t addStaticMeshWithId(const std::vector<glm::vec3>& vertices,
                                           const std::vector<uint32_t>& indices,
                                           const glm::mat4& transform = glm::mat4(1.0f)) = 0;

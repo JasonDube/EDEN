@@ -3653,6 +3653,11 @@ void EditorUI::renderBuildingTextureWindow() {
     if (ImGui::Button("Import Texture...")) {
         m_wantImportBuildingTexture = true;
     }
+    ImGui::Text("Opacity:");
+    ImGui::SetNextItemWidth(-1);
+    if (ImGui::SliderFloat("##opacity", &m_blockOpacity, 0.05f, 1.0f, "%.2f", ImGuiSliderFlags_AlwaysClamp)) {
+        m_wantApplyOpacity = true;
+    }
 
     ImGui::Separator();
 

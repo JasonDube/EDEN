@@ -231,6 +231,11 @@ public:
     bool hasJoltBody() const { return m_joltBodyId != UINT32_MAX; }
     void clearJoltBody() { m_joltBodyId = UINT32_MAX; }
 
+    // Wall hole bounds (world-space AABB of the hole opening, for collision skip)
+    void addWallHole(const glm::vec3& holeMin, const glm::vec3& holeMax) { m_wallHoles.push_back({holeMin, holeMax}); }
+    const std::vector<AABB>& getWallHoles() const { return m_wallHoles; }
+    bool hasWallHoles() const { return !m_wallHoles.empty(); }
+
     // Physics offset (local center offset for physics body alignment)
     void setPhysicsOffset(const glm::vec3& offset) { m_physicsOffset = offset; }
     glm::vec3 getPhysicsOffset() const { return m_physicsOffset; }
@@ -757,6 +762,7 @@ private:
     BulletCollisionType m_bulletCollisionType = BulletCollisionType::NONE;  // Bullet physics collision
     bool m_isKinematicPlatform = false;  // Is this a lift/moving platform?
     uint32_t m_joltBodyId = UINT32_MAX;  // Runtime Jolt body ID (play mode only)
+    std::vector<AABB> m_wallHoles;       // World-space hole openings for collision skip
     glm::vec3 m_physicsOffset{0.0f};     // Local center offset for physics body alignment
 
     // Frozen transform - rotation/scale baked into vertices (for serialization)

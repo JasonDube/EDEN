@@ -53,6 +53,8 @@ struct BinaryObjectData {
     bool isSkinned = false;
     bool isPrimitive = false;
     bool isDoor = false;
+    bool transparent = false;
+    bool indoor = false;
 
     // Frozen transform
     bool hasFrozenTransform = false;
