@@ -12146,12 +12146,58 @@ private:
                         newPos.x = std::round((newPos.x - snapOffX) / snap) * snap + snapOffX;
                         newPos.z = std::round((newPos.z - snapOffZ) / snap) * snap + snapOffZ;
                         newPos.y = planeY;
+
                         obj->getTransform().setPosition(newPos);
                     }
                 }
             }
             if (!Input::isMouseButtonDown(Input::MOUSE_LEFT)) {
                 m_buildMoveDragging = false;
+            }
+        }
+
+        // G key: cycle selected WinFrame through wall holes (snap + orient)
+        if (m_selectedBuildPiece >= 0 && m_selectedBuildPiece < static_cast<int>(m_sceneObjects.size())
+            && m_sceneObjects[m_selectedBuildPiece] && m_showSiloConfig
+            && Input::isKeyPressed(Input::KEY_G) && !ImGui::GetIO().WantCaptureKeyboard) {
+            auto* snapObj = m_sceneObjects[m_selectedBuildPiece].get();
+            if (snapObj->getName().find("WinFrame_") == 0 || snapObj->getBuildingType() == "platform_wall") {
+                // Collect all holes with their parent wall
+                struct HoleInfo { AABB hole; SceneObject* wall; };
+                std::vector<HoleInfo> allHoles;
+                for (const auto& wobj : m_sceneObjects) {
+                    if (!wobj || !wobj->hasWallHoles()) continue;
+                    for (const auto& h : wobj->getWallHoles())
+                        allHoles.push_back({h, wobj.get()});
+                }
+
+                if (allHoles.empty()) {
+                    m_screenMessage = "No holes found";
+                    m_screenMessageTimer = 1.0f;
+                } else {
+                    // Cycle: advance index each press
+                    static int snapHoleIdx = -1;
+                    snapHoleIdx = (snapHoleIdx + 1) % static_cast<int>(allHoles.size());
+
+                    auto& hi = allHoles[snapHoleIdx];
+                    glm::vec3 hc = (hi.hole.min + hi.hole.max) * 0.5f;
+                    glm::vec3 snapPos = hc;
+                    snapPos.y = hi.hole.min.y; // bottom-anchored
+
+                    // Orient frame to match the wall — determine wall facing direction
+                    // The thin axis of the hole is the expanded one (approach zone)
+                    float xExtent = hi.hole.max.x - hi.hole.min.x;
+                    float zExtent = hi.hole.max.z - hi.hole.min.z;
+                    // The expanded axis is much larger than the wall thickness
+                    // If X is expanded → wall faces X → frame yaw = 90
+                    // If Z is expanded → wall faces Z → frame yaw = 0
+                    float yaw = (xExtent > zExtent) ? 90.0f : 0.0f;
+                    snapObj->setEulerRotation({0, yaw, 0});
+                    snapObj->getTransform().setPosition(snapPos);
+
+                    m_screenMessage = "Hole " + std::to_string(snapHoleIdx + 1) + "/" + std::to_string(allHoles.size());
+                    m_screenMessageTimer = 1.5f;
+                }
             }
         }
 
