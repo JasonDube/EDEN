@@ -178,7 +178,13 @@ public:
         m_texHue.resize(count, 0.0f);
         m_texSat.resize(count, 1.0f);
         m_texBright.resize(count, 1.0f);
+        m_terrainThumbnails.resize(count, nullptr);
         if (m_selectedTexture >= count) m_selectedTexture = 0;
+    }
+
+    void setTerrainThumbnail(int slot, void* descriptor) {
+        if (slot >= 0 && slot < static_cast<int>(m_terrainThumbnails.size()))
+            m_terrainThumbnails[slot] = descriptor;
     }
 
     // Callbacks
@@ -516,6 +522,7 @@ private:
     std::vector<std::string> m_textureNames{"Grass", "Sand/Dirt", "Rock", "Snow"};
     int m_textureCount = 4;
     std::vector<glm::vec3> m_textureColors;
+    std::vector<void*> m_terrainThumbnails; // ImGui descriptors for terrain texture thumbnails
 
     AssignTextureSlotCallback m_onAssignTextureSlot;
 

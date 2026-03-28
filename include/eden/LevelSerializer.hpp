@@ -96,6 +96,7 @@ struct LevelData {
         float patrolSpeed = 5.0f;    // Movement speed for FOLLOW_PATH
         std::string description;     // Description visible to AI perception
         std::string buildingType;    // Building catalog type (e.g. "farm")
+        std::vector<std::pair<glm::vec3, glm::vec3>> wallHoles; // (min, max) pairs for collision skip
         std::vector<BehaviorData> behaviors;  // Behaviors for this object
 
         // Skinned/animated model support

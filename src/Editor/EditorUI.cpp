@@ -115,7 +115,7 @@ void EditorUI::render() {
         const auto& name = obj->getName();
         const auto& bt = obj->getBuildingType();
         hasBuildingSelected = (name.find("Building_") == 0 || name.find("Foundation_") == 0 ||
-                               bt == "platform_slab" || bt == "platform_wall" || bt == "wall_frame");
+                               bt == "platform_slab" || bt == "platform_wall" || bt == "wall_frame" || bt == "window_frame");
     }
     if (m_showBuildingTextures || inBuildMode || hasBuildingSelected) {
         renderBuildingTextureWindow();
@@ -467,9 +467,17 @@ void EditorUI::renderTextureSelector() {
                 ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.3f, 0.6f, 0.9f, 1.0f));
             }
 
-            ImVec4 col = texColor(i, m_textureCount);
-            if (ImGui::ColorButton("##tex", col, 0, ImVec2(40, 40))) {
-                m_selectedTexture = i;
+            // Thumbnail: use ImGui descriptor if available, otherwise color swatch
+            if (i < static_cast<int>(m_terrainThumbnails.size()) && m_terrainThumbnails[i]) {
+                if (ImGui::ImageButton(("##tex" + std::to_string(i)).c_str(),
+                                       (ImTextureID)m_terrainThumbnails[i], ImVec2(40, 40))) {
+                    m_selectedTexture = i;
+                }
+            } else {
+                ImVec4 col = texColor(i, m_textureCount);
+                if (ImGui::ColorButton("##tex", col, 0, ImVec2(40, 40))) {
+                    m_selectedTexture = i;
+                }
             }
 
             if (selected) {
@@ -482,7 +490,7 @@ void EditorUI::renderTextureSelector() {
 
             ImGui::SameLine();
             char setLabel[32];
-            snprintf(setLabel, sizeof(setLabel), "Set##slot%d", i);
+            snprintf(setLabel, sizeof(setLabel), "Browse##slot%d", i);
             if (ImGui::SmallButton(setLabel)) {
                 if (m_onAssignTextureSlot) {
                     m_onAssignTextureSlot(i);
@@ -3681,7 +3689,7 @@ void EditorUI::renderBuildingTextureWindow() {
         const auto& objName = selObj->getName();
         const auto& objBt = selObj->getBuildingType();
         bool isBuildingPart = (objName.find("Building_") == 0 || objName.find("Foundation_") == 0 ||
-                               objBt == "platform_slab" || objBt == "platform_wall" || objBt == "wall_frame");
+                               objBt == "platform_slab" || objBt == "platform_wall" || objBt == "wall_frame" || objBt == "window_frame");
         if (isBuildingPart && hasTexture) {
             if (ImGui::Button("Apply to Selected", ImVec2(-1, 0))) {
                 if (m_onApplyBuildingTexture) {

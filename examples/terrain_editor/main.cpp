@@ -254,15 +254,23 @@ protected:
         // Pass loaded texture names to the editor UI
         m_editorUI.setTextureNames(m_textureManager->getTextureNames(), m_textureManager->getTextureCount(), m_textureManager->getTextureColors());
 
-        // "Set" button on texture slots — opens texture browser for that slot
+        // Create thumbnails for all existing terrain textures
+        for (int i = 0; i < m_textureManager->getTextureCount(); i++) {
+            createTerrainThumbnail(i);
+        }
+
+        // "Browse" button on texture slots — opens file dialog for that slot
         m_editorUI.setAssignTextureSlotCallback([this](int slotIndex) {
-            m_pendingTextureSlot = slotIndex;
-            m_editorUI.showTextureBrowser() = true;
-            m_textureBrowser.setTextureSelectedCallback([this](const std::string& path) {
-                if (m_pendingTextureSlot < 0) return;
-                assignTextureToSlot(m_pendingTextureSlot, path);
-                m_pendingTextureSlot = -1;
-            });
+            // Open file dialog to browse for a texture
+            nfdchar_t* outPath = nullptr;
+            nfdfilteritem_t filters[] = {{"Images", "png,jpg,jpeg,dds"}};
+            nfdresult_t result = NFD_OpenDialog(&outPath, filters, 1, nullptr);
+            if (result == NFD_OKAY && outPath) {
+                assignTextureToSlot(slotIndex, std::string(outPath));
+                // Create thumbnail for this slot
+                createTerrainThumbnail(slotIndex);
+                NFD_FreePath(outPath);
+            }
         });
 
         m_pipeline = std::make_unique<TerrainPipeline>(
@@ -4949,18 +4957,24 @@ private:
         AABB fb = frame->getWorldBounds();
         float thick = isXFace ? wallScl.x : wallScl.z;
 
-        // Use actual world bounds for both wall and hole
+        // Use actual world bounds for wall
         float wallMinH = isXFace ? wb.min.z : wb.min.x;
         float wallMaxH = isXFace ? wb.max.z : wb.max.x;
         float wallMinV = wb.min.y;
         float wallMaxV = wb.max.y;
-        // Use actual bounds center, not wallPos (which may not be at geometric center)
         float wallThinCenter = isXFace ? (wb.min.x + wb.max.x) * 0.5f : (wb.min.z + wb.max.z) * 0.5f;
 
-        float holeMinH = isXFace ? fb.min.z : fb.min.x;
-        float holeMaxH = isXFace ? fb.max.z : fb.max.x;
-        float holeMinV = fb.min.y;
-        float holeMaxV = fb.max.y;
+        // Hole bounds directly from frame position + scale (no AABB rounding)
+        float holeMinH, holeMaxH;
+        if (!isXFace) {
+            holeMinH = framePos.x - frameScl.x * 0.5f;
+            holeMaxH = framePos.x + frameScl.x * 0.5f;
+        } else {
+            holeMinH = framePos.z - frameScl.x * 0.5f;
+            holeMaxH = framePos.z + frameScl.x * 0.5f;
+        }
+        float holeMinV = framePos.y;  // bottom-anchored
+        float holeMaxV = framePos.y + frameScl.y;
 
         holeMinH = std::max(holeMinH, wallMinH);
         holeMaxH = std::min(holeMaxH, wallMaxH);
@@ -4976,56 +4990,48 @@ private:
 
         // === COLLISION: trigger box at hole — wall keeps AABB, hole-skip lets player through ===
         {
-            glm::vec3 hMin = fb.min, hMax = fb.max;
-            // Expand in wall's thin direction so player is detected approaching
+            glm::vec3 hMin, hMax;
+            if (!isXFace) {
+                hMin = {holeMinH, holeMinV, wb.min.z};
+                hMax = {holeMaxH, holeMaxV, wb.max.z};
+            } else {
+                hMin = {wb.min.x, holeMinV, holeMinH};
+                hMax = {wb.max.x, holeMaxV, holeMaxH};
+            }
             const float approach = 1.5f;
             if (!isXFace) { hMin.z -= approach; hMax.z += approach; }
             else { hMin.x -= approach; hMax.x += approach; }
             wall->addWallHole(hMin, hMax);
         }
 
-        // === VISIBILITY: split cut-axis faces into strips around the hole ===
-        // Non-cut faces pass through with original UVs intact
-        // Wall keeps AABB collision — hole-skip triggers handle walkthrough
+        // === VISIBILITY: grid-based mesh rebuild from ALL holes ===
+        // Rebuild cut-axis faces from scratch using a grid of ALL hole edges.
+        // Non-cut faces pass through with original UVs intact.
         auto oldVerts = wall->getVertices();
         std::vector<ModelVertex> newVerts;
         std::vector<uint32_t> newInds;
         glm::vec4 vertColor = wall->hasTextureData() ? glm::vec4(1.0f) : oldVerts[0].color;
 
-        // Hole bounds in local space
-        float locHMin, locHMax;
-        if (!isXFace) {
-            locHMin = (holeMinH - wallPos.x) / wallScl.x;
-            locHMax = (holeMaxH - wallPos.x) / wallScl.x;
-        } else {
-            locHMin = (holeMinH - wallPos.z) / wallScl.z;
-            locHMax = (holeMaxH - wallPos.z) / wallScl.z;
+        // Collect ALL hole bounds in local space
+        struct LocalHole { float hMin, hMax, vMin, vMax; };
+        std::vector<LocalHole> allLocalHoles;
+        for (const auto& wh : wall->getWallHoles()) {
+            LocalHole lh;
+            if (!isXFace) {
+                // Hole stores world coords with approach expansion — use frame-sized bounds
+                // The non-expanded dimensions are the real hole edges
+                lh.hMin = (std::min(wh.min.x, wh.max.x) - wallPos.x) / wallScl.x;
+                lh.hMax = (std::max(wh.min.x, wh.max.x) - wallPos.x) / wallScl.x;
+            } else {
+                lh.hMin = (std::min(wh.min.z, wh.max.z) - wallPos.z) / wallScl.z;
+                lh.hMax = (std::max(wh.min.z, wh.max.z) - wallPos.z) / wallScl.z;
+            }
+            lh.vMin = (wh.min.y - wallPos.y) / wallScl.y;
+            lh.vMax = (wh.max.y - wallPos.y) / wallScl.y;
+            allLocalHoles.push_back(lh);
         }
-        float locVMin = (holeMinV - wallPos.y) / wallScl.y;
-        float locVMax = (holeMaxV - wallPos.y) / wallScl.y;
 
-        // Helper: add a quad preserving the parent face's UV interpolation
-        auto addStrip = [&](glm::vec3 a, glm::vec3 b, glm::vec3 c, glm::vec3 d,
-                           glm::vec3 norm, float qMinH, float qMaxH, float qMinV, float qMaxV,
-                           float faceUMin, float faceUMax, float faceVMin, float faceVMax) {
-            uint32_t base = static_cast<uint32_t>(newVerts.size());
-            float hRange = qMaxH - qMinH, vRange = qMaxV - qMinV;
-            auto interpUV = [&](glm::vec3 p) -> glm::vec2 {
-                float h = (!isXFace) ? p.x : p.z;
-                float s = (hRange > 0.001f) ? (h - qMinH) / hRange : 0.5f;
-                float t = (vRange > 0.001f) ? (p.y - qMinV) / vRange : 0.5f;
-                return {faceUMin + s * (faceUMax - faceUMin),
-                        faceVMin + t * (faceVMax - faceVMin)};
-            };
-            ModelVertex v; v.color = vertColor; v.normal = norm;
-            v.position = a; v.texCoord = interpUV(a); newVerts.push_back(v);
-            v.position = b; v.texCoord = interpUV(b); newVerts.push_back(v);
-            v.position = c; v.texCoord = interpUV(c); newVerts.push_back(v);
-            v.position = d; v.texCoord = interpUV(d); newVerts.push_back(v);
-            newInds.push_back(base); newInds.push_back(base+1); newInds.push_back(base+2);
-            newInds.push_back(base); newInds.push_back(base+2); newInds.push_back(base+3);
-        };
-
+        // Pass through non-cut faces
         int numQuads = static_cast<int>(oldVerts.size()) / 4;
         for (int qi = 0; qi < numQuads; qi++) {
             int vi = qi * 4;
@@ -5033,70 +5039,146 @@ private:
             glm::vec3 n = oldVerts[vi].normal;
             bool onCutAxis = (!isXFace && std::abs(n.z) > 0.5f) ||
                              (isXFace && std::abs(n.x) > 0.5f);
-
             if (!onCutAxis) {
-                // Pass through — keep original vertices with original UVs
                 uint32_t base = static_cast<uint32_t>(newVerts.size());
                 for (int k = 0; k < 4; k++) newVerts.push_back(oldVerts[vi + k]);
                 newInds.push_back(base); newInds.push_back(base+1); newInds.push_back(base+2);
                 newInds.push_back(base); newInds.push_back(base+2); newInds.push_back(base+3);
-                continue;
             }
+        }
 
-            // Get quad bounds and UV range
-            float qMinH = 1e9f, qMaxH = -1e9f, qMinV = 1e9f, qMaxV = -1e9f;
-            float fUMin = 1e9f, fUMax = -1e9f, fVMin = 1e9f, fVMax = -1e9f;
-            for (int k = 0; k < 4; k++) {
-                glm::vec3 p = oldVerts[vi+k].position;
-                float h = (!isXFace) ? p.x : p.z;
-                qMinH = std::min(qMinH, h); qMaxH = std::max(qMaxH, h);
-                qMinV = std::min(qMinV, p.y); qMaxV = std::max(qMaxV, p.y);
-                fUMin = std::min(fUMin, oldVerts[vi+k].texCoord.x);
-                fUMax = std::max(fUMax, oldVerts[vi+k].texCoord.x);
-                fVMin = std::min(fVMin, oldVerts[vi+k].texCoord.y);
-                fVMax = std::max(fVMax, oldVerts[vi+k].texCoord.y);
-            }
+        // Rebuild ENTIRE cut-axis faces from scratch using ONE grid per face
+        // Find all unique (depth, normal-sign) faces on the cut axis
+        struct FaceInfo { float depth; bool back; glm::vec3 normal; glm::vec2 uvBL, uvBR, uvTL, uvTR; };
+        std::vector<FaceInfo> cutFaces;
+        for (int qi = 0; qi < numQuads; qi++) {
+            int vi = qi * 4;
+            if (vi + 3 >= static_cast<int>(oldVerts.size())) break;
+            glm::vec3 n = oldVerts[vi].normal;
+            bool onCutAxis = (!isXFace && std::abs(n.z) > 0.5f) ||
+                             (isXFace && std::abs(n.x) > 0.5f);
+            if (!onCutAxis) continue;
 
-            // Check overlap with hole
-            bool overlapH = (qMaxH > locHMin + 0.001f && qMinH < locHMax - 0.001f);
-            bool overlapV = (qMaxV > locVMin + 0.001f && qMinV < locVMax - 0.001f);
-            if (!overlapH || !overlapV) {
-                // No overlap — pass through
-                uint32_t base = static_cast<uint32_t>(newVerts.size());
-                for (int k = 0; k < 4; k++) newVerts.push_back(oldVerts[vi + k]);
-                newInds.push_back(base); newInds.push_back(base+1); newInds.push_back(base+2);
-                newInds.push_back(base); newInds.push_back(base+2); newInds.push_back(base+3);
-                continue;
-            }
-
-            // Clamp hole to this quad
-            float cL = std::max(locHMin, qMinH), cR = std::min(locHMax, qMaxH);
-            float cB = std::max(locVMin, qMinV), cT = std::min(locVMax, qMaxV);
-
-            // Get face depth coordinate and determine winding
             float depth = (!isXFace) ? oldVerts[vi].position.z : oldVerts[vi].position.x;
             bool back = (!isXFace) ? (n.z < 0) : (n.x > 0);
-            float eL = back ? qMaxH : qMinH, eR = back ? qMinH : qMaxH;
-            float ecL = back ? cR : cL, ecR = back ? cL : cR;
 
-            // 4 strips around hole (bottom, top, left, right)
-            auto mkVert = [&](float h, float v) -> glm::vec3 {
-                if (!isXFace) return {h, v, depth};
-                else return {depth, v, h};
+            // Check if we already have this face
+            bool found = false;
+            for (auto& cf : cutFaces) {
+                if (std::abs(cf.depth - depth) < 0.01f && cf.back == back) { found = true; break; }
+            }
+            if (found) continue;
+
+            // Get UV corners from GLOBAL min/max across ALL quads at this depth
+            // This gives the original face's full UV range even after previous cuts
+            FaceInfo fi; fi.depth = depth; fi.back = back; fi.normal = n;
+            float globalMinH = 1e9f, globalMaxH = -1e9f, globalMinV = 1e9f, globalMaxV = -1e9f;
+            float globalUMin = 1e9f, globalUMax = -1e9f, globalVMin = 1e9f, globalVMax = -1e9f;
+            for (int qi2 = 0; qi2 < numQuads; qi2++) {
+                int vi2 = qi2 * 4;
+                if (vi2 + 3 >= static_cast<int>(oldVerts.size())) break;
+                float d2 = (!isXFace) ? oldVerts[vi2].position.z : oldVerts[vi2].position.x;
+                bool b2 = (!isXFace) ? (oldVerts[vi2].normal.z < 0) : (oldVerts[vi2].normal.x > 0);
+                if (std::abs(d2 - depth) > 0.01f || b2 != back) continue;
+                for (int k = 0; k < 4; k++) {
+                    float ph = (!isXFace) ? oldVerts[vi2+k].position.x : oldVerts[vi2+k].position.z;
+                    float pv = oldVerts[vi2+k].position.y;
+                    globalMinH = std::min(globalMinH, ph); globalMaxH = std::max(globalMaxH, ph);
+                    globalMinV = std::min(globalMinV, pv); globalMaxV = std::max(globalMaxV, pv);
+                    globalUMin = std::min(globalUMin, oldVerts[vi2+k].texCoord.x);
+                    globalUMax = std::max(globalUMax, oldVerts[vi2+k].texCoord.x);
+                    globalVMin = std::min(globalVMin, oldVerts[vi2+k].texCoord.y);
+                    globalVMax = std::max(globalVMax, oldVerts[vi2+k].texCoord.y);
+                }
+            }
+            // Map UV extremes to face corners based on position-to-UV correlation
+            // For front face: minH→minU, maxH→maxU. For back face: minH→maxU, maxH→minU
+            if (!back) {
+                fi.uvBL = {globalUMin, globalVMin}; fi.uvBR = {globalUMax, globalVMin};
+                fi.uvTL = {globalUMin, globalVMax}; fi.uvTR = {globalUMax, globalVMax};
+            } else {
+                fi.uvBL = {globalUMax, globalVMin}; fi.uvBR = {globalUMin, globalVMin};
+                fi.uvTL = {globalUMax, globalVMax}; fi.uvTR = {globalUMin, globalVMax};
+            }
+            cutFaces.push_back(fi);
+        }
+
+        // For each unique face, build ONE grid covering the full wall face
+        // Use the cube's known local bounds (not per-quad bounds)
+        float faceMinH = -0.5f, faceMaxH = 0.5f;  // X or Z, centered
+        float faceMinV = 0.0f, faceMaxV = 1.0f;    // Y, bottom-anchored
+
+        for (auto& fi : cutFaces) {
+            // Build grid from ALL holes
+            std::vector<float> hLines = {faceMinH, faceMaxH};
+            std::vector<float> vLines = {faceMinV, faceMaxV};
+            for (const auto& lh : allLocalHoles) {
+                if (lh.hMax > faceMinH && lh.hMin < faceMaxH &&
+                    lh.vMax > faceMinV && lh.vMin < faceMaxV) {
+                    hLines.push_back(std::max(lh.hMin, faceMinH));
+                    hLines.push_back(std::min(lh.hMax, faceMaxH));
+                    vLines.push_back(std::max(lh.vMin, faceMinV));
+                    vLines.push_back(std::min(lh.vMax, faceMaxV));
+                }
+            }
+            std::sort(hLines.begin(), hLines.end());
+            hLines.erase(std::unique(hLines.begin(), hLines.end(),
+                [](float a, float b) { return std::abs(a-b) < 0.0001f; }), hLines.end());
+            std::sort(vLines.begin(), vLines.end());
+            vLines.erase(std::unique(vLines.begin(), vLines.end(),
+                [](float a, float b) { return std::abs(a-b) < 0.0001f; }), vLines.end());
+
+            // UV interpolation
+            float fHRange = faceMaxH - faceMinH, fVRange = faceMaxV - faceMinV;
+            auto gridUV = [&](float h, float v) -> glm::vec2 {
+                float s = (fHRange > 0.001f) ? (h - faceMinH) / fHRange : 0.5f;
+                float t = (fVRange > 0.001f) ? (v - faceMinV) / fVRange : 0.5f;
+                glm::vec2 bot = fi.uvBL + s * (fi.uvBR - fi.uvBL);
+                glm::vec2 top = fi.uvTL + s * (fi.uvTR - fi.uvTL);
+                return bot + t * (top - bot);
             };
 
-            if (cB > qMinV + 0.001f)
-                addStrip(mkVert(eL, qMinV), mkVert(eR, qMinV), mkVert(eR, cB), mkVert(eL, cB),
-                         n, qMinH, qMaxH, qMinV, qMaxV, fUMin, fUMax, fVMin, fVMax);
-            if (cT < qMaxV - 0.001f)
-                addStrip(mkVert(eL, cT), mkVert(eR, cT), mkVert(eR, qMaxV), mkVert(eL, qMaxV),
-                         n, qMinH, qMaxH, qMinV, qMaxV, fUMin, fUMax, fVMin, fVMax);
-            if (cL > qMinH + 0.001f)
-                addStrip(mkVert(eL, cB), mkVert(ecL, cB), mkVert(ecL, cT), mkVert(eL, cT),
-                         n, qMinH, qMaxH, qMinV, qMaxV, fUMin, fUMax, fVMin, fVMax);
-            if (cR < qMaxH - 0.001f)
-                addStrip(mkVert(ecR, cB), mkVert(eR, cB), mkVert(eR, cT), mkVert(ecR, cT),
-                         n, qMinH, qMaxH, qMinV, qMaxV, fUMin, fUMax, fVMin, fVMax);
+            auto mkVert = [&](float h, float v) -> glm::vec3 {
+                if (!isXFace) return {h, v, fi.depth};
+                else return {fi.depth, v, h};
+            };
+
+            // Emit grid cells
+            for (size_t ci = 0; ci + 1 < hLines.size(); ci++) {
+                for (size_t ri = 0; ri + 1 < vLines.size(); ri++) {
+                    float cellL = hLines[ci], cellR = hLines[ci+1];
+                    float cellB = vLines[ri], cellT = vLines[ri+1];
+                    if (cellR - cellL < 0.0001f || cellT - cellB < 0.0001f) continue;
+
+                    float cellCH = (cellL + cellR) * 0.5f;
+                    float cellCV = (cellB + cellT) * 0.5f;
+                    bool inHole = false;
+                    for (const auto& lh : allLocalHoles) {
+                        if (cellCH > lh.hMin + 0.001f && cellCH < lh.hMax - 0.001f &&
+                            cellCV > lh.vMin + 0.001f && cellCV < lh.vMax - 0.001f) {
+                            inHole = true; break;
+                        }
+                    }
+                    if (inHole) continue;
+
+                    float wL = fi.back ? cellR : cellL;
+                    float wR = fi.back ? cellL : cellR;
+                    glm::vec3 a = mkVert(wL, cellB), b = mkVert(wR, cellB);
+                    glm::vec3 c = mkVert(wR, cellT), d = mkVert(wL, cellT);
+                    glm::vec2 uvA = gridUV(cellL, cellB), uvB = gridUV(cellR, cellB);
+                    glm::vec2 uvC = gridUV(cellR, cellT), uvD = gridUV(cellL, cellT);
+                    if (fi.back) { std::swap(uvA, uvB); std::swap(uvC, uvD); }
+
+                    uint32_t base = static_cast<uint32_t>(newVerts.size());
+                    ModelVertex v; v.color = vertColor; v.normal = fi.normal;
+                    v.position = a; v.texCoord = uvA; newVerts.push_back(v);
+                    v.position = b; v.texCoord = uvB; newVerts.push_back(v);
+                    v.position = c; v.texCoord = uvC; newVerts.push_back(v);
+                    v.position = d; v.texCoord = uvD; newVerts.push_back(v);
+                    newInds.push_back(base); newInds.push_back(base+1); newInds.push_back(base+2);
+                    newInds.push_back(base); newInds.push_back(base+2); newInds.push_back(base+3);
+                }
+            }
         }
 
         // Jamb faces (inner walls of the hole connecting front and back)
@@ -5114,6 +5196,18 @@ private:
                 newInds.push_back(base); newInds.push_back(base+1); newInds.push_back(base+2);
                 newInds.push_back(base); newInds.push_back(base+2); newInds.push_back(base+3);
             };
+
+            // Current hole in local space for jambs
+            float locHMin, locHMax;
+            if (!isXFace) {
+                locHMin = (holeMinH - wallPos.x) / wallScl.x;
+                locHMax = (holeMaxH - wallPos.x) / wallScl.x;
+            } else {
+                locHMin = (holeMinH - wallPos.z) / wallScl.z;
+                locHMax = (holeMaxH - wallPos.z) / wallScl.z;
+            }
+            float locVMin = (holeMinV - wallPos.y) / wallScl.y;
+            float locVMax = (holeMaxV - wallPos.y) / wallScl.y;
 
             if (!isXFace) {
                 float zF = cubeH, zB = -cubeH;
@@ -5146,14 +5240,8 @@ private:
             }
         }
 
-        // Update visible wall mesh
-        AABB newBounds;
-        newBounds.min = glm::vec3(INFINITY);
-        newBounds.max = glm::vec3(-INFINITY);
-        for (const auto& v : newVerts) {
-            newBounds.min = glm::min(newBounds.min, v.position);
-            newBounds.max = glm::max(newBounds.max, v.position);
-        }
+        // Update visible wall mesh — keep original local bounds (seam expansion
+        // shifts vertices slightly; recomputing bounds would cause cumulative drift)
         uint32_t oldHandle = wall->getBufferHandle();
         uint32_t newHandle = m_modelRenderer->createModel(newVerts, newInds);
         if (wall->hasTextureData()) {
@@ -5165,7 +5253,7 @@ private:
         wall->setIndexCount(static_cast<uint32_t>(newInds.size()));
         wall->setVertexCount(static_cast<uint32_t>(newVerts.size()));
         wall->setMeshData(newVerts, newInds);
-        wall->setLocalBounds(newBounds);
+        // Do NOT call setLocalBounds — keep original bounds stable
 
         } // end per-wall loop
 
@@ -5213,7 +5301,7 @@ private:
 
             // Expand quad edges slightly outward to seal T-junction pinholes between cuts
             {
-                const float seamEps = 0.0f; // disabled to test if expansion causes flipped faces
+                const float seamEps = 0.0f;
                 glm::vec3 absN = glm::abs(normal);
                 if (absN.z >= absN.x && absN.z >= absN.y) {
                     float midX = (a.x + b.x + c.x + d.x) * 0.25f;
@@ -5531,11 +5619,124 @@ private:
         for (auto& obj : m_sceneObjects) {
             if (!obj) continue;
             const auto& bt = obj->getBuildingType();
-            if (bt == "platform_slab" || bt == "platform_wall" || bt == "wall_frame")
+            if (bt == "platform_slab" || bt == "platform_wall" || bt == "wall_frame" || bt == "window_frame")
                 obj->setSelected(false);
         }
         m_selectedBuildPiece = -1;
         m_editorUI.setSelectedObjectIndex(-1);
+    }
+
+    void createTerrainThumbnail(int slot) {
+        // Load the source image for this slot and create an ImGui thumbnail
+        const std::string& srcPath = m_textureManager->getSlotSourcePath(slot);
+        if (srcPath.empty()) return;
+
+        int w, h, channels;
+        unsigned char* pixels = stbi_load(srcPath.c_str(), &w, &h, &channels, STBI_rgb_alpha);
+        if (!pixels) return;
+
+        // Resize to 64x64 thumbnail
+        const int thumbSize = 64;
+        std::vector<unsigned char> thumb(thumbSize * thumbSize * 4);
+        for (int ty = 0; ty < thumbSize; ty++) {
+            for (int tx = 0; tx < thumbSize; tx++) {
+                int sx = tx * w / thumbSize;
+                int sy = ty * h / thumbSize;
+                int si = (sy * w + sx) * 4;
+                int di = (ty * thumbSize + tx) * 4;
+                thumb[di] = pixels[si]; thumb[di+1] = pixels[si+1];
+                thumb[di+2] = pixels[si+2]; thumb[di+3] = pixels[si+3];
+            }
+        }
+        stbi_image_free(pixels);
+
+        // Create Vulkan image + ImGui descriptor
+        auto& ctx = getContext();
+        VkDevice device = ctx.getDevice();
+
+        VkImageCreateInfo imgInfo{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
+        imgInfo.imageType = VK_IMAGE_TYPE_2D;
+        imgInfo.format = VK_FORMAT_R8G8B8A8_UNORM;
+        imgInfo.extent = {(uint32_t)thumbSize, (uint32_t)thumbSize, 1};
+        imgInfo.mipLevels = 1; imgInfo.arrayLayers = 1;
+        imgInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+        imgInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
+        imgInfo.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+        imgInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+
+        VkImage img; VkDeviceMemory mem;
+        vkCreateImage(device, &imgInfo, nullptr, &img);
+
+        VkMemoryRequirements memReq;
+        vkGetImageMemoryRequirements(device, img, &memReq);
+        VkMemoryAllocateInfo allocInfo{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+        allocInfo.allocationSize = memReq.size;
+        allocInfo.memoryTypeIndex = ctx.findMemoryType(memReq.memoryTypeBits,
+            VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+        vkAllocateMemory(device, &allocInfo, nullptr, &mem);
+        vkBindImageMemory(device, img, mem, 0);
+
+        // Upload via staging buffer
+        VkBuffer stagingBuf; VkDeviceMemory stagingMem;
+        VkDeviceSize bufSize = thumbSize * thumbSize * 4;
+        ctx.createBuffer(bufSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                         VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                         stagingBuf, stagingMem);
+        void* mapped;
+        vkMapMemory(device, stagingMem, 0, bufSize, 0, &mapped);
+        memcpy(mapped, thumb.data(), bufSize);
+        vkUnmapMemory(device, stagingMem);
+
+        VkCommandBuffer cmd = ctx.beginSingleTimeCommands();
+
+        VkImageMemoryBarrier barrier{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+        barrier.image = img;
+        barrier.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+        barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        barrier.srcAccessMask = 0;
+        barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                             VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &barrier);
+
+        VkBufferImageCopy region{};
+        region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+        region.imageExtent = {(uint32_t)thumbSize, (uint32_t)thumbSize, 1};
+        vkCmdCopyBufferToImage(cmd, stagingBuf, img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+
+        barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                             VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr, 0, nullptr, 1, &barrier);
+
+        ctx.endSingleTimeCommands(cmd);
+
+        vkDestroyBuffer(device, stagingBuf, nullptr);
+        vkFreeMemory(device, stagingMem, nullptr);
+
+        VkImageViewCreateInfo viewInfo{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+        viewInfo.image = img;
+        viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+        viewInfo.format = VK_FORMAT_R8G8B8A8_UNORM;
+        viewInfo.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+        VkImageView view;
+        vkCreateImageView(device, &viewInfo, nullptr, &view);
+
+        VkSamplerCreateInfo sampInfo{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
+        sampInfo.magFilter = VK_FILTER_LINEAR; sampInfo.minFilter = VK_FILTER_LINEAR;
+        VkSampler sampler;
+        vkCreateSampler(device, &sampInfo, nullptr, &sampler);
+
+        void* descriptor = ImGui_ImplVulkan_AddTexture(sampler, view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        m_editorUI.setTerrainThumbnail(slot, descriptor);
+
+        // Store for cleanup (not critical — they live for the session)
+        m_terrainThumbImages.push_back(img);
+        m_terrainThumbMemory.push_back(mem);
+        m_terrainThumbViews.push_back(view);
+        m_terrainThumbSamplers.push_back(sampler);
     }
 
     void assignTextureToSlot(int slot, const std::string& path) {
@@ -6894,14 +7095,25 @@ private:
                             // Both blocked, revert completely
                             newPos = glm::vec3(oldCameraPos.x, newPos.y, oldCameraPos.z);
                         }
+
+                        // Check if still colliding (head hit ceiling) — revert Y too
+                        playerMin = glm::vec3(newPos.x - playerRadius, newPos.y - playerHeight, newPos.z - playerRadius);
+                        playerMax = glm::vec3(newPos.x + playerRadius, newPos.y + 0.1f, newPos.z + playerRadius);
+                        bool stillColliding = (playerMax.x > bounds.min.x && playerMin.x < bounds.max.x &&
+                                               playerMax.y > bounds.min.y && playerMin.y < bounds.max.y &&
+                                               playerMax.z > bounds.min.z && playerMin.z < bounds.max.z);
+                        if (stillColliding) {
+                            newPos.y = oldCameraPos.y;
+                        }
+
                         m_camera.setPosition(newPos);
-                        // Sync only X/Z to Jolt — keep Jolt's Y (handles gravity/jump/terrain)
-                        // Camera Y includes eye offset which would compound if synced
                         if (useCharacterController && m_characterController) {
                             glm::vec3 joltPos = m_characterController->getPosition();
-                            m_characterController->setPosition(glm::vec3(newPos.x, joltPos.y, newPos.z));
+                            // Sync X/Z always; sync Y only if we had to revert it (ceiling hit)
+                            float syncY = stillColliding ? (joltPos.y - (newPos.y - oldCameraPos.y)) : joltPos.y;
+                            m_characterController->setPosition(glm::vec3(newPos.x, stillColliding ? joltPos.y : joltPos.y, newPos.z));
                         }
-                        break;  // Only handle one collision per frame
+                        // Continue checking — corners need multiple walls resolved per frame
                     }
                 }
 
@@ -12028,7 +12240,7 @@ private:
                 auto& obj = m_sceneObjects[bi];
                 if (!obj) continue;
                 const auto& bt = obj->getBuildingType();
-                if (bt != "platform_wall" && bt != "platform_slab" && bt != "wall_frame") continue;
+                if (bt != "platform_wall" && bt != "platform_slab" && bt != "wall_frame" && bt != "window_frame") continue;
                 float dist = obj->getWorldBounds().intersect(rayO, rayD);
                 if (dist >= 0 && dist < 200.0f && dist < bestDist) {
                     bestDist = dist;
@@ -17635,7 +17847,7 @@ private:
                     obj->setPrimitiveType(PrimitiveType::Cube);
                     obj->setPrimitiveSize(1.0f);
                     obj->setPrimitiveColor(color);
-                    obj->setBuildingType("platform_wall");
+                    obj->setBuildingType("window_frame");
                     obj->getTransform().setPosition(placePos);
                     m_sceneObjects.push_back(std::move(obj));
 
@@ -20867,6 +21079,11 @@ private:
                 m_physicsWorld->addObject(obj.get(), obj->getBulletCollisionType());
             }
 
+            // Restore wall holes from JSON (not in binary)
+            for (const auto& [hMin, hMax] : jsonObj.wallHoles) {
+                obj->addWallHole(hMin, hMax);
+            }
+
             // Restore behaviors from JSON (not in binary)
             for (const auto& behData : jsonObj.behaviors) {
                 Behavior behavior;
@@ -21182,6 +21399,11 @@ private:
                 }
                 if (!objData.buildingType.empty()) {
                     obj->setBuildingType(objData.buildingType);
+                }
+
+                // Restore wall holes
+                for (const auto& [hMin, hMax] : objData.wallHoles) {
+                    obj->addWallHole(hMin, hMax);
                 }
 
                 // Restore behaviors
@@ -22611,6 +22833,14 @@ private:
             for (auto& obj : m_sceneObjects) {
                 if (!obj || !obj->isVisible()) continue;
                 const auto& bt = obj->getBuildingType();
+
+                // Window/door frames: zero collision always
+                if (bt == "window_frame") {
+                    obj->setAABBCollision(false);
+                    obj->setBulletCollisionType(BulletCollisionType::NONE);
+                    continue;
+                }
+
                 if (bt != "platform_slab" && bt != "platform_wall") continue;
                 if (obj->isKinematicPlatform()) continue;
 
@@ -26124,6 +26354,10 @@ private:
     // Renderers
     std::unique_ptr<TerrainPipeline> m_pipeline;
     std::unique_ptr<TextureManager> m_textureManager;
+    std::vector<VkImage> m_terrainThumbImages;
+    std::vector<VkDeviceMemory> m_terrainThumbMemory;
+    std::vector<VkImageView> m_terrainThumbViews;
+    std::vector<VkSampler> m_terrainThumbSamplers;
     std::unique_ptr<ProceduralSkybox> m_skybox;
     std::unique_ptr<BrushRing> m_brushRing;
     std::unique_ptr<GizmoRenderer> m_gizmoRenderer;

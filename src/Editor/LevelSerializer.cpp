@@ -474,6 +474,18 @@ bool LevelSerializer::save(const std::string& filepath,
                 objJson["buildingType"] = obj->getBuildingType();
             }
 
+            // Wall holes (for collision skip and frame snapping)
+            if (obj->hasWallHoles()) {
+                nlohmann::json holesJson = nlohmann::json::array();
+                for (const auto& hole : obj->getWallHoles()) {
+                    holesJson.push_back({
+                        {"min", {hole.min.x, hole.min.y, hole.min.z}},
+                        {"max", {hole.max.x, hole.max.y, hole.max.z}}
+                    });
+                }
+                objJson["wallHoles"] = holesJson;
+            }
+
             // Primitive object support
             objJson["primitiveType"] = static_cast<int>(obj->getPrimitiveType());
             if (obj->isPrimitive()) {
@@ -852,6 +864,15 @@ bool LevelSerializer::load(const std::string& filepath, LevelData& outData) {
                 obj.bulletCollisionType = objJson.value("bulletCollisionType", 0);
                 obj.kinematicPlatform = objJson.value("kinematicPlatform", false);
                 obj.indoor = objJson.value("indoor", false);
+
+                // Wall holes
+                if (objJson.contains("wallHoles")) {
+                    for (const auto& h : objJson["wallHoles"]) {
+                        glm::vec3 hMin(h["min"][0], h["min"][1], h["min"][2]);
+                        glm::vec3 hMax(h["max"][0], h["max"][1], h["max"][2]);
+                        obj.wallHoles.push_back({hMin, hMax});
+                    }
+                }
 
                 // Frozen transform - rotation/scale baked into vertices
                 obj.frozenTransform = objJson.value("frozenTransform", false);
