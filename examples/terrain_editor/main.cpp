@@ -4816,9 +4816,67 @@ private:
         m_groveLogoLoaded = false;
     }
 
-    // Clear selection highlight from ALL building pieces (slabs, walls, frames)
+    // Helper: spawn a wall piece (cube) with optional texture from a source wall
+    // wallOrigin = world-space min corner of the original wall (for UV alignment)
+    void spawnWallPiece(const std::string& name, glm::vec3 pos, glm::vec3 scale,
+                        glm::vec3 rotation, SceneObject* sourceWall,
+                        glm::vec3 wallOrigin = glm::vec3(0), bool isXFace = false) {
+        // Skip degenerate pieces
+        if (scale.x < 0.01f || scale.y < 0.01f || scale.z < 0.01f) return;
+
+        glm::vec4 color = sourceWall->getPrimitiveColor();
+        auto mesh = PrimitiveMeshBuilder::createCube(1.0f, color);
+        uint32_t handle = m_modelRenderer->createModel(mesh.vertices, mesh.indices);
+
+        auto obj = std::make_unique<SceneObject>(name);
+        obj->setBufferHandle(handle);
+        obj->setIndexCount(static_cast<uint32_t>(mesh.indices.size()));
+        obj->setVertexCount(static_cast<uint32_t>(mesh.vertices.size()));
+        obj->setLocalBounds(mesh.bounds);
+        obj->setMeshData(mesh.vertices, mesh.indices);
+        obj->setPrimitiveType(PrimitiveType::Cube);
+        obj->setPrimitiveSize(1.0f);
+        obj->setPrimitiveColor(color);
+        obj->setBuildingType("platform_wall");
+        obj->setAABBCollision(true);
+        obj->getTransform().setPosition(pos);
+        obj->getTransform().setScale(scale);
+        obj->setEulerRotation(rotation);
+
+        // Copy texture if source wall had one
+        if (sourceWall->hasTextureData()) {
+            obj->setTextureData(sourceWall->getTextureData(),
+                                sourceWall->getTextureWidth(), sourceWall->getTextureHeight());
+            m_modelRenderer->updateTexture(handle, obj->getTextureData().data(),
+                                           obj->getTextureWidth(), obj->getTextureHeight());
+            // Set vertex colors to white and apply UV scale for the new piece's dimensions
+            auto vertices = obj->getVertices();
+            auto freshMesh = PrimitiveMeshBuilder::createCube(1.0f, glm::vec4(1.0f));
+            // UV offset from piece LEFT EDGE (not center) — X/Z are centered in createCube
+            // Y is bottom-anchored so pos.y IS the bottom edge already
+            float pieceW = isXFace ? scale.z : scale.x;
+            float uvOffsetH = (isXFace ? pos.z : pos.x) - pieceW * 0.5f;
+            float uvOffsetV = pos.y;
+            for (size_t vi = 0; vi < vertices.size() && vi < freshMesh.vertices.size(); vi++) {
+                vertices[vi].color = glm::vec4(1.0f);
+                vertices[vi].texCoord = freshMesh.vertices[vi].texCoord;
+                glm::vec3 absN = glm::abs(vertices[vi].normal);
+                float faceW, faceH;
+                if (absN.y > absN.x && absN.y > absN.z) { faceW = scale.x; faceH = scale.z; }
+                else if (absN.x > absN.z) { faceW = scale.z; faceH = scale.y; }
+                else { faceW = scale.x; faceH = scale.y; }
+                vertices[vi].texCoord.x = vertices[vi].texCoord.x * faceW + uvOffsetH;
+                vertices[vi].texCoord.y = vertices[vi].texCoord.y * faceH + uvOffsetV;
+            }
+            obj->setMeshData(vertices, obj->getIndices());
+            m_modelRenderer->updateVertices(handle, vertices);
+        }
+
+        m_sceneObjects.push_back(std::move(obj));
+    }
+
     void cutWallHoleAtSelectedFrame() {
-        // Find selected wall_frame — check both editor and build selection
+        // Find selected wall_frame
         int selIdx = m_selectedObjectIndex;
         if (selIdx < 0 || selIdx >= static_cast<int>(m_sceneObjects.size()) ||
             !m_sceneObjects[selIdx] || m_sceneObjects[selIdx]->getBuildingType() != "wall_frame") {
@@ -4843,70 +4901,141 @@ private:
         glm::vec3 framePos = frame->getTransform().getPosition();
         glm::vec3 frameScl = frame->getTransform().getScale();
 
-        // Find the wall this frame is attached to (nearest platform_wall)
-        SceneObject* wall = nullptr;
-        float bestDist = 2.0f; // must be very close
+        // Find ALL wall pieces that overlap the frame (after previous cuts,
+        // the frame may span multiple pieces)
+        AABB frameBounds = frame->getWorldBounds();
+        frameBounds.min -= glm::vec3(0.1f); // slight expand to catch adjacent pieces
+        frameBounds.max += glm::vec3(0.1f);
+
+        std::vector<SceneObject*> overlappingWalls;
         for (auto& obj : m_sceneObjects) {
             if (!obj || obj->getBuildingType() != "platform_wall") continue;
+            if (!obj->isVisible()) continue;
             AABB wb = obj->getWorldBounds();
-            // Expand slightly to catch frames placed on the surface
-            wb.min -= glm::vec3(0.2f);
-            wb.max += glm::vec3(0.2f);
-            if (framePos.x >= wb.min.x && framePos.x <= wb.max.x &&
-                framePos.y >= wb.min.y && framePos.y <= wb.max.y &&
-                framePos.z >= wb.min.z && framePos.z <= wb.max.z) {
-                wall = obj.get();
-                break;
+            // Check AABB overlap
+            if (wb.max.x > frameBounds.min.x && wb.min.x < frameBounds.max.x &&
+                wb.max.y > frameBounds.min.y && wb.min.y < frameBounds.max.y &&
+                wb.max.z > frameBounds.min.z && wb.min.z < frameBounds.max.z) {
+                overlappingWalls.push_back(obj.get());
             }
         }
 
-        if (!wall) {
+        if (overlappingWalls.empty()) {
             m_screenMessage = "No wall found near this frame";
             m_screenMessageTimer = 2.0f;
             return;
         }
 
-        if (!wall->hasMeshData()) {
-            m_screenMessage = "Wall has no mesh data";
-            m_screenMessageTimer = 2.0f;
-            return;
-        }
+        // Process each overlapping wall piece
+        for (SceneObject* wall : overlappingWalls) {
 
-        // Get wall transform info
+        // Get wall transform
         glm::vec3 wallPos = wall->getTransform().getPosition();
         glm::vec3 wallScl = wall->getTransform().getScale();
+        glm::vec3 wallRot = wall->getEulerRotation();
 
-        // Frame hole in wall local space (wall cube: X centered, Y bottom-anchored, Z centered)
-        // Frame center relative to wall position
-        float relX = framePos.x - wallPos.x;
-        float relY = framePos.y - wallPos.y;
-        float relZ = framePos.z - wallPos.z;
-
-        // Normalize to unit cube space (divide by scale)
-        float normX = relX / wallScl.x;
-        float normY = relY / wallScl.y;
-        float normZ = relZ / wallScl.z;
-
-        // Frame half-sizes in normalized wall space
-        float holeHW = (frameScl.x * 0.5f) / wallScl.x;
-        float holeHH = (frameScl.y * 0.5f) / wallScl.y;
-
-        // Determine which axis the frame is on based on the frame's thin dimension
-        // Frame scale Z is 0.1 for wall frames → it's on the Z face
-        // We need to figure out which pair of faces to cut
+        // Determine which axis the frame is on
         float frameYaw = frame->getEulerRotation().y;
         bool isXFace = (std::abs(std::fmod(frameYaw + 360.0f, 180.0f) - 90.0f) < 10.0f);
 
-        // Single-mesh approach with continuous position-based UVs
-        auto oldVerts = wall->getVertices();
-        glm::vec4 wallColor = oldVerts.empty() ? glm::vec4(0.7f) : oldVerts[0].color;
-        glm::vec4 vertColor = wall->hasTextureData() ? glm::vec4(1.0f) : wallColor;
+        // === BOX SPLIT: replace wall with up to 4 box pieces around the hole ===
+        AABB wb = wall->getWorldBounds();
+        AABB fb = frame->getWorldBounds();
+        float thick = isXFace ? wallScl.x : wallScl.z;
 
-        // UV scale from wall's physical dimensions — 1 texture tile per meter
-        float uvScaleU = (!isXFace) ? wallScl.x : wallScl.z;
-        float uvScaleV = wallScl.y;
+        // Use actual world bounds for both wall and hole
+        float wallMinH = isXFace ? wb.min.z : wb.min.x;
+        float wallMaxH = isXFace ? wb.max.z : wb.max.x;
+        float wallMinV = wb.min.y;
+        float wallMaxV = wb.max.y;
+        // Use actual bounds center, not wallPos (which may not be at geometric center)
+        float wallThinCenter = isXFace ? (wb.min.x + wb.max.x) * 0.5f : (wb.min.z + wb.max.z) * 0.5f;
 
-        std::vector<ModelVertex> newVerts;
+        float holeMinH = isXFace ? fb.min.z : fb.min.x;
+        float holeMaxH = isXFace ? fb.max.z : fb.max.x;
+        float holeMinV = fb.min.y;
+        float holeMaxV = fb.max.y;
+
+        holeMinH = std::max(holeMinH, wallMinH);
+        holeMaxH = std::min(holeMaxH, wallMaxH);
+        holeMinV = std::max(holeMinV, wallMinV);
+        holeMaxV = std::min(holeMaxV, wallMaxV);
+
+        std::cout << "[BoxSplit] wall bounds: (" << wb.min.x << "," << wb.min.y << "," << wb.min.z
+                  << ")->(" << wb.max.x << "," << wb.max.y << "," << wb.max.z << ")"
+                  << " wallPos=(" << wallPos.x << "," << wallPos.y << "," << wallPos.z << ")"
+                  << " wallScl=(" << wallScl.x << "," << wallScl.y << "," << wallScl.z << ")" << std::endl;
+        std::cout << "[BoxSplit] hole: H(" << holeMinH << "-" << holeMaxH << ") V(" << holeMinV << "-" << holeMaxV
+                  << ") thick=" << thick << " thinCenter=" << wallThinCenter << std::endl;
+
+        std::string baseName = wall->getName() + "_";
+        int pieceNum = 0;
+
+        // createCube is bottom-anchored in Y (0 to size), centered in X/Z (-h to h)
+        // So piece position Y = bottom of piece, X/Z = center of piece
+        // wallOrigin = world-space min corner for UV alignment
+        glm::vec3 wallOrigin = wb.min;
+
+        // Bottom piece (full width, below hole)
+        float bottomH = holeMinV - wallMinV;
+        if (bottomH > 0.01f) {
+            float cH = (wallMinH + wallMaxH) * 0.5f;
+            float w = wallMaxH - wallMinH;
+            glm::vec3 pos = isXFace ? glm::vec3(wallThinCenter, wallMinV, cH) : glm::vec3(cH, wallMinV, wallThinCenter);
+            glm::vec3 scl = isXFace ? glm::vec3(thick, bottomH, w) : glm::vec3(w, bottomH, thick);
+            spawnWallPiece(baseName + std::to_string(pieceNum++), pos, scl, wallRot, wall, wallOrigin, isXFace);
+        }
+
+        // Top piece (full width, above hole)
+        float topH = wallMaxV - holeMaxV;
+        if (topH > 0.01f) {
+            float cH = (wallMinH + wallMaxH) * 0.5f;
+            float w = wallMaxH - wallMinH;
+            glm::vec3 pos = isXFace ? glm::vec3(wallThinCenter, holeMaxV, cH) : glm::vec3(cH, holeMaxV, wallThinCenter);
+            glm::vec3 scl = isXFace ? glm::vec3(thick, topH, w) : glm::vec3(w, topH, thick);
+            spawnWallPiece(baseName + std::to_string(pieceNum++), pos, scl, wallRot, wall, wallOrigin, isXFace);
+        }
+
+        // Left piece (hole height, left of hole)
+        float leftW = holeMinH - wallMinH;
+        if (leftW > 0.01f) {
+            float cH = wallMinH + leftW * 0.5f;
+            float h = holeMaxV - holeMinV;
+            glm::vec3 pos = isXFace ? glm::vec3(wallThinCenter, holeMinV, cH) : glm::vec3(cH, holeMinV, wallThinCenter);
+            glm::vec3 scl = isXFace ? glm::vec3(thick, h, leftW) : glm::vec3(leftW, h, thick);
+            spawnWallPiece(baseName + std::to_string(pieceNum++), pos, scl, wallRot, wall, wallOrigin, isXFace);
+        }
+
+        // Right piece (hole height, right of hole)
+        float rightW = wallMaxH - holeMaxH;
+        if (rightW > 0.01f) {
+            float cH = holeMaxH + rightW * 0.5f;
+            float h = holeMaxV - holeMinV;
+            glm::vec3 pos = isXFace ? glm::vec3(wallThinCenter, holeMinV, cH) : glm::vec3(cH, holeMinV, wallThinCenter);
+            glm::vec3 scl = isXFace ? glm::vec3(thick, h, rightW) : glm::vec3(rightW, h, thick);
+            spawnWallPiece(baseName + std::to_string(pieceNum++), pos, scl, wallRot, wall, wallOrigin, isXFace);
+        }
+
+        // Remove this wall piece (replaced by sub-pieces)
+        wall->setVisible(false);
+        wall->setName("__wall_remove__"); m_pendingObjectRemoval = true;
+
+        } // end per-wall loop
+
+        // Delete the frame
+        frame->setVisible(false);
+        frame->setName("__wall_remove__");
+
+        // Clear selection
+        m_selectedObjectIndex = -1;
+        m_selectedBuildPiece = -1;
+        m_selectedSalvageIndex = -1;
+        m_editorUI.setSelectedObjectIndex(-1);
+
+        m_screenMessage = "Hole cut in wall";
+        m_screenMessageTimer = 2.0f;
+        /* OLD MESH CUTTING CODE REMOVED — replaced by box split above
+        if (false) {
         std::vector<uint32_t> newInds;
         float cubeH = 0.5f;
 
@@ -5248,8 +5377,7 @@ private:
         m_selectedSalvageIndex = -1;
         m_editorUI.setSelectedObjectIndex(-1);
 
-        m_screenMessage = "Hole cut in wall";
-        m_screenMessageTimer = 2.0f;
+        } // end dead code block */
     }
 
     void clearBuildSelection() {
