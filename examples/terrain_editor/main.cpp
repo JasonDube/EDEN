@@ -4816,11 +4816,11 @@ private:
         m_groveLogoLoaded = false;
     }
 
-    // Helper: spawn a wall piece (cube) with optional texture from a source wall
-    // wallOrigin = world-space min corner of the original wall (for UV alignment)
+    // Helper: spawn a wall piece (cube) — visible with texture, or invisible for collision only
     void spawnWallPiece(const std::string& name, glm::vec3 pos, glm::vec3 scale,
                         glm::vec3 rotation, SceneObject* sourceWall,
-                        glm::vec3 wallOrigin = glm::vec3(0), bool isXFace = false) {
+                        glm::vec3 wallOrigin = glm::vec3(0), bool isXFace = false,
+                        bool collisionOnly = false) {
         // Skip degenerate pieces
         if (scale.x < 0.01f || scale.y < 0.01f || scale.z < 0.01f) return;
 
@@ -4842,6 +4842,12 @@ private:
         obj->getTransform().setPosition(pos);
         obj->getTransform().setScale(scale);
         obj->setEulerRotation(rotation);
+
+        if (collisionOnly) {
+            obj->setVisible(false); // invisible — collision only
+            m_sceneObjects.push_back(std::move(obj));
+            return;
+        }
 
         // Copy texture if source wall had one
         if (sourceWall->hasTextureData()) {
@@ -4968,57 +4974,198 @@ private:
         std::cout << "[BoxSplit] hole: H(" << holeMinH << "-" << holeMaxH << ") V(" << holeMinV << "-" << holeMaxV
                   << ") thick=" << thick << " thinCenter=" << wallThinCenter << std::endl;
 
-        std::string baseName = wall->getName() + "_";
-        int pieceNum = 0;
-
-        // createCube is bottom-anchored in Y (0 to size), centered in X/Z (-h to h)
-        // So piece position Y = bottom of piece, X/Z = center of piece
-        // wallOrigin = world-space min corner for UV alignment
-        glm::vec3 wallOrigin = wb.min;
-
-        // Bottom piece (full width, below hole)
-        float bottomH = holeMinV - wallMinV;
-        if (bottomH > 0.01f) {
-            float cH = (wallMinH + wallMaxH) * 0.5f;
-            float w = wallMaxH - wallMinH;
-            glm::vec3 pos = isXFace ? glm::vec3(wallThinCenter, wallMinV, cH) : glm::vec3(cH, wallMinV, wallThinCenter);
-            glm::vec3 scl = isXFace ? glm::vec3(thick, bottomH, w) : glm::vec3(w, bottomH, thick);
-            spawnWallPiece(baseName + std::to_string(pieceNum++), pos, scl, wallRot, wall, wallOrigin, isXFace);
+        // === COLLISION: trigger box at hole — wall keeps AABB, hole-skip lets player through ===
+        {
+            glm::vec3 hMin = fb.min, hMax = fb.max;
+            // Expand in wall's thin direction so player is detected approaching
+            const float approach = 1.5f;
+            if (!isXFace) { hMin.z -= approach; hMax.z += approach; }
+            else { hMin.x -= approach; hMax.x += approach; }
+            wall->addWallHole(hMin, hMax);
         }
 
-        // Top piece (full width, above hole)
-        float topH = wallMaxV - holeMaxV;
-        if (topH > 0.01f) {
-            float cH = (wallMinH + wallMaxH) * 0.5f;
-            float w = wallMaxH - wallMinH;
-            glm::vec3 pos = isXFace ? glm::vec3(wallThinCenter, holeMaxV, cH) : glm::vec3(cH, holeMaxV, wallThinCenter);
-            glm::vec3 scl = isXFace ? glm::vec3(thick, topH, w) : glm::vec3(w, topH, thick);
-            spawnWallPiece(baseName + std::to_string(pieceNum++), pos, scl, wallRot, wall, wallOrigin, isXFace);
+        // === VISIBILITY: split cut-axis faces into strips around the hole ===
+        // Non-cut faces pass through with original UVs intact
+        // Wall keeps AABB collision — hole-skip triggers handle walkthrough
+        auto oldVerts = wall->getVertices();
+        std::vector<ModelVertex> newVerts;
+        std::vector<uint32_t> newInds;
+        glm::vec4 vertColor = wall->hasTextureData() ? glm::vec4(1.0f) : oldVerts[0].color;
+
+        // Hole bounds in local space
+        float locHMin, locHMax;
+        if (!isXFace) {
+            locHMin = (holeMinH - wallPos.x) / wallScl.x;
+            locHMax = (holeMaxH - wallPos.x) / wallScl.x;
+        } else {
+            locHMin = (holeMinH - wallPos.z) / wallScl.z;
+            locHMax = (holeMaxH - wallPos.z) / wallScl.z;
+        }
+        float locVMin = (holeMinV - wallPos.y) / wallScl.y;
+        float locVMax = (holeMaxV - wallPos.y) / wallScl.y;
+
+        // Helper: add a quad preserving the parent face's UV interpolation
+        auto addStrip = [&](glm::vec3 a, glm::vec3 b, glm::vec3 c, glm::vec3 d,
+                           glm::vec3 norm, float qMinH, float qMaxH, float qMinV, float qMaxV,
+                           float faceUMin, float faceUMax, float faceVMin, float faceVMax) {
+            uint32_t base = static_cast<uint32_t>(newVerts.size());
+            float hRange = qMaxH - qMinH, vRange = qMaxV - qMinV;
+            auto interpUV = [&](glm::vec3 p) -> glm::vec2 {
+                float h = (!isXFace) ? p.x : p.z;
+                float s = (hRange > 0.001f) ? (h - qMinH) / hRange : 0.5f;
+                float t = (vRange > 0.001f) ? (p.y - qMinV) / vRange : 0.5f;
+                return {faceUMin + s * (faceUMax - faceUMin),
+                        faceVMin + t * (faceVMax - faceVMin)};
+            };
+            ModelVertex v; v.color = vertColor; v.normal = norm;
+            v.position = a; v.texCoord = interpUV(a); newVerts.push_back(v);
+            v.position = b; v.texCoord = interpUV(b); newVerts.push_back(v);
+            v.position = c; v.texCoord = interpUV(c); newVerts.push_back(v);
+            v.position = d; v.texCoord = interpUV(d); newVerts.push_back(v);
+            newInds.push_back(base); newInds.push_back(base+1); newInds.push_back(base+2);
+            newInds.push_back(base); newInds.push_back(base+2); newInds.push_back(base+3);
+        };
+
+        int numQuads = static_cast<int>(oldVerts.size()) / 4;
+        for (int qi = 0; qi < numQuads; qi++) {
+            int vi = qi * 4;
+            if (vi + 3 >= static_cast<int>(oldVerts.size())) break;
+            glm::vec3 n = oldVerts[vi].normal;
+            bool onCutAxis = (!isXFace && std::abs(n.z) > 0.5f) ||
+                             (isXFace && std::abs(n.x) > 0.5f);
+
+            if (!onCutAxis) {
+                // Pass through — keep original vertices with original UVs
+                uint32_t base = static_cast<uint32_t>(newVerts.size());
+                for (int k = 0; k < 4; k++) newVerts.push_back(oldVerts[vi + k]);
+                newInds.push_back(base); newInds.push_back(base+1); newInds.push_back(base+2);
+                newInds.push_back(base); newInds.push_back(base+2); newInds.push_back(base+3);
+                continue;
+            }
+
+            // Get quad bounds and UV range
+            float qMinH = 1e9f, qMaxH = -1e9f, qMinV = 1e9f, qMaxV = -1e9f;
+            float fUMin = 1e9f, fUMax = -1e9f, fVMin = 1e9f, fVMax = -1e9f;
+            for (int k = 0; k < 4; k++) {
+                glm::vec3 p = oldVerts[vi+k].position;
+                float h = (!isXFace) ? p.x : p.z;
+                qMinH = std::min(qMinH, h); qMaxH = std::max(qMaxH, h);
+                qMinV = std::min(qMinV, p.y); qMaxV = std::max(qMaxV, p.y);
+                fUMin = std::min(fUMin, oldVerts[vi+k].texCoord.x);
+                fUMax = std::max(fUMax, oldVerts[vi+k].texCoord.x);
+                fVMin = std::min(fVMin, oldVerts[vi+k].texCoord.y);
+                fVMax = std::max(fVMax, oldVerts[vi+k].texCoord.y);
+            }
+
+            // Check overlap with hole
+            bool overlapH = (qMaxH > locHMin + 0.001f && qMinH < locHMax - 0.001f);
+            bool overlapV = (qMaxV > locVMin + 0.001f && qMinV < locVMax - 0.001f);
+            if (!overlapH || !overlapV) {
+                // No overlap — pass through
+                uint32_t base = static_cast<uint32_t>(newVerts.size());
+                for (int k = 0; k < 4; k++) newVerts.push_back(oldVerts[vi + k]);
+                newInds.push_back(base); newInds.push_back(base+1); newInds.push_back(base+2);
+                newInds.push_back(base); newInds.push_back(base+2); newInds.push_back(base+3);
+                continue;
+            }
+
+            // Clamp hole to this quad
+            float cL = std::max(locHMin, qMinH), cR = std::min(locHMax, qMaxH);
+            float cB = std::max(locVMin, qMinV), cT = std::min(locVMax, qMaxV);
+
+            // Get face depth coordinate and determine winding
+            float depth = (!isXFace) ? oldVerts[vi].position.z : oldVerts[vi].position.x;
+            bool back = (!isXFace) ? (n.z < 0) : (n.x > 0);
+            float eL = back ? qMaxH : qMinH, eR = back ? qMinH : qMaxH;
+            float ecL = back ? cR : cL, ecR = back ? cL : cR;
+
+            // 4 strips around hole (bottom, top, left, right)
+            auto mkVert = [&](float h, float v) -> glm::vec3 {
+                if (!isXFace) return {h, v, depth};
+                else return {depth, v, h};
+            };
+
+            if (cB > qMinV + 0.001f)
+                addStrip(mkVert(eL, qMinV), mkVert(eR, qMinV), mkVert(eR, cB), mkVert(eL, cB),
+                         n, qMinH, qMaxH, qMinV, qMaxV, fUMin, fUMax, fVMin, fVMax);
+            if (cT < qMaxV - 0.001f)
+                addStrip(mkVert(eL, cT), mkVert(eR, cT), mkVert(eR, qMaxV), mkVert(eL, qMaxV),
+                         n, qMinH, qMaxH, qMinV, qMaxV, fUMin, fUMax, fVMin, fVMax);
+            if (cL > qMinH + 0.001f)
+                addStrip(mkVert(eL, cB), mkVert(ecL, cB), mkVert(ecL, cT), mkVert(eL, cT),
+                         n, qMinH, qMaxH, qMinV, qMaxV, fUMin, fUMax, fVMin, fVMax);
+            if (cR < qMaxH - 0.001f)
+                addStrip(mkVert(ecR, cB), mkVert(eR, cB), mkVert(eR, cT), mkVert(ecR, cT),
+                         n, qMinH, qMaxH, qMinV, qMaxV, fUMin, fUMax, fVMin, fVMax);
         }
 
-        // Left piece (hole height, left of hole)
-        float leftW = holeMinH - wallMinH;
-        if (leftW > 0.01f) {
-            float cH = wallMinH + leftW * 0.5f;
-            float h = holeMaxV - holeMinV;
-            glm::vec3 pos = isXFace ? glm::vec3(wallThinCenter, holeMinV, cH) : glm::vec3(cH, holeMinV, wallThinCenter);
-            glm::vec3 scl = isXFace ? glm::vec3(thick, h, leftW) : glm::vec3(leftW, h, thick);
-            spawnWallPiece(baseName + std::to_string(pieceNum++), pos, scl, wallRot, wall, wallOrigin, isXFace);
+        // Jamb faces (inner walls of the hole connecting front and back)
+        {
+            float cubeH = 0.5f;
+            auto addJamb = [&](glm::vec3 a, glm::vec3 b, glm::vec3 c, glm::vec3 d, glm::vec3 norm) {
+                uint32_t base = static_cast<uint32_t>(newVerts.size());
+                ModelVertex v; v.color = vertColor; v.normal = norm;
+                // Simple UV for jambs — just tile based on world position
+                auto jambUV = [](glm::vec3 p) -> glm::vec2 { return {p.x + p.z, p.y}; };
+                v.position = a; v.texCoord = jambUV(a); newVerts.push_back(v);
+                v.position = b; v.texCoord = jambUV(b); newVerts.push_back(v);
+                v.position = c; v.texCoord = jambUV(c); newVerts.push_back(v);
+                v.position = d; v.texCoord = jambUV(d); newVerts.push_back(v);
+                newInds.push_back(base); newInds.push_back(base+1); newInds.push_back(base+2);
+                newInds.push_back(base); newInds.push_back(base+2); newInds.push_back(base+3);
+            };
+
+            if (!isXFace) {
+                float zF = cubeH, zB = -cubeH;
+                // Top jamb (corrected winding — faces down into hole)
+                addJamb(glm::vec3(locHMin, locVMax, zB), glm::vec3(locHMax, locVMax, zB),
+                        glm::vec3(locHMax, locVMax, zF), glm::vec3(locHMin, locVMax, zF), glm::vec3(0,-1,0));
+                // Bottom jamb (faces up into hole)
+                addJamb(glm::vec3(locHMin, locVMin, zF), glm::vec3(locHMax, locVMin, zF),
+                        glm::vec3(locHMax, locVMin, zB), glm::vec3(locHMin, locVMin, zB), glm::vec3(0,1,0));
+                // Left jamb (faces right into hole)
+                addJamb(glm::vec3(locHMin, locVMax, zB), glm::vec3(locHMin, locVMax, zF),
+                        glm::vec3(locHMin, locVMin, zF), glm::vec3(locHMin, locVMin, zB), glm::vec3(1,0,0));
+                // Right jamb (faces left into hole)
+                addJamb(glm::vec3(locHMax, locVMax, zF), glm::vec3(locHMax, locVMax, zB),
+                        glm::vec3(locHMax, locVMin, zB), glm::vec3(locHMax, locVMin, zF), glm::vec3(-1,0,0));
+            } else {
+                float xF = cubeH, xB = -cubeH;
+                // Top jamb
+                addJamb(glm::vec3(xF, locVMax, locHMin), glm::vec3(xF, locVMax, locHMax),
+                        glm::vec3(xB, locVMax, locHMax), glm::vec3(xB, locVMax, locHMin), glm::vec3(0,-1,0));
+                // Bottom jamb
+                addJamb(glm::vec3(xB, locVMin, locHMin), glm::vec3(xB, locVMin, locHMax),
+                        glm::vec3(xF, locVMin, locHMax), glm::vec3(xF, locVMin, locHMin), glm::vec3(0,1,0));
+                // Left jamb
+                addJamb(glm::vec3(xB, locVMin, locHMin), glm::vec3(xF, locVMin, locHMin),
+                        glm::vec3(xF, locVMax, locHMin), glm::vec3(xB, locVMax, locHMin), glm::vec3(0,0,1));
+                // Right jamb
+                addJamb(glm::vec3(xF, locVMin, locHMax), glm::vec3(xB, locVMin, locHMax),
+                        glm::vec3(xB, locVMax, locHMax), glm::vec3(xF, locVMax, locHMax), glm::vec3(0,0,-1));
+            }
         }
 
-        // Right piece (hole height, right of hole)
-        float rightW = wallMaxH - holeMaxH;
-        if (rightW > 0.01f) {
-            float cH = holeMaxH + rightW * 0.5f;
-            float h = holeMaxV - holeMinV;
-            glm::vec3 pos = isXFace ? glm::vec3(wallThinCenter, holeMinV, cH) : glm::vec3(cH, holeMinV, wallThinCenter);
-            glm::vec3 scl = isXFace ? glm::vec3(thick, h, rightW) : glm::vec3(rightW, h, thick);
-            spawnWallPiece(baseName + std::to_string(pieceNum++), pos, scl, wallRot, wall, wallOrigin, isXFace);
+        // Update visible wall mesh
+        AABB newBounds;
+        newBounds.min = glm::vec3(INFINITY);
+        newBounds.max = glm::vec3(-INFINITY);
+        for (const auto& v : newVerts) {
+            newBounds.min = glm::min(newBounds.min, v.position);
+            newBounds.max = glm::max(newBounds.max, v.position);
         }
-
-        // Remove this wall piece (replaced by sub-pieces)
-        wall->setVisible(false);
-        wall->setName("__wall_remove__"); m_pendingObjectRemoval = true;
+        uint32_t oldHandle = wall->getBufferHandle();
+        uint32_t newHandle = m_modelRenderer->createModel(newVerts, newInds);
+        if (wall->hasTextureData()) {
+            m_modelRenderer->updateTexture(newHandle, wall->getTextureData().data(),
+                                           wall->getTextureWidth(), wall->getTextureHeight());
+        }
+        if (oldHandle != 0) m_modelRenderer->destroyModel(oldHandle);
+        wall->setBufferHandle(newHandle);
+        wall->setIndexCount(static_cast<uint32_t>(newInds.size()));
+        wall->setVertexCount(static_cast<uint32_t>(newVerts.size()));
+        wall->setMeshData(newVerts, newInds);
+        wall->setLocalBounds(newBounds);
 
         } // end per-wall loop
 
