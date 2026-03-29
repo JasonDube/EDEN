@@ -279,9 +279,9 @@ void EditorUI::renderMainWindow() {
     ImGui::Text("Brush Settings");
 
     // Brush mode
-    const char* modeNames[] = { "Raise", "Lower", "Smooth", "Flatten", "Paint", "Crack", "Texture", "Plateau", "Level Min", "Grab", "Select", "Deselect", "Move Object", "Spire", "Ridged", "Trench", "Path", "Terrace", "Flatten to Y", "Wall Draw", "Foundation", "Furrow", "Shovel" };
+    const char* modeNames[] = { "Raise", "Lower", "Smooth", "Flatten", "Paint", "Crack", "Texture", "Plateau", "Level Min", "Grab", "Select", "Deselect", "Move Object", "Spire", "Ridged", "Trench", "Path", "Terrace", "Flatten to Y", "Wall Draw", "Foundation", "Furrow", "Shovel", "Smear Texture" };
     int currentMode = static_cast<int>(m_brushMode);
-    if (ImGui::Combo("Mode", &currentMode, modeNames, 23)) {
+    if (ImGui::Combo("Mode", &currentMode, modeNames, 24)) {
         m_brushMode = static_cast<BrushMode>(currentMode);
     }
 
@@ -456,6 +456,26 @@ void EditorUI::renderTextureSelector() {
         ImGui::ColorConvertHSVtoRGB(hue, 0.5f, 0.75f, r, g, b);
         return ImVec4(r, g, b, 1.0f);
     };
+
+    // Load Preset button
+    if (ImGui::Button("Load Preset...")) {
+        if (m_onBrowseTexturePreset) m_onBrowseTexturePreset();
+    }
+
+    // Preset tabs
+    if (ImGui::BeginTabBar("##TexturePresets")) {
+        for (int t = 0; t < static_cast<int>(m_presetNames.size()); t++) {
+            if (ImGui::BeginTabItem(m_presetNames[t].c_str())) {
+                if (t != m_activePresetIndex) {
+                    m_activePresetIndex = t;
+                    if (m_onLoadTexturePreset && !m_presetPaths[t].empty())
+                        m_onLoadTexturePreset(m_presetPaths[t]);
+                }
+                ImGui::EndTabItem();
+            }
+        }
+        ImGui::EndTabBar();
+    }
 
     // Layer selection
     if (ImGui::CollapsingHeader("Select Layer", ImGuiTreeNodeFlags_DefaultOpen)) {
@@ -3631,6 +3651,8 @@ void EditorUI::renderBuildingTextureWindow() {
     if (ImGui::Button("Reset Scale")) {
         m_buildingTexScaleU = 1.0f;
         m_buildingTexScaleV = 1.0f;
+        m_buildingTexOffsetU = 0.0f;
+        m_buildingTexOffsetV = 0.0f;
         m_buildingTexRotation = 0;
         m_buildingTexFillFace = false;
     }
@@ -3642,6 +3664,10 @@ void EditorUI::renderBuildingTextureWindow() {
     if (ImGui::Button("Rotate 90")) {
         m_buildingTexRotation = (m_buildingTexRotation + 90) % 360;
     }
+    ImGui::SetNextItemWidth(-1);
+    ImGui::InputFloat("U Offset", &m_buildingTexOffsetU, 0.05f, 0.1f, "%.2f");
+    ImGui::SetNextItemWidth(-1);
+    ImGui::InputFloat("V Offset", &m_buildingTexOffsetV, 0.05f, 0.1f, "%.2f");
     if (ImGui::Button("Fill Face")) {
         m_buildingTexFillFace = true;
         m_buildingTexScaleU = -1.0f; // Sentinel: callback computes 1/faceSize

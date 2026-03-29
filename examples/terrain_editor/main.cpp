@@ -259,6 +259,22 @@ protected:
             createTerrainThumbnail(i);
         }
 
+        // "Load Preset" button — opens folder dialog, loads all textures from folder
+        m_editorUI.setBrowseTexturePresetCallback([this]() {
+            nfdchar_t* outPath = nullptr;
+            nfdresult_t result = NFD_PickFolder(&outPath, nullptr);
+            if (result == NFD_OKAY && outPath) {
+                std::string folderPath(outPath);
+                NFD_FreePath(outPath);
+                loadTexturePreset(folderPath);
+            }
+        });
+
+        // Switch preset tab — reload textures from that folder
+        m_editorUI.setLoadTexturePresetCallback([this](const std::string& folderPath) {
+            loadTexturePreset(folderPath);
+        });
+
         // "Browse" button on texture slots — opens file dialog for that slot
         m_editorUI.setAssignTextureSlotCallback([this](int slotIndex) {
             // Open file dialog to browse for a texture
@@ -3560,6 +3576,9 @@ private:
                         v.texCoord.x = cu * cosR - cv * sinR + 0.5f;
                         v.texCoord.y = cu * sinR + cv * cosR + 0.5f;
                     }
+                    // Apply UV offset
+                    v.texCoord.x += m_editorUI.getBuildingTexOffsetU();
+                    v.texCoord.y += m_editorUI.getBuildingTexOffsetV();
                 }
                 target->setMeshData(vertices, target->getIndices());
                 m_modelRenderer->updateVertices(target->getBufferHandle(), vertices);
@@ -5049,7 +5068,7 @@ private:
 
         // Rebuild ENTIRE cut-axis faces from scratch using ONE grid per face
         // Find all unique (depth, normal-sign) faces on the cut axis
-        struct FaceInfo { float depth; bool back; glm::vec3 normal; glm::vec2 uvBL, uvBR, uvTL, uvTR; };
+        struct FaceInfo { float depth; bool back; glm::vec3 normal; float uvDensityH, uvDensityV; };
         std::vector<FaceInfo> cutFaces;
         for (int qi = 0; qi < numQuads; qi++) {
             int vi = qi * 4;
@@ -5069,10 +5088,8 @@ private:
             }
             if (found) continue;
 
-            // Get UV corners from GLOBAL min/max across ALL quads at this depth
-            // This gives the original face's full UV range even after previous cuts
+            // Get UV magnitude from global range of all cut-axis quads at this depth
             FaceInfo fi; fi.depth = depth; fi.back = back; fi.normal = n;
-            float globalMinH = 1e9f, globalMaxH = -1e9f, globalMinV = 1e9f, globalMaxV = -1e9f;
             float globalUMin = 1e9f, globalUMax = -1e9f, globalVMin = 1e9f, globalVMax = -1e9f;
             for (int qi2 = 0; qi2 < numQuads; qi2++) {
                 int vi2 = qi2 * 4;
@@ -5081,25 +5098,27 @@ private:
                 bool b2 = (!isXFace) ? (oldVerts[vi2].normal.z < 0) : (oldVerts[vi2].normal.x > 0);
                 if (std::abs(d2 - depth) > 0.01f || b2 != back) continue;
                 for (int k = 0; k < 4; k++) {
-                    float ph = (!isXFace) ? oldVerts[vi2+k].position.x : oldVerts[vi2+k].position.z;
-                    float pv = oldVerts[vi2+k].position.y;
-                    globalMinH = std::min(globalMinH, ph); globalMaxH = std::max(globalMaxH, ph);
-                    globalMinV = std::min(globalMinV, pv); globalMaxV = std::max(globalMaxV, pv);
                     globalUMin = std::min(globalUMin, oldVerts[vi2+k].texCoord.x);
                     globalUMax = std::max(globalUMax, oldVerts[vi2+k].texCoord.x);
                     globalVMin = std::min(globalVMin, oldVerts[vi2+k].texCoord.y);
                     globalVMax = std::max(globalVMax, oldVerts[vi2+k].texCoord.y);
                 }
             }
-            // Map UV extremes to face corners based on position-to-UV correlation
-            // For front face: minH→minU, maxH→maxU. For back face: minH→maxU, maxH→minU
-            if (!back) {
-                fi.uvBL = {globalUMin, globalVMin}; fi.uvBR = {globalUMax, globalVMin};
-                fi.uvTL = {globalUMin, globalVMax}; fi.uvTR = {globalUMax, globalVMax};
-            } else {
-                fi.uvBL = {globalUMax, globalVMin}; fi.uvBR = {globalUMin, globalVMin};
-                fi.uvTL = {globalUMax, globalVMax}; fi.uvTR = {globalUMin, globalVMax};
-            }
+            float faceW = globalUMax - globalUMin;
+            float faceH = globalVMax - globalVMin;
+            if (faceW < 0.01f) faceW = (!isXFace) ? wallScl.x : wallScl.z;
+            if (faceH < 0.01f) faceH = wallScl.y;
+            // World-aligned UVs: compute UV density from mesh, apply using world position
+            // Both faces at the same world position get identical UVs — no front/back issue
+            glm::vec3 absN = glm::abs(fi.normal);
+            float worldExtentH, worldExtentV;
+            if (absN.z >= absN.x && absN.z >= absN.y) { worldExtentH = wallScl.x; worldExtentV = wallScl.y; }
+            else if (absN.x >= absN.y) { worldExtentH = wallScl.z; worldExtentV = wallScl.y; }
+            else { worldExtentH = wallScl.x; worldExtentV = wallScl.z; }
+            float uvDensityH = (faceW > 0.01f) ? faceW / worldExtentH : 1.0f;
+            float uvDensityV = (faceH > 0.01f) ? faceH / worldExtentV : 1.0f;
+            fi.uvDensityH = uvDensityH;
+            fi.uvDensityV = uvDensityV;
             cutFaces.push_back(fi);
         }
 
@@ -5128,14 +5147,22 @@ private:
             vLines.erase(std::unique(vLines.begin(), vLines.end(),
                 [](float a, float b) { return std::abs(a-b) < 0.0001f; }), vLines.end());
 
-            // UV interpolation
-            float fHRange = faceMaxH - faceMinH, fVRange = faceMaxV - faceMinV;
+            // World-aligned UV: convert local position to world, multiply by density
             auto gridUV = [&](float h, float v) -> glm::vec2 {
-                float s = (fHRange > 0.001f) ? (h - faceMinH) / fHRange : 0.5f;
-                float t = (fVRange > 0.001f) ? (v - faceMinV) / fVRange : 0.5f;
-                glm::vec2 bot = fi.uvBL + s * (fi.uvBR - fi.uvBL);
-                glm::vec2 top = fi.uvTL + s * (fi.uvTR - fi.uvTL);
-                return bot + t * (top - bot);
+                // Convert local position to world
+                float worldH, worldV;
+                glm::vec3 absN2 = glm::abs(fi.normal);
+                if (absN2.z >= absN2.x && absN2.z >= absN2.y) {
+                    worldH = wallPos.x + h * wallScl.x;
+                    worldV = wallPos.y + v * wallScl.y;
+                } else if (absN2.x >= absN2.y) {
+                    worldH = wallPos.z + h * wallScl.z;
+                    worldV = wallPos.y + v * wallScl.y;
+                } else {
+                    worldH = wallPos.x + h * wallScl.x;
+                    worldV = wallPos.z + v * wallScl.z;
+                }
+                return {worldH * fi.uvDensityH, worldV * fi.uvDensityV};
             };
 
             auto mkVert = [&](float h, float v) -> glm::vec3 {
@@ -5161,13 +5188,11 @@ private:
                     }
                     if (inHole) continue;
 
-                    float wL = fi.back ? cellR : cellL;
-                    float wR = fi.back ? cellL : cellR;
-                    glm::vec3 a = mkVert(wL, cellB), b = mkVert(wR, cellB);
-                    glm::vec3 c = mkVert(wR, cellT), d = mkVert(wL, cellT);
+                    // Same positions and UVs for both faces
+                    glm::vec3 a = mkVert(cellL, cellB), b = mkVert(cellR, cellB);
+                    glm::vec3 c = mkVert(cellR, cellT), d = mkVert(cellL, cellT);
                     glm::vec2 uvA = gridUV(cellL, cellB), uvB = gridUV(cellR, cellB);
                     glm::vec2 uvC = gridUV(cellR, cellT), uvD = gridUV(cellL, cellT);
-                    if (fi.back) { std::swap(uvA, uvB); std::swap(uvC, uvD); }
 
                     uint32_t base = static_cast<uint32_t>(newVerts.size());
                     ModelVertex v; v.color = vertColor; v.normal = fi.normal;
@@ -5175,8 +5200,15 @@ private:
                     v.position = b; v.texCoord = uvB; newVerts.push_back(v);
                     v.position = c; v.texCoord = uvC; newVerts.push_back(v);
                     v.position = d; v.texCoord = uvD; newVerts.push_back(v);
-                    newInds.push_back(base); newInds.push_back(base+1); newInds.push_back(base+2);
-                    newInds.push_back(base); newInds.push_back(base+2); newInds.push_back(base+3);
+                    if (!fi.back) {
+                        // Front face: CCW winding
+                        newInds.push_back(base); newInds.push_back(base+1); newInds.push_back(base+2);
+                        newInds.push_back(base); newInds.push_back(base+2); newInds.push_back(base+3);
+                    } else {
+                        // Back face: reversed winding (CCW from opposite side)
+                        newInds.push_back(base); newInds.push_back(base+2); newInds.push_back(base+1);
+                        newInds.push_back(base); newInds.push_back(base+3); newInds.push_back(base+2);
+                    }
                 }
             }
         }
@@ -5240,8 +5272,64 @@ private:
             }
         }
 
-        // Update visible wall mesh — keep original local bounds (seam expansion
-        // shifts vertices slightly; recomputing bounds would cause cumulative drift)
+        // Final UV pass: recompute ALL cut-axis face UVs from world position
+        // This is the nuclear option — ignores all per-face UV logic above
+        // and ensures both sides of every wall get identical texture scale
+        {
+            // Get UV density from the first non-cut face's UV range
+            // (non-cut faces have untouched original texture UVs)
+            float uvDensH = 1.0f, uvDensV = 1.0f;
+            for (size_t vi2 = 0; vi2 + 3 < newVerts.size(); vi2 += 4) {
+                glm::vec3 absN2 = glm::abs(newVerts[vi2].normal);
+                bool onCut = (!isXFace && absN2.z > 0.5f) || (isXFace && absN2.x > 0.5f);
+                if (onCut) continue; // skip cut-axis faces
+                // Found a non-cut face — compute UV density from it
+                float uMin = 1e9f, uMax = -1e9f, vMin = 1e9f, vMax = -1e9f;
+                float hMin = 1e9f, hMax = -1e9f, yMin = 1e9f, yMax = -1e9f;
+                for (int k = 0; k < 4; k++) {
+                    auto& vtx = newVerts[vi2 + k];
+                    uMin = std::min(uMin, vtx.texCoord.x); uMax = std::max(uMax, vtx.texCoord.x);
+                    vMin = std::min(vMin, vtx.texCoord.y); vMax = std::max(vMax, vtx.texCoord.y);
+                    // World extent of this face
+                    glm::vec3 wp = glm::vec3(wallPos) + vtx.position * wallScl;
+                    if (absN2.y > 0.5f) {
+                        hMin = std::min(hMin, wp.x); hMax = std::max(hMax, wp.x);
+                        yMin = std::min(yMin, wp.z); yMax = std::max(yMax, wp.z);
+                    } else if (absN2.x > 0.5f) {
+                        hMin = std::min(hMin, wp.z); hMax = std::max(hMax, wp.z);
+                        yMin = std::min(yMin, wp.y); yMax = std::max(yMax, wp.y);
+                    } else {
+                        hMin = std::min(hMin, wp.x); hMax = std::max(hMax, wp.x);
+                        yMin = std::min(yMin, wp.y); yMax = std::max(yMax, wp.y);
+                    }
+                }
+                float worldW = hMax - hMin, worldH = yMax - yMin;
+                float uvW = uMax - uMin, uvH = vMax - vMin;
+                if (worldW > 0.01f && uvW > 0.01f) uvDensH = uvW / worldW;
+                if (worldH > 0.01f && uvH > 0.01f) uvDensV = uvH / worldH;
+                break;
+            }
+
+            // Now rewrite all cut-axis face UVs using world position * density
+            for (auto& vtx : newVerts) {
+                glm::vec3 absN2 = glm::abs(vtx.normal);
+                bool onCut = (!isXFace && absN2.z > 0.5f) || (isXFace && absN2.x > 0.5f);
+                if (!onCut) continue;
+                // World position
+                glm::vec3 wp;
+                wp.x = wallPos.x + vtx.position.x * wallScl.x;
+                wp.y = wallPos.y + vtx.position.y * wallScl.y;
+                wp.z = wallPos.z + vtx.position.z * wallScl.z;
+                // Project to UV based on which way this wall faces
+                if (!isXFace) {
+                    vtx.texCoord = {(wp.x - wb.min.x) * uvDensH, (wp.y - wb.min.y) * uvDensV};
+                } else {
+                    vtx.texCoord = {(wp.z - wb.min.z) * uvDensH, (wp.y - wb.min.y) * uvDensV};
+                }
+            }
+        }
+
+        // Update visible wall mesh — keep original local bounds
         uint32_t oldHandle = wall->getBufferHandle();
         uint32_t newHandle = m_modelRenderer->createModel(newVerts, newInds);
         if (wall->hasTextureData()) {
@@ -5626,6 +5714,28 @@ private:
         m_editorUI.setSelectedObjectIndex(-1);
     }
 
+    void loadTexturePreset(const std::string& folderPath) {
+        // Load all textures from the folder
+        m_textureManager->loadTerrainTexturesFromFolder(folderPath);
+
+        // Update UI with new names
+        m_editorUI.setTextureNames(m_textureManager->getTextureNames(),
+                                    m_textureManager->getTextureCount(),
+                                    m_textureManager->getTextureColors());
+
+        // Regenerate thumbnails
+        for (int i = 0; i < m_textureManager->getTextureCount(); i++) {
+            createTerrainThumbnail(i);
+        }
+
+        // Register tab
+        std::string folderName = std::filesystem::path(folderPath).filename().string();
+        m_editorUI.addTexturePreset(folderName, folderPath);
+
+        std::cout << "Loaded texture preset: " << folderName
+                  << " (" << m_textureManager->getTextureCount() << " textures)" << std::endl;
+    }
+
     void createTerrainThumbnail(int slot) {
         // Load the source image for this slot and create an ImGui thumbnail
         const std::string& srcPath = m_textureManager->getSlotSourcePath(slot);
@@ -5739,6 +5849,53 @@ private:
         m_terrainThumbSamplers.push_back(sampler);
     }
 
+    // Make a texture tileable by blending edges with opposite edges
+    void makeTextureTileable(std::vector<unsigned char>& rgba, int w, int h) {
+        int blendWidth = std::max(1, std::min(w / 8, 32)); // blend zone: 1/8 of image, max 32px
+        auto getPixel = [&](int x, int y) -> unsigned char* { return &rgba[(y * w + x) * 4]; };
+
+        // Create a copy for reading (blend reads from original, writes to result)
+        std::vector<unsigned char> src = rgba;
+        auto getSrc = [&](int x, int y) -> unsigned char* { return &src[(y * w + x) * 4]; };
+
+        for (int y = 0; y < h; y++) {
+            for (int bx = 0; bx < blendWidth; bx++) {
+                float t = static_cast<float>(bx) / blendWidth; // 0 at edge, 1 at blend boundary
+                // Left edge: blend with right side
+                unsigned char* dst = getPixel(bx, y);
+                unsigned char* srcL = getSrc(bx, y);
+                unsigned char* srcR = getSrc(w - blendWidth + bx, y);
+                for (int c = 0; c < 4; c++)
+                    dst[c] = static_cast<unsigned char>(srcL[c] * t + srcR[c] * (1.0f - t));
+                // Right edge: blend with left side
+                dst = getPixel(w - blendWidth + bx, y);
+                srcL = getSrc(bx, y);
+                srcR = getSrc(w - blendWidth + bx, y);
+                for (int c = 0; c < 4; c++)
+                    dst[c] = static_cast<unsigned char>(srcR[c] * t + srcL[c] * (1.0f - t));
+            }
+        }
+        // Refresh src with horizontal blend results
+        src = rgba;
+        for (int x = 0; x < w; x++) {
+            for (int by = 0; by < blendWidth; by++) {
+                float t = static_cast<float>(by) / blendWidth;
+                // Top edge: blend with bottom side
+                unsigned char* dst = getPixel(x, by);
+                unsigned char* srcT = getSrc(x, by);
+                unsigned char* srcB = getSrc(x, h - blendWidth + by);
+                for (int c = 0; c < 4; c++)
+                    dst[c] = static_cast<unsigned char>(srcT[c] * t + srcB[c] * (1.0f - t));
+                // Bottom edge: blend with top side
+                dst = getPixel(x, h - blendWidth + by);
+                srcT = getSrc(x, by);
+                srcB = getSrc(x, h - blendWidth + by);
+                for (int c = 0; c < 4; c++)
+                    dst[c] = static_cast<unsigned char>(srcB[c] * t + srcT[c] * (1.0f - t));
+            }
+        }
+    }
+
     void assignTextureToSlot(int slot, const std::string& path) {
         // Load the image (DDS or PNG/JPG) and assign it to the terrain texture slot
         std::string ext = std::filesystem::path(path).extension().string();
@@ -5766,6 +5923,9 @@ private:
             std::cout << "Failed to load texture: " << path << std::endl;
             return;
         }
+
+        // Make texture tileable by blending edges
+        makeTextureTileable(rgba, w, h);
 
         std::string filename = std::filesystem::path(path).stem().string();
         std::string slotName = "Slot #" + std::to_string(slot + 1) + " (" + filename + ")";
@@ -6392,9 +6552,9 @@ private:
             // Building mode camera: orbit/pan/zoom (same as editor/LIME controls)
             if (m_playModeCursorVisible && m_showSiloConfig) {
 
-                // Scroll wheel zoom (dolly toward/away from orbit target)
+                // Scroll wheel zoom (dolly toward/away from orbit target) — skip if mouse over ImGui
                 float scroll = Input::getScrollDelta();
-                if (scroll != 0) {
+                if (scroll != 0 && !ImGui::GetIO().WantCaptureMouse) {
                     float orbitDistance = glm::length(m_camera.getPosition() - m_orbitTarget);
                     if (orbitDistance < 0.01f) orbitDistance = 5.0f;
                     float dollySpeed = std::max(orbitDistance * 0.04f, 0.5f);
@@ -7811,13 +7971,7 @@ private:
                     clearBuildSelection();
                 }
             }
-            // Q clears brush tools (H/V slab, frame placement)
-            if (Input::isKeyPressed(Input::KEY_Q)) {
-                m_hSlabBrushMode = false;
-                m_wallBrushMode = false;
-                m_framePlacementMode = false;
-                m_framePreviewValid = false;
-            }
+            // Q key disabled — brushes auto-deactivate after placing
             // F key: toggle frame placement (1x1 frames)
             if (Input::isKeyPressed(Input::KEY_F)) {
                 m_framePlacementMode = !m_framePlacementMode;
@@ -11880,8 +12034,9 @@ private:
                     obj->getTransform().setScale({floorW, m_hSlabThickness, floorD});
 
                     m_sceneObjects.push_back(std::move(obj));
-                    // Floor placed silently
                 }
+                // Auto-deactivate brush after placing
+                m_hSlabBrushMode = false;
             }
         } else if (!m_hSlabBrushMode) {
             m_hSlabDrawing = false;
@@ -12038,8 +12193,10 @@ private:
                     obj->getTransform().setScale(wallScale);
 
                     m_sceneObjects.push_back(std::move(obj));
-                    // Wall placed silently
                 }
+                // Auto-deactivate brush after placing
+                m_wallBrushMode = false;
+                m_wallBrushPreviewValid = false;
             }
         }
 
@@ -12262,6 +12419,22 @@ private:
             // Sync with EditorUI so Building Textures window can apply to selection
             updateSceneObjectsList();
             m_editorUI.setSelectedObjectIndex(bestIdx);
+        }
+
+        // D key: duplicate selected building piece (with holes, texture, everything)
+        if (m_isPlayMode && m_showSiloConfig && m_selectedBuildPiece >= 0
+            && Input::isKeyPressed(Input::KEY_D)
+            && !ImGui::GetIO().WantCaptureKeyboard) {
+            int newIdx = duplicateObjectSilent(m_selectedBuildPiece);
+            if (newIdx >= 0) {
+                clearBuildSelection();
+                m_selectedBuildPiece = newIdx;
+                m_sceneObjects[newIdx]->setSelected(true);
+                updateSceneObjectsList();
+                m_editorUI.setSelectedObjectIndex(newIdx);
+                m_screenMessage = "Duplicated";
+                m_screenMessageTimer = 1.0f;
+            }
         }
 
         // Delete selected building piece (walls, slabs, frames)
@@ -26054,7 +26227,7 @@ private:
             newObj->setLocalBounds(original->getLocalBounds());
             newObj->setModelPath("");
             newObj->setMeshData(verts, inds);
-            newObj->getTransform().setPosition(original->getTransform().getPosition());
+            newObj->getTransform().setPosition(original->getTransform().getPosition() + glm::vec3(1, 0, 0));
             newObj->setEulerRotation(original->getEulerRotation());
             newObj->getTransform().setScale(original->getTransform().getScale());
             newObj->setHueShift(original->getHueShift());
@@ -26063,6 +26236,23 @@ private:
             newObj->setBeingType(original->getBeingType());
             newObj->setDailySchedule(original->hasDailySchedule());
             newObj->setPatrolSpeed(original->getPatrolSpeed());
+            if (!original->getBuildingType().empty())
+                newObj->setBuildingType(original->getBuildingType());
+            if (original->isPrimitive()) {
+                newObj->setPrimitiveType(original->getPrimitiveType());
+                newObj->setPrimitiveSize(original->getPrimitiveSize());
+                newObj->setPrimitiveColor(original->getPrimitiveColor());
+            }
+            if (original->hasTextureData()) {
+                newObj->setTextureData(original->getTextureData(),
+                                       original->getTextureWidth(), original->getTextureHeight());
+                m_modelRenderer->updateTexture(handle, original->getTextureData().data(),
+                                               original->getTextureWidth(), original->getTextureHeight());
+            }
+            for (const auto& hole : original->getWallHoles()) {
+                newObj->addWallHole(hole.min + glm::vec3(1,0,0), hole.max + glm::vec3(1,0,0));
+            }
+            newObj->setAABBCollision(original->hasAABBCollision());
             for (const auto& behavior : original->getBehaviors()) {
                 newObj->addBehavior(behavior);
             }

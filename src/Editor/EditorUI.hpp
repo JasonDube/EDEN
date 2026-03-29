@@ -194,6 +194,16 @@ public:
     void setMoveSelectionCallback(MoveSelectionCallback callback) { m_onMoveSelection = callback; }
     void setTiltSelectionCallback(TiltSelectionCallback callback) { m_onTiltSelection = callback; }
     void setAssignTextureSlotCallback(AssignTextureSlotCallback callback) { m_onAssignTextureSlot = callback; }
+    void setBrowseTexturePresetCallback(std::function<void()> callback) { m_onBrowseTexturePreset = callback; }
+    void setLoadTexturePresetCallback(std::function<void(const std::string&)> callback) { m_onLoadTexturePreset = callback; }
+    void addTexturePreset(const std::string& name, const std::string& path) {
+        for (size_t i = 0; i < m_presetPaths.size(); i++) {
+            if (m_presetPaths[i] == path) { m_activePresetIndex = static_cast<int>(i); return; }
+        }
+        m_presetNames.push_back(name);
+        m_presetPaths.push_back(path);
+        m_activePresetIndex = static_cast<int>(m_presetNames.size()) - 1;
+    }
     void setImportModelCallback(ImportModelCallback callback) { m_onImportModel = callback; }
     void setBrowseModelCallback(BrowseModelCallback callback) { m_onBrowseModel = callback; }
     void setSelectObjectCallback(SelectObjectCallback callback) { m_onSelectObject = callback; }
@@ -447,6 +457,8 @@ public:
     int getBuildingTextureCount() const { return static_cast<int>(m_buildingTextures.size()); }
     float getBuildingTexScaleU() const { return m_buildingTexScaleU; }
     float getBuildingTexScaleV() const { return m_buildingTexScaleV; }
+    float getBuildingTexOffsetU() const { return m_buildingTexOffsetU; }
+    float getBuildingTexOffsetV() const { return m_buildingTexOffsetV; }
     int getBuildingTexRotation() const { return m_buildingTexRotation; }
     bool wantImportBuildingTexture() const { return m_wantImportBuildingTexture; }
     void clearImportBuildingTexture() { m_wantImportBuildingTexture = false; }
@@ -523,8 +535,13 @@ private:
     int m_textureCount = 4;
     std::vector<glm::vec3> m_textureColors;
     std::vector<void*> m_terrainThumbnails; // ImGui descriptors for terrain texture thumbnails
+    std::vector<std::string> m_presetNames{"Custom"};
+    std::vector<std::string> m_presetPaths{""};
+    int m_activePresetIndex = 0;
 
     AssignTextureSlotCallback m_onAssignTextureSlot;
+    std::function<void()> m_onBrowseTexturePreset;
+    std::function<void(const std::string&)> m_onLoadTexturePreset;
 
     // Texture color adjustments (per texture, dynamically sized)
     std::vector<float> m_texHue;
@@ -766,6 +783,8 @@ private:
     int m_selectedBuildingTexture = -1;
     float m_buildingTexScaleU = 1.0f;
     float m_buildingTexScaleV = 1.0f;
+    float m_buildingTexOffsetU = 0.0f;
+    float m_buildingTexOffsetV = 0.0f;
     int m_buildingTexRotation = 0; // 0, 90, 180, 270 degrees
     bool m_buildingTexFillFace = false;
     bool m_wantImportBuildingTexture = false;

@@ -1103,6 +1103,72 @@ void Terrain::applyTextureBrush(float worldX, float worldZ, float radius, float 
 
 }
 
+void Terrain::applySmearTextureBrush(float worldX, float worldZ, float radius, float strength, float falloff,
+                                     const BrushShapeParams& shapeParams) {
+    // Blur/smooth splatmap weights within brush radius — blends texture transitions
+    float maxRadius = radius * (shapeParams.shape == BrushShape::Ellipse ? std::max(1.0f, 1.0f / shapeParams.aspectRatio) : 1.5f);
+    for (auto& vc : m_visibleChunks) {
+        auto& chunk = vc.chunk;
+        glm::vec3 chunkPos = chunk->getWorldPosition() + vc.renderOffset;
+        float chunkSize = chunk->getChunkWorldSize();
+
+        if (worldX + maxRadius >= chunkPos.x && worldX - maxRadius < chunkPos.x + chunkSize &&
+            worldZ + maxRadius >= chunkPos.z && worldZ - maxRadius < chunkPos.z + chunkSize) {
+            int res = chunk->getResolution();
+            float tileSize = chunkSize / (res - 1);
+            float localX = worldX - vc.renderOffset.x;
+            float localZ = worldZ - vc.renderOffset.z;
+
+            // Snapshot current splatmaps for reading
+            auto s0copy = chunk->m_splatmap0;
+            auto s1copy = chunk->m_splatmap1;
+            auto s2copy = chunk->m_splatmap2;
+            auto s3copy = chunk->m_splatmap3;
+
+            for (int z = 0; z < res; z++) {
+                for (int x = 0; x < res; x++) {
+                    float vx = chunk->getWorldPosition().x + x * tileSize;
+                    float vz = chunk->getWorldPosition().z + z * tileSize;
+                    float dx = vx - localX, dz = vz - localZ;
+                    float dist = std::sqrt(dx * dx + dz * dz);
+                    if (dist > radius) continue;
+
+                    float t = dist / radius;
+                    float falloffMult = 1.0f - std::pow(t, falloff);
+                    float blendAmt = strength * falloffMult * 0.1f;
+
+                    glm::vec4 avg0(0), avg1(0), avg2(0), avg3(0);
+                    int count = 0;
+                    for (int nz = -2; nz <= 2; nz++) {
+                        for (int nx = -2; nx <= 2; nx++) {
+                            int sx = x + nx, sz = z + nz;
+                            if (sx >= 0 && sx < res && sz >= 0 && sz < res) {
+                                int si = sz * res + sx;
+                                avg0 += s0copy[si]; avg1 += s1copy[si];
+                                avg2 += s2copy[si]; avg3 += s3copy[si];
+                                count++;
+                            }
+                        }
+                    }
+                    if (count > 0) {
+                        avg0 /= static_cast<float>(count);
+                        avg1 /= static_cast<float>(count);
+                        avg2 /= static_cast<float>(count);
+                        avg3 /= static_cast<float>(count);
+                    }
+
+                    int idx = z * res + x;
+                    chunk->m_splatmap0[idx] = glm::mix(chunk->m_splatmap0[idx], avg0, blendAmt);
+                    chunk->m_splatmap1[idx] = glm::mix(chunk->m_splatmap1[idx], avg1, blendAmt);
+                    chunk->m_splatmap2[idx] = glm::mix(chunk->m_splatmap2[idx], avg2, blendAmt);
+                    chunk->m_splatmap3[idx] = glm::mix(chunk->m_splatmap3[idx], avg3, blendAmt);
+                }
+            }
+            chunk->m_needsUpload = true;
+        }
+    }
+}
+
 void Terrain::syncEdgeTextureData() {
     // Collect modified set first to avoid cascade from marking neighbors
     std::vector<glm::ivec2> modified;

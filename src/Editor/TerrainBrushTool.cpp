@@ -60,6 +60,14 @@ void TerrainBrushTool::apply(float deltaTime) {
             );
             break;
 
+        case BrushMode::SmearTexture:
+            m_terrain.applySmearTextureBrush(
+                m_position.x, m_position.z,
+                m_radius, scaledStrength, m_falloff,
+                m_shapeParams
+            );
+            break;
+
         case BrushMode::Select:
             m_terrain.applySelectionBrush(
                 m_position.x, m_position.z,

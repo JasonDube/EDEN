@@ -25,7 +25,7 @@ struct Vertex3D {
     float holeMask;        // Terrain hole (0 = solid, 1 = discarded/invisible)
 };
 
-enum class BrushMode { Raise, Lower, Smooth, Flatten, Paint, Crack, Texture, Plateau, LevelMin, Grab, Select, Deselect, MoveObject, Spire, Ridged, Trench, PathMode, Terrace, FlattenToY, WallDraw, Foundation, Furrow, Shovel };
+enum class BrushMode { Raise, Lower, Smooth, Flatten, Paint, Crack, Texture, Plateau, LevelMin, Grab, Select, Deselect, MoveObject, Spire, Ridged, Trench, PathMode, Terrace, FlattenToY, WallDraw, Foundation, Furrow, Shovel, SmearTexture };
 
 enum class BrushShape { Circle, Ellipse, Square };
 
@@ -257,6 +257,9 @@ public:
 
     // Export terrain to OBJ file
     bool exportToOBJ(const std::string& filepath) const;
+
+    void applySmearTextureBrush(float worldX, float worldZ, float radius, float strength, float falloff,
+                                const BrushShapeParams& shapeParams = BrushShapeParams{});
 
 private:
     void syncEdgeTextureData();  // Copy edge texture data from modified chunks to neighbors
