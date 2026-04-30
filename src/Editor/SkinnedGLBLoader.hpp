@@ -24,6 +24,7 @@ struct SkinnedLoadResult {
     std::vector<SkinnedLoadedMesh> meshes;
     std::unique_ptr<Skeleton> skeleton;
     std::vector<AnimationClip> animations;
+    std::string generator;  // glTF asset.generator (used to skip Mixamo-specific axis/scale correction)
 };
 
 class SkinnedGLBLoader {

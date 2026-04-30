@@ -461,6 +461,8 @@ SkinnedLoadResult SkinnedGLBLoader::load(const std::string& filepath) {
         }
     }
 
+    result.generator = model.asset.generator;
+
     // Success if we have meshes OR animations (animation-only files are valid)
     result.success = !result.meshes.empty() || !result.animations.empty();
     if (!result.success && result.error.empty()) {

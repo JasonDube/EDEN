@@ -325,29 +325,69 @@ uint32_t SkinnedModelRenderer::createModel(const std::vector<SkinnedVertex>& ver
     data.animations = std::move(animations);
     data.animPlayer.setSkeleton(data.skeleton.get());
 
-    // Create vertex buffer
+    // Helper: upload `src` bytes into a fresh DEVICE_LOCAL buffer via a
+    // host-visible staging buffer + cmdCopyBuffer. Vertex/index data is
+    // read every frame by the GPU; keeping it in system RAM (the previous
+    // HOST_VISIBLE allocation) forced PCIe reads per draw and dragged
+    // framerate hard on dense skinned meshes.
+    auto uploadToDeviceLocal = [this](const void* src, VkDeviceSize size,
+                                       VkBufferUsageFlags usage,
+                                       VkBuffer& outBuf, VkDeviceMemory& outMem) {
+        VkBuffer staging;
+        VkDeviceMemory stagingMem;
+        m_context.createBuffer(size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                               VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                                   VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                               staging, stagingMem);
+        void* mapped;
+        vkMapMemory(m_context.getDevice(), stagingMem, 0, size, 0, &mapped);
+        std::memcpy(mapped, src, size);
+        vkUnmapMemory(m_context.getDevice(), stagingMem);
+
+        m_context.createBuffer(size,
+                               VK_BUFFER_USAGE_TRANSFER_DST_BIT | usage,
+                               VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+                               outBuf, outMem);
+
+        VkCommandBufferAllocateInfo allocInfo{};
+        allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+        allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+        allocInfo.commandPool = m_context.getCommandPool();
+        allocInfo.commandBufferCount = 1;
+        VkCommandBuffer cb;
+        vkAllocateCommandBuffers(m_context.getDevice(), &allocInfo, &cb);
+
+        VkCommandBufferBeginInfo beginInfo{};
+        beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+        beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        vkBeginCommandBuffer(cb, &beginInfo);
+        VkBufferCopy region{};
+        region.size = size;
+        vkCmdCopyBuffer(cb, staging, outBuf, 1, &region);
+        vkEndCommandBuffer(cb);
+
+        VkSubmitInfo submit{};
+        submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+        submit.commandBufferCount = 1;
+        submit.pCommandBuffers = &cb;
+        vkQueueSubmit(m_context.getGraphicsQueue(), 1, &submit, VK_NULL_HANDLE);
+        vkQueueWaitIdle(m_context.getGraphicsQueue());
+        vkFreeCommandBuffers(m_context.getDevice(), m_context.getCommandPool(), 1, &cb);
+
+        vkDestroyBuffer(m_context.getDevice(), staging, nullptr);
+        vkFreeMemory(m_context.getDevice(), stagingMem, nullptr);
+    };
+
     VkDeviceSize vertexSize = sizeof(SkinnedVertex) * vertices.size();
-    m_context.createBuffer(vertexSize, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
-                           VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-                           data.vertexBuffer, data.vertexMemory);
-
-    void* mapped;
-    vkMapMemory(m_context.getDevice(), data.vertexMemory, 0, vertexSize, 0, &mapped);
-    memcpy(mapped, vertices.data(), vertexSize);
-    vkUnmapMemory(m_context.getDevice(), data.vertexMemory);
-
+    uploadToDeviceLocal(vertices.data(), vertexSize,
+                        VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+                        data.vertexBuffer, data.vertexMemory);
     data.vertexCount = static_cast<uint32_t>(vertices.size());
 
-    // Create index buffer
     VkDeviceSize indexSize = sizeof(uint32_t) * indices.size();
-    m_context.createBuffer(indexSize, VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
-                           VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-                           data.indexBuffer, data.indexMemory);
-
-    vkMapMemory(m_context.getDevice(), data.indexMemory, 0, indexSize, 0, &mapped);
-    memcpy(mapped, indices.data(), indexSize);
-    vkUnmapMemory(m_context.getDevice(), data.indexMemory);
-
+    uploadToDeviceLocal(indices.data(), indexSize,
+                        VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
+                        data.indexBuffer, data.indexMemory);
     data.indexCount = static_cast<uint32_t>(indices.size());
 
     // Create bone matrix UBO (persistently mapped)
@@ -379,6 +419,7 @@ uint32_t SkinnedModelRenderer::createModel(const std::vector<SkinnedVertex>& ver
                                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
                                stagingBuffer, stagingMemory);
 
+        void* mapped = nullptr;
         vkMapMemory(m_context.getDevice(), stagingMemory, 0, texSize, 0, &mapped);
         memcpy(mapped, textureData, texSize);
         vkUnmapMemory(m_context.getDevice(), stagingMemory);

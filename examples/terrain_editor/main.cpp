@@ -1,3 +1,7 @@
+#ifdef TRACY_ENABLE
+#include <tracy/Tracy.hpp>
+#endif
+
 #include "Renderer/VulkanApplicationBase.hpp"
 #include "Renderer/ImGuiManager.hpp"
 #include "Renderer/TerrainPipeline.hpp"
@@ -239,6 +243,7 @@ public:
         m_screenMessageTimer = duration;
     }
     glm::vec3 getCameraPosition() const override { return m_camera.getPosition(); }
+    ModelRenderer* getModelRenderer() override { return m_modelRenderer.get(); }
     // canPowerReach() defined later in class — satisfies MachineHost::canPowerReach
 
     void setSessionMode(bool enabled) { m_sessionMode = enabled; }
@@ -249,15 +254,12 @@ protected:
         Audio::getInstance().init();
 
         m_textureManager = std::make_unique<TextureManager>(getContext());
-        m_textureManager->loadTerrainTexturesFromFolder("textures/");
+        m_textureManager->loadTerrainTexturesFromFolder(std::string(CMAKE_SOURCE_DIR) + "/examples/terrain_editor/assets/textures/");
 
         // Pass loaded texture names to the editor UI
         m_editorUI.setTextureNames(m_textureManager->getTextureNames(), m_textureManager->getTextureCount(), m_textureManager->getTextureColors());
 
-        // Create thumbnails for all existing terrain textures
-        for (int i = 0; i < m_textureManager->getTextureCount(); i++) {
-            createTerrainThumbnail(i);
-        }
+        // Terrain thumbnails created after pipeline init (see below)
 
         // "Load Preset" button — opens folder dialog, loads all textures from folder
         m_editorUI.setBrowseTexturePresetCallback([this]() {
@@ -293,6 +295,9 @@ protected:
             getContext(), getSwapchain().getRenderPass(), getSwapchain().getExtent(),
             m_textureManager->getDescriptorSetLayout());
         m_editorUI.setTerrainPipeline(m_pipeline.get());
+
+        // Defer terrain thumbnail creation to first frame (needs ImGui Vulkan context)
+        m_pendingTerrainThumbnails = true;
 
         m_chunkManager = std::make_unique<ChunkManager>(getBufferManager());
         m_brushTool = std::make_unique<TerrainBrushTool>(m_terrain, m_camera);
@@ -1455,7 +1460,7 @@ protected:
             for (const auto& obj : m_sceneObjects) {
                 if (!obj) continue;
                 const std::string& bt = obj->getBuildingType();
-                if (bt == "eden_basement_wall" || bt == "eden_basement" || bt == "filesystem_wall" || bt == "platform_wall" || bt == "platform_slab") {
+                if (bt == "eden_basement_wall" || bt == "eden_basement" || bt == "filesystem_wall" || bt == "platform_wall" || bt == "platform_slab" || bt == "platform_slope") {
                     AABB bounds = obj->getWorldBounds();
                     m_camera.addCollisionBox(bounds.min, bounds.max);
                 }
@@ -1855,6 +1860,14 @@ protected:
         // Help window renders in both modes
         if (m_editorUI.showHelp()) {
             m_editorUI.renderHelpWindow();
+        }
+
+        // Deferred terrain thumbnail creation (needs ImGui Vulkan context from first frame)
+        if (m_pendingTerrainThumbnails) {
+            m_pendingTerrainThumbnails = false;
+            for (int i = 0; i < m_textureManager->getTextureCount(); i++) {
+                createTerrainThumbnail(i);
+            }
         }
 
         if (m_isPlayMode) {
@@ -2524,6 +2537,35 @@ protected:
                             m_modelRenderer->render(cmd, vp, m_dirtPileGpuHandle, dirtMatrix);
                         }
                     }
+
+                    // Render clumped objects piled on the wheelbarrow
+                    if (!m_clumpedObjects.empty()) {
+                        // Basin center: slightly up and forward from heldPos
+                        glm::vec3 basinCenter = heldPos + camUp3 * 0.15f + camFront3 * 0.15f;
+
+                        for (auto& c : m_clumpedObjects) {
+                            if (!c.obj) continue;
+                            // Transform local offset by camera orientation
+                            glm::vec3 worldOffset = camRight3 * c.localOffset.x +
+                                                    camUp3 * c.localOffset.y +
+                                                    camFront3 * c.localOffset.z;
+                            glm::vec3 clumpPos = basinCenter + worldOffset;
+
+                            glm::mat4 clumpMatrix = glm::translate(glm::mat4(1.0f), clumpPos);
+                            clumpMatrix *= camOrient2; // Orient with camera
+                            // Apply scaled-down size so objects fit in the clump box
+                            glm::vec3 renderScale = c.originalScale * c.clumpScale;
+                            clumpMatrix = glm::scale(clumpMatrix, renderScale);
+
+                            // Apply dump tilt if dumping
+                            if (m_isDumping && dumpTilt > 0.0f) {
+                                clumpMatrix = glm::rotate(clumpMatrix, glm::radians(dumpTilt),
+                                                          glm::vec3(1.0f, 0.0f, 0.0f));
+                            }
+
+                            m_modelRenderer->render(cmd, vp, c.obj->getBufferHandle(), clumpMatrix);
+                        }
+                    }
                 }
                 // Held rake — lower-right like shovel
                 else if (heldName.find("rake") != std::string::npos) {
@@ -2967,12 +3009,55 @@ protected:
             }
         }
 
+        // Room brush preview — cyan wireframe showing 4 walls around the dragged rectangle
+        if (m_roomBrushPreviewValid && m_roomBrushDrawing) {
+            float dx = std::abs(m_roomBrushEnd.x - m_roomBrushStart.x);
+            float dz = std::abs(m_roomBrushEnd.z - m_roomBrushStart.z);
+            float roomW = std::round(dx);
+            float roomD = std::round(dz);
+            if (roomW >= 1.0f && roomD >= 1.0f) {
+                float minX = std::min(m_roomBrushStart.x, m_roomBrushEnd.x);
+                float minZ = std::min(m_roomBrushStart.z, m_roomBrushEnd.z);
+                float baseY = m_roomBrushStart.y;
+                float wallH = m_wallBrushHeight;
+                float wallT = m_wallBrushThickness;
+
+                // Draw 4 wall wireframe boxes
+                struct WDef { float cx, cz, hw, hd; };
+                WDef wd[4] = {
+                    { minX + roomW * 0.5f, minZ + wallT * 0.5f, roomW * 0.5f, wallT * 0.5f },
+                    { minX + roomW * 0.5f, minZ + roomD - wallT * 0.5f, roomW * 0.5f, wallT * 0.5f },
+                    { minX + wallT * 0.5f, minZ + roomD * 0.5f, wallT * 0.5f, roomD * 0.5f },
+                    { minX + roomW - wallT * 0.5f, minZ + roomD * 0.5f, wallT * 0.5f, roomD * 0.5f },
+                };
+
+                std::vector<glm::vec3> roomLines;
+                for (int i = 0; i < 4; i++) {
+                    float cx = wd[i].cx, cz = wd[i].cz, hw = wd[i].hw, hd = wd[i].hd;
+                    glm::vec3 c000 = {cx - hw, baseY, cz - hd};
+                    glm::vec3 c100 = {cx + hw, baseY, cz - hd};
+                    glm::vec3 c110 = {cx + hw, baseY, cz + hd};
+                    glm::vec3 c010 = {cx - hw, baseY, cz + hd};
+                    glm::vec3 c001 = {cx - hw, baseY + wallH, cz - hd};
+                    glm::vec3 c101 = {cx + hw, baseY + wallH, cz - hd};
+                    glm::vec3 c111 = {cx + hw, baseY + wallH, cz + hd};
+                    glm::vec3 c011 = {cx - hw, baseY + wallH, cz + hd};
+                    roomLines.insert(roomLines.end(), {
+                        c000, c100, c100, c110, c110, c010, c010, c000,
+                        c001, c101, c101, c111, c111, c011, c011, c001,
+                        c000, c001, c100, c101, c110, c111, c010, c011
+                    });
+                }
+                m_modelRenderer->renderLines(cmd, vp, roomLines, glm::vec3(0.2f, 0.8f, 0.9f)); // cyan
+            }
+        }
+
         // Game-mode grid overlay on platform_slab floors and platform_wall walls
-        if ((m_hSlabBrushMode || m_wallBrushMode || m_framePlacementMode || m_showSiloConfig) && !m_filesystemBrowser.isActive() && m_isPlayMode) {
+        if ((m_hSlabBrushMode || m_wallBrushMode || m_roomBrushMode || m_framePlacementMode || m_showSiloConfig) && !m_filesystemBrowser.isActive() && m_isPlayMode) {
             std::vector<glm::vec3> gameGridLines;
             std::vector<glm::vec3> selectedGridLines;
 
-            bool anyBrushActive = m_hSlabBrushMode || m_wallBrushMode || m_framePlacementMode || m_buildMoveMode || m_showSiloConfig;
+            bool anyBrushActive = m_hSlabBrushMode || m_wallBrushMode || m_roomBrushMode || m_framePlacementMode || m_buildMoveMode || m_showSiloConfig;
             for (auto& obj : m_sceneObjects) {
                 if (!obj) continue;
                 const auto& bt = obj->getBuildingType();
@@ -3471,6 +3556,10 @@ protected:
 
         vkCmdEndRenderPass(cmd);
         vkEndCommandBuffer(cmd);
+
+#ifdef TRACY_ENABLE
+        FrameMark;
+#endif
     }
 
     void onSwapchainRecreated() override {
@@ -3577,6 +3666,40 @@ private:
                         v.texCoord.y = cu * sinR + cv * cosR + 0.5f;
                     }
                     // Apply UV offset
+                    v.texCoord.x += m_editorUI.getBuildingTexOffsetU();
+                    v.texCoord.y += m_editorUI.getBuildingTexOffsetV();
+                }
+                target->setMeshData(vertices, target->getIndices());
+                m_modelRenderer->updateVertices(target->getBufferHandle(), vertices);
+            } else if (target->hasMeshData() && target->getPrimitiveType() == PrimitiveType::Wedge) {
+                auto freshMesh = PrimitiveMeshBuilder::createWedge(1.0f, target->getSlopeRatio(), glm::vec4(1.0f));
+                auto vertices = target->getVertices();
+                glm::vec3 sc = target->getTransform().getScale();
+                float rotRad = glm::radians(static_cast<float>(rotationDeg));
+                float cosR = std::cos(rotRad), sinR = std::sin(rotRad);
+                for (size_t vi = 0; vi < vertices.size() && vi < freshMesh.vertices.size(); vi++) {
+                    auto& v = vertices[vi];
+                    v.color = glm::vec4(1.0f, 1.0f, 1.0f, 1.0f);
+                    v.texCoord = freshMesh.vertices[vi].texCoord;
+                    glm::vec3 absN = glm::abs(v.normal);
+                    float faceW, faceH;
+                    if (absN.y > absN.x && absN.y > absN.z) {
+                        faceW = sc.x; faceH = sc.z;
+                    } else if (absN.x > absN.z) {
+                        faceW = sc.z; faceH = sc.y;
+                    } else {
+                        faceW = sc.x; faceH = sc.y;
+                    }
+                    float finalU = (uScale < 0.0f) ? 1.0f : (faceW * uScale);
+                    float finalV = (vScale < 0.0f) ? 1.0f : (faceH * vScale);
+                    v.texCoord.x *= finalU;
+                    v.texCoord.y *= finalV;
+                    if (rotationDeg != 0) {
+                        float cu = v.texCoord.x - 0.5f;
+                        float cv = v.texCoord.y - 0.5f;
+                        v.texCoord.x = cu * cosR - cv * sinR + 0.5f;
+                        v.texCoord.y = cu * sinR + cv * cosR + 0.5f;
+                    }
                     v.texCoord.x += m_editorUI.getBuildingTexOffsetU();
                     v.texCoord.y += m_editorUI.getBuildingTexOffsetV();
                 }
@@ -5707,7 +5830,7 @@ private:
         for (auto& obj : m_sceneObjects) {
             if (!obj) continue;
             const auto& bt = obj->getBuildingType();
-            if (bt == "platform_slab" || bt == "platform_wall" || bt == "wall_frame" || bt == "window_frame")
+            if (bt == "platform_slab" || bt == "platform_wall" || bt == "platform_slope" || bt == "wall_frame" || bt == "window_frame")
                 obj->setSelected(false);
         }
         m_selectedBuildPiece = -1;
@@ -5739,11 +5862,17 @@ private:
     void createTerrainThumbnail(int slot) {
         // Load the source image for this slot and create an ImGui thumbnail
         const std::string& srcPath = m_textureManager->getSlotSourcePath(slot);
-        if (srcPath.empty()) return;
+        if (srcPath.empty()) {
+            std::cout << "[Thumb] Slot " << slot << ": no source path" << std::endl;
+            return;
+        }
 
         int w, h, channels;
         unsigned char* pixels = stbi_load(srcPath.c_str(), &w, &h, &channels, STBI_rgb_alpha);
-        if (!pixels) return;
+        if (!pixels) {
+            std::cout << "[Thumb] Slot " << slot << ": failed to load " << srcPath << std::endl;
+            return;
+        }
 
         // Resize to 64x64 thumbnail
         const int thumbSize = 64;
@@ -6930,6 +7059,62 @@ private:
 
         glm::vec3 oldCameraPos = m_camera.getPosition();
 
+        // Free-cam toggle (C in play mode). Detached from player, noclip, smooth slow motion.
+        {
+            bool cKeyDown = Input::isKeyDown(Input::KEY_C);
+            bool canToggle = m_isPlayMode && !imguiWantsKeyboard &&
+                             !m_inConversation && !m_quickChatMode &&
+                             !m_inPanelFocusMode;
+            if (canToggle && cKeyDown && !m_wasFreeCamCKeyDown) {
+                m_freeCamMode = !m_freeCamMode;
+                if (m_freeCamMode) {
+                    m_freeCamSavedPos = m_camera.getPosition();
+                    m_freeCamSavedYaw = m_camera.getYaw();
+                    m_freeCamSavedPitch = m_camera.getPitch();
+                    m_freeCamSavedNoclip = m_camera.isNoClip();
+                    m_freeCamSavedMode = m_camera.getMovementMode();
+                    m_camera.setNoClip(true);
+                    m_camera.setMovementMode(MovementMode::Fly);
+                    m_freeCamVelocity = glm::vec3(0);
+                } else {
+                    m_camera.setPosition(m_freeCamSavedPos);
+                    m_camera.setYaw(m_freeCamSavedYaw);
+                    m_camera.setPitch(m_freeCamSavedPitch);
+                    m_camera.setNoClip(m_freeCamSavedNoclip);
+                    m_camera.setMovementMode(m_freeCamSavedMode);
+                    if (m_characterController) {
+                        m_characterController->setPosition(m_freeCamSavedPos);
+                    }
+                }
+            }
+            m_wasFreeCamCKeyDown = cKeyDown;
+        }
+
+        // Free-cam movement: smoothed velocity, slow base speed, shift = sprint, space/ctrl = up/down.
+        // Skips character controller, terrain collision, AABB collision — flies anywhere.
+        if (m_freeCamMode) {
+            glm::vec3 desired(0.0f);
+            if (!imguiWantsKeyboard && !m_inConversation && !m_quickChatMode) {
+                if (Input::isKeyDown(Input::KEY_W)) desired += m_camera.getFront();
+                if (Input::isKeyDown(Input::KEY_S)) desired -= m_camera.getFront();
+                if (Input::isKeyDown(Input::KEY_D)) desired += m_camera.getRight();
+                if (Input::isKeyDown(Input::KEY_A)) desired -= m_camera.getRight();
+                if (Input::isKeyDown(Input::KEY_SPACE)) desired += glm::vec3(0, 1, 0);
+                if (Input::isKeyDown(Input::KEY_LEFT_CONTROL)) desired -= glm::vec3(0, 1, 0);
+            }
+            if (glm::length(desired) > 0.001f) desired = glm::normalize(desired);
+
+            float sprintMult = (!imguiWantsKeyboard && Input::isKeyDown(Input::KEY_LEFT_SHIFT)) ? 4.0f : 1.0f;
+            glm::vec3 targetVel = desired * m_freeCamBaseSpeed * sprintMult;
+
+            // Exponential smoothing — ~0.13s to reach target velocity
+            float damp = 1.0f - std::exp(-8.0f * deltaTime);
+            m_freeCamVelocity += (targetVel - m_freeCamVelocity) * damp;
+
+            m_camera.setPosition(m_camera.getPosition() + m_freeCamVelocity * deltaTime);
+            return;
+        }
+
         // Compute early so we can skip camera's onSpacePressed when Jolt handles jump
         bool useCharacterController = m_isPlayMode && m_characterController &&
                                 m_camera.getMovementMode() == MovementMode::Walk &&
@@ -7944,6 +8129,7 @@ private:
                     Input::setMouseCaptured(true);
                     m_hSlabBrushMode = false;
                     m_wallBrushMode = false;
+                    m_roomBrushMode = false;
                     m_framePlacementMode = false;
                     m_framePreviewValid = false;
                     m_buildMoveMode = false;
@@ -7960,15 +8146,24 @@ private:
             if (Input::isKeyPressed(Input::KEY_H)) {
                 m_hSlabBrushMode = !m_hSlabBrushMode;
                 if (m_hSlabBrushMode) {
-                    m_wallBrushMode = false; m_framePlacementMode = false; m_buildMoveMode = false;
+                    m_wallBrushMode = false; m_framePlacementMode = false; m_buildMoveMode = false; m_roomBrushMode = false;
                     clearBuildSelection();
                 }
             }
             if (Input::isKeyPressed(Input::KEY_V)) {
                 m_wallBrushMode = !m_wallBrushMode;
                 if (m_wallBrushMode) {
-                    m_hSlabBrushMode = false; m_framePlacementMode = false; m_buildMoveMode = false;
+                    m_hSlabBrushMode = false; m_framePlacementMode = false; m_buildMoveMode = false; m_roomBrushMode = false;
                     clearBuildSelection();
+                }
+            }
+            if (Input::isKeyPressed(Input::KEY_B)) {
+                m_roomBrushMode = !m_roomBrushMode;
+                if (m_roomBrushMode) {
+                    m_hSlabBrushMode = false; m_wallBrushMode = false; m_framePlacementMode = false; m_buildMoveMode = false;
+                    clearBuildSelection();
+                    m_screenMessage = "Room brush: drag to place 4 walls";
+                    m_screenMessageTimer = 2.0f;
                 }
             }
             // Q key disabled — brushes auto-deactivate after placing
@@ -7979,6 +8174,7 @@ private:
                 if (m_framePlacementMode) {
                     m_hSlabBrushMode = false;
                     m_wallBrushMode = false;
+                    m_roomBrushMode = false;
                     clearBuildSelection();
                     m_screenMessage = "Frame mode: click to place 1x1 frames";
                     m_screenMessageTimer = 2.0f;
@@ -9514,6 +9710,15 @@ private:
                             obj->setAABBCollision(false);
                             m_cpAttachedTo[obj.get()] = snapResult.target;
                             portSnapped = true;
+
+                            // Body part stitching: if both parts have numbered CPs, stitch seam vertices
+                            if (BodyPartMachine::isBodyPart(obj.get()) && BodyPartMachine::isBodyPart(snapResult.target)) {
+                                auto stitchResult = m_machineManager.bodyPart().stitchParts(obj.get(), snapResult.target, *this);
+                                if (stitchResult.success) {
+                                    m_screenMessage = "Stitched " + std::to_string(stitchResult.verticesMoved) + " vertices";
+                                    m_screenMessageTimer = 3.0f;
+                                }
+                            }
                         }
                     }
 
@@ -9748,9 +9953,28 @@ private:
         if (m_isPlayMode && !ImGui::GetIO().WantCaptureMouse && !(m_playModeCursorVisible && m_showSiloConfig)) {
             float scroll = Input::getScrollDelta();
             if (scroll > 0.0f) {
+                // Release clumped objects before switching slots (restore scale)
+                if (!m_clumpedObjects.empty()) {
+                    for (auto& c : m_clumpedObjects) {
+                        if (c.obj) {
+                            c.obj->getTransform().setScale(c.originalScale);
+                            c.obj->setVisible(true);
+                        }
+                    }
+                    m_clumpedObjects.clear();
+                }
                 m_activeToolbarSlot = (m_activeToolbarSlot + 9) % 10;
                 showHotbarTooltip(m_activeToolbarSlot);
             } else if (scroll < 0.0f) {
+                if (!m_clumpedObjects.empty()) {
+                    for (auto& c : m_clumpedObjects) {
+                        if (c.obj) {
+                            c.obj->getTransform().setScale(c.originalScale);
+                            c.obj->setVisible(true);
+                        }
+                    }
+                    m_clumpedObjects.clear();
+                }
                 m_activeToolbarSlot = (m_activeToolbarSlot + 1) % 10;
                 showHotbarTooltip(m_activeToolbarSlot);
             }
@@ -12200,6 +12424,136 @@ private:
             }
         }
 
+        // Room brush mode — drag out a rectangle, creates 4 separate walls on release
+        m_roomBrushPreviewValid = false;
+        if (m_roomBrushMode && m_isPlayMode && !m_filesystemBrowser.isActive() && !ImGui::GetIO().WantCaptureMouse) {
+            float aspect = static_cast<float>(getWindow().getWidth()) / getWindow().getHeight();
+            glm::mat4 proj = m_camera.getProjectionMatrix(aspect, 0.1f, 5000.0f);
+            glm::mat4 view = m_camera.getViewMatrix();
+            glm::mat4 invVP = glm::inverse(proj * view);
+            float ndcX = 0.0f, ndcY = 0.0f;
+            if (m_playModeCursorVisible) {
+                glm::vec2 mouse = Input::getMousePosition();
+                ndcX = (2.0f * mouse.x / getWindow().getWidth()) - 1.0f;
+                ndcY = 1.0f - (2.0f * mouse.y / getWindow().getHeight());
+            }
+            glm::vec4 nearPt = invVP * glm::vec4(ndcX, ndcY, -1, 1); nearPt /= nearPt.w;
+            glm::vec4 farPt  = invVP * glm::vec4(ndcX, ndcY,  1, 1); farPt  /= farPt.w;
+            glm::vec3 rayO = glm::vec3(nearPt);
+            glm::vec3 rayD = glm::normalize(glm::vec3(farPt - nearPt));
+
+            // Hit test: slabs then terrain (same as H-slab brush)
+            glm::vec3 hitPt{0.0f};
+            bool hit = false;
+            float bestT = std::numeric_limits<float>::max();
+
+            for (auto& obj : m_sceneObjects) {
+                if (!obj) continue;
+                const auto& bt = obj->getBuildingType();
+                if (bt != "platform_wall" && bt != "platform_slab") continue;
+                float dist = obj->getWorldBounds().intersect(rayO, rayD);
+                if (dist >= 0 && dist < 200.0f && dist < bestT) {
+                    bestT = dist;
+                    glm::vec3 hp = rayO + rayD * dist;
+                    AABB wb = obj->getWorldBounds();
+                    float snappedY = std::round(hp.y);
+                    snappedY = std::max(snappedY, std::round(wb.min.y));
+                    snappedY = std::min(snappedY, std::round(wb.max.y));
+                    hitPt = {std::round(hp.x), snappedY, std::round(hp.z)};
+                    hit = true;
+                }
+            }
+
+            if (!hit && rayD.y < -0.001f) {
+                for (float t = 1.0f; t < 500.0f; t += 0.5f) {
+                    glm::vec3 p = rayO + rayD * t;
+                    float terrY = m_terrain.getHeightAt(p.x, p.z);
+                    if (p.y <= terrY + 0.5f) {
+                        hitPt = {std::round(p.x), terrY, std::round(p.z)};
+                        hit = true;
+                        break;
+                    }
+                }
+            }
+
+            if (hit) {
+                if (leftPressed && !m_roomBrushDrawing) {
+                    m_roomBrushStart = hitPt;
+                    m_roomBrushEnd = hitPt;
+                    m_roomBrushDrawing = true;
+                }
+            }
+
+            // While dragging, project onto starting Y plane
+            if (m_roomBrushDrawing) {
+                if (std::abs(rayD.y) > 0.001f) {
+                    float t = (m_roomBrushStart.y - rayO.y) / rayD.y;
+                    if (t > 0 && t < 500.0f) {
+                        glm::vec3 hp = rayO + rayD * t;
+                        m_roomBrushEnd = {std::round(hp.x), m_roomBrushStart.y, std::round(hp.z)};
+                        m_roomBrushPreviewValid = true;
+                    }
+                }
+            }
+
+            // Release: create 4 walls
+            if (m_roomBrushDrawing && !Input::isMouseButtonDown(Input::MOUSE_LEFT)) {
+                m_roomBrushDrawing = false;
+                float dx = std::abs(m_roomBrushEnd.x - m_roomBrushStart.x);
+                float dz = std::abs(m_roomBrushEnd.z - m_roomBrushStart.z);
+                if (dx >= 1.0f && dz >= 1.0f) {
+                    float roomW = std::round(dx);
+                    float roomD = std::round(dz);
+                    float minX = std::min(m_roomBrushStart.x, m_roomBrushEnd.x);
+                    float minZ = std::min(m_roomBrushStart.z, m_roomBrushEnd.z);
+                    float baseY = m_roomBrushStart.y;
+                    float wallH = m_wallBrushHeight;
+                    float wallT = m_wallBrushThickness;
+
+                    // Wall definitions: {centerX, centerZ, scaleX, scaleZ}
+                    struct WallDef { float cx, cz, sx, sz; const char* label; };
+                    WallDef walls[4] = {
+                        // Front wall (min Z edge, along X)
+                        { minX + roomW * 0.5f, minZ + wallT * 0.5f, roomW, wallT, "Front" },
+                        // Back wall (max Z edge, along X)
+                        { minX + roomW * 0.5f, minZ + roomD - wallT * 0.5f, roomW, wallT, "Back" },
+                        // Left wall (min X edge, along Z)
+                        { minX + wallT * 0.5f, minZ + roomD * 0.5f, wallT, roomD, "Left" },
+                        // Right wall (max X edge, along Z)
+                        { minX + roomW - wallT * 0.5f, minZ + roomD * 0.5f, wallT, roomD, "Right" },
+                    };
+
+                    for (int i = 0; i < 4; i++) {
+                        glm::vec4 wallColor = {0.7f, 0.7f, 0.7f, 1.0f};
+                        auto mesh = PrimitiveMeshBuilder::createCube(1.0f, wallColor);
+                        uint32_t handle = m_modelRenderer->createModel(mesh.vertices, mesh.indices);
+
+                        auto obj = std::make_unique<SceneObject>(
+                            "RoomWall_" + std::string(walls[i].label) + "_" + std::to_string(m_sceneObjects.size()));
+                        obj->setBufferHandle(handle);
+                        obj->setIndexCount(static_cast<uint32_t>(mesh.indices.size()));
+                        obj->setVertexCount(static_cast<uint32_t>(mesh.vertices.size()));
+                        obj->setLocalBounds(mesh.bounds);
+                        obj->setMeshData(mesh.vertices, mesh.indices);
+                        obj->setPrimitiveType(PrimitiveType::Cube);
+                        obj->setPrimitiveSize(1.0f);
+                        obj->setPrimitiveColor(wallColor);
+                        obj->setBuildingType("platform_wall");
+                        obj->setAABBCollision(true);
+
+                        obj->getTransform().setPosition({walls[i].cx, baseY, walls[i].cz});
+                        obj->getTransform().setScale({walls[i].sx, wallH, walls[i].sz});
+
+                        m_sceneObjects.push_back(std::move(obj));
+                    }
+                }
+                m_roomBrushMode = false;
+                m_roomBrushPreviewValid = false;
+            }
+        } else if (!m_roomBrushMode) {
+            m_roomBrushDrawing = false;
+        }
+
         // Game-mode frame placement — click on a wall or floor to place a frame
         if (m_framePlacementMode && m_isPlayMode && !m_filesystemBrowser.isActive() && !ImGui::GetIO().WantCaptureMouse) {
             float aspect = static_cast<float>(getWindow().getWidth()) / getWindow().getHeight();
@@ -12364,14 +12718,14 @@ private:
 
         // Building piece selection — left-click when building mode open and no placement brush active
         // Auto-enable move mode when in build mode (unified mode — no W/E switching)
-        if (m_showSiloConfig && !m_hSlabBrushMode && !m_wallBrushMode && !m_framePlacementMode) {
+        if (m_showSiloConfig && !m_hSlabBrushMode && !m_wallBrushMode && !m_roomBrushMode && !m_framePlacementMode) {
             m_buildMoveMode = true;
         }
 
         // Click to select build pieces (and move them by dragging)
         bool buildSelectClick = false;
         bool buildMoveSelect = !m_buildMoveDragging;
-        if (m_isPlayMode && m_showSiloConfig && !m_hSlabBrushMode && !m_wallBrushMode && !m_framePlacementMode
+        if (m_isPlayMode && m_showSiloConfig && !m_hSlabBrushMode && !m_wallBrushMode && !m_roomBrushMode && !m_framePlacementMode
             && buildMoveSelect
             && !m_filesystemBrowser.isActive() && !ImGui::GetIO().WantCaptureMouse
             && Input::isMouseButtonPressed(Input::MOUSE_LEFT)) {
@@ -12397,7 +12751,7 @@ private:
                 auto& obj = m_sceneObjects[bi];
                 if (!obj) continue;
                 const auto& bt = obj->getBuildingType();
-                if (bt != "platform_wall" && bt != "platform_slab" && bt != "wall_frame" && bt != "window_frame") continue;
+                if (bt != "platform_wall" && bt != "platform_slab" && bt != "platform_slope" && bt != "wall_frame" && bt != "window_frame") continue;
                 float dist = obj->getWorldBounds().intersect(rayO, rayD);
                 if (dist >= 0 && dist < 200.0f && dist < bestDist) {
                     bestDist = dist;
@@ -13397,15 +13751,50 @@ private:
                     m_screenMessageTimer = 1.5f;
                     m_dumpTargetPile = nullptr;
                 }
+
+                // Release clumped objects — drop them in front of the player as a pile
+                if (!m_clumpedObjects.empty()) {
+                    glm::vec3 dropBase = m_camera.getPosition() + m_camera.getFront() * 3.0f;
+                    dropBase.y = m_terrain.getHeightAt(dropBase.x, dropBase.z);
+
+                    for (size_t ci = 0; ci < m_clumpedObjects.size(); ci++) {
+                        auto& c = m_clumpedObjects[ci];
+                        if (!c.obj) continue;
+
+                        // Restore original scale
+                        c.obj->getTransform().setScale(c.originalScale);
+
+                        // Stack objects in a tight pile
+                        glm::vec3 dropPos = dropBase;
+                        float angle = (float)ci * 2.4f;
+                        float spread = 0.15f * std::sqrt((float)ci);
+                        dropPos.x += std::cos(angle) * spread;
+                        dropPos.z += std::sin(angle) * spread;
+                        dropPos.y = m_terrain.getHeightAt(dropPos.x, dropPos.z);
+
+                        // Place bottom on terrain using original scale
+                        AABB lb = c.obj->getLocalBounds();
+                        dropPos.y += -lb.min.y * c.originalScale.y;
+
+                        c.obj->getTransform().setPosition(dropPos);
+                        c.obj->setVisible(true);
+                    }
+
+                    char buf[128];
+                    snprintf(buf, sizeof(buf), "Dumped %zu clumped objects", m_clumpedObjects.size());
+                    m_screenMessage = buf;
+                    m_screenMessageTimer = 2.0f;
+                    m_clumpedObjects.clear();
+                }
             }
         }
-        // E key to start dump when holding loaded wheelbarrow
+        // E key to start dump when holding loaded wheelbarrow (dirt or clumped objects)
         if (!m_isDumping && Input::isKeyPressed(Input::KEY_E) && !ImGui::GetIO().WantTextInput) {
             auto& wbSlot = m_toolbarSlots[m_activeToolbarSlot];
             std::string wbName = wbSlot.displayName;
             std::transform(wbName.begin(), wbName.end(), wbName.begin(), ::tolower);
             if (wbSlot.occupied && wbSlot.is3DModel && wbName.find("wheelbarrow") != std::string::npos
-                && wbSlot.containerFill >= 6.0f) {
+                && (wbSlot.containerFill >= 6.0f || !m_clumpedObjects.empty())) {
                 // Check if we're touching a dirt pile — add to it, otherwise dump fresh
                 m_dumpTargetPile = nullptr;
                 glm::vec3 wbPos = m_camera.getPosition() + m_camera.getFront() * 1.1f;
@@ -13543,6 +13932,166 @@ private:
                         }
                         break; // Only load from one pile per frame
                     }
+                }
+            }
+        }
+
+        // Wheelbarrow clump — scoop non-dirt objects on contact
+        if (m_clumpCooldown > 0.0f) m_clumpCooldown -= deltaTime;
+        {
+            auto& wbSlot = m_toolbarSlots[m_activeToolbarSlot];
+            std::string wbName = wbSlot.displayName;
+            std::transform(wbName.begin(), wbName.end(), wbName.begin(), ::tolower);
+            bool holdingWB = wbSlot.occupied && wbSlot.is3DModel &&
+                             wbName.find("wheelbarrow") != std::string::npos;
+
+            if (holdingWB && !m_isDumping && m_clumpCooldown <= 0.0f) {
+                glm::vec3 wbWorldPos = m_camera.getPosition() + m_camera.getFront() * 1.1f;
+
+                for (auto& obj : m_sceneObjects) {
+                    if (!obj || !obj->isVisible()) continue;
+                    // Skip dirt piles — they use their own system
+                    if (obj->getName().find("dirt_pile") != std::string::npos) continue;
+                    // Skip non-interaction objects (NPCs, buildings, etc.)
+                    if (obj->getBeingType() != BeingType::INTERACTION &&
+                        obj->getBuildingType() != "salvage") continue;
+                    // Skip objects already clumped
+                    bool alreadyClumped = false;
+                    for (auto& c : m_clumpedObjects) {
+                        if (c.obj == obj.get()) { alreadyClumped = true; break; }
+                    }
+                    if (alreadyClumped) continue;
+
+                    // AABB collision check
+                    AABB bounds = obj->getWorldBounds();
+                    bounds.min -= glm::vec3(0.3f); bounds.max += glm::vec3(0.3f);
+                    if (wbWorldPos.x >= bounds.min.x && wbWorldPos.x <= bounds.max.x &&
+                        wbWorldPos.z >= bounds.min.z && wbWorldPos.z <= bounds.max.z &&
+                        wbWorldPos.y >= bounds.min.y - 0.5f && wbWorldPos.y <= bounds.max.y + 1.0f) {
+
+                        // Found an object to clump — compute vertex attachment
+                        ClumpedObject clump;
+                        clump.obj = obj.get();
+                        clump.originalScale = obj->getTransform().getScale();
+
+                        // Compute scale factor so object fits within the clump box
+                        AABB localBounds = obj->getLocalBounds();
+                        glm::vec3 objSize = localBounds.getSize() * clump.originalScale;
+                        float maxDim = std::max({objSize.x, objSize.y, objSize.z, 0.01f});
+                        // Scale down so largest dimension fits in ~0.4m (leaves room for packing)
+                        float targetSize = 0.4f;
+                        clump.clumpScale = std::min(1.0f, targetSize / maxDim);
+
+                        // Get this object's vertices for attachment
+                        const auto& verts = obj->getVertices();
+                        glm::mat4 objModel = obj->getTransform().getMatrix();
+
+                        if (m_clumpedObjects.empty()) {
+                            // First clumped object — sit at basin center
+                            clump.parentIndex = -1;
+                            clump.localOffset = glm::vec3(0.0f, 0.1f, 0.1f); // Slightly up and forward in basin
+
+                            // Pick 2 bottom-most vertices as attachment points
+                            if (verts.size() >= 2) {
+                                std::vector<std::pair<float, int>> vertYs;
+                                for (int i = 0; i < (int)verts.size(); i++) {
+                                    glm::vec3 wp = glm::vec3(objModel * glm::vec4(verts[i].position, 1.0f));
+                                    vertYs.push_back({wp.y, i});
+                                }
+                                std::partial_sort(vertYs.begin(), vertYs.begin() + 2, vertYs.end());
+                                clump.attachVertA = vertYs[0].second;
+                                clump.attachVertB = vertYs[1].second;
+                            }
+                        } else {
+                            // Attach to nearest existing clumped object via closest vertex pairs
+                            int bestParent = (int)m_clumpedObjects.size() - 1;
+                            auto& parent = m_clumpedObjects[bestParent];
+                            const auto& parentVerts = parent.obj->getVertices();
+                            glm::mat4 parentModel = parent.obj->getTransform().getMatrix();
+
+                            struct VertPair { float dist; int objVert; int parentVert; };
+                            std::vector<VertPair> pairs;
+                            int objStep = std::max(1, (int)verts.size() / 200);
+                            int parStep = std::max(1, (int)parentVerts.size() / 200);
+                            for (int i = 0; i < (int)verts.size(); i += objStep) {
+                                glm::vec3 wp = glm::vec3(objModel * glm::vec4(verts[i].position, 1.0f));
+                                for (int j = 0; j < (int)parentVerts.size(); j += parStep) {
+                                    glm::vec3 pp = glm::vec3(parentModel * glm::vec4(parentVerts[j].position, 1.0f));
+                                    float d = glm::distance(wp, pp);
+                                    pairs.push_back({d, i, j});
+                                }
+                            }
+                            std::sort(pairs.begin(), pairs.end(), [](const VertPair& a, const VertPair& b) {
+                                return a.dist < b.dist;
+                            });
+
+                            clump.parentIndex = bestParent;
+                            if (pairs.size() >= 1) {
+                                clump.attachVertA = pairs[0].objVert;
+                                clump.parentVertA = pairs[0].parentVert;
+                            }
+                            for (size_t p = 1; p < pairs.size(); p++) {
+                                if (pairs[p].objVert != clump.attachVertA &&
+                                    pairs[p].parentVert != clump.parentVertA) {
+                                    clump.attachVertB = pairs[p].objVert;
+                                    clump.parentVertB = pairs[p].parentVert;
+                                    break;
+                                }
+                            }
+
+                            // Position: nudge against the parent's attachment vertex
+                            // Convert parent attach vertex to clump-local space
+                            if (clump.attachVertA >= 0 && clump.parentVertA >= 0) {
+                                // Get parent's scaled vertex position in local clump space
+                                glm::vec3 parentVertLocal = parentVerts[clump.parentVertA].position *
+                                                            parent.originalScale * parent.clumpScale;
+                                glm::vec3 objVertLocal = verts[clump.attachVertA].position *
+                                                         clump.originalScale * clump.clumpScale;
+                                // Place this object so its attach vertex touches parent's attach vertex
+                                clump.localOffset = parent.localOffset + parentVertLocal - objVertLocal;
+                            } else {
+                                // Fallback: stack above parent
+                                clump.localOffset = parent.localOffset;
+                                clump.localOffset.y += 0.15f;
+                            }
+                        }
+
+                        // Clamp offset so everything stays within the 1.5m box
+                        clump.localOffset.x = std::clamp(clump.localOffset.x, -CLUMP_BOX_HALF, CLUMP_BOX_HALF);
+                        clump.localOffset.y = std::clamp(clump.localOffset.y, -0.1f, CLUMP_BOX_HALF);
+                        clump.localOffset.z = std::clamp(clump.localOffset.z, -CLUMP_BOX_HALF, CLUMP_BOX_HALF);
+
+                        // Remove collision body so clumped object doesn't block player
+                        if (obj->hasJoltBody() && m_characterController) {
+                            m_characterController->removeStaticBody(obj->getJoltBodyId());
+                            obj->clearJoltBody();
+                        }
+
+                        // Hide from normal scene rendering — we'll render it with the wheelbarrow
+                        obj->setVisible(false);
+                        m_clumpedObjects.push_back(clump);
+                        m_clumpCooldown = 0.3f; // Brief cooldown between scoops
+
+                        char buf[128];
+                        snprintf(buf, sizeof(buf), "Scooped %s (%zu items in wheelbarrow)",
+                                 obj->getName().c_str(), m_clumpedObjects.size());
+                        m_screenMessage = buf;
+                        m_screenMessageTimer = 1.5f;
+                        break; // One scoop per frame
+                    }
+                }
+            }
+
+            // Update clumped object positions to follow wheelbarrow
+            if (holdingWB && !m_clumpedObjects.empty()) {
+                glm::vec3 wbPos = m_camera.getPosition() + m_camera.getFront() * 1.1f;
+                for (auto& c : m_clumpedObjects) {
+                    if (!c.obj) continue;
+                    // Transform local offset by camera orientation
+                    glm::vec3 worldOffset = m_camera.getRight() * c.localOffset.x +
+                                            m_camera.getUp() * c.localOffset.y +
+                                            m_camera.getFront() * c.localOffset.z;
+                    c.obj->getTransform().setPosition(wbPos + worldOffset);
                 }
             }
         }
@@ -17863,8 +18412,8 @@ private:
                         "Click+drag to place horizontal slab (floors/ceilings)");
                 }
                 ImGui::SliderFloat("H-Slab Thickness", &m_hSlabThickness, 0.1f, 1.0f, "%.1fm");
-                ImGui::SliderFloat("H-Slab Length", &m_hSlabLength, 1.0f, 20.0f, "%.0fm");
-                ImGui::SliderFloat("H-Slab Width", &m_hSlabWidth, 1.0f, 20.0f, "%.0fm");
+                ImGui::SliderFloat("H-Slab Length", &m_hSlabLength, 0.1f, 20.0f, "%.1fm");
+                ImGui::SliderFloat("H-Slab Width", &m_hSlabWidth, 0.1f, 20.0f, "%.1fm");
                 if (ImGui::Button("Place H-Slab")) {
                     // Place at crosshair position
                     glm::vec3 camPos = m_camera.getPosition();
@@ -17909,7 +18458,7 @@ private:
                 float roundedThick = std::round(m_wallBrushThickness * 10.0f) / 10.0f;
                 if (roundedThick != m_wallBrushThickness) m_wallBrushThickness = roundedThick;
                 ImGui::SliderFloat("V-Slab Thickness", &m_wallBrushThickness, 0.1f, 3.0f, "%.1fm");
-                ImGui::SliderFloat("V-Slab Length", &m_vSlabLength, 1.0f, 20.0f, "%.0fm");
+                ImGui::SliderFloat("V-Slab Length", &m_vSlabLength, 0.1f, 20.0f, "%.1fm");
                 if (ImGui::Button("Place V-Slab")) {
                     glm::vec3 camPos = m_camera.getPosition();
                     glm::vec3 camFront = m_camera.getFront();
@@ -17933,6 +18482,59 @@ private:
                     obj->setBuildingType("platform_wall");
                     obj->getTransform().setPosition(placePos);
                     obj->getTransform().setScale({m_vSlabLength, m_wallBrushHeight, m_wallBrushThickness});
+                    obj->setAABBCollision(true);
+                    m_sceneObjects.push_back(std::move(obj));
+                }
+
+                ImGui::Separator();
+                ImGui::Text("Room Brush (B)");
+                ImGui::Checkbox("Room Brush", &m_roomBrushMode);
+                if (m_roomBrushMode) {
+                    m_hSlabBrushMode = false;
+                    m_wallBrushMode = false;
+                    m_framePlacementMode = false;
+                    m_buildMoveMode = false;
+                    clearBuildSelection();
+                    ImGui::TextColored(ImVec4(0.2f, 0.8f, 0.9f, 1.0f),
+                        "Click+drag to place 4 walls (room outline)");
+                }
+                ImGui::Text("Uses V-Slab Height/Thickness settings");
+
+                ImGui::Separator();
+                ImGui::Text("Slope Piece");
+                ImGui::SliderFloat("Slope Length", &m_slopePlaceLength, 1.0f, 20.0f, "%.1fm");
+                ImGui::SliderFloat("Slope Height", &m_slopePlaceHeight, 1.0f, 20.0f, "%.1fm");
+                ImGui::SliderFloat("Slope Thickness", &m_slopePlaceThickness, 0.1f, 3.0f, "%.1fm");
+                ImGui::SliderFloat("Slope Angle", &m_slopePlaceAngle, 0.0f, 45.0f, "%.0f deg");
+                ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f),
+                    "0 = flat, 45 = max slope");
+                if (ImGui::Button("Place Slope")) {
+                    glm::vec3 camPos = m_camera.getPosition();
+                    glm::vec3 camFront = m_camera.getFront();
+                    glm::vec3 placePos = camPos + camFront * 5.0f;
+                    placePos.x = std::round(placePos.x);
+                    placePos.z = std::round(placePos.z);
+                    placePos.y = std::round(placePos.y);
+
+                    float slopeRatio = 1.0f - std::tan(glm::radians(m_slopePlaceAngle));
+                    slopeRatio = std::max(0.0f, std::min(1.0f, slopeRatio));
+
+                    glm::vec4 slopeColor = {0.7f, 0.7f, 0.7f, 1.0f};
+                    auto mesh = PrimitiveMeshBuilder::createWedge(1.0f, slopeRatio, slopeColor);
+                    uint32_t handle = m_modelRenderer->createModel(mesh.vertices, mesh.indices);
+                    auto obj = std::make_unique<SceneObject>("Slope_" + std::to_string(m_sceneObjects.size()));
+                    obj->setBufferHandle(handle);
+                    obj->setIndexCount(static_cast<uint32_t>(mesh.indices.size()));
+                    obj->setVertexCount(static_cast<uint32_t>(mesh.vertices.size()));
+                    obj->setLocalBounds(mesh.bounds);
+                    obj->setMeshData(mesh.vertices, mesh.indices);
+                    obj->setPrimitiveType(PrimitiveType::Wedge);
+                    obj->setPrimitiveSize(1.0f);
+                    obj->setPrimitiveColor(slopeColor);
+                    obj->setSlopeRatio(slopeRatio);
+                    obj->setBuildingType("platform_slope");
+                    obj->getTransform().setPosition(placePos);
+                    obj->getTransform().setScale({m_slopePlaceLength, m_slopePlaceHeight, m_slopePlaceThickness});
                     obj->setAABBCollision(true);
                     m_sceneObjects.push_back(std::move(obj));
                 }
@@ -20354,7 +20956,7 @@ private:
             for (auto& obj : m_sceneObjects) {
                 const std::string& bt = obj->getBuildingType();
                 if (bt.empty() || bt.substr(0, 10) == "worker_at_" ||
-                    bt == "filesystem" || bt == "filesystem_wall" || bt == "image_desc" || bt == "platform_wall" || bt == "platform_slab" || bt == "wall_frame" || bt == "wall_widget" || bt == "eden_basement" || bt == "eden_basement_wall") continue;
+                    bt == "filesystem" || bt == "filesystem_wall" || bt == "image_desc" || bt == "platform_wall" || bt == "platform_slab" || bt == "platform_slope" || bt == "wall_frame" || bt == "wall_widget" || bt == "eden_basement" || bt == "eden_basement_wall") continue;
 
                 glm::vec3 pos = obj->getTransform().getPosition();
                 glm::ivec2 gp = m_zoneSystem->worldToGrid(pos.x, pos.z);
@@ -20463,7 +21065,7 @@ private:
                     for (auto& bobj : m_sceneObjects) {
                         const std::string& bt = bobj->getBuildingType();
                         if (bt.empty() || bt.substr(0, 10) == "worker_at_" ||
-                    bt == "filesystem" || bt == "filesystem_wall" || bt == "image_desc" || bt == "platform_wall" || bt == "platform_slab" || bt == "wall_frame" || bt == "wall_widget" || bt == "eden_basement" || bt == "eden_basement_wall") continue;
+                    bt == "filesystem" || bt == "filesystem_wall" || bt == "image_desc" || bt == "platform_wall" || bt == "platform_slab" || bt == "platform_slope" || bt == "wall_frame" || bt == "wall_widget" || bt == "eden_basement" || bt == "eden_basement_wall") continue;
                         glm::vec3 bpos = bobj->getTransform().getPosition();
                         glm::ivec2 bgp = m_zoneSystem->worldToGrid(bpos.x, bpos.z);
                         if (bgp.x == hoverGX && bgp.y == hoverGZ) {
@@ -21133,6 +21735,9 @@ private:
                     case PrimitiveType::SpawnMarker:
                         meshData = PrimitiveMeshBuilder::createSpawnMarker(binObj.primitiveSize);
                         break;
+                    case PrimitiveType::Wedge:
+                        meshData = PrimitiveMeshBuilder::createWedge(binObj.primitiveSize, binObj.slopeRatio, binObj.primitiveColor);
+                        break;
                     case PrimitiveType::Door:
                         meshData = PrimitiveMeshBuilder::createCube(binObj.primitiveSize, binObj.primitiveColor);
                         break;
@@ -21233,6 +21838,7 @@ private:
                 obj->setPrimitiveHeight(binObj.primitiveHeight);
                 obj->setPrimitiveSegments(binObj.primitiveSegments);
                 obj->setPrimitiveColor(binObj.primitiveColor);
+                obj->setSlopeRatio(binObj.slopeRatio);
             }
 
             // Door properties
@@ -21403,6 +22009,9 @@ private:
                         case PrimitiveType::SpawnMarker:
                             meshData = PrimitiveMeshBuilder::createSpawnMarker(objData.primitiveSize);
                             break;
+                        case PrimitiveType::Wedge:
+                            meshData = PrimitiveMeshBuilder::createWedge(objData.primitiveSize, objData.slopeRatio, objData.primitiveColor);
+                            break;
                         case PrimitiveType::Door:
                             meshData = PrimitiveMeshBuilder::createCube(objData.primitiveSize, objData.primitiveColor);
                             break;
@@ -21426,6 +22035,7 @@ private:
                     obj->setPrimitiveHeight(objData.primitiveHeight);
                     obj->setPrimitiveSegments(objData.primitiveSegments);
                     obj->setPrimitiveColor(objData.primitiveColor);
+                    obj->setSlopeRatio(objData.slopeRatio);
 
                     // Apply door properties if this is a door
                     if (primType == PrimitiveType::Door) {
@@ -22367,6 +22977,9 @@ private:
                     case PrimitiveType::SpawnMarker:
                         meshData = PrimitiveMeshBuilder::createSpawnMarker(objData.primitiveSize);
                         break;
+                    case PrimitiveType::Wedge:
+                        meshData = PrimitiveMeshBuilder::createWedge(objData.primitiveSize, objData.slopeRatio, objData.primitiveColor);
+                        break;
                     case PrimitiveType::Door:
                         meshData = PrimitiveMeshBuilder::createCube(objData.primitiveSize, objData.primitiveColor);
                         break;
@@ -22388,6 +23001,7 @@ private:
                 obj->setPrimitiveHeight(objData.primitiveHeight);
                 obj->setPrimitiveSegments(objData.primitiveSegments);
                 obj->setPrimitiveColor(objData.primitiveColor);
+                obj->setSlopeRatio(objData.slopeRatio);
 
                 if (primType == PrimitiveType::Door) {
                     obj->setDoorId(objData.doorId);
@@ -23017,11 +23631,90 @@ private:
                 if (bt != "platform_slab" && bt != "platform_wall") continue;
                 if (obj->isKinematicPlatform()) continue;
 
-                // Building pieces use AABB collision exclusively (NOT Jolt).
-                // AABB runs in all modes and supports wall hole skip.
+                // Building pieces use AABB collision for character controller (supports wall hole skip).
                 obj->setAABBCollision(true);
-                // Clear any stale Bullet/Jolt collision from old saves
                 obj->setBulletCollisionType(BulletCollisionType::NONE);
+
+                // Add slabs and walls to Jolt so physics objects collide with them.
+                // Walls with holes get split into solid segments around each hole.
+                if (m_characterController) {
+                    // Minimum collision thickness so Jolt CCD can reliably catch impacts
+                    // 0.5 half = 1m total — generous so even small fast objects get caught
+                    constexpr float MIN_HALF_THICK = 0.5f;
+
+                    if (bt == "platform_slab" || !obj->hasWallHoles()) {
+                        // No holes — add as single Jolt box
+                        AABB localBounds = obj->getLocalBounds();
+                        glm::vec3 localHalfExtents = (localBounds.max - localBounds.min) * 0.5f;
+                        glm::vec3 localCenterOffset = (localBounds.min + localBounds.max) * 0.5f;
+                        glm::vec3 scale = obj->getTransform().getScale();
+                        localHalfExtents *= scale;
+                        localCenterOffset *= scale;
+                        // Enforce minimum thickness on the thinnest axis only
+                        int thinAxis = (localHalfExtents.x <= localHalfExtents.y && localHalfExtents.x <= localHalfExtents.z) ? 0
+                                     : (localHalfExtents.y <= localHalfExtents.z) ? 1 : 2;
+                        localHalfExtents[thinAxis] = std::max(localHalfExtents[thinAxis], MIN_HALF_THICK);
+                        glm::vec3 position = obj->getTransform().getPosition();
+                        glm::quat rotation = obj->getTransform().getRotation();
+                        glm::vec3 center = position + rotation * localCenterOffset;
+                        uint32_t bodyId = m_characterController->addStaticBoxWithId(localHalfExtents, center, rotation);
+                        obj->setJoltBodyId(bodyId);
+                    } else {
+                        // Wall with holes — split into solid pieces around each hole.
+                        // Work in world space since holes are stored in world space.
+                        AABB wall = obj->getWorldBounds();
+                        const auto& holes = obj->getWallHoles();
+
+                        // Determine wall's thin axis (thickness axis)
+                        glm::vec3 wallSize = wall.getSize();
+                        bool thinX = wallSize.x < wallSize.z;
+
+                        // Helper: add a Jolt box with minimum thickness on the wall's thin axis
+                        auto addWallPiece = [&](glm::vec3 pMin, glm::vec3 pMax) {
+                            glm::vec3 halfExt = (pMax - pMin) * 0.5f;
+                            // Thicken on the wall's thin axis (X or Z)
+                            if (thinX) halfExt.x = std::max(halfExt.x, MIN_HALF_THICK);
+                            else       halfExt.z = std::max(halfExt.z, MIN_HALF_THICK);
+                            glm::vec3 center = (pMin + pMax) * 0.5f;
+                            m_characterController->addStaticBoxWithId(halfExt, center);
+                        };
+
+                        for (const auto& hole : holes) {
+                            glm::vec3 hMin = glm::max(hole.min, wall.min);
+                            glm::vec3 hMax = glm::min(hole.max, wall.max);
+
+                            if (thinX) {
+                                // Wall runs along Z, thin in X
+                                if (hMin.z - wall.min.z > 0.01f)
+                                    addWallPiece(wall.min, {wall.max.x, wall.max.y, hMin.z});
+                                if (wall.max.z - hMax.z > 0.01f)
+                                    addWallPiece({wall.min.x, wall.min.y, hMax.z}, wall.max);
+                            } else {
+                                // Wall runs along X, thin in Z
+                                if (hMin.x - wall.min.x > 0.01f)
+                                    addWallPiece(wall.min, {hMin.x, wall.max.y, wall.max.z});
+                                if (wall.max.x - hMax.x > 0.01f)
+                                    addWallPiece({hMax.x, wall.min.y, wall.min.z}, wall.max);
+                            }
+                            // Piece above the hole (full wall thickness)
+                            if (wall.max.y - hMax.y > 0.01f) {
+                                glm::vec3 pMin = {hMin.x, hMax.y, hMin.z};
+                                glm::vec3 pMax = {hMax.x, wall.max.y, hMax.z};
+                                if (thinX) { pMin.x = wall.min.x; pMax.x = wall.max.x; }
+                                else        { pMin.z = wall.min.z; pMax.z = wall.max.z; }
+                                addWallPiece(pMin, pMax);
+                            }
+                            // Piece below the hole (if hole doesn't start at floor)
+                            if (hMin.y - wall.min.y > 0.1f) {
+                                glm::vec3 pMin = {hMin.x, wall.min.y, hMin.z};
+                                glm::vec3 pMax = {hMax.x, hMin.y, hMax.z};
+                                if (thinX) { pMin.x = wall.min.x; pMax.x = wall.max.x; }
+                                else        { pMin.z = wall.min.z; pMax.z = wall.max.z; }
+                                addWallPiece(pMin, pMax);
+                            }
+                        }
+                    }
+                }
             }
 
             // Add collision bodies from scene objects with Bullet collision
@@ -23314,6 +24007,8 @@ private:
 
         m_isPlayMode = false;
         m_playModeDebug = false;
+        m_freeCamMode = false;
+        m_freeCamVelocity = glm::vec3(0);
 
         // Enable noclip for editor mode (can go below terrain)
         m_camera.setNoClip(true);
@@ -25117,10 +25812,15 @@ private:
             obj->setModelPath(path);
             obj->setVertexCount(static_cast<uint32_t>(mesh.vertices.size()));
 
-            // Blender uses Z-up, we use Y-up, so rotate +90 on X axis
-            // Mixamo models are in cm, scale to m
-            obj->setEulerRotation(glm::vec3(90.0f, 0.0f, 0.0f));
-            obj->getTransform().setScale(glm::vec3(0.012f));
+            // The Mixamo correction (Z-up→Y-up rotation + cm→m scale) is wrong
+            // for engine-authored exports (LIME, etc.) which already ship in
+            // engine-native space. Detect via asset.generator.
+            const std::string& gen = result.generator;
+            bool isLimeExport = gen.find("LIME") != std::string::npos;
+            if (!isLimeExport) {
+                obj->setEulerRotation(glm::vec3(90.0f, 0.0f, 0.0f));
+                obj->getTransform().setScale(glm::vec3(0.012f));
+            }
 
             // Position in front of camera at ground level (or subfloor if underground)
             glm::vec3 spawnPos = m_camera.getPosition() + m_camera.getFront() * 5.0f;
@@ -25308,6 +26008,22 @@ private:
     float m_dumpTimer = 0.0f;
     float m_dumpDuration = 1.5f;
     SceneObject* m_dumpTargetPile = nullptr; // If set, add to this pile; if null, dump new
+
+    // Wheelbarrow clump system — non-dirt objects pile onto the wheelbarrow
+    static constexpr float CLUMP_BOX_HALF = 0.75f; // 1.5m cube half-extent
+    struct ClumpedObject {
+        SceneObject* obj = nullptr;       // The scene object scooped up
+        glm::vec3 localOffset{0.0f};      // Offset relative to wheelbarrow basin center
+        float clumpScale = 1.0f;          // Scale factor to fit within clump box
+        glm::vec3 originalScale{1.0f};    // Original world scale (to restore on release)
+        int attachVertA = -1;             // Index of vertex on THIS object (attachment point 1)
+        int attachVertB = -1;             // Index of vertex on THIS object (attachment point 2)
+        int parentVertA = -1;             // Index of vertex on PARENT object (attachment point 1)
+        int parentVertB = -1;             // Index of vertex on PARENT object (attachment point 2)
+        int parentIndex = -1;             // Index into m_clumpedObjects of the parent (-1 = wheelbarrow itself)
+    };
+    std::vector<ClumpedObject> m_clumpedObjects;
+    float m_clumpCooldown = 0.0f;         // Prevents instant multi-scoop
 
     // Rake hold-to-rake state
     bool m_isRaking = false;
@@ -26548,6 +27264,7 @@ private:
     std::vector<VkDeviceMemory> m_terrainThumbMemory;
     std::vector<VkImageView> m_terrainThumbViews;
     std::vector<VkSampler> m_terrainThumbSamplers;
+    bool m_pendingTerrainThumbnails = false;
     std::unique_ptr<ProceduralSkybox> m_skybox;
     std::unique_ptr<BrushRing> m_brushRing;
     std::unique_ptr<GizmoRenderer> m_gizmoRenderer;
@@ -26563,6 +27280,18 @@ private:
     glm::vec3 m_thirdPersonPlayerPos{0};   // Player position for third-person camera
     float m_collisionHullHeight{1.7f};     // Height of collision hull (feet to eye)
     float m_collisionHullRadius{0.5f};     // Radius of collision hull
+
+    // Free-cam mode (toggle with C in play mode): detached, no-clip, slow smoothed motion
+    bool m_freeCamMode = false;
+    glm::vec3 m_freeCamSavedPos{0};
+    float m_freeCamSavedYaw = 0.0f;
+    float m_freeCamSavedPitch = 0.0f;
+    bool m_freeCamSavedNoclip = false;
+    MovementMode m_freeCamSavedMode = MovementMode::Walk;
+    glm::vec3 m_freeCamVelocity{0};
+    bool m_wasFreeCamCKeyDown = false;
+    float m_freeCamBaseSpeed = 4.0f;       // Slow for close zoom; shift sprints
+
     glm::vec3 m_lastInteractBubblePos{0};
     bool m_inConversation = false;
     float m_conversationTargetYaw = 0.0f;
@@ -27125,6 +27854,19 @@ private:
     float m_hSlabLength = 4.0f;   // H-slab X dimension for Place button
     float m_hSlabWidth = 4.0f;    // H-slab Z dimension for Place button
     float m_vSlabLength = 4.0f;   // V-slab X dimension for Place button
+
+    // Room brush mode (drag out rectangle, creates 4 separate walls)
+    bool m_roomBrushMode = false;
+    bool m_roomBrushDrawing = false;
+    glm::vec3 m_roomBrushStart{0.0f};
+    glm::vec3 m_roomBrushEnd{0.0f};
+    bool m_roomBrushPreviewValid = false;
+
+    // Slope piece placement
+    float m_slopePlaceLength = 4.0f;
+    float m_slopePlaceHeight = 4.0f;
+    float m_slopePlaceThickness = 1.0f;
+    float m_slopePlaceAngle = 30.0f; // degrees: 0=flat, 45=max slope
 
     // Window frame creator
     float m_winFrameWidth = 2.0f;
