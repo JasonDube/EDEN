@@ -29,6 +29,10 @@ struct LevelData {
         std::vector<glm::vec4> splatmap1;   // Weights for textures 4-7
         std::vector<glm::vec4> splatmap2;   // Weights for textures 8-11
         std::vector<glm::vec4> splatmap3;   // Weights for textures 12-15
+        std::vector<glm::vec4> splatmap4;   // Weights for textures 16-19
+        std::vector<glm::vec4> splatmap5;   // Weights for textures 20-23
+        std::vector<glm::vec4> splatmap6;   // Weights for textures 24-27
+        std::vector<glm::vec4> splatmap7;   // Weights for textures 28-31
         std::vector<glm::vec3> texHSBmap;
         // Legacy fields (populated when loading old format)
         std::vector<glm::vec4> texWeightmap;
@@ -110,6 +114,7 @@ struct LevelData {
         float primitiveHeight = 1.0f;   // Height for cylinder
         int primitiveSegments = 16;     // Segments for cylinder
         glm::vec4 primitiveColor = glm::vec4(0.7f, 0.7f, 0.7f, 1.0f);  // Color for primitive
+        float slopeRatio = 1.0f;       // Wedge slope: 1.0=flat, 0.0=full slope
 
         // Door properties (for level transitions)
         std::string doorId;

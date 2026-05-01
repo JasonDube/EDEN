@@ -168,7 +168,7 @@ bool LevelSerializer::saveTerrainBinary(const std::string& filepath, const Terra
 
     // Prepare header (version 2 = splatmap format)
     TerrainFileHeader header;
-    header.version = 2;
+    header.version = 3;  // v3: 32-texture splatmap (8 vec4s)
     header.chunkCount = static_cast<uint32_t>(allChunks.size());
     header.chunkResolution = 64;  // Default resolution
 
@@ -207,10 +207,8 @@ bool LevelSerializer::saveTerrainBinary(const std::string& filepath, const Terra
         std::vector<float> heightmap(count);
         std::vector<float> paintAlphas(count);
         std::vector<glm::vec3> colors(count);
-        std::vector<glm::vec4> splatmap0(count);
-        std::vector<glm::vec4> splatmap1(count);
-        std::vector<glm::vec4> splatmap2(count);
-        std::vector<glm::vec4> splatmap3(count);
+        std::vector<glm::vec4> splatmap0(count), splatmap1(count), splatmap2(count), splatmap3(count);
+        std::vector<glm::vec4> splatmap4(count), splatmap5(count), splatmap6(count), splatmap7(count);
         std::vector<glm::vec3> texHSB(count);
 
         for (int i = 0; i < count; i++) {
@@ -218,14 +216,14 @@ bool LevelSerializer::saveTerrainBinary(const std::string& filepath, const Terra
             heightmap[i] = v.position.y;
             paintAlphas[i] = v.paintAlpha;
             colors[i] = v.color;
-            splatmap0[i] = v.texSplat0;
-            splatmap1[i] = v.texSplat1;
-            splatmap2[i] = v.texSplat2;
-            splatmap3[i] = v.texSplat3;
+            splatmap0[i] = v.texSplat0; splatmap1[i] = v.texSplat1;
+            splatmap2[i] = v.texSplat2; splatmap3[i] = v.texSplat3;
+            splatmap4[i] = v.texSplat4; splatmap5[i] = v.texSplat5;
+            splatmap6[i] = v.texSplat6; splatmap7[i] = v.texSplat7;
             texHSB[i] = v.texHSB;
         }
 
-        // Write all arrays directly as binary (version 2: splatmap format, 16 textures)
+        // Write all arrays directly as binary (version 3: 32-texture splatmap)
         file.write(reinterpret_cast<const char*>(heightmap.data()), count * sizeof(float));
         file.write(reinterpret_cast<const char*>(paintAlphas.data()), count * sizeof(float));
         file.write(reinterpret_cast<const char*>(colors.data()), count * sizeof(glm::vec3));
@@ -233,6 +231,10 @@ bool LevelSerializer::saveTerrainBinary(const std::string& filepath, const Terra
         file.write(reinterpret_cast<const char*>(splatmap1.data()), count * sizeof(glm::vec4));
         file.write(reinterpret_cast<const char*>(splatmap2.data()), count * sizeof(glm::vec4));
         file.write(reinterpret_cast<const char*>(splatmap3.data()), count * sizeof(glm::vec4));
+        file.write(reinterpret_cast<const char*>(splatmap4.data()), count * sizeof(glm::vec4));
+        file.write(reinterpret_cast<const char*>(splatmap5.data()), count * sizeof(glm::vec4));
+        file.write(reinterpret_cast<const char*>(splatmap6.data()), count * sizeof(glm::vec4));
+        file.write(reinterpret_cast<const char*>(splatmap7.data()), count * sizeof(glm::vec4));
         file.write(reinterpret_cast<const char*>(texHSB.data()), count * sizeof(glm::vec3));
 
         entry.dataSize = static_cast<uint64_t>(file.tellp()) - entry.dataOffset;
@@ -277,7 +279,7 @@ bool LevelSerializer::loadTerrainBinary(const std::string& filepath, LevelData& 
         return false;
     }
 
-    if (header.version != 1 && header.version != 2) {
+    if (header.version != 1 && header.version != 2 && header.version != 3) {
         s_lastError = "Unsupported terrain file version: " + std::to_string(header.version);
         return false;
     }
@@ -318,7 +320,7 @@ bool LevelSerializer::loadTerrainBinary(const std::string& filepath, LevelData& 
             file.read(reinterpret_cast<char*>(chunk.texIndicesmap.data()), count * sizeof(glm::uvec4));
             chunk.isLegacy = true;
         } else {
-            // Version 2: splatmap0-3 (4x vec4 = 16 textures)
+            // Version 2/3: splatmap format
             chunk.splatmap0.resize(count);
             chunk.splatmap1.resize(count);
             chunk.splatmap2.resize(count);
@@ -327,6 +329,17 @@ bool LevelSerializer::loadTerrainBinary(const std::string& filepath, LevelData& 
             file.read(reinterpret_cast<char*>(chunk.splatmap1.data()), count * sizeof(glm::vec4));
             file.read(reinterpret_cast<char*>(chunk.splatmap2.data()), count * sizeof(glm::vec4));
             file.read(reinterpret_cast<char*>(chunk.splatmap3.data()), count * sizeof(glm::vec4));
+            if (header.version >= 3) {
+                // v3: additional splatmaps 4-7 (32 textures)
+                chunk.splatmap4.resize(count);
+                chunk.splatmap5.resize(count);
+                chunk.splatmap6.resize(count);
+                chunk.splatmap7.resize(count);
+                file.read(reinterpret_cast<char*>(chunk.splatmap4.data()), count * sizeof(glm::vec4));
+                file.read(reinterpret_cast<char*>(chunk.splatmap5.data()), count * sizeof(glm::vec4));
+                file.read(reinterpret_cast<char*>(chunk.splatmap6.data()), count * sizeof(glm::vec4));
+                file.read(reinterpret_cast<char*>(chunk.splatmap7.data()), count * sizeof(glm::vec4));
+            }
         }
 
         file.read(reinterpret_cast<char*>(chunk.texHSBmap.data()), count * sizeof(glm::vec3));
@@ -494,6 +507,9 @@ bool LevelSerializer::save(const std::string& filepath,
                 objJson["primitiveHeight"] = obj->getPrimitiveHeight();
                 objJson["primitiveSegments"] = obj->getPrimitiveSegments();
                 objJson["primitiveColor"] = vec4ToJson(obj->getPrimitiveColor());
+                if (obj->getPrimitiveType() == PrimitiveType::Wedge) {
+                    objJson["slopeRatio"] = obj->getSlopeRatio();
+                }
             }
 
             // Door properties
@@ -898,6 +914,7 @@ bool LevelSerializer::load(const std::string& filepath, LevelData& outData) {
                     if (objJson.contains("primitiveColor")) {
                         obj.primitiveColor = jsonToVec4(objJson["primitiveColor"]);
                     }
+                    obj.slopeRatio = objJson.value("slopeRatio", 1.0f);
                 }
 
                 // Door properties
@@ -1132,7 +1149,11 @@ void LevelSerializer::applyToTerrain(const LevelData& data, Terrain& terrain) {
                 chunkData.splatmap1,
                 chunkData.splatmap2,
                 chunkData.splatmap3,
-                chunkData.texHSBmap
+                chunkData.texHSBmap,
+                chunkData.splatmap4,
+                chunkData.splatmap5,
+                chunkData.splatmap6,
+                chunkData.splatmap7
             );
         }
         appliedCount++;

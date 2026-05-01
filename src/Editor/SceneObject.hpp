@@ -80,7 +80,8 @@ enum class PrimitiveType {
     Cube = 1,
     Cylinder = 2,
     SpawnMarker = 3,
-    Door = 4        // Level transition trigger zone
+    Door = 4,       // Level transition trigger zone
+    Wedge = 5       // Sloped wall/roof piece (one end lower than the other)
 };
 
 // Axis-aligned bounding box for picking
@@ -147,6 +148,9 @@ public:
 
     void setPrimitiveColor(const glm::vec4& color) { m_primitiveColor = color; }
     const glm::vec4& getPrimitiveColor() const { return m_primitiveColor; }
+
+    void setSlopeRatio(float r) { m_slopeRatio = r; }
+    float getSlopeRatio() const { return m_slopeRatio; }
 
     // Door properties (for level transitions)
     bool isDoor() const { return m_primitiveType == PrimitiveType::Door; }
@@ -740,6 +744,7 @@ private:
     float m_primitiveHeight = 1.0f;     // Height for cylinder
     int m_primitiveSegments = 16;       // Segments for cylinder
     glm::vec4 m_primitiveColor = glm::vec4(0.7f, 0.7f, 0.7f, 1.0f);
+    float m_slopeRatio = 1.0f;          // 1.0 = flat, 0.0 = one end at ground level
 
     // Door properties (for level transitions)
     std::string m_doorId;

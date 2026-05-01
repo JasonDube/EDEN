@@ -127,6 +127,7 @@ struct BinaryObjectEntry {
     float primitiveHeight = 1.0f;
     int32_t primitiveSegments = 16;
     glm::vec4 primitiveColor{0.7f, 0.7f, 0.7f, 1.0f};
+    // For Wedge: primitiveRadius stores slopeRatio (wedges don't use radius)
 
     // Door properties (if BOF_IS_DOOR set)
     char doorId[32] = {0};

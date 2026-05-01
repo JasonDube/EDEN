@@ -81,7 +81,7 @@ void TerrainPipeline::createPipeline(VkRenderPass renderPass, VkExtent2D extent)
     bindingDescription.stride = sizeof(Vertex3D);
     bindingDescription.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
 
-    std::array<VkVertexInputAttributeDescription, 12> attributeDescriptions{};
+    std::array<VkVertexInputAttributeDescription, 16> attributeDescriptions{};
     // Position
     attributeDescriptions[0].binding = 0;
     attributeDescriptions[0].location = 0;
@@ -102,46 +102,59 @@ void TerrainPipeline::createPipeline(VkRenderPass renderPass, VkExtent2D extent)
     attributeDescriptions[3].location = 3;
     attributeDescriptions[3].format = VK_FORMAT_R32G32_SFLOAT;
     attributeDescriptions[3].offset = offsetof(Vertex3D, uv);
-    // Splatmap weights for textures 0-3
+    // Splatmap 0-7 (32 textures)
     attributeDescriptions[4].binding = 0;
     attributeDescriptions[4].location = 4;
     attributeDescriptions[4].format = VK_FORMAT_R32G32B32A32_SFLOAT;
     attributeDescriptions[4].offset = offsetof(Vertex3D, texSplat0);
-    // Splatmap weights for textures 4-7
     attributeDescriptions[5].binding = 0;
     attributeDescriptions[5].location = 5;
     attributeDescriptions[5].format = VK_FORMAT_R32G32B32A32_SFLOAT;
     attributeDescriptions[5].offset = offsetof(Vertex3D, texSplat1);
-    // Selection weight
     attributeDescriptions[6].binding = 0;
     attributeDescriptions[6].location = 6;
-    attributeDescriptions[6].format = VK_FORMAT_R32_SFLOAT;
-    attributeDescriptions[6].offset = offsetof(Vertex3D, selection);
-    // Paint alpha
+    attributeDescriptions[6].format = VK_FORMAT_R32G32B32A32_SFLOAT;
+    attributeDescriptions[6].offset = offsetof(Vertex3D, texSplat2);
     attributeDescriptions[7].binding = 0;
     attributeDescriptions[7].location = 7;
-    attributeDescriptions[7].format = VK_FORMAT_R32_SFLOAT;
-    attributeDescriptions[7].offset = offsetof(Vertex3D, paintAlpha);
-    // Texture HSB (hue, saturation, brightness)
+    attributeDescriptions[7].format = VK_FORMAT_R32G32B32A32_SFLOAT;
+    attributeDescriptions[7].offset = offsetof(Vertex3D, texSplat3);
     attributeDescriptions[8].binding = 0;
     attributeDescriptions[8].location = 8;
-    attributeDescriptions[8].format = VK_FORMAT_R32G32B32_SFLOAT;
-    attributeDescriptions[8].offset = offsetof(Vertex3D, texHSB);
-    // Hole mask
+    attributeDescriptions[8].format = VK_FORMAT_R32G32B32A32_SFLOAT;
+    attributeDescriptions[8].offset = offsetof(Vertex3D, texSplat4);
     attributeDescriptions[9].binding = 0;
     attributeDescriptions[9].location = 9;
-    attributeDescriptions[9].format = VK_FORMAT_R32_SFLOAT;
-    attributeDescriptions[9].offset = offsetof(Vertex3D, holeMask);
-    // Splatmap weights for textures 8-11
+    attributeDescriptions[9].format = VK_FORMAT_R32G32B32A32_SFLOAT;
+    attributeDescriptions[9].offset = offsetof(Vertex3D, texSplat5);
     attributeDescriptions[10].binding = 0;
     attributeDescriptions[10].location = 10;
     attributeDescriptions[10].format = VK_FORMAT_R32G32B32A32_SFLOAT;
-    attributeDescriptions[10].offset = offsetof(Vertex3D, texSplat2);
-    // Splatmap weights for textures 12-15
+    attributeDescriptions[10].offset = offsetof(Vertex3D, texSplat6);
     attributeDescriptions[11].binding = 0;
     attributeDescriptions[11].location = 11;
     attributeDescriptions[11].format = VK_FORMAT_R32G32B32A32_SFLOAT;
-    attributeDescriptions[11].offset = offsetof(Vertex3D, texSplat3);
+    attributeDescriptions[11].offset = offsetof(Vertex3D, texSplat7);
+    // Selection weight
+    attributeDescriptions[12].binding = 0;
+    attributeDescriptions[12].location = 12;
+    attributeDescriptions[12].format = VK_FORMAT_R32_SFLOAT;
+    attributeDescriptions[12].offset = offsetof(Vertex3D, selection);
+    // Paint alpha
+    attributeDescriptions[13].binding = 0;
+    attributeDescriptions[13].location = 13;
+    attributeDescriptions[13].format = VK_FORMAT_R32_SFLOAT;
+    attributeDescriptions[13].offset = offsetof(Vertex3D, paintAlpha);
+    // Texture HSB
+    attributeDescriptions[14].binding = 0;
+    attributeDescriptions[14].location = 14;
+    attributeDescriptions[14].format = VK_FORMAT_R32G32B32_SFLOAT;
+    attributeDescriptions[14].offset = offsetof(Vertex3D, texHSB);
+    // Hole mask
+    attributeDescriptions[15].binding = 0;
+    attributeDescriptions[15].location = 15;
+    attributeDescriptions[15].format = VK_FORMAT_R32_SFLOAT;
+    attributeDescriptions[15].offset = offsetof(Vertex3D, holeMask);
 
     VkPipelineVertexInputStateCreateInfo vertexInputInfo{};
     vertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;

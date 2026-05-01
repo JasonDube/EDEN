@@ -25,6 +25,8 @@
 #include "Editor/GLBLoader.hpp"
 #include "Editor/LimeLoader.hpp"
 #include "Editor/SkinnedGLBLoader.hpp"
+#include "Editor/VideoEditor.hpp"
+#include "Video/VideoPlayer.hpp"
 #include "Editor/PathTool.hpp"
 #include "Editor/PrimitiveMeshBuilder.hpp"
 #include "Editor/AINode.hpp"
@@ -343,6 +345,10 @@ protected:
 
         m_skinnedModelRenderer = std::make_unique<SkinnedModelRenderer>(
             getContext(), getSwapchain().getRenderPass(), getSwapchain().getExtent());
+
+        m_videoEditor = std::make_unique<eden::VideoEditor>(getContext());
+        m_videoEditor->setDefaultDir(
+            std::string(CMAKE_SOURCE_DIR) + "/examples/terrain_editor/assets/clips");
 
         m_waterRenderer = std::make_unique<WaterRenderer>(
             getContext(), getSwapchain().getRenderPass(), getSwapchain().getExtent());
@@ -1240,6 +1246,12 @@ protected:
     }
 
     void update(float deltaTime) override {
+        // Tick the standalone clip editor (no-op when no video loaded).
+        if (m_videoEditor) m_videoEditor->update(deltaTime);
+
+        // (Removed) Video-cube per-frame upload. The cube experiment lives
+        // in #if 0 above; revive it later if useful.
+
         // Lazy-bind terminal to "terminal_screen" scene object
         if (!m_terminalScreenBound) {
             for (auto& obj : m_sceneObjects) {
@@ -1333,12 +1345,11 @@ protected:
             m_activeLights.insert(m_activeLights.end(), hingeLights.begin(), hingeLights.end());
 
             if (m_modelRenderer) {
-                // Compute day/night for model lighting
-                float dnPhase = (m_gameTimeMinutes / 1440.0f) * 2.0f * 3.14159f - 1.5708f;
-                float dnSunY = std::sin(dnPhase);
-                float dnDay = std::clamp((dnSunY + 0.2f) / 1.2f, 0.0f, 1.0f);
-                float dnAmbient = 0.08f + dnDay * 0.32f;
-                float dnSunH = std::max(dnSunY, 0.05f);
+                // Day/night cycle disabled — fixed bright noon for the
+                // movie-quad work. Set m_gameTimeScale > 0 and restore the
+                // dnAmbient/dnSunY calc below to bring the cycle back.
+                const float dnSunH   = 1.0f;
+                const float dnAmbient = 0.95f;
                 m_modelRenderer->setDayNight(dnSunH, dnAmbient);
                 m_modelRenderer->setLights(m_activeLights);
             }
@@ -1891,6 +1902,9 @@ protected:
 
             // Server Manager window
             if (m_editorUI.showServerManager()) m_serverManager.renderImGui(&m_editorUI.showServerManager());
+
+            // Video Editor window (load → trim → export)
+            if (m_videoEditor) m_videoEditor->renderUI(&m_editorUI.showVideoEditor());
 
             // Texture Browser window
             if (m_editorUI.showTextureBrowser()) {
@@ -23355,6 +23369,183 @@ private:
         return true;
     }
 
+    // (Removed) Video-cube proof-of-concept. Per-character video texturing
+    // didn't scale; the design pivoted to 3D skinned bodies in the world
+    // plus on-demand video portraits in dialogue UI. VideoPlayer/VideoEditor
+    // remain in eden for the dialogue path.
+#if 0
+    void spawnVideoCube() {
+        if (m_videoCubeSpawned || !m_modelRenderer) return;
+        m_videoCubeSpawned = true;
+
+        const std::string base = std::string(CMAKE_SOURCE_DIR) +
+                                 "/examples/terrain_editor/assets/clips/sandy/";
+        const std::string frontPath = base + "sandy_front_idle.mp4";
+        const std::string backPath  = base + "sandy_back_idle.mp4";
+        const std::string sidePath  = base + "sandy_side_idle.mp4";
+
+        auto makePlayer = [](const std::string& path) {
+            auto p = std::make_unique<eden::VideoPlayer>();
+            if (!p->open(path)) {
+                std::cout << "[Video] open failed: " << p->errorMessage() << std::endl;
+                return std::unique_ptr<eden::VideoPlayer>{};
+            }
+            std::cout << "[Video] " << path << " "
+                      << p->width() << "x" << p->height() << " "
+                      << p->duration() << "s" << std::endl;
+            return p;
+        };
+        m_videoPlayerFront = makePlayer(frontPath);
+        m_videoPlayerBack  = makePlayer(backPath);
+        m_videoPlayerSide  = makePlayer(sidePath);
+        if (!m_videoPlayerFront) return;  // need at least the front
+
+        // All Sandy clips are 544x544 — assert in dev, fall back to front's
+        // dimensions in prod so a mismatched clip doesn't crash.
+        const int faceW = m_videoPlayerFront->width();
+        const int faceH = m_videoPlayerFront->height();
+        m_videoFaceW = faceW;
+
+        // Texture layout (one row, height = faceH):
+        //   [front faceW] [back faceW] [side faceW] [white pad 64] [portrait faceW]
+        m_videoPaddedW = faceW * 4 + kVideoPadCols;
+        m_videoPaddedH = faceH;
+        m_videoPaddedBuffer.assign(
+            static_cast<size_t>(m_videoPaddedW) * m_videoPaddedH * 4, 0);
+
+        // Fill the white pad columns once. Located between the side region
+        // and the portrait region: x in [3*faceW, 3*faceW + padCols).
+        const size_t padRowBytes = static_cast<size_t>(m_videoPaddedW) * 4;
+        for (int y = 0; y < faceH; ++y) {
+            unsigned char* rowPad = m_videoPaddedBuffer.data() +
+                                    static_cast<size_t>(y) * padRowBytes +
+                                    static_cast<size_t>(3 * faceW) * 4;
+            for (int x = 0; x < kVideoPadCols; ++x) {
+                rowPad[x * 4 + 0] = 255;
+                rowPad[x * 4 + 1] = 255;
+                rowPad[x * 4 + 2] = 255;
+                rowPad[x * 4 + 3] = 255;
+            }
+        }
+
+        // Seed the portrait region with frame 0 of the front clip.
+        if (m_videoPlayerFront->hasFrame()) {
+            const unsigned char* src = m_videoPlayerFront->currentFrame().data();
+            const size_t srcRowBytes = static_cast<size_t>(faceW) * 4;
+            const size_t portraitColOffset = static_cast<size_t>(3 * faceW + kVideoPadCols) * 4;
+            for (int y = 0; y < faceH; ++y) {
+                std::memcpy(
+                    m_videoPaddedBuffer.data() + y * padRowBytes + portraitColOffset,
+                    src + y * srcRowBytes,
+                    srcRowBytes);
+            }
+        }
+        // Seed front/back/side regions with each clip's first frame so the
+        // cube isn't black for the first half-second.
+        auto seedRegion = [&](eden::VideoPlayer* p, int regionIndex) {
+            if (!p || !p->hasFrame()) return;
+            const unsigned char* src = p->currentFrame().data();
+            const size_t srcRowBytes = static_cast<size_t>(faceW) * 4;
+            const size_t colOffset = static_cast<size_t>(regionIndex * faceW) * 4;
+            for (int y = 0; y < faceH; ++y) {
+                std::memcpy(
+                    m_videoPaddedBuffer.data() + y * padRowBytes + colOffset,
+                    src + y * srcRowBytes,
+                    srcRowBytes);
+            }
+        };
+        seedRegion(m_videoPlayerFront.get(), 0);
+        seedRegion(m_videoPlayerBack.get(),  1);
+        seedRegion(m_videoPlayerSide.get(),  2);
+
+        // UV bounds for each region.
+        const float texW = static_cast<float>(m_videoPaddedW);
+        const float uF0 = 0.0f;
+        const float uF1 = faceW / texW;
+        const float uB0 = (1 * faceW) / texW;
+        const float uB1 = (2 * faceW) / texW;
+        const float uS0 = (2 * faceW) / texW;
+        const float uS1 = (3 * faceW) / texW;
+        const float uW  = (3 * faceW + kVideoPadCols * 0.5f) / texW;
+        const float uP0 = (3 * faceW + kVideoPadCols) / texW;
+        const float uP1 = 1.0f;
+        const glm::vec2 whiteUV(uW, 0.5f);
+
+        // Build the cube. 24 verts (4 per face × 6) so each face has its
+        // own UVs and normal. Indices wind CCW looking from outside.
+        const float h = 0.5f;
+        std::vector<eden::ModelVertex> verts;
+        std::vector<uint32_t> idx;
+        verts.reserve(24);
+        idx.reserve(36);
+        auto addFace = [&](glm::vec3 p0, glm::vec3 p1, glm::vec3 p2, glm::vec3 p3,
+                           glm::vec3 n,
+                           glm::vec2 uv0, glm::vec2 uv1, glm::vec2 uv2, glm::vec2 uv3) {
+            uint32_t base = static_cast<uint32_t>(verts.size());
+            verts.push_back({p0, n, uv0, glm::vec4(1.0f)});
+            verts.push_back({p1, n, uv1, glm::vec4(1.0f)});
+            verts.push_back({p2, n, uv2, glm::vec4(1.0f)});
+            verts.push_back({p3, n, uv3, glm::vec4(1.0f)});
+            idx.push_back(base + 0); idx.push_back(base + 1); idx.push_back(base + 2);
+            idx.push_back(base + 0); idx.push_back(base + 2); idx.push_back(base + 3);
+        };
+
+        // +Z (front) — front clip
+        addFace(
+            {-h, -h, +h}, {+h, -h, +h}, {+h, +h, +h}, {-h, +h, +h},
+            {0, 0, +1},
+            {uF0, 1.0f}, {uF1, 1.0f}, {uF1, 0.0f}, {uF0, 0.0f});
+        // -Z (back) — back clip
+        addFace(
+            {+h, -h, -h}, {-h, -h, -h}, {-h, +h, -h}, {+h, +h, -h},
+            {0, 0, -1},
+            {uB0, 1.0f}, {uB1, 1.0f}, {uB1, 0.0f}, {uB0, 0.0f});
+        // +X (right) — side clip
+        addFace(
+            {+h, -h, +h}, {+h, -h, -h}, {+h, +h, -h}, {+h, +h, +h},
+            {+1, 0, 0},
+            {uS0, 1.0f}, {uS1, 1.0f}, {uS1, 0.0f}, {uS0, 0.0f});
+        // -X (left) — side clip MIRRORED (swap U so the character doesn't
+        // appear to be facing the wrong way from this angle)
+        addFace(
+            {-h, -h, -h}, {-h, -h, +h}, {-h, +h, +h}, {-h, +h, -h},
+            {-1, 0, 0},
+            {uS1, 1.0f}, {uS0, 1.0f}, {uS0, 0.0f}, {uS1, 0.0f});
+        // +Y (top) — portrait
+        addFace(
+            {-h, +h, +h}, {+h, +h, +h}, {+h, +h, -h}, {-h, +h, -h},
+            {0, +1, 0},
+            {uP0, 1.0f}, {uP1, 1.0f}, {uP1, 0.0f}, {uP0, 0.0f});
+        // -Y (bottom) — white
+        addFace(
+            {-h, -h, -h}, {+h, -h, -h}, {+h, -h, +h}, {-h, -h, +h},
+            {0, -1, 0},
+            whiteUV, whiteUV, whiteUV, whiteUV);
+
+        uint32_t handle = m_modelRenderer->createModel(
+            verts, idx,
+            m_videoPaddedBuffer.data(),
+            m_videoPaddedW, m_videoPaddedH);
+
+        auto obj = std::make_unique<SceneObject>("video_cube");
+        obj->setBufferHandle(handle);
+        obj->setIndexCount(static_cast<uint32_t>(idx.size()));
+        obj->setVertexCount(static_cast<uint32_t>(verts.size()));
+        obj->setMeshData(verts, idx);
+
+        const glm::vec3 cubeScale(2.0f, 2.0f, 2.0f);
+        glm::vec3 anchor = m_camera.getPosition() + m_camera.getFront() * 6.0f;
+        float floorY = getPlacementFloorHeight(anchor.x, anchor.z);
+        obj->getTransform().setScale(cubeScale);
+        obj->getTransform().setPosition(glm::vec3(anchor.x, floorY + cubeScale.y * 0.5f, anchor.z));
+
+        m_videoCube = obj.get();
+        m_sceneObjects.push_back(std::move(obj));
+        std::cout << "[Video] spawned video_cube at ("
+                  << anchor.x << "," << floorY << "," << anchor.z << ")" << std::endl;
+    }
+#endif
+
     void enterPlayMode() {
         m_isPlayMode = true;
         m_playModeCursorVisible = false;  // Start with cursor hidden (mouse look active)
@@ -27398,6 +27589,13 @@ private:
     bool m_terminalPixelsDirty = false;
     bool m_terminalScreenBound = false;
 
+    // ImGui-based clip editor: Load → Trim → Export Clip via ffmpeg.
+    // Toggle is owned by EditorUI (m_editorUI.showVideoEditor()).
+    // The in-world video-cube proof-of-concept was removed; the
+    // VideoPlayer/VideoEditor plumbing stays for later use as the
+    // dialogue-portrait system.
+    std::unique_ptr<eden::VideoEditor> m_videoEditor;
+
     // Clipboard history
     struct ClipboardEntry {
         std::string text;
@@ -27739,8 +27937,8 @@ private:
     float m_editorCameraPitch = 0.0f;
 
     // Game time system (24 game hours = 5 real minutes for testing)
-    float m_gameTimeMinutes = 360.0f;  // Current time in game minutes (0-1440), starts at 0600
-    float m_gameTimeScale = 4.8f;      // Game minutes per real second (1440 / 300 = 4.8)
+    float m_gameTimeMinutes = 720.0f;  // Frozen at noon for stable bright lighting
+    float m_gameTimeScale = 0.0f;      // 0 = no advance; restore to 4.8 for the day/night cycle
 
     // Player economy
     float m_playerCredits = 1000.0f;   // Starting credits

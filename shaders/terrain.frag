@@ -5,14 +5,18 @@ layout(location = 1) in vec3 fragNormal;
 layout(location = 2) in vec2 fragUV;
 layout(location = 3) in vec4 fragTexSplat0;   // Weights for textures 0-3
 layout(location = 4) in vec4 fragTexSplat1;   // Weights for textures 4-7
-layout(location = 5) in float fragDistance;
-layout(location = 6) in float fragSelection;
-layout(location = 7) in float fragPaintAlpha;
-layout(location = 8) in vec3 fragTexHSB;  // Per-vertex HSB (hue, saturation, brightness)
-layout(location = 9) in float fragHoleMask;
-layout(location = 10) in vec4 fragTexSplat2;  // Weights for textures 8-11
-layout(location = 11) in vec4 fragTexSplat3;  // Weights for textures 12-15
-layout(location = 12) in vec3 fragWorldPos;
+layout(location = 5) in vec4 fragTexSplat2;   // Weights for textures 8-11
+layout(location = 6) in vec4 fragTexSplat3;   // Weights for textures 12-15
+layout(location = 7) in vec4 fragTexSplat4;   // Weights for textures 16-19
+layout(location = 8) in vec4 fragTexSplat5;   // Weights for textures 20-23
+layout(location = 9) in vec4 fragTexSplat6;   // Weights for textures 24-27
+layout(location = 10) in vec4 fragTexSplat7;  // Weights for textures 28-31
+layout(location = 11) in float fragDistance;
+layout(location = 12) in float fragSelection;
+layout(location = 13) in float fragPaintAlpha;
+layout(location = 14) in vec3 fragTexHSB;
+layout(location = 15) in float fragHoleMask;
+layout(location = 16) in vec3 fragWorldPos;
 
 // Texture arrays
 layout(set = 0, binding = 0) uniform sampler2DArray terrainTextures;
@@ -79,8 +83,24 @@ void main() {
     blendedTex += texture(terrainTextures, vec3(fragUV, 13.0)).rgb * fragTexSplat3.y;
     blendedTex += texture(terrainTextures, vec3(fragUV, 14.0)).rgb * fragTexSplat3.z;
     blendedTex += texture(terrainTextures, vec3(fragUV, 15.0)).rgb * fragTexSplat3.w;
+    blendedTex += texture(terrainTextures, vec3(fragUV, 16.0)).rgb * fragTexSplat4.x;
+    blendedTex += texture(terrainTextures, vec3(fragUV, 17.0)).rgb * fragTexSplat4.y;
+    blendedTex += texture(terrainTextures, vec3(fragUV, 18.0)).rgb * fragTexSplat4.z;
+    blendedTex += texture(terrainTextures, vec3(fragUV, 19.0)).rgb * fragTexSplat4.w;
+    blendedTex += texture(terrainTextures, vec3(fragUV, 20.0)).rgb * fragTexSplat5.x;
+    blendedTex += texture(terrainTextures, vec3(fragUV, 21.0)).rgb * fragTexSplat5.y;
+    blendedTex += texture(terrainTextures, vec3(fragUV, 22.0)).rgb * fragTexSplat5.z;
+    blendedTex += texture(terrainTextures, vec3(fragUV, 23.0)).rgb * fragTexSplat5.w;
+    blendedTex += texture(terrainTextures, vec3(fragUV, 24.0)).rgb * fragTexSplat6.x;
+    blendedTex += texture(terrainTextures, vec3(fragUV, 25.0)).rgb * fragTexSplat6.y;
+    blendedTex += texture(terrainTextures, vec3(fragUV, 26.0)).rgb * fragTexSplat6.z;
+    blendedTex += texture(terrainTextures, vec3(fragUV, 27.0)).rgb * fragTexSplat6.w;
+    blendedTex += texture(terrainTextures, vec3(fragUV, 28.0)).rgb * fragTexSplat7.x;
+    blendedTex += texture(terrainTextures, vec3(fragUV, 29.0)).rgb * fragTexSplat7.y;
+    blendedTex += texture(terrainTextures, vec3(fragUV, 30.0)).rgb * fragTexSplat7.z;
+    blendedTex += texture(terrainTextures, vec3(fragUV, 31.0)).rgb * fragTexSplat7.w;
 
-    // Sample all 16 normal map layers and blend by same splatmap weights
+    // Sample all 32 normal map layers and blend by same splatmap weights
     vec3 blendedNormal = vec3(0.0);
     blendedNormal += texture(terrainNormals, vec3(fragUV, 0.0)).rgb * fragTexSplat0.x;
     blendedNormal += texture(terrainNormals, vec3(fragUV, 1.0)).rgb * fragTexSplat0.y;
@@ -98,6 +118,22 @@ void main() {
     blendedNormal += texture(terrainNormals, vec3(fragUV, 13.0)).rgb * fragTexSplat3.y;
     blendedNormal += texture(terrainNormals, vec3(fragUV, 14.0)).rgb * fragTexSplat3.z;
     blendedNormal += texture(terrainNormals, vec3(fragUV, 15.0)).rgb * fragTexSplat3.w;
+    blendedNormal += texture(terrainNormals, vec3(fragUV, 16.0)).rgb * fragTexSplat4.x;
+    blendedNormal += texture(terrainNormals, vec3(fragUV, 17.0)).rgb * fragTexSplat4.y;
+    blendedNormal += texture(terrainNormals, vec3(fragUV, 18.0)).rgb * fragTexSplat4.z;
+    blendedNormal += texture(terrainNormals, vec3(fragUV, 19.0)).rgb * fragTexSplat4.w;
+    blendedNormal += texture(terrainNormals, vec3(fragUV, 20.0)).rgb * fragTexSplat5.x;
+    blendedNormal += texture(terrainNormals, vec3(fragUV, 21.0)).rgb * fragTexSplat5.y;
+    blendedNormal += texture(terrainNormals, vec3(fragUV, 22.0)).rgb * fragTexSplat5.z;
+    blendedNormal += texture(terrainNormals, vec3(fragUV, 23.0)).rgb * fragTexSplat5.w;
+    blendedNormal += texture(terrainNormals, vec3(fragUV, 24.0)).rgb * fragTexSplat6.x;
+    blendedNormal += texture(terrainNormals, vec3(fragUV, 25.0)).rgb * fragTexSplat6.y;
+    blendedNormal += texture(terrainNormals, vec3(fragUV, 26.0)).rgb * fragTexSplat6.z;
+    blendedNormal += texture(terrainNormals, vec3(fragUV, 27.0)).rgb * fragTexSplat6.w;
+    blendedNormal += texture(terrainNormals, vec3(fragUV, 28.0)).rgb * fragTexSplat7.x;
+    blendedNormal += texture(terrainNormals, vec3(fragUV, 29.0)).rgb * fragTexSplat7.y;
+    blendedNormal += texture(terrainNormals, vec3(fragUV, 30.0)).rgb * fragTexSplat7.z;
+    blendedNormal += texture(terrainNormals, vec3(fragUV, 31.0)).rgb * fragTexSplat7.w;
 
     // Decode tangent-space normal from [0,1] -> [-1,1]
     vec3 tangentNormal = blendedNormal * 2.0 - 1.0;

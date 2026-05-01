@@ -158,6 +158,90 @@ PrimitiveMeshBuilder::MeshData PrimitiveMeshBuilder::createCube(float size, cons
     return result;
 }
 
+PrimitiveMeshBuilder::MeshData PrimitiveMeshBuilder::createWedge(float size, float slopeRatio, const glm::vec4& color) {
+    MeshData result;
+    auto& vertices = result.vertices;
+    auto& indices = result.indices;
+
+    float h = size / 2.0f;
+    float sH = size * slopeRatio; // sloped end height (+X side)
+
+    // Corners: left side (-X) at full height, right side (+X) at slopeRatio height
+    // Bottom
+    glm::vec3 c0 = {-h, 0, -h};     // left-back-bottom
+    glm::vec3 c1 = { h, 0, -h};     // right-back-bottom
+    glm::vec3 c4 = {-h, 0,  h};     // left-front-bottom
+    glm::vec3 c5 = { h, 0,  h};     // right-front-bottom
+    // Top
+    glm::vec3 c3 = {-h, size, -h};  // left-back-top (full height)
+    glm::vec3 c2 = { h, sH,   -h};  // right-back-top (sloped)
+    glm::vec3 c7 = {-h, size,  h};  // left-front-top (full height)
+    glm::vec3 c6 = { h, sH,    h};  // right-front-top (sloped)
+
+    // Top face normal (sloped surface)
+    float a = 1.0f - slopeRatio; // slope steepness
+    float topLen = std::sqrt(a * a + 1.0f);
+    glm::vec3 topN = {a / topLen, 1.0f / topLen, 0.0f};
+
+    auto addQuad = [&](glm::vec3 p0, glm::vec3 p1, glm::vec3 p2, glm::vec3 p3,
+                       glm::vec3 normal,
+                       glm::vec2 uv0, glm::vec2 uv1, glm::vec2 uv2, glm::vec2 uv3) {
+        uint32_t base = static_cast<uint32_t>(vertices.size());
+        ModelVertex v0, v1, v2, v3;
+        v0.position = p0; v0.normal = normal; v0.color = color; v0.texCoord = uv0;
+        v1.position = p1; v1.normal = normal; v1.color = color; v1.texCoord = uv1;
+        v2.position = p2; v2.normal = normal; v2.color = color; v2.texCoord = uv2;
+        v3.position = p3; v3.normal = normal; v3.color = color; v3.texCoord = uv3;
+        vertices.push_back(v0);
+        vertices.push_back(v1);
+        vertices.push_back(v2);
+        vertices.push_back(v3);
+        indices.push_back(base + 0);
+        indices.push_back(base + 1);
+        indices.push_back(base + 2);
+        indices.push_back(base + 0);
+        indices.push_back(base + 2);
+        indices.push_back(base + 3);
+    };
+
+    float sR = slopeRatio;
+
+    // Front face (+Z) — trapezoid: left at full height, right at slopeRatio
+    addQuad(c4, c5, c6, c7,
+            {0, 0, 1},
+            {0, 0}, {1, 0}, {1, sR}, {0, 1});
+
+    // Back face (-Z) — trapezoid
+    addQuad(c1, c0, c3, c2,
+            {0, 0, -1},
+            {0, 0}, {1, 0}, {1, 1}, {0, sR});
+
+    // Left face (-X) — full height rectangle
+    addQuad(c0, c4, c7, c3,
+            {-1, 0, 0},
+            {0, 0}, {1, 0}, {1, 1}, {0, 1});
+
+    // Right face (+X) — shorter rectangle at slopeRatio height
+    addQuad(c5, c1, c2, c6,
+            {1, 0, 0},
+            {0, 0}, {1, 0}, {1, sR}, {0, sR});
+
+    // Top face (sloped)
+    addQuad(c7, c6, c2, c3,
+            topN,
+            {0, 0}, {1, 0}, {1, 1}, {0, 1});
+
+    // Bottom face (-Y)
+    addQuad(c0, c1, c5, c4,
+            {0, -1, 0},
+            {0, 0}, {1, 0}, {1, 1}, {0, 1});
+
+    result.bounds.min = glm::vec3(-h, 0, -h);
+    result.bounds.max = glm::vec3(h, size, h);
+
+    return result;
+}
+
 PrimitiveMeshBuilder::MeshData PrimitiveMeshBuilder::createSpawnMarker(float size) {
     MeshData result;
     auto& vertices = result.vertices;

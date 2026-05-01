@@ -47,6 +47,10 @@ void TerrainChunk::generate(const TerrainConfig& config) {
     m_splatmap1.resize(resolution * resolution, glm::vec4(0.0f));
     m_splatmap2.resize(resolution * resolution, glm::vec4(0.0f));
     m_splatmap3.resize(resolution * resolution, glm::vec4(0.0f));
+    m_splatmap4.resize(resolution * resolution, glm::vec4(0.0f));
+    m_splatmap5.resize(resolution * resolution, glm::vec4(0.0f));
+    m_splatmap6.resize(resolution * resolution, glm::vec4(0.0f));
+    m_splatmap7.resize(resolution * resolution, glm::vec4(0.0f));
     m_selectionmap.resize(resolution * resolution, 0.0f);  // No selection by default
     m_texHSBmap.resize(resolution * resolution, glm::vec3(0.0f, 1.0f, 1.0f));  // Default: no hue shift, normal sat/bright
     m_holemap.resize(resolution * resolution, 0.0f);  // No holes by default
@@ -97,6 +101,10 @@ void TerrainChunk::resetToDefaults() {
     std::fill(m_splatmap1.begin(), m_splatmap1.end(), glm::vec4(0.0f));
     std::fill(m_splatmap2.begin(), m_splatmap2.end(), glm::vec4(0.0f));
     std::fill(m_splatmap3.begin(), m_splatmap3.end(), glm::vec4(0.0f));
+    std::fill(m_splatmap4.begin(), m_splatmap4.end(), glm::vec4(0.0f));
+    std::fill(m_splatmap5.begin(), m_splatmap5.end(), glm::vec4(0.0f));
+    std::fill(m_splatmap6.begin(), m_splatmap6.end(), glm::vec4(0.0f));
+    std::fill(m_splatmap7.begin(), m_splatmap7.end(), glm::vec4(0.0f));
     std::fill(m_texHSBmap.begin(), m_texHSBmap.end(), glm::vec3(0.0f, 1.0f, 1.0f));
     std::fill(m_selectionmap.begin(), m_selectionmap.end(), 0.0f);
     std::fill(m_holemap.begin(), m_holemap.end(), 0.0f);
@@ -138,6 +146,10 @@ void TerrainChunk::rebuildVerticesFromHeightmap() {
             vertex.texSplat1 = m_splatmap1[idx];
             vertex.texSplat2 = m_splatmap2[idx];
             vertex.texSplat3 = m_splatmap3[idx];
+            vertex.texSplat4 = m_splatmap4[idx];
+            vertex.texSplat5 = m_splatmap5[idx];
+            vertex.texSplat6 = m_splatmap6[idx];
+            vertex.texSplat7 = m_splatmap7[idx];
 
             // Selection weight
             vertex.selection = m_selectionmap[idx];
@@ -248,7 +260,11 @@ void TerrainChunk::setChunkData(const std::vector<float>& heightmap,
                                  const std::vector<glm::vec4>& splatmap1,
                                  const std::vector<glm::vec4>& splatmap2,
                                  const std::vector<glm::vec4>& splatmap3,
-                                 const std::vector<glm::vec3>& texHSBmap) {
+                                 const std::vector<glm::vec3>& texHSBmap,
+                                 const std::vector<glm::vec4>& splatmap4,
+                                 const std::vector<glm::vec4>& splatmap5,
+                                 const std::vector<glm::vec4>& splatmap6,
+                                 const std::vector<glm::vec4>& splatmap7) {
     size_t expected = static_cast<size_t>(m_resolution * m_resolution);
 
     if (heightmap.size() == expected) m_heightmap = heightmap;
@@ -258,6 +274,10 @@ void TerrainChunk::setChunkData(const std::vector<float>& heightmap,
     if (splatmap1.size() == expected) m_splatmap1 = splatmap1;
     if (splatmap2.size() == expected) m_splatmap2 = splatmap2;
     if (splatmap3.size() == expected) m_splatmap3 = splatmap3;
+    if (splatmap4.size() == expected) m_splatmap4 = splatmap4;
+    if (splatmap5.size() == expected) m_splatmap5 = splatmap5;
+    if (splatmap6.size() == expected) m_splatmap6 = splatmap6;
+    if (splatmap7.size() == expected) m_splatmap7 = splatmap7;
     if (texHSBmap.size() == expected) m_texHSBmap = texHSBmap;
 
     rebuildVerticesFromHeightmap();
@@ -283,24 +303,30 @@ void TerrainChunk::setChunkDataLegacy(const std::vector<float>& heightmap,
         m_splatmap1.resize(expected, glm::vec4(0.0f));
         m_splatmap2.resize(expected, glm::vec4(0.0f));
         m_splatmap3.resize(expected, glm::vec4(0.0f));
+        m_splatmap4.resize(expected, glm::vec4(0.0f));
+        m_splatmap5.resize(expected, glm::vec4(0.0f));
+        m_splatmap6.resize(expected, glm::vec4(0.0f));
+        m_splatmap7.resize(expected, glm::vec4(0.0f));
         for (size_t i = 0; i < expected; i++) {
             m_splatmap0[i] = glm::vec4(0.0f);
             m_splatmap1[i] = glm::vec4(0.0f);
             m_splatmap2[i] = glm::vec4(0.0f);
             m_splatmap3[i] = glm::vec4(0.0f);
-            // Scatter weights into splatmap by index
+            m_splatmap4[i] = glm::vec4(0.0f);
+            m_splatmap5[i] = glm::vec4(0.0f);
+            m_splatmap6[i] = glm::vec4(0.0f);
+            m_splatmap7[i] = glm::vec4(0.0f);
             for (int s = 0; s < 4; s++) {
                 unsigned int texIdx = texIndicesmap[i][s];
                 float weight = texWeightmap[i][s];
-                if (texIdx < 4) {
-                    m_splatmap0[i][texIdx] += weight;
-                } else if (texIdx < 8) {
-                    m_splatmap1[i][texIdx - 4] += weight;
-                } else if (texIdx < 12) {
-                    m_splatmap2[i][texIdx - 8] += weight;
-                } else if (texIdx < 16) {
-                    m_splatmap3[i][texIdx - 12] += weight;
-                }
+                if (texIdx < 4) m_splatmap0[i][texIdx] += weight;
+                else if (texIdx < 8) m_splatmap1[i][texIdx - 4] += weight;
+                else if (texIdx < 12) m_splatmap2[i][texIdx - 8] += weight;
+                else if (texIdx < 16) m_splatmap3[i][texIdx - 12] += weight;
+                else if (texIdx < 20) m_splatmap4[i][texIdx - 16] += weight;
+                else if (texIdx < 24) m_splatmap5[i][texIdx - 20] += weight;
+                else if (texIdx < 28) m_splatmap6[i][texIdx - 24] += weight;
+                else if (texIdx < 32) m_splatmap7[i][texIdx - 28] += weight;
             }
         }
     }
@@ -560,7 +586,7 @@ void TerrainChunk::applyColorBrush(float worldX, float worldZ, float radius, flo
 
 void TerrainChunk::applyTextureBrush(float worldX, float worldZ, float radius, float strength, float falloff, int textureIndex,
                                      float hue, float saturation, float brightness, const BrushShapeParams& shapeParams) {
-    if (textureIndex < 0 || textureIndex >= 16) return;
+    if (textureIndex < 0 || textureIndex >= 32) return;
 
     glm::vec3 chunkPos = getWorldPosition();
 
@@ -589,23 +615,26 @@ void TerrainChunk::applyTextureBrush(float worldX, float worldZ, float radius, f
 
                 int idx = z * m_resolution + x;
 
-                // Get all 16 weights as a flat array for easy manipulation
-                float w[16] = {
+                // Get all 32 weights as a flat array
+                float w[32] = {
                     m_splatmap0[idx].x, m_splatmap0[idx].y, m_splatmap0[idx].z, m_splatmap0[idx].w,
                     m_splatmap1[idx].x, m_splatmap1[idx].y, m_splatmap1[idx].z, m_splatmap1[idx].w,
                     m_splatmap2[idx].x, m_splatmap2[idx].y, m_splatmap2[idx].z, m_splatmap2[idx].w,
-                    m_splatmap3[idx].x, m_splatmap3[idx].y, m_splatmap3[idx].z, m_splatmap3[idx].w
+                    m_splatmap3[idx].x, m_splatmap3[idx].y, m_splatmap3[idx].z, m_splatmap3[idx].w,
+                    m_splatmap4[idx].x, m_splatmap4[idx].y, m_splatmap4[idx].z, m_splatmap4[idx].w,
+                    m_splatmap5[idx].x, m_splatmap5[idx].y, m_splatmap5[idx].z, m_splatmap5[idx].w,
+                    m_splatmap6[idx].x, m_splatmap6[idx].y, m_splatmap6[idx].z, m_splatmap6[idx].w,
+                    m_splatmap7[idx].x, m_splatmap7[idx].y, m_splatmap7[idx].z, m_splatmap7[idx].w
                 };
 
-                // Increase target texture weight
                 float addAmount = strength * 0.1f * falloffMult;
                 w[textureIndex] += addAmount;
 
-                // Normalize so all 16 weights sum to 1
+                // Normalize so all 32 weights sum to 1
                 float sum = 0.0f;
-                for (int i = 0; i < 16; i++) sum += w[i];
+                for (int i = 0; i < 32; i++) sum += w[i];
                 if (sum > 0.0f) {
-                    for (int i = 0; i < 16; i++) w[i] /= sum;
+                    for (int i = 0; i < 32; i++) w[i] /= sum;
                 }
 
                 // Write back
@@ -613,6 +642,10 @@ void TerrainChunk::applyTextureBrush(float worldX, float worldZ, float radius, f
                 m_splatmap1[idx] = glm::vec4(w[4], w[5], w[6], w[7]);
                 m_splatmap2[idx] = glm::vec4(w[8], w[9], w[10], w[11]);
                 m_splatmap3[idx] = glm::vec4(w[12], w[13], w[14], w[15]);
+                m_splatmap4[idx] = glm::vec4(w[16], w[17], w[18], w[19]);
+                m_splatmap5[idx] = glm::vec4(w[20], w[21], w[22], w[23]);
+                m_splatmap6[idx] = glm::vec4(w[24], w[25], w[26], w[27]);
+                m_splatmap7[idx] = glm::vec4(w[28], w[29], w[30], w[31]);
 
                 // Blend HSB values towards the brush settings
                 glm::vec3& hsb = m_texHSBmap[idx];
@@ -1120,10 +1153,10 @@ void Terrain::applySmearTextureBrush(float worldX, float worldZ, float radius, f
             float localZ = worldZ - vc.renderOffset.z;
 
             // Snapshot current splatmaps for reading
-            auto s0copy = chunk->m_splatmap0;
-            auto s1copy = chunk->m_splatmap1;
-            auto s2copy = chunk->m_splatmap2;
-            auto s3copy = chunk->m_splatmap3;
+            auto s0copy = chunk->m_splatmap0; auto s1copy = chunk->m_splatmap1;
+            auto s2copy = chunk->m_splatmap2; auto s3copy = chunk->m_splatmap3;
+            auto s4copy = chunk->m_splatmap4; auto s5copy = chunk->m_splatmap5;
+            auto s6copy = chunk->m_splatmap6; auto s7copy = chunk->m_splatmap7;
 
             for (int z = 0; z < res; z++) {
                 for (int x = 0; x < res; x++) {
@@ -1138,6 +1171,7 @@ void Terrain::applySmearTextureBrush(float worldX, float worldZ, float radius, f
                     float blendAmt = strength * falloffMult * 0.1f;
 
                     glm::vec4 avg0(0), avg1(0), avg2(0), avg3(0);
+                    glm::vec4 avg4(0), avg5(0), avg6(0), avg7(0);
                     int count = 0;
                     for (int nz = -2; nz <= 2; nz++) {
                         for (int nx = -2; nx <= 2; nx++) {
@@ -1146,15 +1180,16 @@ void Terrain::applySmearTextureBrush(float worldX, float worldZ, float radius, f
                                 int si = sz * res + sx;
                                 avg0 += s0copy[si]; avg1 += s1copy[si];
                                 avg2 += s2copy[si]; avg3 += s3copy[si];
+                                avg4 += s4copy[si]; avg5 += s5copy[si];
+                                avg6 += s6copy[si]; avg7 += s7copy[si];
                                 count++;
                             }
                         }
                     }
                     if (count > 0) {
-                        avg0 /= static_cast<float>(count);
-                        avg1 /= static_cast<float>(count);
-                        avg2 /= static_cast<float>(count);
-                        avg3 /= static_cast<float>(count);
+                        float inv = 1.0f / static_cast<float>(count);
+                        avg0 *= inv; avg1 *= inv; avg2 *= inv; avg3 *= inv;
+                        avg4 *= inv; avg5 *= inv; avg6 *= inv; avg7 *= inv;
                     }
 
                     int idx = z * res + x;
@@ -1162,6 +1197,10 @@ void Terrain::applySmearTextureBrush(float worldX, float worldZ, float radius, f
                     chunk->m_splatmap1[idx] = glm::mix(chunk->m_splatmap1[idx], avg1, blendAmt);
                     chunk->m_splatmap2[idx] = glm::mix(chunk->m_splatmap2[idx], avg2, blendAmt);
                     chunk->m_splatmap3[idx] = glm::mix(chunk->m_splatmap3[idx], avg3, blendAmt);
+                    chunk->m_splatmap4[idx] = glm::mix(chunk->m_splatmap4[idx], avg4, blendAmt);
+                    chunk->m_splatmap5[idx] = glm::mix(chunk->m_splatmap5[idx], avg5, blendAmt);
+                    chunk->m_splatmap6[idx] = glm::mix(chunk->m_splatmap6[idx], avg6, blendAmt);
+                    chunk->m_splatmap7[idx] = glm::mix(chunk->m_splatmap7[idx], avg7, blendAmt);
                 }
             }
             chunk->m_needsUpload = true;
@@ -1190,6 +1229,10 @@ void Terrain::syncEdgeTextureData() {
                 right->m_splatmap1[dstIdx] = chunk->m_splatmap1[srcIdx];
                 right->m_splatmap2[dstIdx] = chunk->m_splatmap2[srcIdx];
                 right->m_splatmap3[dstIdx] = chunk->m_splatmap3[srcIdx];
+                right->m_splatmap4[dstIdx] = chunk->m_splatmap4[srcIdx];
+                right->m_splatmap5[dstIdx] = chunk->m_splatmap5[srcIdx];
+                right->m_splatmap6[dstIdx] = chunk->m_splatmap6[srcIdx];
+                right->m_splatmap7[dstIdx] = chunk->m_splatmap7[srcIdx];
                 right->m_texHSBmap[dstIdx] = chunk->m_texHSBmap[srcIdx];
                 right->m_colormap[dstIdx] = chunk->m_colormap[srcIdx];
                 right->m_paintAlphamap[dstIdx] = chunk->m_paintAlphamap[srcIdx];
@@ -1208,6 +1251,10 @@ void Terrain::syncEdgeTextureData() {
                 bottom->m_splatmap1[dstIdx] = chunk->m_splatmap1[srcIdx];
                 bottom->m_splatmap2[dstIdx] = chunk->m_splatmap2[srcIdx];
                 bottom->m_splatmap3[dstIdx] = chunk->m_splatmap3[srcIdx];
+                bottom->m_splatmap4[dstIdx] = chunk->m_splatmap4[srcIdx];
+                bottom->m_splatmap5[dstIdx] = chunk->m_splatmap5[srcIdx];
+                bottom->m_splatmap6[dstIdx] = chunk->m_splatmap6[srcIdx];
+                bottom->m_splatmap7[dstIdx] = chunk->m_splatmap7[srcIdx];
                 bottom->m_texHSBmap[dstIdx] = chunk->m_texHSBmap[srcIdx];
                 bottom->m_colormap[dstIdx] = chunk->m_colormap[srcIdx];
                 bottom->m_paintAlphamap[dstIdx] = chunk->m_paintAlphamap[srcIdx];

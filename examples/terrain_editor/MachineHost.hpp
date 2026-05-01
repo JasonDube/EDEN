@@ -16,6 +16,7 @@
 namespace eden {
 class SceneObject;
 class ParticleRenderer;
+class ModelRenderer;
 }
 
 struct MachineHost {
@@ -41,4 +42,7 @@ struct MachineHost {
 
     // Check if power from a running generator can reach this object via wires
     virtual bool canPowerReach(eden::SceneObject* obj) = 0;
+
+    // Model renderer access (for body part vertex stitching)
+    virtual eden::ModelRenderer* getModelRenderer() = 0;
 };

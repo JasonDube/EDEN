@@ -804,6 +804,7 @@ ICharacterController::DynamicBodyResult JoltCharacter::addDynamicBox(
     bodySettings.mAngularDamping = 0.2f;
     bodySettings.mAllowSleeping = true;
     bodySettings.mAllowDynamicOrKinematic = true;
+    bodySettings.mMotionQuality = JPH::EMotionQuality::LinearCast; // CCD — prevents tunneling through thin walls
     bodySettings.mLinearVelocity = toJolt(velocity);  // Set velocity at creation time
     // Add slight angular velocity for tumble effect
     bodySettings.mAngularVelocity = JPH::Vec3(1.5f, 0.5f, 1.0f);
@@ -869,6 +870,7 @@ ICharacterController::DynamicBodyResult JoltCharacter::addDynamicConvexHull(
     bodySettings.mAngularDamping = 0.2f;
     bodySettings.mAllowSleeping = true;
     bodySettings.mAllowDynamicOrKinematic = true;
+    bodySettings.mMotionQuality = JPH::EMotionQuality::LinearCast; // CCD — prevents tunneling through thin walls
     bodySettings.mLinearVelocity = toJolt(velocity);
     bodySettings.mAngularVelocity = JPH::Vec3(1.5f, 0.5f, 1.0f);
 
@@ -934,7 +936,12 @@ void JoltCharacter::wakeAllDynamicBodies() {
 
 void JoltCharacter::stepPhysics(float deltaTime) {
     if (!m_physicsSystem) return;
-    m_physicsSystem->Update(deltaTime, 1, m_tempAllocator.get(), m_jobSystem.get());
+    // Clamp deltaTime to prevent huge tunneling on lag spikes
+    float dt = std::min(deltaTime, 1.0f / 30.0f);
+    // Use multiple collision steps so CCD can catch thin walls reliably
+    // At 60fps (dt≈0.016) → 2 steps; at 30fps (dt≈0.033) → 4 steps
+    int collisionSteps = std::max(2, static_cast<int>(std::ceil(dt / (1.0f / 120.0f))));
+    m_physicsSystem->Update(dt, collisionSteps, m_tempAllocator.get(), m_jobSystem.get());
 }
 
 } // namespace eden

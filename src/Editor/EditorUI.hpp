@@ -293,6 +293,7 @@ public:
     bool& showImageReferences() { return m_showImageReferences; }
     bool& showTerminal() { return m_showTerminal; }
     bool& showServerManager() { return m_showServerManager; }
+    bool& showVideoEditor() { return m_showVideoEditor; }
 
     // Spatial analysis / mind map
     struct SpatialGrid {
@@ -659,6 +660,7 @@ private:
     bool m_showImageReferences = false;
     bool m_showTerminal = false;
     bool m_showServerManager = false;
+    bool m_showVideoEditor = false;
 
     // Grove script editor state
     char m_groveSource[16384] = "";  // 16KB source buffer

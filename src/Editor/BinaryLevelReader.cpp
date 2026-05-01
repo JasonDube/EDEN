@@ -267,6 +267,10 @@ bool BinaryLevelReader::readObjects(std::ifstream& file, const BinaryLevelHeader
             obj.primitiveHeight = entry.primitiveHeight;
             obj.primitiveSegments = entry.primitiveSegments;
             obj.primitiveColor = entry.primitiveColor;
+            // For Wedge, slopeRatio is stored in primitiveRadius
+            if (entry.primitiveType == static_cast<int32_t>(PrimitiveType::Wedge)) {
+                obj.slopeRatio = entry.primitiveRadius;
+            }
         }
 
         // Door properties

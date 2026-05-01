@@ -281,6 +281,11 @@ bool TextureManager::loadDDSFile(const std::string& path, std::vector<unsigned c
 
 void TextureManager::loadTerrainTexturesFromFolder(const std::string& folderPath) {
     VkDevice device = m_context.getDevice();
+    // Reset source paths — they'll be repopulated during loading
+    // Names/colors are also repopulated below (push_back after clearing old texture data)
+    m_slotSourcePaths.clear();
+    m_textureNames.clear();
+    m_textureColors.clear();
 
     // Clean up existing texture array
     if (m_textureArrayView) {

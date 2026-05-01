@@ -68,6 +68,7 @@ struct BinaryObjectData {
     float primitiveHeight = 1.0f;
     int primitiveSegments = 16;
     glm::vec4 primitiveColor{0.7f, 0.7f, 0.7f, 1.0f};
+    float slopeRatio = 1.0f;
 
     // Door properties
     std::string doorId;

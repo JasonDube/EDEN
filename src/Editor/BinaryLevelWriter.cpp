@@ -155,6 +155,10 @@ void BinaryLevelWriter::addObject(const SceneObject& obj, int32_t meshId, const 
         entry.primitiveHeight = obj.getPrimitiveHeight();
         entry.primitiveSegments = obj.getPrimitiveSegments();
         entry.primitiveColor = obj.getPrimitiveColor();
+        // For Wedge, store slopeRatio in primitiveRadius (wedges don't use radius)
+        if (obj.getPrimitiveType() == PrimitiveType::Wedge) {
+            entry.primitiveRadius = obj.getSlopeRatio();
+        }
     }
 
     // Door properties

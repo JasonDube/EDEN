@@ -15,10 +15,14 @@ struct Vertex3D {
     glm::vec3 color;
     glm::vec3 normal;
     glm::vec2 uv;
-    glm::vec4 texSplat0;   // Splatmap weights for textures 0-3 (smoothly interpolated)
-    glm::vec4 texSplat1;   // Splatmap weights for textures 4-7 (smoothly interpolated)
-    glm::vec4 texSplat2;   // Splatmap weights for textures 8-11 (smoothly interpolated)
-    glm::vec4 texSplat3;   // Splatmap weights for textures 12-15 (smoothly interpolated)
+    glm::vec4 texSplat0;   // Splatmap weights for textures 0-3
+    glm::vec4 texSplat1;   // Splatmap weights for textures 4-7
+    glm::vec4 texSplat2;   // Splatmap weights for textures 8-11
+    glm::vec4 texSplat3;   // Splatmap weights for textures 12-15
+    glm::vec4 texSplat4;   // Splatmap weights for textures 16-19
+    glm::vec4 texSplat5;   // Splatmap weights for textures 20-23
+    glm::vec4 texSplat6;   // Splatmap weights for textures 24-27
+    glm::vec4 texSplat7;   // Splatmap weights for textures 28-31
     float selection;       // Selection weight (0 = not selected, 1 = selected)
     float paintAlpha;      // Paint intensity (0 = texture only, 1 = painted color only)
     glm::vec3 texHSB;      // Per-vertex texture color adjustment (hue, saturation, brightness)
@@ -131,7 +135,11 @@ public:
                       const std::vector<glm::vec4>& splatmap1,
                       const std::vector<glm::vec4>& splatmap2,
                       const std::vector<glm::vec4>& splatmap3,
-                      const std::vector<glm::vec3>& texHSBmap);
+                      const std::vector<glm::vec3>& texHSBmap,
+                      const std::vector<glm::vec4>& splatmap4 = {},
+                      const std::vector<glm::vec4>& splatmap5 = {},
+                      const std::vector<glm::vec4>& splatmap6 = {},
+                      const std::vector<glm::vec4>& splatmap7 = {});
 
     // Legacy loading - convert old indices+weights format to splatmap
     void setChunkDataLegacy(const std::vector<float>& heightmap,
@@ -161,6 +169,10 @@ private:
     std::vector<glm::vec4> m_splatmap1;  // Splatmap weights for textures 4-7
     std::vector<glm::vec4> m_splatmap2;  // Splatmap weights for textures 8-11
     std::vector<glm::vec4> m_splatmap3;  // Splatmap weights for textures 12-15
+    std::vector<glm::vec4> m_splatmap4;  // Splatmap weights for textures 16-19
+    std::vector<glm::vec4> m_splatmap5;  // Splatmap weights for textures 20-23
+    std::vector<glm::vec4> m_splatmap6;  // Splatmap weights for textures 24-27
+    std::vector<glm::vec4> m_splatmap7;  // Splatmap weights for textures 28-31
     std::vector<float> m_selectionmap;  // Per-vertex selection weight (0-1)
     std::vector<glm::vec3> m_texHSBmap;  // Per-vertex texture color adjustment (hue, saturation, brightness)
     std::vector<float> m_holemap;  // Per-vertex hole mask (0 = solid, 1 = hole)

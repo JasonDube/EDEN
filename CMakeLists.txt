@@ -197,6 +197,8 @@ set(EDEN_SOURCES
     src/Physics/HomebrewCharacter.cpp
     src/GameModules/GameModule.cpp
     src/Zone/ZoneSystem.cpp
+    src/Video/VideoPlayer.cpp
+    src/Editor/VideoEditor.cpp
 )
 
 # Create static library
@@ -216,6 +218,17 @@ target_include_directories(eden PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src
 )
 
+# Tracy profiler integration
+set(TRACY_DIR "$ENV{HOME}/Desktop/tracy")
+if(EXISTS ${TRACY_DIR}/public/tracy/Tracy.hpp)
+    option(TRACY_ENABLE "Enable Tracy profiler" ON)
+    if(TRACY_ENABLE)
+        target_sources(eden PRIVATE ${TRACY_DIR}/public/TracyClient.cpp)
+        target_include_directories(eden PUBLIC ${TRACY_DIR}/public)
+        target_compile_definitions(eden PUBLIC TRACY_ENABLE)
+    endif()
+endif()
+
 # Link libraries
 target_link_libraries(eden PUBLIC
     Vulkan::Vulkan
@@ -230,6 +243,16 @@ target_link_libraries(eden PUBLIC
     LinearMath
     Jolt
 )
+
+# FFmpeg / libav for in-process video decode (VideoPlayer).
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(FFMPEG REQUIRED IMPORTED_TARGET
+    libavcodec
+    libavformat
+    libavutil
+    libswscale
+)
+target_link_libraries(eden PUBLIC PkgConfig::FFMPEG)
 
 # Enable validation layers in debug builds
 target_compile_definitions(eden PUBLIC

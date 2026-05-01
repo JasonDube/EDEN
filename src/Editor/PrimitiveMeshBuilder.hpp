@@ -42,6 +42,16 @@ public:
                                bool interior = false);
 
     /**
+     * Generate a wedge mesh (cube with one end of the top lowered).
+     * @param size Side length of the base
+     * @param slopeRatio Height ratio of the sloped end (0.0 = ground, 1.0 = full height = cube)
+     * @param color Base color for the mesh
+     * @return MeshData with vertices, indices, and bounds
+     */
+    static MeshData createWedge(float size, float slopeRatio = 0.5f,
+                                const glm::vec4& color = glm::vec4(0.7f, 0.7f, 0.7f, 1.0f));
+
+    /**
      * Generate a spawn point marker mesh (a colored cube-like shape).
      * @param size Size of the marker
      * @return MeshData with vertices, indices, and bounds

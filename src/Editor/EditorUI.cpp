@@ -205,6 +205,7 @@ void EditorUI::renderMenuBar() {
             ImGui::MenuItem("Image References", nullptr, &m_showImageReferences);
             ImGui::MenuItem("Terminal", "Ctrl+`", &m_showTerminal);
             ImGui::MenuItem("Servers", nullptr, &m_showServerManager);
+            ImGui::MenuItem("Video Editor", nullptr, &m_showVideoEditor);
             ImGui::Separator();
             if (ImGui::MenuItem("Show All")) {
                 m_showTerrainEditor = true;
@@ -457,29 +458,9 @@ void EditorUI::renderTextureSelector() {
         return ImVec4(r, g, b, 1.0f);
     };
 
-    // Load Preset button
-    if (ImGui::Button("Load Preset...")) {
-        if (m_onBrowseTexturePreset) m_onBrowseTexturePreset();
-    }
-
-    // Preset tabs
-    if (ImGui::BeginTabBar("##TexturePresets")) {
-        for (int t = 0; t < static_cast<int>(m_presetNames.size()); t++) {
-            if (ImGui::BeginTabItem(m_presetNames[t].c_str())) {
-                if (t != m_activePresetIndex) {
-                    m_activePresetIndex = t;
-                    if (m_onLoadTexturePreset && !m_presetPaths[t].empty())
-                        m_onLoadTexturePreset(m_presetPaths[t]);
-                }
-                ImGui::EndTabItem();
-            }
-        }
-        ImGui::EndTabBar();
-    }
-
-    // Layer selection
+    // Layer selection — all 32 slots
     if (ImGui::CollapsingHeader("Select Layer", ImGuiTreeNodeFlags_DefaultOpen)) {
-        for (int i = 0; i < m_textureCount; i++) {
+        for (int i = 0; i < 32; i++) {
             ImGui::PushID(i);
 
             bool selected = (i == m_selectedTexture);
@@ -505,17 +486,20 @@ void EditorUI::renderTextureSelector() {
             }
 
             ImGui::SameLine();
-            const char* name = (i < (int)m_textureNames.size()) ? m_textureNames[i].c_str() : "Texture";
-            ImGui::Text("%s%s", name, selected ? " [Paint]" : "");
-
-            ImGui::SameLine();
-            char setLabel[32];
-            snprintf(setLabel, sizeof(setLabel), "Browse##slot%d", i);
-            if (ImGui::SmallButton(setLabel)) {
-                if (m_onAssignTextureSlot) {
-                    m_onAssignTextureSlot(i);
-                }
+            // Extract just the filename from the slot name (strip "Slot #N ()" wrapper)
+            std::string dispName;
+            if (i < (int)m_textureNames.size() && !m_textureNames[i].empty()) {
+                std::string& tn = m_textureNames[i];
+                auto p1 = tn.find('(');
+                auto p2 = tn.rfind(')');
+                if (p1 != std::string::npos && p2 != std::string::npos && p2 > p1)
+                    dispName = tn.substr(p1 + 1, p2 - p1 - 1);
             }
+            if (dispName.empty())
+                ImGui::Text("%d%s", i + 1, selected ? " [Paint]" : "");
+            else
+                ImGui::Text("%d  %s%s", i + 1, dispName.c_str(), selected ? " [Paint]" : "");
+
 
             ImGui::PopID();
         }
@@ -3576,7 +3560,7 @@ void EditorUI::renderMindMapWindow() {
 }
 
 void EditorUI::renderBuildingTextureWindow() {
-    ImGui::SetNextWindowSize(ImVec2(280, 350), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSize(ImVec2(340, 600), ImGuiCond_FirstUseEver);
     if (!ImGui::Begin("Building Textures", &m_showBuildingTextures)) {
         ImGui::End();
         return;
@@ -3715,7 +3699,7 @@ void EditorUI::renderBuildingTextureWindow() {
         const auto& objName = selObj->getName();
         const auto& objBt = selObj->getBuildingType();
         bool isBuildingPart = (objName.find("Building_") == 0 || objName.find("Foundation_") == 0 ||
-                               objBt == "platform_slab" || objBt == "platform_wall" || objBt == "wall_frame" || objBt == "window_frame");
+                               objBt == "platform_slab" || objBt == "platform_wall" || objBt == "platform_slope" || objBt == "wall_frame" || objBt == "window_frame");
         if (isBuildingPart && hasTexture) {
             if (ImGui::Button("Apply to Selected", ImVec2(-1, 0))) {
                 if (m_onApplyBuildingTexture) {

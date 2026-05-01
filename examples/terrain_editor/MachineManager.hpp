@@ -14,6 +14,7 @@
 #include "machines/GeneratorMachine.hpp"
 #include "machines/HingeMachine.hpp"
 #include "machines/CompressorMachine.hpp"
+#include "machines/BodyPartMachine.hpp"
 
 class MachineManager {
 public:
@@ -24,6 +25,7 @@ public:
         m_generator.update(deltaTime, m_host);
         m_hinge.update(deltaTime, m_host);
         m_compressor.update(deltaTime, m_host);
+        m_bodyPart.update(deltaTime, m_host);
     }
 
     // Try to handle an E-key interaction. Returns true if handled.
@@ -31,6 +33,7 @@ public:
         if (m_hinge.onInteract(obj, m_host)) return true;
         if (m_compressor.onInteract(obj, m_host)) return true;
         if (m_generator.onInteract(obj, m_host)) return true;
+        if (m_bodyPart.onInteract(obj, m_host)) return true;
         return false;
     }
 
@@ -39,6 +42,7 @@ public:
         m_generator.onPickup(obj, m_host);
         m_hinge.onPickup(obj, m_host);
         m_compressor.onPickup(obj, m_host);
+        m_bodyPart.onPickup(obj, m_host);
     }
 
     // Notify all machine types that an object is being deleted.
@@ -46,6 +50,7 @@ public:
         m_generator.onDelete(obj);
         m_hinge.onDelete(obj);
         m_compressor.onDelete(obj);
+        m_bodyPart.onDelete(obj);
     }
 
     // Shut down everything (level exit / cleanup).
@@ -53,6 +58,7 @@ public:
         m_generator.shutdown(m_host);
         m_hinge.shutdown(m_host);
         m_compressor.shutdown(m_host);
+        m_bodyPart.shutdown(m_host);
     }
 
     // Query: is this object a running machine of any type?
@@ -60,6 +66,7 @@ public:
         if (m_generator.isRunning(obj)) return true;
         if (m_hinge.isRunning(obj)) return true;
         if (m_compressor.isRunning(obj)) return true;
+        if (m_bodyPart.isRunning(obj)) return true;
         return false;
     }
 
@@ -67,10 +74,12 @@ public:
     GeneratorMachine& generator() { return m_generator; }
     HingeMachine& hinge() { return m_hinge; }
     CompressorMachine& compressor() { return m_compressor; }
+    BodyPartMachine& bodyPart() { return m_bodyPart; }
 
 private:
     MachineHost& m_host;
     GeneratorMachine m_generator;
     HingeMachine m_hinge;
     CompressorMachine m_compressor;
+    BodyPartMachine m_bodyPart;
 };
