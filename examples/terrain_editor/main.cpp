@@ -2062,6 +2062,9 @@ protected:
             glm::mat4 viewProj = proj * view;
             m_dialogueRenderer.render(viewProj, (float)extent.width, (float)extent.height);
 
+            // HP bars over battle-test units
+            renderBattleHpBars();
+
             // Debug: render facing direction arrow for AI NPCs (Xenk + Eve)
             // Use unflipped projection for glm::project (it expects OpenGL convention)
             glm::mat4 projGL = glm::perspective(glm::radians(60.0f), aspect, 0.1f, 5000.0f);
@@ -25732,7 +25735,8 @@ private:
         std::cout << "Created cube (" << size << "m)" << std::endl;
     }
 
-    // Battle test: 10 red vs 10 blue cubes, line spawn, rush nearest enemy + collide.
+    // Battle test: 10 red vs 10 blue cubes, line spawn, boids movement + d20/d6 combat.
+    // Ported from Desktop/PYTHON_PROJECTS/war_game/boids_battle.py.
     void spawnBattleTest() {
         // Wipe any prior battle units
         for (auto& u : m_battleUnits) {
@@ -25745,6 +25749,9 @@ private:
 
         glm::vec3 center = m_camera.getPosition() + m_camera.getFront() * 30.0f;
         center.y = 0.0f;
+
+        auto rnd      = []() { return static_cast<float>(rand()) / static_cast<float>(RAND_MAX); };
+        auto rndRange = [&](float lo, float hi) { return lo + (hi - lo) * rnd(); };
 
         auto spawnTeam = [&](int team, const glm::vec3& origin, const glm::vec4& color, const char* prefix) {
             auto meshData = PrimitiveMeshBuilder::createCube(1.0f, color);
@@ -25765,8 +25772,14 @@ private:
                 obj->getTransform().setPosition(pos);
 
                 BattleUnit u;
-                u.obj = obj.get();
-                u.team = team;
+                u.obj        = obj.get();
+                u.team       = team;
+                u.alive      = true;
+                u.maxHp      = 25.0f;
+                u.hp         = u.maxHp;
+                u.maxSpeed   = rndRange(2.5f, 3.5f);
+                u.aggression = rndRange(0.7f, 1.3f);
+                u.wanderAmt  = rndRange(0.3f, 0.8f);
                 m_battleUnits.push_back(u);
                 m_sceneObjects.push_back(std::move(obj));
             }
@@ -25784,54 +25797,208 @@ private:
 
     void updateBattle(float dt) {
         if (m_battleUnits.empty()) return;
-        const float speed = 3.0f;
-        const float halfSize = 0.5f;
-        const float contactDist = 1.0f;
+        if (dt > 0.1f) dt = 0.1f;  // clamp big steps so the sim doesn't blow up
 
+        // 1. Team centers (alive only)
+        glm::vec2 centers[2] = { glm::vec2(0.0f), glm::vec2(0.0f) };
+        int aliveCount[2]    = { 0, 0 };
         for (auto& u : m_battleUnits) {
-            if (!u.obj) continue;
+            if (!u.alive) continue;
+            glm::vec3 p = u.obj->getTransform().getPosition();
+            centers[u.team] += glm::vec2(p.x, p.z);
+            aliveCount[u.team]++;
+        }
+        if (aliveCount[0]) centers[0] /= static_cast<float>(aliveCount[0]);
+        if (aliveCount[1]) centers[1] /= static_cast<float>(aliveCount[1]);
 
-            glm::vec3 myPos = u.obj->getTransform().getPosition();
+        // 2. Movement (boids: charge to enemy center + target seek + separation + wander)
+        for (size_t i = 0; i < m_battleUnits.size(); ++i) {
+            BattleUnit& u = m_battleUnits[i];
+            if (!u.alive) continue;
 
-            // Pick nearest enemy on XZ
-            BattleUnit* nearest = nullptr;
-            float nearestSq = std::numeric_limits<float>::max();
-            for (auto& other : m_battleUnits) {
-                if (!other.obj || other.team == u.team) continue;
-                glm::vec3 op = other.obj->getTransform().getPosition();
-                float dx = op.x - myPos.x, dz = op.z - myPos.z;
-                float dSq = dx*dx + dz*dz;
-                if (dSq < nearestSq) { nearestSq = dSq; nearest = &other; }
-            }
-            if (!nearest) continue;
+            glm::vec3 p3 = u.obj->getTransform().getPosition();
+            glm::vec2 pos(p3.x, p3.z);
+            glm::vec2 force(0.0f);
+            int enemy = 1 - u.team;
 
-            glm::vec3 tp = nearest->obj->getTransform().getPosition();
-            float dx = tp.x - myPos.x, dz = tp.z - myPos.z;
-            float dist = std::sqrt(dx*dx + dz*dz);
-
-            glm::vec3 newPos = myPos;
-            if (dist > contactDist) {
-                newPos.x += (dx / dist) * speed * dt;
-                newPos.z += (dz / dist) * speed * dt;
-            }
-
-            // Push out of overlap with any other unit
-            for (auto& other : m_battleUnits) {
-                if (&other == &u || !other.obj) continue;
-                glm::vec3 op = other.obj->getTransform().getPosition();
-                float ox = newPos.x - op.x, oz = newPos.z - op.z;
-                float ax = std::abs(ox), az = std::abs(oz);
-                if (ax < contactDist && az < contactDist) {
-                    if (contactDist - ax < contactDist - az) {
-                        newPos.x = op.x + (ox >= 0 ? contactDist : -contactDist);
-                    } else {
-                        newPos.z = op.z + (oz >= 0 ? contactDist : -contactDist);
-                    }
+            // (a) Charge toward enemy team center
+            if (aliveCount[enemy] > 0) {
+                glm::vec2 toCenter = centers[enemy] - pos;
+                float dSq = glm::dot(toCenter, toCenter);
+                if (dSq > 9.0f) {
+                    float d = std::sqrt(dSq);
+                    force += (toCenter / d) * (1.2f * u.aggression * u.maxSpeed);
                 }
             }
 
-            newPos.y = m_terrain.getHeightAt(newPos.x, newPos.z) + halfSize;
-            u.obj->getTransform().setPosition(newPos);
+            // (b) Target reacquisition (every ~1s, or when current target is dead)
+            u.targetTimer -= dt;
+            BattleUnit* tgt = (u.targetIdx >= 0) ? &m_battleUnits[u.targetIdx] : nullptr;
+            if (u.targetTimer <= 0.0f || !tgt || !tgt->alive) {
+                float bestSq = 225.0f;  // 15m radius
+                int   bestIdx = -1;
+                for (size_t j = 0; j < m_battleUnits.size(); ++j) {
+                    BattleUnit& e = m_battleUnits[j];
+                    if (!e.alive || e.team == u.team) continue;
+                    glm::vec3 ep = e.obj->getTransform().getPosition();
+                    float dx = ep.x - pos.x, dz = ep.z - pos.y;
+                    float dSq = dx * dx + dz * dz;
+                    if (dSq < bestSq) { bestSq = dSq; bestIdx = static_cast<int>(j); }
+                }
+                u.targetIdx   = bestIdx;
+                u.targetTimer = 1.0f;
+                tgt = (bestIdx >= 0) ? &m_battleUnits[bestIdx] : nullptr;
+            }
+
+            // (c) Engage current target if it's between 1.5m and 15m
+            if (tgt && tgt->alive) {
+                glm::vec3 tp = tgt->obj->getTransform().getPosition();
+                glm::vec2 toT(tp.x - pos.x, tp.z - pos.y);
+                float dSq = glm::dot(toT, toT);
+                if (dSq > 2.25f && dSq < 225.0f) {
+                    float d = std::sqrt(dSq);
+                    force += (toT / d) * (0.8f * u.aggression * u.maxSpeed);
+                }
+            }
+
+            // (d) Separation from neighbors within 1.5m
+            for (size_t j = 0; j < m_battleUnits.size(); ++j) {
+                if (j == i) continue;
+                BattleUnit& o = m_battleUnits[j];
+                if (!o.alive) continue;
+                glm::vec3 op = o.obj->getTransform().getPosition();
+                float dx = pos.x - op.x, dz = pos.y - op.z;
+                float dSq = dx * dx + dz * dz;
+                if (dSq > 0.01f && dSq < 2.25f) {
+                    float d = std::sqrt(dSq);
+                    float strength = ((1.5f - d) / 1.5f) * 1.5f * u.maxSpeed;
+                    force += glm::vec2(dx, dz) / d * strength;
+                }
+            }
+
+            // (e) Wander noise
+            auto rnd01 = []() { return static_cast<float>(rand()) / static_cast<float>(RAND_MAX); };
+            float jx = (rnd01() - 0.5f) * 2.0f * u.wanderAmt * u.maxSpeed;
+            float jz = (rnd01() - 0.5f) * 2.0f * u.wanderAmt * u.maxSpeed;
+            force += glm::vec2(jx, jz);
+
+            // Smooth velocity toward force (framerate-independent ≈ 0.2 lerp at 60fps)
+            float alpha = 1.0f - std::exp(-12.0f * dt);
+            u.vel += (force - u.vel) * alpha;
+
+            // Cap speed
+            float spdSq = glm::dot(u.vel, u.vel);
+            float maxSq = u.maxSpeed * u.maxSpeed;
+            if (spdSq > maxSq) u.vel *= u.maxSpeed / std::sqrt(spdSq);
+
+            // Integrate
+            glm::vec2 newXZ = pos + u.vel * dt;
+            p3.x = newXZ.x;
+            p3.z = newXZ.y;
+            u.obj->getTransform().setPosition(p3);
+        }
+
+        // 3. Resolve cube overlap
+        const float contact = 1.0f;
+        for (size_t i = 0; i < m_battleUnits.size(); ++i) {
+            BattleUnit& a = m_battleUnits[i];
+            if (!a.alive) continue;
+            glm::vec3 ap = a.obj->getTransform().getPosition();
+            for (size_t j = i + 1; j < m_battleUnits.size(); ++j) {
+                BattleUnit& b = m_battleUnits[j];
+                if (!b.alive) continue;
+                glm::vec3 bp = b.obj->getTransform().getPosition();
+                float dx = bp.x - ap.x, dz = bp.z - ap.z;
+                float ax = std::abs(dx), az = std::abs(dz);
+                if (ax < contact && az < contact) {
+                    if (contact - ax < contact - az) {
+                        float push = (contact - ax) * 0.5f + 0.001f;
+                        if (dx >= 0) { ap.x -= push; bp.x += push; }
+                        else         { ap.x += push; bp.x -= push; }
+                    } else {
+                        float push = (contact - az) * 0.5f + 0.001f;
+                        if (dz >= 0) { ap.z -= push; bp.z += push; }
+                        else         { ap.z += push; bp.z -= push; }
+                    }
+                    a.obj->getTransform().setPosition(ap);
+                    b.obj->getTransform().setPosition(bp);
+                }
+            }
+        }
+
+        // 4. Combat — d20 ≥ 10 to hit, d6 damage, 0.25s cooldown, 1.5m reach
+        for (auto& u : m_battleUnits) {
+            if (!u.alive) continue;
+            if (u.cooldown > 0.0f) { u.cooldown -= dt; continue; }
+            BattleUnit* tgt = (u.targetIdx >= 0) ? &m_battleUnits[u.targetIdx] : nullptr;
+            if (!tgt || !tgt->alive) continue;
+
+            glm::vec3 up = u.obj->getTransform().getPosition();
+            glm::vec3 tp = tgt->obj->getTransform().getPosition();
+            float dx = tp.x - up.x, dz = tp.z - up.z;
+            if (dx * dx + dz * dz < 2.25f) {
+                int roll = (rand() % 20) + 1;
+                if (roll >= 10) {
+                    int dmg = (rand() % 6) + 1;
+                    tgt->hp -= static_cast<float>(dmg);
+                    if (tgt->hp <= 0.0f) {
+                        tgt->alive = false;
+                        if (tgt->obj) tgt->obj->setVisible(false);
+                    }
+                }
+                u.cooldown = 0.25f;
+            }
+        }
+
+        // 5. Snap living units to terrain
+        for (auto& u : m_battleUnits) {
+            if (!u.alive) continue;
+            glm::vec3 p = u.obj->getTransform().getPosition();
+            p.y = m_terrain.getHeightAt(p.x, p.z) + 0.5f;
+            u.obj->getTransform().setPosition(p);
+        }
+    }
+
+    // HP bar over each living, damaged unit (skips full-HP to reduce clutter).
+    void renderBattleHpBars() {
+        if (m_battleUnits.empty()) return;
+        VkExtent2D extent = getSwapchain().getExtent();
+        float screenW = static_cast<float>(extent.width);
+        float screenH = static_cast<float>(extent.height);
+        float aspect  = screenW / screenH;
+
+        glm::mat4 view = m_camera.getViewMatrix();
+        glm::mat4 proj = glm::perspective(glm::radians(60.0f), aspect, 0.1f, 5000.0f);
+        glm::mat4 vp = proj * view;
+
+        ImDrawList* dl = ImGui::GetForegroundDrawList();
+        const float barW = 36.0f, barH = 5.0f;
+
+        for (const auto& u : m_battleUnits) {
+            if (!u.alive || !u.obj) continue;
+            if (u.hp >= u.maxHp) continue;  // hide bar at full HP
+
+            glm::vec3 p = u.obj->getTransform().getPosition();
+            glm::vec3 above = p + glm::vec3(0.0f, 1.1f, 0.0f);
+            glm::vec4 clip = vp * glm::vec4(above, 1.0f);
+            if (clip.w <= 0.001f) continue;
+            glm::vec3 ndc = glm::vec3(clip) / clip.w;
+            if (ndc.z <= 0.0f || ndc.z >= 1.0f) continue;
+            float sx = (ndc.x *  0.5f + 0.5f) * screenW;
+            float sy = (ndc.y * -0.5f + 0.5f) * screenH;
+
+            float ratio = std::clamp(u.hp / u.maxHp, 0.0f, 1.0f);
+            ImVec2 tl(sx - barW * 0.5f, sy - barH * 0.5f);
+            ImVec2 br(sx + barW * 0.5f, sy + barH * 0.5f);
+            dl->AddRectFilled(tl, br, IM_COL32(50, 0, 0, 220));
+            if (ratio > 0.0f) {
+                ImVec2 fillBr(tl.x + barW * ratio, br.y);
+                ImU32 col = (ratio > 0.5f)  ? IM_COL32(0, 200, 0, 230)
+                          : (ratio > 0.25f) ? IM_COL32(220, 200, 0, 230)
+                                            : IM_COL32(220, 60, 0, 230);
+                dl->AddRectFilled(tl, fillBr, col);
+            }
+            dl->AddRect(tl, br, IM_COL32(0, 0, 0, 200));
         }
     }
 
@@ -28494,10 +28661,21 @@ private:
     std::vector<std::unique_ptr<DogfightAI>> m_dogfighters;
     uint32_t m_nextDogfighterId = 1;
 
-    // Battle test (B key): 10 red vs 10 blue 1m cubes that rush each other
+    // Battle test (B key): 10 red vs 10 blue 1m cubes — boids movement + d20/d6 combat.
+    // Ported from Desktop/PYTHON_PROJECTS/war_game/boids_battle.py
     struct BattleUnit {
         SceneObject* obj = nullptr;
-        int team = 0;       // 0 = red, 1 = blue
+        int team = 0;                  // 0 = red, 1 = blue
+        bool alive = true;
+        glm::vec2 vel{0.0f, 0.0f};     // XZ velocity (m/s); .y holds Z
+        float hp = 25.0f;
+        float maxHp = 25.0f;
+        float maxSpeed = 3.0f;
+        float aggression = 1.0f;
+        float wanderAmt = 0.5f;
+        float cooldown = 0.0f;         // s until next attack
+        int   targetIdx = -1;
+        float targetTimer = 0.0f;      // s until target reacquire
     };
     std::vector<BattleUnit> m_battleUnits;
 
