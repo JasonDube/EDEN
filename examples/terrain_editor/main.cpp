@@ -18850,7 +18850,7 @@ private:
         }
 
         float windowW = static_cast<float>(getWindow().getWidth());
-        ImGui::SetNextWindowPos(ImVec2(windowW - 10.0f, 30.0f), ImGuiCond_Always, ImVec2(1.0f, 0.0f));
+        ImGui::SetNextWindowPos(ImVec2(windowW - 10.0f, 80.0f), ImGuiCond_Always, ImVec2(1.0f, 0.0f));
         ImGui::SetNextWindowBgAlpha(0.6f);
         if (ImGui::Begin("##PerfOverlay", nullptr,
             ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
@@ -18888,9 +18888,13 @@ private:
             else
                 ImGui::TextColored(vramColor, "VRAM: %.0f MB", m_cachedVramMB);
 
-            // Draw calls
-            ImGui::TextColored(ImVec4(0.8f, 0.7f, 1.0f, 1.0f), "Draws: %d | Objs: %d",
-                               m_modelDrawCalls, static_cast<int>(m_sceneObjects.size()));
+            // Draw calls — Objs counts only visible objects (hidden/dead units excluded)
+            int visibleObjs = 0;
+            for (const auto& o : m_sceneObjects) {
+                if (o && o->isVisible()) ++visibleObjs;
+            }
+            ImGui::TextColored(ImVec4(0.8f, 0.7f, 1.0f, 1.0f), "Draws: %d | Objs: %d / %d",
+                               m_modelDrawCalls, visibleObjs, static_cast<int>(m_sceneObjects.size()));
 
             // Camera position
             glm::vec3 cp = m_camera.getPosition();
