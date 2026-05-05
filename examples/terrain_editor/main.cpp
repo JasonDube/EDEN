@@ -25792,10 +25792,10 @@ private:
             }
         };
 
-        // RED = 1×10 line, wider spacing (4m). BLUE = 5×2 clump.
+        // RED = 1×10 line, tight spacing (2m). BLUE = 5×2 clump.
         spawnTeam(0, center + glm::vec3(-12.0f, 0.0f, 0.0f),
                   glm::vec4(1.0f, 0.1f, 0.1f, 1.0f), "RedUnit",
-                  /*cols=*/10, /*rows=*/1, /*colSp=*/4.0f, /*rowSp=*/0.0f);
+                  /*cols=*/10, /*rows=*/1, /*colSp=*/2.0f, /*rowSp=*/0.0f);
         spawnTeam(1, center + glm::vec3(+12.0f, 0.0f, 0.0f),
                   glm::vec4(0.1f, 0.3f, 1.0f, 1.0f), "BlueUnit",
                   /*cols=*/5,  /*rows=*/2, /*colSp=*/2.0f, /*rowSp=*/1.5f);
