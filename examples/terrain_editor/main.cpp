@@ -2065,6 +2065,9 @@ protected:
             // HP bars over battle-test units (play mode only)
             if (m_isPlayMode) renderBattleHpBars();
 
+            // Two 50×50 spawn-area squares at the level origin (always visible)
+            renderBattleSquares();
+
             // Debug: render facing direction arrow for AI NPCs (Xenk + Eve)
             // Use unflipped projection for glm::project (it expects OpenGL convention)
             glm::mat4 projGL = glm::perspective(glm::radians(60.0f), aspect, 0.1f, 5000.0f);
@@ -25765,9 +25768,8 @@ private:
         }
         m_battleUnits.clear();
 
-        glm::vec3 center = m_camera.getPosition() + m_camera.getFront() * 30.0f;
-        center.y = 0.0f;
-
+        // Spawn at fixed world positions: red square center (-25,0,0), blue (+25,0,0).
+        // Each square is 50×50, so spawns are 25m from any edge of their square.
         auto rnd      = []() { return static_cast<float>(rand()) / static_cast<float>(RAND_MAX); };
         auto rndRange = [&](float lo, float hi) { return lo + (hi - lo) * rnd(); };
 
@@ -25810,12 +25812,11 @@ private:
             }
         };
 
-        // Both teams default to 5×2 long-forward, head-on, 40m apart.
-        // Player can hot-reform mid-approach: 1/2/3 for blue, 8/9/0 for red.
-        spawnTeam(0, center + glm::vec3(-20.0f, 0.0f, 0.0f),
+        // Spawn at the centers of the two 50×50 squares drawn at the level origin.
+        spawnTeam(0, glm::vec3(-25.0f, 0.0f, 0.0f),
                   glm::vec4(1.0f, 0.1f, 0.1f, 1.0f), "RedUnit",
                   /*cols=*/5, /*rows=*/2, /*colSp=*/2.0f, /*rowSp=*/1.5f);
-        spawnTeam(1, center + glm::vec3(+20.0f, 0.0f, 0.0f),
+        spawnTeam(1, glm::vec3(+25.0f, 0.0f, 0.0f),
                   glm::vec4(0.1f, 0.3f, 1.0f, 1.0f), "BlueUnit",
                   /*cols=*/5, /*rows=*/2, /*colSp=*/2.0f, /*rowSp=*/1.5f);
 
@@ -26068,6 +26069,62 @@ private:
             }
             dl->AddRect(tl, br, IM_COL32(0, 0, 0, 200));
         }
+    }
+
+    // Two 50×50 white outlined squares on the terrain at the level origin, marking
+    // each team's spawn area. Always visible (not gated by play mode).
+    // Red square spans X = -50..0, blue square X = 0..+50, both Z = -25..+25.
+    void renderBattleSquares() {
+        VkExtent2D extent = getSwapchain().getExtent();
+        float screenW = static_cast<float>(extent.width);
+        float screenH = static_cast<float>(extent.height);
+        float aspect  = screenW / screenH;
+
+        glm::mat4 vp = m_camera.getProjectionMatrix(aspect, 0.1f, 5000.0f) * m_camera.getViewMatrix();
+
+        auto project = [&](const glm::vec3& world, ImVec2& out) -> bool {
+            glm::vec4 clip = vp * glm::vec4(world, 1.0f);
+            if (clip.w <= 0.001f) return false;
+            glm::vec3 ndc = glm::vec3(clip) / clip.w;
+            out = ImVec2((ndc.x * 0.5f + 0.5f) * screenW, (ndc.y * -0.5f + 0.5f) * screenH);
+            return ndc.z > 0.0f && ndc.z < 1.0f;
+        };
+
+        // Subdivide each edge into 20 segments to follow terrain undulations.
+        const int SEGS = 20;
+        const ImU32 white = IM_COL32(255, 255, 255, 220);
+        const float lineW = 2.0f;
+        const float yOffset = 0.05f;  // tiny lift to avoid z-fighting with terrain
+
+        ImDrawList* dl = ImGui::GetForegroundDrawList();
+
+        auto drawSquareEdge = [&](float x0, float z0, float x1, float z1) {
+            ImVec2 prev;
+            bool prevValid = false;
+            for (int i = 0; i <= SEGS; ++i) {
+                float t = static_cast<float>(i) / SEGS;
+                float x = x0 + (x1 - x0) * t;
+                float z = z0 + (z1 - z0) * t;
+                glm::vec3 p(x, m_terrain.getHeightAt(x, z) + yOffset, z);
+                ImVec2 cur;
+                bool valid = project(p, cur);
+                if (valid && prevValid) dl->AddLine(prev, cur, white, lineW);
+                prev = cur;
+                prevValid = valid;
+            }
+        };
+
+        // Red square: X = -50..0, Z = -25..+25
+        drawSquareEdge(-50.0f, -25.0f,   0.0f, -25.0f);  // bottom (−Z edge)
+        drawSquareEdge(  0.0f, -25.0f,   0.0f, +25.0f);  // right (+X edge — shared with blue)
+        drawSquareEdge(  0.0f, +25.0f, -50.0f, +25.0f);  // top
+        drawSquareEdge(-50.0f, +25.0f, -50.0f, -25.0f);  // left
+
+        // Blue square: X = 0..+50, Z = -25..+25 (shares the X=0 edge already drawn)
+        drawSquareEdge(  0.0f, -25.0f, +50.0f, -25.0f);  // bottom
+        drawSquareEdge(+50.0f, -25.0f, +50.0f, +25.0f);  // right
+        drawSquareEdge(+50.0f, +25.0f,   0.0f, +25.0f);  // top
+        // (left edge X=0 already drawn by red square)
     }
 
     // Spawn 4 golden corner posts to mark a purchased plot
