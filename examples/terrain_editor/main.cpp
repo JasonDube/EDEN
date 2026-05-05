@@ -1274,6 +1274,9 @@ protected:
         // Update machines (fan spinning, sound attenuation, etc.)
         m_machineManager.update(deltaTime);
 
+        // Battle test (B-key spawned 10 red vs 10 blue cubes)
+        updateBattle(deltaTime);
+
         // Water flow sound attenuation (same curve as generator)
         if (m_waterLoopId >= 0 && m_flowSource) {
             glm::vec3 camPos = m_camera.getPosition();
@@ -7985,6 +7988,14 @@ private:
                 printf("[Debug] Hitbox visualization: %s\n", m_showHitboxes ? "ON" : "OFF");
             }
             wasF10 = f10;
+        }
+
+        // B — spawn battle test (10 red vs 10 blue, rush each other)
+        if (!ImGui::GetIO().WantCaptureKeyboard) {
+            static bool wasB = false;
+            bool b = Input::isKeyDown(66); // GLFW_KEY_B
+            if (b && !wasB) spawnBattleTest();
+            wasB = b;
         }
 
         // F9 — toggle filesystem browser (load OS level objects + spawn silo, or dismiss)
@@ -25721,6 +25732,109 @@ private:
         std::cout << "Created cube (" << size << "m)" << std::endl;
     }
 
+    // Battle test: 10 red vs 10 blue cubes, line spawn, rush nearest enemy + collide.
+    void spawnBattleTest() {
+        // Wipe any prior battle units
+        for (auto& u : m_battleUnits) {
+            if (!u.obj) continue;
+            for (auto it = m_sceneObjects.begin(); it != m_sceneObjects.end(); ++it) {
+                if (it->get() == u.obj) { m_sceneObjects.erase(it); break; }
+            }
+        }
+        m_battleUnits.clear();
+
+        glm::vec3 center = m_camera.getPosition() + m_camera.getFront() * 30.0f;
+        center.y = 0.0f;
+
+        auto spawnTeam = [&](int team, const glm::vec3& origin, const glm::vec4& color, const char* prefix) {
+            auto meshData = PrimitiveMeshBuilder::createCube(1.0f, color);
+            for (int i = 0; i < 10; ++i) {
+                auto obj = std::make_unique<SceneObject>(generateUniqueName(prefix));
+                uint32_t handle = m_modelRenderer->createModel(meshData.vertices, meshData.indices);
+                obj->setBufferHandle(handle);
+                obj->setIndexCount(static_cast<uint32_t>(meshData.indices.size()));
+                obj->setVertexCount(static_cast<uint32_t>(meshData.vertices.size()));
+                obj->setLocalBounds(meshData.bounds);
+                obj->setPrimitiveType(PrimitiveType::Cube);
+                obj->setPrimitiveSize(1.0f);
+                obj->setPrimitiveColor(color);
+
+                glm::vec3 pos = origin;
+                pos.z += (static_cast<float>(i) - 4.5f) * 2.0f;  // 2m spacing → 1m gap
+                pos.y = m_terrain.getHeightAt(pos.x, pos.z) + 0.5f;
+                obj->getTransform().setPosition(pos);
+
+                BattleUnit u;
+                u.obj = obj.get();
+                u.team = team;
+                m_battleUnits.push_back(u);
+                m_sceneObjects.push_back(std::move(obj));
+            }
+        };
+
+        spawnTeam(0, center + glm::vec3(-12.0f, 0.0f, 0.0f),
+                  glm::vec4(1.0f, 0.1f, 0.1f, 1.0f), "RedUnit");
+        spawnTeam(1, center + glm::vec3(+12.0f, 0.0f, 0.0f),
+                  glm::vec4(0.1f, 0.3f, 1.0f, 1.0f), "BlueUnit");
+
+        std::cout << "[Battle] Spawned 10 red vs 10 blue" << std::endl;
+        m_screenMessage = "Battle: 10 red vs 10 blue spawned";
+        m_screenMessageTimer = 2.0f;
+    }
+
+    void updateBattle(float dt) {
+        if (m_battleUnits.empty()) return;
+        const float speed = 3.0f;
+        const float halfSize = 0.5f;
+        const float contactDist = 1.0f;
+
+        for (auto& u : m_battleUnits) {
+            if (!u.obj) continue;
+
+            glm::vec3 myPos = u.obj->getTransform().getPosition();
+
+            // Pick nearest enemy on XZ
+            BattleUnit* nearest = nullptr;
+            float nearestSq = std::numeric_limits<float>::max();
+            for (auto& other : m_battleUnits) {
+                if (!other.obj || other.team == u.team) continue;
+                glm::vec3 op = other.obj->getTransform().getPosition();
+                float dx = op.x - myPos.x, dz = op.z - myPos.z;
+                float dSq = dx*dx + dz*dz;
+                if (dSq < nearestSq) { nearestSq = dSq; nearest = &other; }
+            }
+            if (!nearest) continue;
+
+            glm::vec3 tp = nearest->obj->getTransform().getPosition();
+            float dx = tp.x - myPos.x, dz = tp.z - myPos.z;
+            float dist = std::sqrt(dx*dx + dz*dz);
+
+            glm::vec3 newPos = myPos;
+            if (dist > contactDist) {
+                newPos.x += (dx / dist) * speed * dt;
+                newPos.z += (dz / dist) * speed * dt;
+            }
+
+            // Push out of overlap with any other unit
+            for (auto& other : m_battleUnits) {
+                if (&other == &u || !other.obj) continue;
+                glm::vec3 op = other.obj->getTransform().getPosition();
+                float ox = newPos.x - op.x, oz = newPos.z - op.z;
+                float ax = std::abs(ox), az = std::abs(oz);
+                if (ax < contactDist && az < contactDist) {
+                    if (contactDist - ax < contactDist - az) {
+                        newPos.x = op.x + (ox >= 0 ? contactDist : -contactDist);
+                    } else {
+                        newPos.z = op.z + (oz >= 0 ? contactDist : -contactDist);
+                    }
+                }
+            }
+
+            newPos.y = m_terrain.getHeightAt(newPos.x, newPos.z) + halfSize;
+            u.obj->getTransform().setPosition(newPos);
+        }
+    }
+
     // Spawn 4 golden corner posts to mark a purchased plot
     void spawnPlotPosts(int gridX, int gridZ) {
         if (!m_zoneSystem) return;
@@ -28379,6 +28493,13 @@ private:
     // Dogfight AI
     std::vector<std::unique_ptr<DogfightAI>> m_dogfighters;
     uint32_t m_nextDogfighterId = 1;
+
+    // Battle test (B key): 10 red vs 10 blue 1m cubes that rush each other
+    struct BattleUnit {
+        SceneObject* obj = nullptr;
+        int team = 0;       // 0 = red, 1 = blue
+    };
+    std::vector<BattleUnit> m_battleUnits;
 
     // Jettisoned cargo (floating objects that can be picked up)
     struct JettisonedCargo {
