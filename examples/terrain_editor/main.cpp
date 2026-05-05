@@ -25753,9 +25753,14 @@ private:
         auto rnd      = []() { return static_cast<float>(rand()) / static_cast<float>(RAND_MAX); };
         auto rndRange = [&](float lo, float hi) { return lo + (hi - lo) * rnd(); };
 
-        auto spawnTeam = [&](int team, const glm::vec3& origin, const glm::vec4& color, const char* prefix) {
+        auto spawnTeam = [&](int team, const glm::vec3& origin, const glm::vec4& color, const char* prefix,
+                             int cols, int rows, float colSp, float rowSp) {
             auto meshData = PrimitiveMeshBuilder::createCube(1.0f, color);
-            for (int i = 0; i < 10; ++i) {
+            int total = cols * rows;
+            for (int i = 0; i < total; ++i) {
+                int col = i % cols;
+                int row = i / cols;
+
                 auto obj = std::make_unique<SceneObject>(generateUniqueName(prefix));
                 uint32_t handle = m_modelRenderer->createModel(meshData.vertices, meshData.indices);
                 obj->setBufferHandle(handle);
@@ -25767,7 +25772,9 @@ private:
                 obj->setPrimitiveColor(color);
 
                 glm::vec3 pos = origin;
-                pos.z += (static_cast<float>(i) - 4.5f) * 2.0f;  // 2m spacing → 1m gap
+                pos.z += (static_cast<float>(col) - (cols - 1) * 0.5f) * colSp;
+                pos.x += (static_cast<float>(row) - (rows - 1) * 0.5f) * rowSp
+                         * (team == 0 ? +1.0f : -1.0f);
                 pos.y = m_terrain.getHeightAt(pos.x, pos.z) + 0.5f;
                 obj->getTransform().setPosition(pos);
 
@@ -25785,10 +25792,13 @@ private:
             }
         };
 
+        // RED = 1×10 line, wider spacing (4m). BLUE = 5×2 clump.
         spawnTeam(0, center + glm::vec3(-12.0f, 0.0f, 0.0f),
-                  glm::vec4(1.0f, 0.1f, 0.1f, 1.0f), "RedUnit");
+                  glm::vec4(1.0f, 0.1f, 0.1f, 1.0f), "RedUnit",
+                  /*cols=*/10, /*rows=*/1, /*colSp=*/4.0f, /*rowSp=*/0.0f);
         spawnTeam(1, center + glm::vec3(+12.0f, 0.0f, 0.0f),
-                  glm::vec4(0.1f, 0.3f, 1.0f, 1.0f), "BlueUnit");
+                  glm::vec4(0.1f, 0.3f, 1.0f, 1.0f), "BlueUnit",
+                  /*cols=*/5,  /*rows=*/2, /*colSp=*/2.0f, /*rowSp=*/1.5f);
 
         std::cout << "[Battle] Spawned 10 red vs 10 blue" << std::endl;
         m_screenMessage = "Battle: 10 red vs 10 blue spawned";
