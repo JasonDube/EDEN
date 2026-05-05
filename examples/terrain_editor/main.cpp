@@ -1274,8 +1274,8 @@ protected:
         // Update machines (fan spinning, sound attenuation, etc.)
         m_machineManager.update(deltaTime);
 
-        // Battle test (B-key spawned 10 red vs 10 blue cubes)
-        updateBattle(deltaTime);
+        // Battle test (only updates in play mode / F5)
+        if (m_isPlayMode) updateBattle(deltaTime);
 
         // Water flow sound attenuation (same curve as generator)
         if (m_waterLoopId >= 0 && m_flowSource) {
@@ -2062,8 +2062,8 @@ protected:
             glm::mat4 viewProj = proj * view;
             m_dialogueRenderer.render(viewProj, (float)extent.width, (float)extent.height);
 
-            // HP bars over battle-test units
-            renderBattleHpBars();
+            // HP bars over battle-test units (play mode only)
+            if (m_isPlayMode) renderBattleHpBars();
 
             // Debug: render facing direction arrow for AI NPCs (Xenk + Eve)
             // Use unflipped projection for glm::project (it expects OpenGL convention)
@@ -7993,8 +7993,8 @@ private:
             wasF10 = f10;
         }
 
-        // B — spawn battle test (10 red vs 10 blue, rush each other)
-        if (!ImGui::GetIO().WantCaptureKeyboard) {
+        // B — spawn battle test (only in play mode / F5)
+        if (m_isPlayMode && !ImGui::GetIO().WantCaptureKeyboard) {
             static bool wasB = false;
             bool b = Input::isKeyDown(66); // GLFW_KEY_B
             if (b && !wasB) spawnBattleTest();
