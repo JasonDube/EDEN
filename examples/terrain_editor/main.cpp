@@ -2065,8 +2065,8 @@ protected:
             // HP bars over battle-test units (play mode only)
             if (m_isPlayMode) renderBattleHpBars();
 
-            // Two 50×50 spawn-area squares at the level origin (always visible)
-            renderBattleSquares();
+            // Uniform 50m grid covering the full terrain (toggled by G)
+            if (m_showTerrainGrid) renderTerrainGrid();
 
             // Debug: render facing direction arrow for AI NPCs (Xenk + Eve)
             // Use unflipped projection for glm::project (it expects OpenGL convention)
@@ -7994,6 +7994,14 @@ private:
                 printf("[Debug] Hitbox visualization: %s\n", m_showHitboxes ? "ON" : "OFF");
             }
             wasF10 = f10;
+        }
+
+        // G — toggle the 50m terrain grid overlay
+        if (!ImGui::GetIO().WantCaptureKeyboard) {
+            static bool wasG = false;
+            bool g = Input::isKeyDown(71); // GLFW_KEY_G
+            if (g && !wasG) m_showTerrainGrid = !m_showTerrainGrid;
+            wasG = g;
         }
 
         // B — spawn battle test (only in play mode / F5)
@@ -25812,11 +25820,13 @@ private:
             }
         };
 
-        // Spawn at the centers of the two 50×50 squares drawn at the level origin.
-        spawnTeam(0, glm::vec3(-25.0f, 0.0f, 0.0f),
+        // Spawns at the centers of two adjacent 50×50 grid cells (cells share X=0 edge).
+        // Red cell:  X=-50..0,  Z=0..+50 → center (-25, 0, +25)
+        // Blue cell: X=0..+50, Z=0..+50 → center (+25, 0, +25)
+        spawnTeam(0, glm::vec3(-25.0f, 0.0f, +25.0f),
                   glm::vec4(1.0f, 0.1f, 0.1f, 1.0f), "RedUnit",
                   /*cols=*/5, /*rows=*/2, /*colSp=*/2.0f, /*rowSp=*/1.5f);
-        spawnTeam(1, glm::vec3(+25.0f, 0.0f, 0.0f),
+        spawnTeam(1, glm::vec3(+25.0f, 0.0f, +25.0f),
                   glm::vec4(0.1f, 0.3f, 1.0f, 1.0f), "BlueUnit",
                   /*cols=*/5, /*rows=*/2, /*colSp=*/2.0f, /*rowSp=*/1.5f);
 
@@ -26071,10 +26081,9 @@ private:
         }
     }
 
-    // Two 50×50 white outlined squares on the terrain at the level origin, marking
-    // each team's spawn area. Always visible (not gated by play mode).
-    // Red square spans X = -50..0, blue square X = 0..+50, both Z = -25..+25.
-    void renderBattleSquares() {
+    // Uniform 50m grid covering the full terrain. White lines, always visible.
+    // Each line is subdivided so the segments hug terrain height.
+    void renderTerrainGrid() {
         VkExtent2D extent = getSwapchain().getExtent();
         float screenW = static_cast<float>(extent.width);
         float screenH = static_cast<float>(extent.height);
@@ -26090,22 +26099,37 @@ private:
             return ndc.z > 0.0f && ndc.z < 1.0f;
         };
 
-        // Subdivide each edge into 20 segments to follow terrain undulations.
-        const int SEGS = 20;
-        const ImU32 white = IM_COL32(255, 255, 255, 220);
+        const float CELL = 50.0f;
+        const float SEG  = 50.0f;          // sample terrain height every 50m along a line
+        const float yOff = 0.05f;          // lift to avoid z-fighting
         const float lineW = 2.0f;
-        const float yOffset = 0.05f;  // tiny lift to avoid z-fighting with terrain
+        const ImU32 white = IM_COL32(255, 255, 255, 200);
+
+        // Use the terrain's actual world extent so the grid spans everything.
+        glm::vec2 worldSize = m_terrain.getWorldSize();
+        float halfX = worldSize.x * 0.5f;
+        float halfZ = worldSize.y * 0.5f;
+
+        // Snap extents to multiples of CELL so grid lines pass through origin (0).
+        float minX = -std::floor(halfX / CELL) * CELL;
+        float maxX = +std::floor(halfX / CELL) * CELL;
+        float minZ = -std::floor(halfZ / CELL) * CELL;
+        float maxZ = +std::floor(halfZ / CELL) * CELL;
 
         ImDrawList* dl = ImGui::GetForegroundDrawList();
 
-        auto drawSquareEdge = [&](float x0, float z0, float x1, float z1) {
+        // Helper: draw one straight grid line in the world, subdivided for terrain following.
+        auto drawLine = [&](float x0, float z0, float x1, float z1) {
+            float dx = x1 - x0, dz = z1 - z0;
+            float len = std::sqrt(dx * dx + dz * dz);
+            int segs = std::max(1, static_cast<int>(std::ceil(len / SEG)));
             ImVec2 prev;
             bool prevValid = false;
-            for (int i = 0; i <= SEGS; ++i) {
-                float t = static_cast<float>(i) / SEGS;
-                float x = x0 + (x1 - x0) * t;
-                float z = z0 + (z1 - z0) * t;
-                glm::vec3 p(x, m_terrain.getHeightAt(x, z) + yOffset, z);
+            for (int i = 0; i <= segs; ++i) {
+                float t = static_cast<float>(i) / segs;
+                float x = x0 + dx * t;
+                float z = z0 + dz * t;
+                glm::vec3 p(x, m_terrain.getHeightAt(x, z) + yOff, z);
                 ImVec2 cur;
                 bool valid = project(p, cur);
                 if (valid && prevValid) dl->AddLine(prev, cur, white, lineW);
@@ -26114,17 +26138,14 @@ private:
             }
         };
 
-        // Red square: X = -50..0, Z = -25..+25
-        drawSquareEdge(-50.0f, -25.0f,   0.0f, -25.0f);  // bottom (−Z edge)
-        drawSquareEdge(  0.0f, -25.0f,   0.0f, +25.0f);  // right (+X edge — shared with blue)
-        drawSquareEdge(  0.0f, +25.0f, -50.0f, +25.0f);  // top
-        drawSquareEdge(-50.0f, +25.0f, -50.0f, -25.0f);  // left
-
-        // Blue square: X = 0..+50, Z = -25..+25 (shares the X=0 edge already drawn)
-        drawSquareEdge(  0.0f, -25.0f, +50.0f, -25.0f);  // bottom
-        drawSquareEdge(+50.0f, -25.0f, +50.0f, +25.0f);  // right
-        drawSquareEdge(+50.0f, +25.0f,   0.0f, +25.0f);  // top
-        // (left edge X=0 already drawn by red square)
+        // Vertical lines (constant X)
+        for (float x = minX; x <= maxX + 0.5f; x += CELL) {
+            drawLine(x, minZ, x, maxZ);
+        }
+        // Horizontal lines (constant Z)
+        for (float z = minZ; z <= maxZ + 0.5f; z += CELL) {
+            drawLine(minX, z, maxX, z);
+        }
     }
 
     // Spawn 4 golden corner posts to mark a purchased plot
@@ -28803,6 +28824,7 @@ private:
         float targetTimer = 0.0f;      // s until target reacquire
     };
     std::vector<BattleUnit> m_battleUnits;
+    bool m_showTerrainGrid = true;  // toggled with G
 
     // Jettisoned cargo (floating objects that can be picked up)
     struct JettisonedCargo {
