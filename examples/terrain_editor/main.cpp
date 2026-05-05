@@ -8001,6 +8001,24 @@ private:
             wasB = b;
         }
 
+        // Formation reform hotkeys — 1/2/3 reshape blue, 8/9/0 reshape red. Play mode only.
+        if (m_isPlayMode && !ImGui::GetIO().WantCaptureKeyboard) {
+            static bool was1=false, was2=false, was3=false, was8=false, was9=false, was0=false;
+            bool k1 = Input::isKeyDown(49); // '1' — blue 5×2 long-forward
+            bool k2 = Input::isKeyDown(50); // '2' — blue 2×5 column (short-forward)
+            bool k3 = Input::isKeyDown(51); // '3' — blue 1×10 line, 4m spacing
+            bool k8 = Input::isKeyDown(56); // '8' — red 1×10 line, 4m spacing
+            bool k9 = Input::isKeyDown(57); // '9' — red 5×2 long-forward
+            bool k0 = Input::isKeyDown(48); // '0' — red 2×5 column (short-forward)
+            if (k1 && !was1) reformTeam(1, /*cols=*/5,  /*rows=*/2, /*colSp=*/2.0f, /*rowSp=*/1.5f);
+            if (k2 && !was2) reformTeam(1, /*cols=*/2,  /*rows=*/5, /*colSp=*/2.0f, /*rowSp=*/1.5f);
+            if (k3 && !was3) reformTeam(1, /*cols=*/10, /*rows=*/1, /*colSp=*/4.0f, /*rowSp=*/0.0f);
+            if (k8 && !was8) reformTeam(0, /*cols=*/10, /*rows=*/1, /*colSp=*/4.0f, /*rowSp=*/0.0f);
+            if (k9 && !was9) reformTeam(0, /*cols=*/5,  /*rows=*/2, /*colSp=*/2.0f, /*rowSp=*/1.5f);
+            if (k0 && !was0) reformTeam(0, /*cols=*/2,  /*rows=*/5, /*colSp=*/2.0f, /*rowSp=*/1.5f);
+            was1=k1; was2=k2; was3=k3; was8=k8; was9=k9; was0=k0;
+        }
+
         // F9 — toggle filesystem browser (load OS level objects + spawn silo, or dismiss)
         {
             static bool wasF9 = false;
@@ -25792,19 +25810,57 @@ private:
             }
         };
 
-        // RED = 1×10 straight line at center. BLUE = 5×2 clump positioned past RED's right flank.
-        // Red's line spans z = -9..+9 at 2m spacing. Blue is offset along +Z so it charges
-        // into red's right end instead of head-on.
-        spawnTeam(0, center + glm::vec3(0.0f, 0.0f, 0.0f),
+        // Both teams default to 5×2 long-forward, head-on, 40m apart.
+        // Player can hot-reform mid-approach: 1/2/3 for blue, 8/9/0 for red.
+        spawnTeam(0, center + glm::vec3(-20.0f, 0.0f, 0.0f),
                   glm::vec4(1.0f, 0.1f, 0.1f, 1.0f), "RedUnit",
-                  /*cols=*/10, /*rows=*/1, /*colSp=*/2.0f, /*rowSp=*/0.0f);
-        spawnTeam(1, center + glm::vec3(0.0f, 0.0f, +22.0f),
+                  /*cols=*/5, /*rows=*/2, /*colSp=*/2.0f, /*rowSp=*/1.5f);
+        spawnTeam(1, center + glm::vec3(+20.0f, 0.0f, 0.0f),
                   glm::vec4(0.1f, 0.3f, 1.0f, 1.0f), "BlueUnit",
-                  /*cols=*/5,  /*rows=*/2, /*colSp=*/2.0f, /*rowSp=*/1.5f);
+                  /*cols=*/5, /*rows=*/2, /*colSp=*/2.0f, /*rowSp=*/1.5f);
 
         std::cout << "[Battle] Spawned 10 red vs 10 blue" << std::endl;
         m_screenMessage = "Battle: 10 red vs 10 blue spawned";
         m_screenMessageTimer = 2.0f;
+    }
+
+    // Teleport an alive team into a new formation (cols × rows) centered on its current
+    // center of mass, oriented to face the enemy team. Velocities reset.
+    void reformTeam(int team, int cols, int rows, float colSp, float rowSp) {
+        glm::vec2 myCenter(0.0f), enemyCenter(0.0f);
+        int myCount = 0, enemyCount = 0;
+        for (auto& u : m_battleUnits) {
+            if (!u.alive) continue;
+            glm::vec3 p = u.obj->getTransform().getPosition();
+            if (u.team == team) { myCenter += glm::vec2(p.x, p.z); myCount++; }
+            else                { enemyCenter += glm::vec2(p.x, p.z); enemyCount++; }
+        }
+        if (myCount == 0) return;
+        myCenter /= static_cast<float>(myCount);
+
+        glm::vec2 forward(1.0f, 0.0f);
+        if (enemyCount > 0) {
+            enemyCenter /= static_cast<float>(enemyCount);
+            glm::vec2 d = enemyCenter - myCenter;
+            float len = std::sqrt(d.x * d.x + d.y * d.y);
+            if (len > 0.001f) forward = d / len;
+        }
+        glm::vec2 lateral(-forward.y, forward.x);
+
+        int slot = 0;
+        for (auto& u : m_battleUnits) {
+            if (!u.alive || u.team != team) continue;
+            int col = slot % cols;
+            int row = slot / cols;
+            float lateralOff = (static_cast<float>(col) - (cols - 1) * 0.5f) * colSp;
+            float forwardOff = -(static_cast<float>(row) - (rows - 1) * 0.5f) * rowSp;
+            glm::vec2 xz = myCenter + lateral * lateralOff + forward * forwardOff;
+            glm::vec3 newPos(xz.x, m_terrain.getHeightAt(xz.x, xz.y) + 0.5f, xz.y);
+            u.obj->getTransform().setPosition(newPos);
+            u.vel = glm::vec2(0.0f);  // reset so they don't drift from prior momentum
+            slot++;
+        }
+        std::cout << "[Battle] Reformed team " << team << " into " << cols << "x" << rows << std::endl;
     }
 
     void updateBattle(float dt) {
