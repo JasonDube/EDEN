@@ -65,75 +65,77 @@ void main() {
     // Discard terrain fragments marked as holes
     if (fragHoleMask > 0.5) discard;
 
-    // Sample all 16 texture layers and blend by splatmap weights
+    // Sample only texture layers whose splatmap weight is nonzero. Skipping zero-weight
+    // layers turns 64 unconditional samples (32 albedo + 32 normal) into typically 2-6
+    // total on terrain that uses 1-3 dominant textures per area. Each pair shares one
+    // branch so albedo and normal are sampled together.
     vec3 blendedTex = vec3(0.0);
-    blendedTex += texture(terrainTextures, vec3(fragUV, 0.0)).rgb * fragTexSplat0.x;
-    blendedTex += texture(terrainTextures, vec3(fragUV, 1.0)).rgb * fragTexSplat0.y;
-    blendedTex += texture(terrainTextures, vec3(fragUV, 2.0)).rgb * fragTexSplat0.z;
-    blendedTex += texture(terrainTextures, vec3(fragUV, 3.0)).rgb * fragTexSplat0.w;
-    blendedTex += texture(terrainTextures, vec3(fragUV, 4.0)).rgb * fragTexSplat1.x;
-    blendedTex += texture(terrainTextures, vec3(fragUV, 5.0)).rgb * fragTexSplat1.y;
-    blendedTex += texture(terrainTextures, vec3(fragUV, 6.0)).rgb * fragTexSplat1.z;
-    blendedTex += texture(terrainTextures, vec3(fragUV, 7.0)).rgb * fragTexSplat1.w;
-    blendedTex += texture(terrainTextures, vec3(fragUV, 8.0)).rgb * fragTexSplat2.x;
-    blendedTex += texture(terrainTextures, vec3(fragUV, 9.0)).rgb * fragTexSplat2.y;
-    blendedTex += texture(terrainTextures, vec3(fragUV, 10.0)).rgb * fragTexSplat2.z;
-    blendedTex += texture(terrainTextures, vec3(fragUV, 11.0)).rgb * fragTexSplat2.w;
-    blendedTex += texture(terrainTextures, vec3(fragUV, 12.0)).rgb * fragTexSplat3.x;
-    blendedTex += texture(terrainTextures, vec3(fragUV, 13.0)).rgb * fragTexSplat3.y;
-    blendedTex += texture(terrainTextures, vec3(fragUV, 14.0)).rgb * fragTexSplat3.z;
-    blendedTex += texture(terrainTextures, vec3(fragUV, 15.0)).rgb * fragTexSplat3.w;
-    blendedTex += texture(terrainTextures, vec3(fragUV, 16.0)).rgb * fragTexSplat4.x;
-    blendedTex += texture(terrainTextures, vec3(fragUV, 17.0)).rgb * fragTexSplat4.y;
-    blendedTex += texture(terrainTextures, vec3(fragUV, 18.0)).rgb * fragTexSplat4.z;
-    blendedTex += texture(terrainTextures, vec3(fragUV, 19.0)).rgb * fragTexSplat4.w;
-    blendedTex += texture(terrainTextures, vec3(fragUV, 20.0)).rgb * fragTexSplat5.x;
-    blendedTex += texture(terrainTextures, vec3(fragUV, 21.0)).rgb * fragTexSplat5.y;
-    blendedTex += texture(terrainTextures, vec3(fragUV, 22.0)).rgb * fragTexSplat5.z;
-    blendedTex += texture(terrainTextures, vec3(fragUV, 23.0)).rgb * fragTexSplat5.w;
-    blendedTex += texture(terrainTextures, vec3(fragUV, 24.0)).rgb * fragTexSplat6.x;
-    blendedTex += texture(terrainTextures, vec3(fragUV, 25.0)).rgb * fragTexSplat6.y;
-    blendedTex += texture(terrainTextures, vec3(fragUV, 26.0)).rgb * fragTexSplat6.z;
-    blendedTex += texture(terrainTextures, vec3(fragUV, 27.0)).rgb * fragTexSplat6.w;
-    blendedTex += texture(terrainTextures, vec3(fragUV, 28.0)).rgb * fragTexSplat7.x;
-    blendedTex += texture(terrainTextures, vec3(fragUV, 29.0)).rgb * fragTexSplat7.y;
-    blendedTex += texture(terrainTextures, vec3(fragUV, 30.0)).rgb * fragTexSplat7.z;
-    blendedTex += texture(terrainTextures, vec3(fragUV, 31.0)).rgb * fragTexSplat7.w;
-
-    // Sample all 32 normal map layers and blend by same splatmap weights
     vec3 blendedNormal = vec3(0.0);
-    blendedNormal += texture(terrainNormals, vec3(fragUV, 0.0)).rgb * fragTexSplat0.x;
-    blendedNormal += texture(terrainNormals, vec3(fragUV, 1.0)).rgb * fragTexSplat0.y;
-    blendedNormal += texture(terrainNormals, vec3(fragUV, 2.0)).rgb * fragTexSplat0.z;
-    blendedNormal += texture(terrainNormals, vec3(fragUV, 3.0)).rgb * fragTexSplat0.w;
-    blendedNormal += texture(terrainNormals, vec3(fragUV, 4.0)).rgb * fragTexSplat1.x;
-    blendedNormal += texture(terrainNormals, vec3(fragUV, 5.0)).rgb * fragTexSplat1.y;
-    blendedNormal += texture(terrainNormals, vec3(fragUV, 6.0)).rgb * fragTexSplat1.z;
-    blendedNormal += texture(terrainNormals, vec3(fragUV, 7.0)).rgb * fragTexSplat1.w;
-    blendedNormal += texture(terrainNormals, vec3(fragUV, 8.0)).rgb * fragTexSplat2.x;
-    blendedNormal += texture(terrainNormals, vec3(fragUV, 9.0)).rgb * fragTexSplat2.y;
-    blendedNormal += texture(terrainNormals, vec3(fragUV, 10.0)).rgb * fragTexSplat2.z;
-    blendedNormal += texture(terrainNormals, vec3(fragUV, 11.0)).rgb * fragTexSplat2.w;
-    blendedNormal += texture(terrainNormals, vec3(fragUV, 12.0)).rgb * fragTexSplat3.x;
-    blendedNormal += texture(terrainNormals, vec3(fragUV, 13.0)).rgb * fragTexSplat3.y;
-    blendedNormal += texture(terrainNormals, vec3(fragUV, 14.0)).rgb * fragTexSplat3.z;
-    blendedNormal += texture(terrainNormals, vec3(fragUV, 15.0)).rgb * fragTexSplat3.w;
-    blendedNormal += texture(terrainNormals, vec3(fragUV, 16.0)).rgb * fragTexSplat4.x;
-    blendedNormal += texture(terrainNormals, vec3(fragUV, 17.0)).rgb * fragTexSplat4.y;
-    blendedNormal += texture(terrainNormals, vec3(fragUV, 18.0)).rgb * fragTexSplat4.z;
-    blendedNormal += texture(terrainNormals, vec3(fragUV, 19.0)).rgb * fragTexSplat4.w;
-    blendedNormal += texture(terrainNormals, vec3(fragUV, 20.0)).rgb * fragTexSplat5.x;
-    blendedNormal += texture(terrainNormals, vec3(fragUV, 21.0)).rgb * fragTexSplat5.y;
-    blendedNormal += texture(terrainNormals, vec3(fragUV, 22.0)).rgb * fragTexSplat5.z;
-    blendedNormal += texture(terrainNormals, vec3(fragUV, 23.0)).rgb * fragTexSplat5.w;
-    blendedNormal += texture(terrainNormals, vec3(fragUV, 24.0)).rgb * fragTexSplat6.x;
-    blendedNormal += texture(terrainNormals, vec3(fragUV, 25.0)).rgb * fragTexSplat6.y;
-    blendedNormal += texture(terrainNormals, vec3(fragUV, 26.0)).rgb * fragTexSplat6.z;
-    blendedNormal += texture(terrainNormals, vec3(fragUV, 27.0)).rgb * fragTexSplat6.w;
-    blendedNormal += texture(terrainNormals, vec3(fragUV, 28.0)).rgb * fragTexSplat7.x;
-    blendedNormal += texture(terrainNormals, vec3(fragUV, 29.0)).rgb * fragTexSplat7.y;
-    blendedNormal += texture(terrainNormals, vec3(fragUV, 30.0)).rgb * fragTexSplat7.z;
-    blendedNormal += texture(terrainNormals, vec3(fragUV, 31.0)).rgb * fragTexSplat7.w;
+
+    #define SAMPLE_LAYER(layer, weight) \
+        if (weight > 0.001) { \
+            blendedTex    += texture(terrainTextures, vec3(fragUV, float(layer))).rgb * weight; \
+            blendedNormal += texture(terrainNormals,  vec3(fragUV, float(layer))).rgb * weight; \
+        }
+
+    // Group early-out: if all 4 weights in a vec4 are ~0, skip the whole group.
+    if (dot(fragTexSplat0, vec4(1.0)) > 0.001) {
+        SAMPLE_LAYER(0,  fragTexSplat0.x)
+        SAMPLE_LAYER(1,  fragTexSplat0.y)
+        SAMPLE_LAYER(2,  fragTexSplat0.z)
+        SAMPLE_LAYER(3,  fragTexSplat0.w)
+    }
+    if (dot(fragTexSplat1, vec4(1.0)) > 0.001) {
+        SAMPLE_LAYER(4,  fragTexSplat1.x)
+        SAMPLE_LAYER(5,  fragTexSplat1.y)
+        SAMPLE_LAYER(6,  fragTexSplat1.z)
+        SAMPLE_LAYER(7,  fragTexSplat1.w)
+    }
+    if (dot(fragTexSplat2, vec4(1.0)) > 0.001) {
+        SAMPLE_LAYER(8,  fragTexSplat2.x)
+        SAMPLE_LAYER(9,  fragTexSplat2.y)
+        SAMPLE_LAYER(10, fragTexSplat2.z)
+        SAMPLE_LAYER(11, fragTexSplat2.w)
+    }
+    if (dot(fragTexSplat3, vec4(1.0)) > 0.001) {
+        SAMPLE_LAYER(12, fragTexSplat3.x)
+        SAMPLE_LAYER(13, fragTexSplat3.y)
+        SAMPLE_LAYER(14, fragTexSplat3.z)
+        SAMPLE_LAYER(15, fragTexSplat3.w)
+    }
+    if (dot(fragTexSplat4, vec4(1.0)) > 0.001) {
+        SAMPLE_LAYER(16, fragTexSplat4.x)
+        SAMPLE_LAYER(17, fragTexSplat4.y)
+        SAMPLE_LAYER(18, fragTexSplat4.z)
+        SAMPLE_LAYER(19, fragTexSplat4.w)
+    }
+    if (dot(fragTexSplat5, vec4(1.0)) > 0.001) {
+        SAMPLE_LAYER(20, fragTexSplat5.x)
+        SAMPLE_LAYER(21, fragTexSplat5.y)
+        SAMPLE_LAYER(22, fragTexSplat5.z)
+        SAMPLE_LAYER(23, fragTexSplat5.w)
+    }
+    if (dot(fragTexSplat6, vec4(1.0)) > 0.001) {
+        SAMPLE_LAYER(24, fragTexSplat6.x)
+        SAMPLE_LAYER(25, fragTexSplat6.y)
+        SAMPLE_LAYER(26, fragTexSplat6.z)
+        SAMPLE_LAYER(27, fragTexSplat6.w)
+    }
+    if (dot(fragTexSplat7, vec4(1.0)) > 0.001) {
+        SAMPLE_LAYER(28, fragTexSplat7.x)
+        SAMPLE_LAYER(29, fragTexSplat7.y)
+        SAMPLE_LAYER(30, fragTexSplat7.z)
+        SAMPLE_LAYER(31, fragTexSplat7.w)
+    }
+
+    #undef SAMPLE_LAYER
+
+    // If no weights anywhere, blendedNormal stays (0,0,0). Decoded below as (-1,-1,-1)
+    // would be a degenerate normal — fall back to flat (0,0,1) tangent-space normal so
+    // lighting matches an unblended surface instead of going dark.
+    if (dot(blendedNormal, vec3(1.0)) < 0.001) {
+        blendedNormal = vec3(0.5, 0.5, 1.0);  // encodes tangent-space (0,0,1)
+    }
 
     // Decode tangent-space normal from [0,1] -> [-1,1]
     vec3 tangentNormal = blendedNormal * 2.0 - 1.0;
