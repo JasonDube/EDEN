@@ -16,6 +16,7 @@
 #include "Renderer/ImGuiManager.hpp"
 #include "Editor/PrimitiveMeshBuilder.hpp"
 #include "Editor/BinaryLevelReader.hpp"
+#include "Editor/GLBLoader.hpp"
 
 #include "encounter.hpp"
 
@@ -103,6 +104,7 @@ protected:
         if (m_hasLevel) {
             m_grid = buildLevelGrid();
             frameCameraOnLevel();
+            loadCharacters();
             return;
         }
 
@@ -199,6 +201,13 @@ protected:
                                         0.0f, 1.0f, 1.0f, /*twoSided*/false, /*indoor*/false,
                                         /*transparent*/false);
             m_modelRenderer->renderLines(cmd, viewProj, m_grid, glm::vec3(0.28f, 0.46f, 0.34f));
+            // Character tokens (Percy, Orlen) standing on the grid.
+            for (const auto& t : m_tokens) {
+                glm::mat4 M = tokenMatrix(t);
+                for (uint32_t h : t.meshHandles)
+                    m_modelRenderer->render(cmd, viewProj, h, M, 0.0f, 1.0f, 1.0f,
+                                            /*twoSided*/false, /*indoor*/false, /*transparent*/false);
+            }
             renderUI();
             ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), cmd);
             vkCmdEndRenderPass(cmd);
@@ -264,8 +273,14 @@ private:
         return static_cast<float>(e.width) / static_cast<float>(e.height);
     }
     glm::mat4 computeViewProj() const {
-        // Un-flipped proj: ModelRenderer's pipeline handles Y itself.
-        return m_camera.getProjectionMatrix(aspect(), 0.1f, 5000.0f) * m_camera.getViewMatrix();
+        // Vulkan clip space is Y-down; glm's projection is Y-up. Flip clip Y so
+        // the frame isn't rendered vertically mirrored (which flips winding and
+        // turns tilted views upside down). This is the standard Vulkan fix.
+        // Tight near/far for good depth precision at room scale — a huge range
+        // (e.g. 0.1..5000) makes the floor z-fight and hide the grid.
+        glm::mat4 proj = m_camera.getProjectionMatrix(aspect(), 0.5f, 2000.0f);
+        proj[1][1] *= -1.0f;
+        return proj * m_camera.getViewMatrix();
     }
 
     // Unproject the mouse onto the y=0 board plane. Correct for orthographic
@@ -275,13 +290,10 @@ private:
         float h = static_cast<float>(getWindow().getHeight());
         glm::vec2 m = Input::getMousePosition();
         glm::mat4 invVP = glm::inverse(computeViewProj());
-        // ModelRenderer draws glm's GL-convention (Y-up) projection into a
-        // positive-height Vulkan viewport with no flip, which mirrors the frame
-        // vertically. computeViewProj() is the un-mirrored matrix, so mirror the
-        // screen-Y here (2*m.y/h - 1, not 1 - 2*m.y/h) to unproject onto the
-        // board the way it's actually displayed — otherwise the Z axis inverts.
+        // computeViewProj() now flips clip Y (standard Vulkan), so the render is
+        // no longer mirrored — use the standard screen->NDC mapping.
         float ndcX = 2.0f * m.x / w - 1.0f;
-        float ndcY = 2.0f * m.y / h - 1.0f;
+        float ndcY = 1.0f - 2.0f * m.y / h;
         glm::vec4 nearP = invVP * glm::vec4(ndcX, ndcY, -1.0f, 1.0f); nearP /= nearP.w;
         glm::vec4 farP  = invVP * glm::vec4(ndcX, ndcY,  1.0f, 1.0f); farP  /= farP.w;
         glm::vec3 o = glm::vec3(nearP);
@@ -297,6 +309,8 @@ private:
     void handleCameraAndPieces() {
         ImGuiIO& io = ImGui::GetIO();
         bool overUI = io.WantCaptureMouse;
+
+        if (m_hasLevel) { handleLevelCamera(overUI); return; }
 
         // Zoom (scroll): smaller ortho size = closer.
         float scroll = Input::getScrollDelta();
@@ -417,7 +431,7 @@ private:
     std::vector<glm::vec3> buildLevelGrid() const {
         std::vector<glm::vec3> lines;
         const float step = 5.0f;
-        const float y = 0.16f;   // just over the floor slab (top at y=0.1)
+        const float y = 0.35f;   // a bit over the floor slab (top at y=0.1) so it reads at all angles
         float x0 = std::ceil(m_levelMin.x / step) * step, x1 = std::floor(m_levelMax.x / step) * step;
         float z0 = std::ceil(m_levelMin.y / step) * step, z1 = std::floor(m_levelMax.y / step) * step;
         for (float x = x0; x <= x1 + 0.01f; x += step) {
@@ -432,9 +446,123 @@ private:
     void frameCameraOnLevel() {
         glm::vec2 c = (m_levelMin + m_levelMax) * 0.5f;
         glm::vec2 size = m_levelMax - m_levelMin;
-        m_orthoSize = std::max({size.x, size.y, 8.0f}) * 0.5f * 1.15f;
-        m_camera.setOrthoSize(m_orthoSize);
-        m_camera.setViewPreset(ViewPreset::Top, glm::vec3(c.x, 0.0f, c.y));
+        float span = std::max({size.x, size.y, 8.0f});
+        // Start on a natural 3/4 PERSPECTIVE angle around the room; the player can
+        // orbit/pan/dolly freely, or hit T for a clean orthographic top-down.
+        m_camTarget = glm::vec3(c.x, 2.0f, c.y);   // a bit above the floor
+        m_camYaw = -90.0f;
+        m_camPitch = -45.0f;
+        m_camDist = span * 1.6f;                    // perspective dolly distance
+        m_orthoSize = span * 0.5f * 1.15f;          // used by the T top-down view
+        m_levelOrtho = false;
+        applyOrbitCamera();
+    }
+
+    // Position the camera from the orbit target/yaw/pitch. Free view is
+    // perspective (natural recession); the T tactical view is orthographic.
+    void applyOrbitCamera() {
+        m_camera.setYaw(m_camYaw);
+        m_camera.setPitch(m_camPitch);
+        if (m_levelOrtho) {
+            m_camera.setProjectionMode(ProjectionMode::Orthographic);
+            m_camera.setOrthoSize(m_orthoSize);
+            m_camera.setPosition(m_camTarget - m_camera.getFront() * 500.0f);
+        } else {
+            m_camera.setProjectionMode(ProjectionMode::Perspective);
+            m_camera.setFov(40.0f);
+            m_camera.setPosition(m_camTarget - m_camera.getFront() * m_camDist);
+        }
+    }
+
+    // Free tabletop camera: right-drag orbit, middle-drag pan, scroll dolly/zoom,
+    // T = snap to a clean orthographic top-down. (Input::getMouseDelta only works
+    // while the mouse is captured, so we track our own per-frame delta.)
+    void handleLevelCamera(bool overUI) {
+        glm::vec2 mouse = Input::getMousePosition();
+        glm::vec2 delta = m_haveLastMouse ? (mouse - m_lastMouse) : glm::vec2(0.0f);
+        m_lastMouse = mouse;
+        m_haveLastMouse = true;
+
+        float scroll = Input::getScrollDelta();
+        if (scroll != 0.0f && !overUI) {
+            if (m_levelOrtho) m_orthoSize = std::clamp(m_orthoSize - scroll * 2.0f, 3.0f, 200.0f);
+            else              m_camDist   = std::clamp(m_camDist * (1.0f - scroll * 0.1f), 4.0f, 500.0f);
+        }
+        if (Input::isMouseButtonDown(Input::MOUSE_RIGHT) && !overUI) {   // orbit -> free perspective
+            m_camYaw   += delta.x * 0.3f;
+            m_camPitch  = std::clamp(m_camPitch - delta.y * 0.3f, -85.0f, -3.0f);
+            m_levelOrtho = false;
+        }
+        if (Input::isMouseButtonDown(Input::MOUSE_MIDDLE) && !overUI) {  // pan
+            float h = static_cast<float>(getWindow().getHeight());
+            float zoom = m_levelOrtho ? m_orthoSize : m_camDist;
+            float wpp = m_levelOrtho ? (2.0f * m_orthoSize) / h
+                                     : (2.0f * m_camDist * std::tan(glm::radians(20.0f))) / h;
+            // Boost pan when zoomed in so close-up traversal isn't sluggish; the
+            // far/default view keeps its 1:1 feel (boost clamps to 1).
+            wpp *= std::clamp(50.0f / std::max(zoom, 4.0f), 1.0f, 6.0f);
+            m_camTarget -= m_camera.getRight() * (delta.x * wpp);
+            m_camTarget += m_camera.getUp()    * (delta.y * wpp);
+        }
+        if (Input::isKeyPressed(Input::KEY_T) && !ImGui::GetIO().WantTextInput) {
+            m_camYaw = -90.0f;
+            m_camPitch = -89.9f;
+            m_levelOrtho = true;   // clean orthographic top-down tactical view
+        }
+        applyOrbitCamera();
+    }
+
+    // A character token: GLB meshes + the transform data to stand it upright,
+    // feet on the floor, centered on a 5-ft grid cell.
+    struct Token {
+        std::string name;
+        std::vector<uint32_t> meshHandles;
+        float scale = 1.0f;            // uniform, to fit target height
+        float minY = 0.0f;             // local bounds min.y (to set feet on floor)
+        glm::vec2 centerXZ{0.0f};      // local XZ center (to center on the cell)
+        int cx = 0, cy = 0;            // grid cell
+    };
+
+    // Load the character GLBs as movable tokens: one model per mesh (textured),
+    // uniformly scaled to a target height in feet with feet on the floor and the
+    // XZ centered on a grid cell.
+    void loadCharacters() {
+        struct Spawn { const char* path; const char* name; int cx, cy; float heightFt; };
+        const Spawn spawns[] = {
+            {"assets/characters/percy_the_knight.glb",   "Percy", 2, 2, 6.0f},
+            {"assets/characters/orlen_the_merchant.glb", "Orlen", 7, 7, 5.8f},
+        };
+        for (const auto& sp : spawns) {
+            eden::LoadResult r = eden::GLBLoader::load(sp.path);
+            if (!r.success || r.meshes.empty()) {
+                std::cerr << "character load FAILED: " << sp.path << "  (" << r.error << ")\n";
+                continue;
+            }
+            glm::vec3 mn(1e9f), mx(-1e9f);
+            for (const auto& m : r.meshes) { mn = glm::min(mn, m.bounds.min); mx = glm::max(mx, m.bounds.max); }
+            Token t;
+            t.name = sp.name; t.cx = sp.cx; t.cy = sp.cy;
+            t.scale = sp.heightFt / std::max(mx.y - mn.y, 0.001f);
+            t.minY = mn.y;
+            t.centerXZ = { (mn.x + mx.x) * 0.5f, (mn.z + mx.z) * 0.5f };
+            for (const auto& m : r.meshes) {
+                const unsigned char* px = m.hasTexture ? m.texture.data.data() : nullptr;
+                int w = m.hasTexture ? m.texture.width : 0, h = m.hasTexture ? m.texture.height : 0;
+                t.meshHandles.push_back(m_modelRenderer->createModel(m.vertices, m.indices, px, w, h));
+            }
+            std::cerr << "character loaded: " << sp.name << " — " << r.meshes.size()
+                      << " meshes, scale " << t.scale << "\n";
+            m_tokens.push_back(std::move(t));
+        }
+    }
+
+    // World transform placing a token upright on its grid cell (5-ft cells).
+    glm::mat4 tokenMatrix(const Token& t) const {
+        float wx = t.cx * 5.0f + 2.5f, wz = t.cy * 5.0f + 2.5f;
+        glm::mat4 M = glm::translate(glm::mat4(1.0f), glm::vec3(wx, 0.12f, wz));
+        M = glm::scale(M, glm::vec3(t.scale));
+        M = glm::translate(M, glm::vec3(-t.centerXZ.x, -t.minY, -t.centerXZ.y));
+        return M;
     }
 
     // The reachable region for a mover at (ax,ay) with `cells` of movement is a
@@ -647,7 +775,8 @@ private:
                         (m_levelMax.x - m_levelMin.x) / 5.0f, (m_levelMax.y - m_levelMin.y) / 5.0f);
             ImGui::Separator();
             ImGui::TextDisabled("Green grid = 5 ft squares (1 unit = 1 ft)");
-            ImGui::TextDisabled("Middle-drag pan  \xc2\xb7  Scroll zoom");
+            ImGui::TextDisabled("Right-drag orbit  \xc2\xb7  Middle-drag pan");
+            ImGui::TextDisabled("Scroll zoom  \xc2\xb7  T = top-down tactical");
             ImGui::End();
             ImGui::Render();
             return;
@@ -829,6 +958,17 @@ private:
     struct LevelDraw { int meshIdx; glm::mat4 model; bool transparent; };
     std::vector<LevelDraw> m_levelDraws;                   // one per object
     glm::vec2 m_levelMin{0.0f}, m_levelMax{0.0f};          // floor-plan XZ bounds (feet)
+
+    // Character tokens (GLB), placed on the level's 5-ft grid.
+    std::vector<Token> m_tokens;
+
+    // Free orbit camera (level mode): perspective free-look + ortho top-down (T).
+    glm::vec3 m_camTarget{0.0f};
+    float m_camYaw = -90.0f, m_camPitch = -45.0f;
+    float m_camDist = 80.0f;               // perspective dolly distance
+    bool  m_levelOrtho = false;            // T toggles the clean top-down ortho view
+    glm::vec2 m_lastMouse{0.0f};
+    bool m_haveLastMouse = false;
 
     rpgtt::Encounter m_enc;                // turn/round/movement state (rules in encounter.hpp)
     std::vector<rpgtt::Combatant> m_spawn; // starting layout, for Reset

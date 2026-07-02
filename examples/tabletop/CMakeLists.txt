@@ -19,3 +19,11 @@ add_custom_command(TARGET tabletop POST_BUILD
         ${CMAKE_BINARY_DIR}/shaders/selection.frag.spv
         $<TARGET_FILE_DIR:tabletop>/shaders/
 )
+
+# Symlink the source assets/ next to the binary so it resolves "assets/..." at
+# runtime without copying (the GLB character models are large).
+add_custom_command(TARGET tabletop POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E create_symlink
+        ${CMAKE_CURRENT_SOURCE_DIR}/assets
+        $<TARGET_FILE_DIR:tabletop>/assets
+)

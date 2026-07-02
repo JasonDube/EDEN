@@ -1,0 +1,5 @@
+# Character/prop model binaries live here but are NOT versioned in git — they're
+# large (tens of MB) and regenerable. Use Git LFS later if we want them tracked.
+*.glb
+*.gltf
+*.bin
