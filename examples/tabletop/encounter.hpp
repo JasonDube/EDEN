@@ -204,6 +204,28 @@ public:
         return o;
     }
 
+    // Flanking (house rule — the DMG optional grid variant, not core SRD):
+    // the attacker and a living ally on the exact opposite side/corner of the
+    // target, both adjacent, grant the attacker advantage on the melee attack.
+    // On a grid, "opposite" means the ally stands on the target cell reflected
+    // through — i.e. attacker + ally sum to twice the target's cell.
+    bool isFlanking(int attackerId, int targetId) const {
+        if (attackerId < 0 || attackerId >= static_cast<int>(m_c.size())) return false;
+        if (targetId  < 0 || targetId  >= static_cast<int>(m_c.size())) return false;
+        const Combatant& a = m_c[attackerId];
+        const Combatant& t = m_c[targetId];
+        if (a.isDown() || t.isDown()) return false;
+        if (cellDistance(a.cx, a.cy, t.cx, t.cy) != 1) return false;  // attacker adjacent
+        int ox = 2 * t.cx - a.cx, oy = 2 * t.cy - a.cy;              // opposite cell
+        for (int i = 0; i < static_cast<int>(m_c.size()); ++i) {
+            if (i == attackerId || i == targetId) continue;
+            const Combatant& ally = m_c[i];
+            if (ally.isDown() || ally.foe != a.foe) continue;         // must be attacker's ally
+            if (ally.cx == ox && ally.cy == oy) return true;
+        }
+        return false;
+    }
+
     // Count living combatants on a side — for victory/defeat checks.
     int living(bool foe) const {
         int n = 0;

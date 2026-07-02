@@ -196,9 +196,13 @@ protected:
                 m_modelRenderer->renderLines(cmd, viewProj, ring, ringCol);
             } else if (!c.isDown() && m_hoverCx == c.cx && m_hoverCy == c.cy &&
                        m_enc.canAttack(i)) {
-                // Hovering a foe the active mover can strike: red target ring.
+                // Hovering a foe the active mover can strike: red target ring,
+                // gold if the strike would be flanked (advantage).
+                glm::vec3 col = m_enc.isFlanking(m_enc.activeId(), i)
+                                    ? glm::vec3(0.98f, 0.80f, 0.20f)
+                                    : glm::vec3(0.92f, 0.22f, 0.18f);
                 auto ring = buildRing(wx, wz, kMiniR * 1.35f, 0.06f);
-                m_modelRenderer->renderLines(cmd, viewProj, ring, glm::vec3(0.92f, 0.22f, 0.18f));
+                m_modelRenderer->renderLines(cmd, viewProj, ring, col);
             }
         }
 
@@ -365,25 +369,34 @@ private:
     void doAttack(int targetId) {
         const rpgtt::Combatant& a = m_enc.active();
         const rpgtt::Combatant& t = m_enc.combatants()[targetId];
-        int d20 = t.dodging ? std::min(rollD20(), rollD20()) : rollD20();
+        bool adv = m_enc.isFlanking(m_enc.activeId(), targetId);   // house-rule flanking
+        bool dis = t.dodging;                                      // target is Dodging
+        // Advantage and disadvantage cancel to one straight roll, no matter how
+        // many sources of each (RAW).
+        int d20;
+        const char* mode = "";
+        if (adv == dis)   d20 = rollD20();
+        else if (adv)   { d20 = std::max(rollD20(), rollD20()); mode = "  (flanking)"; }
+        else            { d20 = std::min(rollD20(), rollD20()); mode = "  (disadvantage)"; }
+
         int sets = (d20 == 20) ? 2 : 1;
         int dice = 0;
         for (int s = 0; s < sets; ++s)
             for (int i = 0; i < a.dmgDice; ++i) dice += rollDie(a.dmgSides);
         rpgtt::AttackOutcome o = m_enc.attack(targetId, d20, dice);
-        if (o.valid) logAttack(o, m_enc.combatants()[targetId]);
+        if (o.valid) logAttack(o, m_enc.combatants()[targetId], mode);
     }
 
-    void logAttack(const rpgtt::AttackOutcome& o, const rpgtt::Combatant& t) {
-        char buf[192];
+    void logAttack(const rpgtt::AttackOutcome& o, const rpgtt::Combatant& t, const char* mode) {
+        char buf[208];
         if (o.hit)
-            std::snprintf(buf, sizeof buf, "%s %s %s (d20 %d%s) - %d dmg  [%s %d/%d]%s",
+            std::snprintf(buf, sizeof buf, "%s %s %s (d20 %d%s)%s - %d dmg  [%s %d/%d]%s",
                           o.attacker.c_str(), o.crit ? "CRITS" : "hits", o.target.c_str(),
-                          o.d20, o.crit ? "!" : "", o.damage, t.name.c_str(), t.hp, t.maxHp,
-                          o.dropped ? "  DOWN!" : "");
+                          o.d20, o.crit ? "!" : "", mode, o.damage, t.name.c_str(), t.hp,
+                          t.maxHp, o.dropped ? "  DOWN!" : "");
         else
-            std::snprintf(buf, sizeof buf, "%s misses %s (%d vs AC %d)",
-                          o.attacker.c_str(), o.target.c_str(), o.total, t.ac);
+            std::snprintf(buf, sizeof buf, "%s misses %s (%d vs AC %d)%s",
+                          o.attacker.c_str(), o.target.c_str(), o.total, t.ac, mode);
         m_log.emplace_back(buf);
         if (m_log.size() > 5) m_log.erase(m_log.begin());
     }
@@ -474,6 +487,7 @@ private:
         ImGui::Separator();
         ImGui::TextDisabled("Drag the highlighted mini to move");
         ImGui::TextDisabled("Click an adjacent foe to attack");
+        ImGui::TextDisabled("Flank (ally opposite) = advantage");
         ImGui::TextDisabled("Middle-drag pan  \xc2\xb7  Scroll zoom");
         ImGui::End();
         ImGui::Render();

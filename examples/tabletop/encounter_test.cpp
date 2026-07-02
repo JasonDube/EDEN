@@ -127,6 +127,31 @@ int main() {
     b.endTurn();
     assert(b.active().name == "Hero" && b.round() == 3);
 
+    // ----- flanking (house rule, DMG grid variant) -----
+    Encounter f;
+    Combatant h1; h1.name = "H1"; h1.foe = false; h1.cx = 4; h1.cy = 4;   // west of target
+    Combatant h2; h2.name = "H2"; h2.foe = false; h2.cx = 6; h2.cy = 4;   // east of target
+    Combatant en; en.name = "En"; en.foe = true;  en.cx = 5; en.cy = 4;   // between them
+    f.add(h1); f.add(h2); f.add(en);
+    int a1 = 0, a2 = 1, foeId = 2;
+
+    // H1 and H2 sit on opposite sides of En -> both flank it.
+    assert(f.isFlanking(a1, foeId));
+    assert(f.isFlanking(a2, foeId));
+    // Not flanking a teammate, and the foe doesn't flank a lone hero.
+    assert(!f.isFlanking(foeId, a1));
+
+    // Move H2 to a diagonal that is NOT opposite H1 -> no flank.
+    f.combatants()[a2].cx = 6; f.combatants()[a2].cy = 5;  // SE corner, H1 due west
+    assert(!f.isFlanking(a1, foeId));
+    // Opposite corners do count: put H1 at NW, H2 at SE of En.
+    f.combatants()[a1].cx = 4; f.combatants()[a1].cy = 3;  // NW corner
+    f.combatants()[a2].cx = 6; f.combatants()[a2].cy = 5;  // SE corner
+    assert(f.isFlanking(a1, foeId) && f.isFlanking(a2, foeId));
+    // A downed ally can't help flank.
+    f.combatants()[a2].hp = 0;
+    assert(!f.isFlanking(a1, foeId));
+
     std::puts("encounter_test: all checks passed");
     return 0;
 }
