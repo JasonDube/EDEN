@@ -629,6 +629,7 @@ private:
         m_screen = Screen::CharCreate;
         stopTitleMusic();
         m_rollsUsed = 1;        // the initial roll counts as the first of three
+        m_halfElfBonus.fill(false);
         rollAbilityScores();
     }
 
@@ -659,6 +660,18 @@ private:
         m_assign[ability] = rolledIdx;
         if (src >= 0 && src != ability) m_assign[src] = old;
     }
+    bool isHalfElf() const { return std::string(rpgc::raceOptions()[m_raceIdx]) == "Half-Elf"; }
+    int  halfElfPickCount() const {
+        int n = 0; for (bool b : m_halfElfBonus) if (b) ++n; return n;
+    }
+    // Full racial bonuses: the fixed table plus the Half-Elf +1/+1 choices.
+    std::array<int, rpgc::ABILITY_COUNT> effectiveRaceBonus() const {
+        auto b = rpgc::raceAbilityBonuses(rpgc::raceOptions()[m_raceIdx]);
+        if (isHalfElf())
+            for (int a = 0; a < rpgc::ABILITY_COUNT; ++a) if (m_halfElfBonus[a]) b[a] += 1;
+        return b;
+    }
+
     // Put the highest rolls in the abilities this class cares about most.
     void autoAssignForClass() {
         auto pr = rpgc::classAbilityPriority(rpgc::classOptions()[m_classIdx]);
@@ -680,7 +693,7 @@ private:
         m_pc.race = rpgc::raceOptions()[m_raceIdx];
         m_pc.className = rpgc::classOptions()[m_classIdx];
         m_pc.level = 1;
-        auto rb = rpgc::raceAbilityBonuses(m_pc.race);
+        auto rb = effectiveRaceBonus();
         for (int a = 0; a < 6; ++a) m_pc.abilities[a] = m_rolled[m_assign[a]] + rb[a];
         m_pc.hitDieSize = classHitDie(m_pc.className);
         m_pc.hitDiceTotal = 1;
@@ -712,6 +725,25 @@ private:
         };
         combo("Race", m_raceIdx, rpgc::raceOptions());
         combo("Class", m_classIdx, rpgc::classOptions());
+
+        // Half-Elf uniquely gets +1 to two abilities of the player's choice.
+        if (isHalfElf()) {
+            int picks = halfElfPickCount();
+            ImGui::TextColored(ImVec4(0.5f, 0.8f, 1.0f, 1.0f),
+                               "Half-Elf: +2 CHA, plus +1 to two of your choice:");
+            for (int a = 0; a < rpgc::ABILITY_COUNT; ++a) {
+                if (a == rpgc::CHA) continue;   // CHA already gets the +2
+                ImGui::SameLine();
+                bool checked = m_halfElfBonus[a];
+                ImGui::BeginDisabled(!checked && picks >= 2);   // cap at two
+                if (ImGui::Checkbox(rpgc::abilityAbbr(a), &checked)) m_halfElfBonus[a] = checked;
+                ImGui::EndDisabled();
+            }
+            if (picks != 2) {
+                ImGui::SameLine();
+                ImGui::TextColored(ImVec4(0.95f, 0.5f, 0.4f, 1.0f), "(choose two)");
+            }
+        }
 
         ImGui::Separator();
         ImGui::TextUnformatted("Ability scores  -  drag a rolled value onto an ability (hover a name for help)");
@@ -746,7 +778,7 @@ private:
         if (!anyInPool) { ImGui::SameLine(); ImGui::TextDisabled("(all assigned)"); }
 
         ImGui::Spacing();
-        auto raceBonus = rpgc::raceAbilityBonuses(rpgc::raceOptions()[m_raceIdx]);
+        auto raceBonus = effectiveRaceBonus();
         // Ability slots (drop targets; also drag sources to rearrange).
         for (int a = 0; a < 6; ++a) {
             ImGui::PushID(a);
@@ -778,13 +810,17 @@ private:
         }
 
         ImGui::Separator();
-        bool ready = m_nameBuf[0] != '\0' && allAssigned();
+        bool halfElfOk = !isHalfElf() || halfElfPickCount() == 2;
+        bool ready = m_nameBuf[0] != '\0' && allAssigned() && halfElfOk;
         ImGui::BeginDisabled(!ready);
         if (ImGui::Button("Begin Adventure", ImVec2(200, 0))) finishCharCreate();
         ImGui::EndDisabled();
         if (!ready) {
+            const char* why = m_nameBuf[0] == '\0' ? "enter a name"
+                            : !allAssigned()       ? "assign all six abilities"
+                                                   : "choose Half-Elf's two +1 abilities";
             ImGui::SameLine();
-            ImGui::TextDisabled("%s", m_nameBuf[0] == '\0' ? "enter a name" : "assign all six abilities");
+            ImGui::TextDisabled("%s", why);
         }
         ImGui::TextDisabled("(skills, portrait & equipment coming next)");
         ImGui::End();
@@ -1424,6 +1460,7 @@ private:
     int   m_rolled[6] = {0, 0, 0, 0, 0, 0};
     int   m_assign[6] = {0, 1, 2, 3, 4, 5};// ability a gets score m_rolled[m_assign[a]]
     int   m_rollsUsed = 0;                 // 1 initial + up to 2 re-rolls = 3 total
+    std::array<bool, rpgc::ABILITY_COUNT> m_halfElfBonus{};  // Half-Elf: +1 to two of your choice
 
     // Level preview (loaded from a terrain_editor .edenbin via TABLETOP_LEVEL)
     std::string m_levelPath, m_levelName;
