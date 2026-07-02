@@ -51,6 +51,11 @@ constexpr float kGridStep  = 2.0f;    // one grid cell = 2 world units (~a 5ft s
 constexpr float kMiniR     = 0.7f;    // mini base radius
 constexpr int   kGridN     = static_cast<int>((2 * kBoardHalf) / kGridStep);  // cells per axis (16)
 
+// Beats between a foe's AI phases, so its turn is watchable rather than instant.
+constexpr float kAIMoveDelay   = 0.45f;
+constexpr float kAIStrikeDelay = 0.55f;
+constexpr float kAIEndDelay    = 0.55f;
+
 // World<->cell mapping. Cells are indexed [0, kGridN); cell centers sit on the
 // grid squares, cell edges on the grid lines.
 inline float cellCenter(int c) { return -kBoardHalf + (c + 0.5f) * kGridStep; }
@@ -129,11 +134,12 @@ protected:
                                               getSwapchain().getExtent());
     }
 
-    void update(float /*dt*/) override {
+    void update(float dt) override {
         ImGui_ImplVulkan_NewFrame();
         ImGui_ImplGlfw_NewFrame();
 
         handleCameraAndPieces();
+        stepAI(dt);
 
         // Fire the dev screenshot once the countdown elapses.
         if (m_shotCountdown >= 0 && --m_shotCountdown < 0) {
@@ -293,8 +299,9 @@ private:
         bool overBoard = mouseOnBoard(board);
         if (overBoard) { m_hoverCx = worldToCell(board.x); m_hoverCy = worldToCell(board.y); }
 
+        // Player input only drives hero turns; foes are run by the AI.
         if (Input::isMouseButtonPressed(Input::MOUSE_LEFT) && !overUI && overBoard &&
-            m_enc.hasActive()) {
+            m_enc.hasActive() && !m_enc.active().foe) {
             const auto& a = m_enc.active();
             if (m_hoverCx == a.cx && m_hoverCy == a.cy) {
                 m_dragging = true;              // grabbed its own cell: move it
@@ -401,6 +408,50 @@ private:
         if (m_log.size() > 5) m_log.erase(m_log.begin());
     }
 
+    // ----- enemy AI driver -----
+    // A foe's turn plays out over a few beats so it's watchable: move, then
+    // strike, then end the turn. Heroes are left entirely to the player.
+    void stepAI(float dt) {
+        if (!m_enc.hasActive()) return;
+        int aid = m_enc.activeId();
+        if (aid != m_lastActiveId) {          // a new turn just began
+            m_lastActiveId = aid;
+            m_aiPhase = 0;
+            m_aiTimer = kAIMoveDelay;
+        }
+        const rpgtt::Combatant& a = m_enc.active();
+        bool over = (m_enc.living(true) == 0 || m_enc.living(false) == 0);
+        if (!a.foe || over || a.isDown()) return;   // player's turn or combat over
+
+        m_aiTimer -= dt;
+        if (m_aiTimer > 0.0f) return;
+        if (m_aiPhase == 0)      { aiMove();   m_aiPhase = 1; m_aiTimer = kAIStrikeDelay; }
+        else if (m_aiPhase == 1) { aiStrike(); m_aiPhase = 2; m_aiTimer = kAIEndDelay; }
+        else                     { m_enc.endTurn(); }  // next-turn detection resets state
+    }
+
+    // Move the active foe toward the nearest hero, engaging melee if it can.
+    // If it can't reach, it Dashes to close (spending the action, so no attack).
+    void aiMove() {
+        int tid = m_enc.aiTarget();
+        if (tid < 0) return;
+        rpgtt::GridCell d = m_enc.aiDestination(tid, kGridN);
+        m_enc.moveActiveTo(d.x, d.y, kGridN);
+        const rpgtt::Combatant& a = m_enc.active();
+        const rpgtt::Combatant& t = m_enc.combatants()[tid];
+        if (rpgtt::cellDistance(a.cx, a.cy, t.cx, t.cy) > a.reachCells && !a.actionUsed) {
+            if (m_enc.dash()) {
+                rpgtt::GridCell d2 = m_enc.aiDestination(tid, kGridN);
+                m_enc.moveActiveTo(d2.x, d2.y, kGridN);
+            }
+        }
+    }
+
+    void aiStrike() {
+        int tid = m_enc.aiTarget();
+        if (tid >= 0 && m_enc.canAttack(tid)) doAttack(tid);
+    }
+
     void renderUI() {
         ImGui::NewFrame();
         ImGui::SetNextWindowPos(ImVec2(10, 10), ImGuiCond_FirstUseEver);
@@ -475,6 +526,7 @@ private:
             m_enc.combatants() = m_spawn;
             m_enc.start();
             m_dragging = false;
+            m_lastActiveId = -1;   // let the AI re-init for whoever acts first
             m_log.clear();
         }
 
@@ -568,6 +620,10 @@ private:
     std::vector<std::string> m_log;        // recent combat-log lines (last 5)
     std::mt19937 m_rng{std::random_device{}()};  // dice RNG
     int  m_hoverCx = 0, m_hoverCy = 0;     // grid cell under the cursor this frame
+
+    int   m_lastActiveId = -1;             // detect turn changes to (re)start the AI
+    int   m_aiPhase = 0;                   // 0 = move, 1 = strike, 2 = end turn
+    float m_aiTimer = 0.0f;                // seconds until the next AI beat
 
     bool      m_dragging = false;          // dragging the active mini
     bool      m_panning  = false;

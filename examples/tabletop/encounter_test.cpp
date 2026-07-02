@@ -152,6 +152,37 @@ int main() {
     f.combatants()[a2].hp = 0;
     assert(!f.isFlanking(a1, foeId));
 
+    // ----- enemy AI planning -----
+    Encounter g;
+    Combatant gh; gh.name = "GH"; gh.foe = false; gh.cx = 10; gh.cy = 0;
+    gh.initiative = 5;  gh.maxHp = gh.hp = 10;
+    Combatant gf; gf.name = "GF"; gf.foe = true; gf.cx = 0; gf.cy = 0;
+    gf.initiative = 20; gf.speedFeet = 30; gf.reachCells = 1; gf.maxHp = gf.hp = 10;
+    g.add(gh); g.add(gf);
+    g.start();
+    assert(g.active().name == "GF");             // foe goes first
+    int ghId = 0;
+    assert(g.nearestEnemy(g.activeId()) == ghId);
+
+    // Speed 30 = 6 cells; from x=0 the closest reachable cell to a hero at x=10
+    // is (6,0).
+    GridCell dst = g.aiDestination(ghId, 16);
+    assert(dst.x == 6 && dst.y == 0);
+
+    // With (6,0) blocked by an ally, the AI picks an unoccupied cell that still
+    // gets as close as possible (distance 4 to the target).
+    Combatant blocker; blocker.name = "Block"; blocker.foe = true;
+    blocker.cx = 6; blocker.cy = 0; blocker.maxHp = blocker.hp = 10;
+    g.combatants().push_back(blocker);
+    GridCell dst2 = g.aiDestination(ghId, 16);
+    assert(!(dst2.x == 6 && dst2.y == 0));
+    assert(!g.occupied(dst2.x, dst2.y, g.activeId()));
+    assert(cellDistance(dst2.x, dst2.y, 10, 0) == 4);
+
+    // Standing adjacent already: stay put.
+    g.combatants()[g.activeId()].cx = 9;         // adjacent to hero at (10,0)
+    assert(g.aiDestination(ghId, 16).x == 9);
+
     std::puts("encounter_test: all checks passed");
     return 0;
 }

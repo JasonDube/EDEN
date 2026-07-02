@@ -47,6 +47,8 @@ struct Combatant {
     bool isDown() const { return hp <= 0; }
 };
 
+struct GridCell { int x = 0, y = 0; };
+
 // Result of resolving one attack (returned by Encounter::attack).
 struct AttackOutcome {
     bool valid = false;   // false if the attack was illegal (no state changed)
@@ -231,6 +233,63 @@ public:
         int n = 0;
         for (const auto& c : m_c) if (c.foe == foe && !c.isDown()) ++n;
         return n;
+    }
+
+    // Is a cell occupied by a living combatant other than `exceptId`?
+    bool occupied(int x, int y, int exceptId) const {
+        for (int i = 0; i < static_cast<int>(m_c.size()); ++i) {
+            if (i == exceptId || m_c[i].isDown()) continue;
+            if (m_c[i].cx == x && m_c[i].cy == y) return true;
+        }
+        return false;
+    }
+
+    // ----- enemy AI planning (deterministic; the app supplies the dice) -----
+
+    // Nearest living enemy of combatant `actorId`, by cell distance; -1 if none.
+    int nearestEnemy(int actorId) const {
+        if (actorId < 0 || actorId >= static_cast<int>(m_c.size())) return -1;
+        const Combatant& a = m_c[actorId];
+        int best = -1, bestD = 1 << 30;
+        for (int i = 0; i < static_cast<int>(m_c.size()); ++i) {
+            const Combatant& c = m_c[i];
+            if (i == actorId || c.isDown() || c.foe == a.foe) continue;
+            int d = cellDistance(a.cx, a.cy, c.cx, c.cy);
+            if (d < bestD) { bestD = d; best = i; }
+        }
+        return best;
+    }
+    int aiTarget() const { return hasActive() ? nearestEnemy(activeId()) : -1; }
+
+    // Best cell for the ACTIVE combatant to move to this turn to engage
+    // `targetId`: among cells reachable with its current movement (on board,
+    // unoccupied), the one that gets closest to the target — i.e. into melee
+    // reach if possible, otherwise as near as it can get. Returns the actor's
+    // current cell if it's already in reach or can't improve. Deterministic.
+    GridCell aiDestination(int targetId, int gridN) const {
+        const Combatant& a = active();
+        const Combatant& t = m_c[targetId];
+        GridCell start{a.cx, a.cy};
+        if (cellDistance(a.cx, a.cy, t.cx, t.cy) <= a.reachCells) return start;
+
+        int reach = cellsLeft();
+        GridCell best = start;
+        int bestToTarget = cellDistance(start.x, start.y, t.cx, t.cy);
+        int bestStep = 0;
+        for (int dy = -reach; dy <= reach; ++dy) {
+            for (int dx = -reach; dx <= reach; ++dx) {
+                int x = a.cx + dx, y = a.cy + dy;
+                if (x < 0 || y < 0 || x >= gridN || y >= gridN) continue;
+                if (occupied(x, y, activeId())) continue;
+                int step = cellDistance(a.cx, a.cy, x, y);   // Chebyshev <= reach
+                int toT = cellDistance(x, y, t.cx, t.cy);
+                // Prefer getting closest to the target; break ties by moving less.
+                if (toT < bestToTarget || (toT == bestToTarget && step < bestStep)) {
+                    bestToTarget = toT; bestStep = step; best = {x, y};
+                }
+            }
+        }
+        return best;
     }
 
 private:
