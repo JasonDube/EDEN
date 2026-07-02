@@ -214,6 +214,67 @@ int main() {
     assert(!oa.canOpportunityAttack(eId, mId));
     assert(oa.provokers(mId, 5, 5, 5, 3).empty());
 
+    // ----- death saves -----
+    Encounter ds;
+    Combatant dh; dh.name = "DH"; dh.foe = false; dh.initiative = 20; dh.maxHp = dh.hp = 20;
+    Combatant df; df.name = "DF"; df.foe = true;  df.initiative = 5;  df.maxHp = df.hp = 10;
+    ds.add(dh); ds.add(df);
+    ds.start();
+    int dhId = 0, dfId = 1;
+    assert(ds.active().name == "DH");
+    Combatant& H = ds.combatants()[dhId];
+    auto makeDying = [&]() { H.hp = 0; H.deathSuccesses = 0; H.deathFailures = 0;
+                             H.stable = false; H.dead = false; };
+
+    // A foe dies outright at 0 HP; a hero drops to dying (not dead).
+    ds.applyDamage(ds.combatants()[dfId], 10, false);
+    assert(ds.combatants()[dfId].dead);
+    ds.applyDamage(H, 20, false);
+    assert(H.hp == 0 && H.isDying() && !H.dead && !H.stable);
+
+    // Three (non-crit) successes stabilize.
+    makeDying();
+    assert(ds.deathSave(10) == SaveResult::Success);
+    assert(ds.deathSave(11) == SaveResult::Success);
+    assert(ds.deathSave(12) == SaveResult::Stabilized);
+    assert(H.stable && !H.isDying());
+
+    // Three failures kill; a nat 1 counts as two failures.
+    makeDying();
+    assert(ds.deathSave(5) == SaveResult::Fail);
+    assert(ds.deathSave(1) == SaveResult::Died);   // 1 + 2 = 3 failures
+    assert(H.dead);
+
+    // A nat 20 pops back up at 1 HP.
+    makeDying();
+    assert(ds.deathSave(20) == SaveResult::Revived);
+    assert(H.hp == 1 && !H.isDown());
+
+    // Taking damage at 0 HP is a failure; a crit is two; massive damage kills.
+    makeDying();
+    ds.applyDamage(H, 3, false);
+    assert(H.deathFailures == 1 && H.isDying());
+    ds.applyDamage(H, 3, true);                    // crit -> 2 more -> dead
+    assert(H.dead);
+    H.hp = 20; H.dead = false; H.stable = false; H.deathFailures = 0;
+    ds.applyDamage(H, 45, false);                  // 45 - 20 overkill >= maxHp -> instant death
+    assert(H.dead && H.hp == 0);
+
+    // endTurn skips those who are out (dead/stable) but lands on a dying hero.
+    Encounter te;
+    Combatant tx; tx.name = "X"; tx.foe = false; tx.initiative = 30; tx.maxHp = tx.hp = 10;
+    Combatant ty; ty.name = "Y"; ty.foe = false; ty.initiative = 20; ty.maxHp = ty.hp = 10;
+    Combatant tz; tz.name = "Z"; tz.foe = true;  tz.initiative = 10; tz.maxHp = tz.hp = 10;
+    te.add(tx); te.add(ty); te.add(tz);
+    te.start();
+    assert(te.active().name == "X");
+    te.combatants()[1].hp = 0;                                   // Y is dying
+    te.combatants()[2].hp = 0; te.combatants()[2].stable = true; // Z is stable (out)
+    te.endTurn();
+    assert(te.active().name == "Y");   // dying hero still gets a turn
+    te.endTurn();
+    assert(te.active().name == "X");   // stable Z is skipped
+
     std::puts("encounter_test: all checks passed");
     return 0;
 }

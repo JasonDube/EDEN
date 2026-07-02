@@ -44,8 +44,21 @@ struct Combatant {
     int   dmgBonus = 2;
     int   reachCells = 1;         // melee reach, in cells (1 = adjacent incl. diagonal)
 
-    bool isDown() const { return hp <= 0; }
+    // Dying state (heroes only — foes die outright at 0 HP). A creature at 0 HP
+    // is unconscious; if not yet dead/stable it is "dying" and makes a death
+    // saving throw at the start of each of its turns.
+    int   deathSuccesses = 0;
+    int   deathFailures  = 0;
+    bool  stable = false;         // stabilized at 0 HP (no longer making saves)
+    bool  dead   = false;
+
+    bool isDown()  const { return hp <= 0; }                         // unconscious or dead
+    bool isDying() const { return hp <= 0 && !dead && !stable; }     // still making saves
+    bool isOut()   const { return dead || stable; }                 // no longer takes turns
 };
+
+// Outcome of a single death saving throw (for logging / feedback).
+enum class SaveResult { None, Success, Fail, Stabilized, Died, Revived };
 
 struct GridCell { int x = 0, y = 0; };
 
@@ -101,10 +114,12 @@ public:
     // refreshed. If nobody is left standing, we stop on the next slot as-is.
     void endTurn() {
         if (m_order.empty()) return;
+        // Skip combatants that are out of the fight (dead or stabilized). A dying
+        // hero is NOT skipped — it still gets a turn to make its death save.
         for (int guard = 0; guard < static_cast<int>(m_order.size()); ++guard) {
             ++m_turn;
             if (m_turn >= static_cast<int>(m_order.size())) { m_turn = 0; ++m_round; }
-            if (!active().isDown()) break;
+            if (!active().isOut()) break;
         }
         refreshActive();
     }
@@ -206,10 +221,32 @@ public:
         o.hit = o.crit || (d20 != 1 && o.total >= t.ac);
         if (o.hit) {
             o.damage = std::max(0, damageDiceTotal + a.dmgBonus);
-            t.hp = std::max(0, t.hp - o.damage);
-            o.dropped = t.isDown();
+            bool wasUp = t.hp > 0;
+            applyDamage(t, o.damage, o.crit);
+            o.dropped = wasUp && t.hp <= 0;   // this hit knocked them out
         }
         return o;
+    }
+
+    // Apply damage, handling the 0-HP rules: foes die outright; a hero dropped
+    // to 0 falls unconscious and dying (massive damage = instant death); a hero
+    // already at 0 suffers death-save failures (two on a crit).
+    void applyDamage(Combatant& t, int dmg, bool crit) {
+        if (dmg <= 0 || t.dead) return;
+        if (t.hp > 0) {
+            int over = dmg - t.hp;            // damage past 0
+            t.hp = std::max(0, t.hp - dmg);
+            if (t.hp == 0) {
+                if (t.foe || over >= t.maxHp) t.dead = true;   // monsters drop; PCs: massive damage kills
+                else { t.stable = false; t.deathSuccesses = t.deathFailures = 0; }  // now dying
+            }
+        } else {
+            // Hit while already at 0 HP: a death-save failure (two on a crit).
+            if (dmg >= t.maxHp) { t.dead = true; return; }
+            t.stable = false;
+            t.deathFailures += crit ? 2 : 1;
+            if (t.deathFailures >= 3) t.dead = true;
+        }
     }
 
     // ----- opportunity attacks (reactions) -----
@@ -273,6 +310,34 @@ public:
             if (ally.cx == ox && ally.cy == oy) return true;
         }
         return false;
+    }
+
+    // Make one death saving throw for the active combatant (call at the start of
+    // its turn when it's dying). The caller supplies the raw d20. 10+ is a
+    // success, under 10 a failure; a nat 1 is two failures, a nat 20 revives at
+    // 1 HP. Three successes stabilize; three failures kill.
+    SaveResult deathSave(int d20) {
+        if (!hasActive()) return SaveResult::None;
+        Combatant& c = active();
+        if (!c.isDying()) return SaveResult::None;
+        if (d20 == 20) {
+            c.hp = 1; c.stable = false; c.deathSuccesses = c.deathFailures = 0;
+            return SaveResult::Revived;
+        }
+        if (d20 == 1) {
+            c.deathFailures += 2;
+            if (c.deathFailures >= 3) { c.dead = true; return SaveResult::Died; }
+            return SaveResult::Fail;
+        }
+        if (d20 >= 10) {
+            if (++c.deathSuccesses >= 3) {
+                c.stable = true; c.deathSuccesses = c.deathFailures = 0;
+                return SaveResult::Stabilized;
+            }
+            return SaveResult::Success;
+        }
+        if (++c.deathFailures >= 3) { c.dead = true; return SaveResult::Died; }
+        return SaveResult::Fail;
     }
 
     // Count living combatants on a side — for victory/defeat checks.

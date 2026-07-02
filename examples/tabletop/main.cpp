@@ -435,6 +435,33 @@ private:
     // ----- enemy AI driver -----
     // A foe's turn plays out over a few beats so it's watchable: move, then
     // strike, then end the turn. Heroes are left entirely to the player.
+    // True once the party can no longer act or recover (no conscious or dying
+    // heroes remain — all are dead or merely stable).
+    bool partyDefeated() const {
+        for (const auto& c : m_enc.combatants())
+            if (!c.foe && (c.hp > 0 || c.isDying())) return false;
+        return true;
+    }
+
+    // Roll one death save for the active dying hero and log the result.
+    void autoDeathSave() {
+        int d20 = rollD20();
+        rpgtt::SaveResult r = m_enc.deathSave(d20);
+        const rpgtt::Combatant& c = m_enc.active();
+        const char* res = r == rpgtt::SaveResult::Revived    ? "REVIVES at 1 HP!"
+                        : r == rpgtt::SaveResult::Stabilized ? "stabilizes"
+                        : r == rpgtt::SaveResult::Died       ? "DIES"
+                        : r == rpgtt::SaveResult::Success    ? "success"
+                        : r == rpgtt::SaveResult::Fail       ? "failure" : "";
+        char buf[192];
+        std::snprintf(buf, sizeof buf, "%s death save (d20 %d): %s  [%d succ / %d fail]",
+                      c.name.c_str(), d20, res, c.deathSuccesses, c.deathFailures);
+        m_log.emplace_back(buf);
+        if (m_log.size() > 5) m_log.erase(m_log.begin());
+    }
+
+    // Drives every non-player turn on timed beats: foe AI, and a dying hero's
+    // automatic death save. Conscious heroes are left to the player.
     void stepAI(float dt) {
         if (!m_enc.hasActive()) return;
         int aid = m_enc.activeId();
@@ -442,16 +469,36 @@ private:
             m_lastActiveId = aid;
             m_aiPhase = 0;
             m_aiTimer = kAIMoveDelay;
+            m_deathTurnActive = false;
         }
+        if (partyDefeated()) return;
         const rpgtt::Combatant& a = m_enc.active();
-        bool over = (m_enc.living(true) == 0 || m_enc.living(false) == 0);
-        if (!a.foe || over || a.isDown()) return;   // player's turn or combat over
 
+        // A dying hero's turn: roll its death save, then end the turn — unless
+        // the save revived it (nat 20), in which case the player takes over.
+        if (a.isDying() && m_aiPhase == 0) m_deathTurnActive = true;
+        if (m_deathTurnActive) {
+            m_aiTimer -= dt;
+            if (m_aiTimer <= 0.0f) {
+                if (m_aiPhase == 0) {
+                    autoDeathSave();
+                    if (m_enc.active().hp > 0) m_deathTurnActive = false;   // revived
+                    else { m_aiPhase = 2; m_aiTimer = kAIEndDelay; }
+                } else {
+                    m_enc.endTurn();
+                    m_deathTurnActive = false;
+                }
+            }
+            return;
+        }
+
+        if (!a.foe) return;                                    // conscious hero: player
+        if (m_enc.living(true) == 0 || a.isDown()) return;     // fight won, or foe down
         m_aiTimer -= dt;
         if (m_aiTimer > 0.0f) return;
         if (m_aiPhase == 0)      { aiMove();   m_aiPhase = 1; m_aiTimer = kAIStrikeDelay; }
         else if (m_aiPhase == 1) { aiStrike(); m_aiPhase = 2; m_aiTimer = kAIEndDelay; }
-        else                     { m_enc.endTurn(); }  // next-turn detection resets state
+        else                     { m_enc.endTurn(); }
     }
 
     // Move the active foe toward the nearest hero, engaging melee if it can.
@@ -497,8 +544,14 @@ private:
                                ImGuiColorEditFlags_NoTooltip | ImGuiColorEditFlags_NoInputs,
                                ImVec2(12, 12));
             ImGui::SameLine();
-            if (c.isDown())
-                ImGui::TextDisabled("   %s  (down)", c.name.c_str());
+            if (c.dead)
+                ImGui::TextDisabled("   %s  (dead)", c.name.c_str());
+            else if (c.hp <= 0 && c.stable)
+                ImGui::TextDisabled("   %s  (stable)", c.name.c_str());
+            else if (c.hp <= 0)   // dying: show death-save tally
+                ImGui::TextColored(ImVec4(0.95f, 0.5f, 0.35f, 1.0f),
+                                   "%s%s  dying (%d/%d)", current ? "> " : "   ",
+                                   c.name.c_str(), c.deathSuccesses, c.deathFailures);
             else if (current)
                 ImGui::TextColored(ImVec4(1.0f, 0.92f, 0.4f, 1.0f),
                                    "> %s  %d/%d", c.name.c_str(), c.hp, c.maxHp);
@@ -537,11 +590,11 @@ private:
                         a2.reactionUsed ? "used" : "ready");
         }
 
-        // Victory / defeat once a side is wiped out.
-        int foesLeft = m_enc.living(true), heroesLeft = m_enc.living(false);
-        if (foesLeft == 0)
+        // Victory when the foes are wiped; defeat only once no hero can act or
+        // recover (a dying hero might still nat-20 back up).
+        if (m_enc.living(true) == 0)
             ImGui::TextColored(ImVec4(0.4f, 0.9f, 0.45f, 1.0f), "Foes defeated - victory!");
-        else if (heroesLeft == 0)
+        else if (partyDefeated())
             ImGui::TextColored(ImVec4(0.95f, 0.4f, 0.35f, 1.0f), "The party has fallen.");
 
         ImGui::Spacing();
@@ -552,6 +605,7 @@ private:
             m_enc.start();
             m_dragging = false;
             m_lastActiveId = -1;   // let the AI re-init for whoever acts first
+            m_deathTurnActive = false;
             m_log.clear();
         }
 
@@ -650,6 +704,7 @@ private:
     int   m_lastActiveId = -1;             // detect turn changes to (re)start the AI
     int   m_aiPhase = 0;                   // 0 = move, 1 = strike, 2 = end turn
     float m_aiTimer = 0.0f;                // seconds until the next AI beat
+    bool  m_deathTurnActive = false;       // active hero is auto-rolling a death save
 
     bool      m_dragging = false;          // dragging the active mini
     bool      m_panning  = false;
