@@ -216,6 +216,16 @@ public:
     const TerrainConfig& getConfig() const { return m_config; }
     TerrainConfig& getConfigMutable() { return m_config; }
 
+    // Replace the terrain config (bounds/tileSize/resolution) and drop every
+    // chunk so a fresh set can be preloaded at the new size. This touches only
+    // CPU-side data — the caller MUST free the old chunks' GPU buffers first
+    // (see ChunkManager::releaseAllChunkBuffers) and preload again afterwards.
+    void reconfigure(const TerrainConfig& config) {
+        m_config = config;
+        m_chunks.clear();
+        m_fullyLoaded = false;
+    }
+
     float getHeightAt(float worldX, float worldZ) const;
 
     // World wrapping (planet mode)

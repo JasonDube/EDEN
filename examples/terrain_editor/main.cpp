@@ -1274,6 +1274,20 @@ protected:
         // Update machines (fan spinning, sound attenuation, etc.)
         m_machineManager.update(deltaTime);
 
+        // Battle render mode: when entering play, drop terrain view distance to 1 chunk
+        // (3x3 chunks, ~384m wide) so distant chunks stop being submitted. Restore on exit.
+        {
+            static bool prevPlayMode = false;
+            static int  savedViewDist = 4;
+            if (m_isPlayMode && !prevPlayMode) {
+                savedViewDist = m_terrain.getConfig().viewDistance;
+                m_terrain.getConfigMutable().viewDistance = 1;
+            } else if (!m_isPlayMode && prevPlayMode) {
+                m_terrain.getConfigMutable().viewDistance = savedViewDist;
+            }
+            prevPlayMode = m_isPlayMode;
+        }
+
         // Battle test (only updates in play mode / F5)
         if (m_isPlayMode) updateBattle(deltaTime);
 
@@ -1884,6 +1898,9 @@ protected:
             }
         }
 
+        renderNewLevelDialog();   // available in both edit and play mode
+        renderEditBuildPanel();   // edit-mode Build tools panel
+
         if (m_isPlayMode) {
             renderPlayModeUI();
             renderUVViewer();
@@ -2223,9 +2240,17 @@ protected:
         }
 
         TerrainPushConstants pushConstants{};
-        pushConstants.fogColor = glm::vec4(m_editorUI.getFogColor(), 1.0f);
-        pushConstants.fogStart = m_editorUI.getFogStart();
-        pushConstants.fogEnd = m_editorUI.getFogEnd();
+        // In play mode, override fog with a tight battle-render range so the world
+        // visibly compresses to ~150m around the camera (smooth fade to black).
+        if (m_isPlayMode) {
+            pushConstants.fogColor = glm::vec4(0.0f, 0.0f, 0.0f, 1.0f);
+            pushConstants.fogStart = 75.0f;
+            pushConstants.fogEnd   = 150.0f;
+        } else {
+            pushConstants.fogColor = glm::vec4(m_editorUI.getFogColor(), 1.0f);
+            pushConstants.fogStart = m_editorUI.getFogStart();
+            pushConstants.fogEnd   = m_editorUI.getFogEnd();
+        }
         pushConstants.sunY = sunHeight;
         pushConstants.ambientLevel = ambientLevel;
         pushConstants.cameraPos = glm::vec4(m_camera.getPosition(), 1.0f);
@@ -2271,11 +2296,22 @@ protected:
             std::unordered_map<uint32_t, std::vector<eden::InstanceData>> batches;
             int drawCalls = 0;
 
+            // Battle render mode: in play mode, hide objects beyond the fog end
+            // (matches the terrain's 150m tight render distance).
+            const float playModeCullSq = 150.0f * 150.0f;
+            glm::vec3 camPos = m_camera.getPosition();
+
             for (size_t i = 0; i < m_sceneObjects.size(); i++) {
                 const auto& objPtr = m_sceneObjects[i];
                 if (!objPtr || !objPtr->isVisible()) continue;
 
                 if (m_isPlayMode && objPtr->isDoor() && objPtr->getBuildingType() != "filesystem" && objPtr->getBuildingType() != "wall_widget") continue;
+
+                if (m_isPlayMode) {
+                    glm::vec3 op = const_cast<SceneObject*>(objPtr.get())->getTransform().getPosition();
+                    glm::vec3 d = op - camPos;
+                    if (glm::dot(d, d) > playModeCullSq) continue;
+                }
 
                 glm::mat4 modelMatrix = const_cast<SceneObject*>(objPtr.get())->getTransform().getMatrix();
 
@@ -3076,7 +3112,7 @@ protected:
         }
 
         // Game-mode grid overlay on platform_slab floors and platform_wall walls
-        if ((m_hSlabBrushMode || m_wallBrushMode || m_roomBrushMode || m_framePlacementMode || m_showSiloConfig) && !m_filesystemBrowser.isActive() && m_isPlayMode) {
+        if ((m_hSlabBrushMode || m_wallBrushMode || m_roomBrushMode || m_framePlacementMode || buildActive()) && !m_filesystemBrowser.isActive() && (m_isPlayMode || m_editBuildMode)) {
             std::vector<glm::vec3> gameGridLines;
             std::vector<glm::vec3> selectedGridLines;
 
@@ -3982,7 +4018,7 @@ private:
         });
 
         m_editorUI.setFileNewCallback([this]() {
-            newLevel();
+            m_newLevelPopup = true;   // ask for map size first
         });
         m_editorUI.setNewTestLevelCallback([this]() {
             newTestLevel();
@@ -6650,9 +6686,146 @@ private:
         endFrame(imageIndex);
     }
 
+    // RTS-style camera: edge pan, MMB drag tumble, mouse-wheel zoom.
+    // No mouse capture; cursor is always visible in play mode.
+    void updateRTSCamera(float dt) {
+        if (!m_isPlayMode) return;
+        if (m_inConversation || m_quickChatMode) return;
+
+        ImGuiIO& io = ImGui::GetIO();
+        bool overUI = io.WantCaptureMouse;
+        bool keybUI = io.WantCaptureKeyboard || io.WantTextInput;
+
+        glm::vec2 mousePos = Input::getMousePosition();
+        static glm::vec2 lastMouse = mousePos;
+        glm::vec2 mouseDelta = mousePos - lastMouse;
+        lastMouse = mousePos;
+
+        float windowW = static_cast<float>(getWindow().getWidth());
+        float windowH = static_cast<float>(getWindow().getHeight());
+
+        glm::vec3 camPos = m_camera.getPosition();
+        glm::vec3 front  = m_camera.getFront();
+        glm::vec3 right  = m_camera.getRight();
+
+        // XZ-projected basis for ground-plane panning (so pitch doesn't bias speed)
+        glm::vec3 fwdXZ(front.x, 0.0f, front.z);
+        if (glm::length(fwdXZ) > 0.001f) fwdXZ = glm::normalize(fwdXZ); else fwdXZ = glm::vec3(0,0,-1);
+        glm::vec3 rightXZ(right.x, 0.0f, right.z);
+        if (glm::length(rightXZ) > 0.001f) rightXZ = glm::normalize(rightXZ); else rightXZ = glm::vec3(1,0,0);
+
+        // Pan/zoom speed scales with height-above-terrain so it feels right at any zoom
+        float ground      = m_terrain.getHeightAt(camPos.x, camPos.z);
+        float heightAbove = std::max(2.0f, camPos.y - ground);
+        float panSpeed    = std::clamp(heightAbove * 1.2f, 10.0f, 200.0f);
+
+        // 1) Edge pan
+        if (!overUI) {
+            const float edge = 8.0f;
+            glm::vec3 panDir(0.0f);
+            if (mousePos.x <= edge)            panDir -= rightXZ;
+            if (mousePos.x >= windowW - edge)  panDir += rightXZ;
+            if (mousePos.y <= edge)            panDir += fwdXZ;
+            if (mousePos.y >= windowH - edge)  panDir -= fwdXZ;
+            if (glm::length(panDir) > 0.001f) {
+                panDir = glm::normalize(panDir);
+                camPos += panDir * panSpeed * dt;
+            }
+        }
+
+        // 2) Keyboard pan (WASD / arrow keys) — convenience; no FPS walk
+        if (!keybUI) {
+            glm::vec3 keyDir(0.0f);
+            if (Input::isKeyDown(Input::KEY_W) || Input::isKeyDown(Input::KEY_UP))    keyDir += fwdXZ;
+            if (Input::isKeyDown(Input::KEY_S) || Input::isKeyDown(Input::KEY_DOWN))  keyDir -= fwdXZ;
+            if (Input::isKeyDown(Input::KEY_A) || Input::isKeyDown(Input::KEY_LEFT))  keyDir -= rightXZ;
+            if (Input::isKeyDown(Input::KEY_D) || Input::isKeyDown(Input::KEY_RIGHT)) keyDir += rightXZ;
+            if (glm::length(keyDir) > 0.001f) {
+                keyDir = glm::normalize(keyDir);
+                camPos += keyDir * panSpeed * dt;
+            }
+        }
+
+        // 3) Wheel zoom (dolly along view dir, clamped to a vertical band over terrain)
+        if (!overUI) {
+            float scroll = Input::getScrollDelta();
+            if (scroll != 0.0f) {
+                float dollyStep = heightAbove * 0.15f * scroll;
+                glm::vec3 newPos = camPos + front * dollyStep;
+                float newGround = m_terrain.getHeightAt(newPos.x, newPos.z);
+                float newAbove  = newPos.y - newGround;
+                if (newAbove >= 4.0f && newAbove <= 600.0f) camPos = newPos;
+            }
+        }
+
+        // 4) RMB drag tumble (orbit a ground point under the camera at drag start)
+        static bool wasRMBDown = false;
+        static glm::vec3 orbitTarget(0.0f);
+        static float orbitDist = 0.0f;
+        bool rmbDown = Input::isMouseButtonDown(Input::MOUSE_RIGHT);
+
+        if (rmbDown && !wasRMBDown && !overUI) {
+            // Project camera-forward onto the ground plane below the camera
+            glm::vec3 fwd = m_camera.getFront();
+            float gy = m_terrain.getHeightAt(camPos.x, camPos.z);
+            if (fwd.y < -0.01f) {
+                float t = (camPos.y - gy) / -fwd.y;
+                t = std::clamp(t, 5.0f, 1000.0f);
+                orbitTarget = camPos + fwd * t;
+            } else {
+                orbitTarget = camPos + glm::vec3(fwdXZ) * 50.0f;
+                orbitTarget.y = gy;
+            }
+            orbitDist = glm::length(camPos - orbitTarget);
+            if (orbitDist < 1.0f) orbitDist = 50.0f;
+        }
+        if (rmbDown) {
+            const float sens = 0.25f;
+            float yawDeg   = m_camera.getYaw()   + mouseDelta.x * sens;
+            float pitchDeg = m_camera.getPitch() - mouseDelta.y * sens;
+            pitchDeg = std::clamp(pitchDeg, -85.0f, -10.0f);  // always look downward
+
+            m_camera.setYaw(yawDeg);
+            m_camera.setPitch(pitchDeg);
+
+            float yawRad   = glm::radians(yawDeg);
+            float pitchRad = glm::radians(pitchDeg);
+            glm::vec3 dir(
+                std::cos(yawRad) * std::cos(pitchRad),
+                std::sin(pitchRad),
+                std::sin(yawRad) * std::cos(pitchRad)
+            );
+            camPos = orbitTarget - dir * orbitDist;
+        }
+        wasRMBDown = rmbDown;
+
+        // 5) MMB drag pan (track on the ground plane — drag scene under cursor)
+        bool mmbDown = Input::isMouseButtonDown(Input::MOUSE_MIDDLE);
+        if (mmbDown && !overUI && (mouseDelta.x != 0.0f || mouseDelta.y != 0.0f)) {
+            // Convert pixel delta to world meters at the camera's height-above-terrain.
+            // tan(fov/2) maps half-screen-height to half the world span at that distance.
+            float fovRad = glm::radians(m_camera.getFov());
+            float worldPerPixel = (2.0f * heightAbove * std::tan(fovRad * 0.5f)) / windowH;
+            glm::vec3 pan = -rightXZ * (mouseDelta.x * worldPerPixel)
+                          +  fwdXZ   * (mouseDelta.y * worldPerPixel);
+            camPos += pan;
+        }
+
+        m_camera.setPosition(camPos);
+    }
+
     void handleCameraInput(float deltaTime) {
-        // Play mode: right-click toggles cursor visibility for UI interaction
+        // RTS play mode: hand off to the strategy camera and skip the FPS code paths
         if (m_isPlayMode && !m_inConversation) {
+            // Cursor must stay visible in play mode (no mouse-look)
+            if (!m_playModeCursorVisible) m_playModeCursorVisible = true;
+            if (Input::isMouseCaptured()) Input::setMouseCaptured(false);
+            updateRTSCamera(deltaTime);
+            return;
+        }
+
+        // Conversation/editor paths fall through to the legacy logic below.
+        if (false) {
             // Check for right-click to toggle cursor (and open filesystem context menu)
             static bool wasRightClickDown = false;
             bool rightClickDown = Input::isMouseButtonDown(Input::MOUSE_RIGHT);
@@ -7318,7 +7491,8 @@ private:
 
             // WASD movement only in play mode (editor mode uses orbit/pan/zoom above)
             // Skip when in building cursor mode — building mode has its own camera controls
-            if (m_isPlayMode && !m_inPanelFocusMode && !(m_playModeCursorVisible && m_showSiloConfig)) {
+            // RTS mode: skip the FPS walk path entirely; updateRTSCamera handles WASD as pan
+            if (m_isPlayMode && false && !m_inPanelFocusMode && !(m_playModeCursorVisible && m_showSiloConfig)) {
                 // During conversation or quick chat: arrow keys, otherwise WASD
                 // When ImGui wants keyboard: no movement at all
                 if (imguiWantsKeyboard) {
@@ -8382,7 +8556,7 @@ private:
 
         if (!m_isPlayMode) {
             if (ctrlDown && nKeyDown && !wasNKeyDown && !ImGui::GetIO().WantTextInput) {
-                newLevel();
+                m_newLevelPopup = true;   // ask for map size first
             }
             if (ctrlDown && sKeyDown && !wasSKeyDown && !ImGui::GetIO().WantTextInput) {
                 showSaveDialog();
@@ -11120,6 +11294,150 @@ private:
         }
     }
 
+    // Horizontal floor-slab placement — shared by play-mode building and the
+    // edit-mode Build panel. Self-guards on the H-slab tool being armed.
+    void updateHSlabPlacement() {
+        bool leftPressed = Input::isMouseButtonPressed(Input::MOUSE_LEFT);
+        // Floor brush mode — click+drag on terrain to draw rectangular floor slabs (game mode)
+        m_hSlabPreviewValid = false;
+        if (m_hSlabBrushMode && buildActive() && !m_filesystemBrowser.isActive() && !ImGui::GetIO().WantCaptureMouse) {
+            float aspect = static_cast<float>(getWindow().getWidth()) / getWindow().getHeight();
+            glm::mat4 proj = m_camera.getProjectionMatrix(aspect, 0.1f, 5000.0f);
+            glm::mat4 view = m_camera.getViewMatrix();
+            glm::mat4 invVP = glm::inverse(proj * view);
+            float ndcX = 0.0f, ndcY = 0.0f;
+            if (buildUseMouse()) {
+                glm::vec2 mouse = Input::getMousePosition();
+                ndcX = (2.0f * mouse.x / getWindow().getWidth()) - 1.0f;
+                ndcY = 1.0f - (2.0f * mouse.y / getWindow().getHeight());
+            }
+            glm::vec4 nearPt = invVP * glm::vec4(ndcX, ndcY, -1, 1); nearPt /= nearPt.w;
+            glm::vec4 farPt  = invVP * glm::vec4(ndcX, ndcY,  1, 1); farPt  /= farPt.w;
+            glm::vec3 rayO = glm::vec3(nearPt);
+            glm::vec3 rayD = glm::normalize(glm::vec3(farPt - nearPt));
+
+            // Hit test: wall/slab AABB, snap to top surface, then terrain
+            glm::vec3 terrainHitPt{0.0f};
+            bool terrainHit = false;
+            float bestFloorT = std::numeric_limits<float>::max();
+
+            // Check walls and slabs — snap Y to nearest 1m increment on the surface
+            for (auto& obj : m_sceneObjects) {
+                if (!obj) continue;
+                const auto& bt = obj->getBuildingType();
+                if (bt != "platform_wall" && bt != "platform_slab") continue;
+                float dist = obj->getWorldBounds().intersect(rayO, rayD);
+                if (dist >= 0 && dist < 200.0f && dist < bestFloorT) {
+                    bestFloorT = dist;
+                    glm::vec3 hp = rayO + rayD * dist;
+                    // Snap Y to nearest 1m increment (allows H-slabs at any height on a wall)
+                    float snappedY = std::round(hp.y);
+                    // Clamp to wall bounds
+                    AABB wb = obj->getWorldBounds();
+                    snappedY = std::max(snappedY, std::round(wb.min.y));
+                    snappedY = std::min(snappedY, std::round(wb.max.y));
+                    terrainHitPt = {std::round(hp.x), snappedY, std::round(hp.z)};
+                    terrainHit = true;
+                }
+            }
+
+            // Fall back to terrain
+            if (!terrainHit && rayD.y < -0.001f) {
+                for (float t = 1.0f; t < 500.0f; t += 0.5f) {
+                    glm::vec3 p = rayO + rayD * t;
+                    float terrY = m_terrain.getHeightAt(p.x, p.z);
+                    if (p.y <= terrY + 0.5f) {
+                        terrainHitPt = {std::round(p.x), terrY, std::round(p.z)};
+                        terrainHit = true;
+                        break;
+                    }
+                }
+            }
+
+            // Right-click to delete floor under cursor (skip when tumbling in build mode)
+            if (Input::isMouseButtonPressed(Input::MOUSE_RIGHT) && !m_hSlabDrawing && !m_isTumbling) {
+                float bestDist = std::numeric_limits<float>::max();
+                int bestIdx = -1;
+                for (int fi = 0; fi < static_cast<int>(m_sceneObjects.size()); fi++) {
+                    auto& obj = m_sceneObjects[fi];
+                    if (!obj || obj->getBuildingType() != "platform_slab") continue;
+                    float dist = obj->getWorldBounds().intersect(rayO, rayD);
+                    if (dist >= 0 && dist < 200.0f && dist < bestDist) {
+                        bestDist = dist;
+                        bestIdx = fi;
+                    }
+                }
+                if (bestIdx >= 0) {
+                    deleteObject(bestIdx);
+                }
+            }
+
+            if (terrainHit) {
+                if (leftPressed && !m_hSlabDrawing) {
+                    m_hSlabStart = terrainHitPt;
+                    m_hSlabEnd = terrainHitPt;
+                    m_hSlabDrawing = true;
+                }
+            }
+
+            // While dragging, project ray onto the starting Y plane so the slab
+            // extends freely beyond the wall/slab that was initially hit
+            if (m_hSlabDrawing) {
+                if (std::abs(rayD.y) > 0.001f) {
+                    float t = (m_hSlabStart.y - rayO.y) / rayD.y;
+                    if (t > 0 && t < 500.0f) {
+                        glm::vec3 hp = rayO + rayD * t;
+                        m_hSlabEnd = {std::round(hp.x), m_hSlabStart.y, std::round(hp.z)};
+                        m_hSlabPreviewValid = true;
+                    }
+                }
+            }
+
+            // Release: create the floor slab
+            if (m_hSlabDrawing && !Input::isMouseButtonDown(Input::MOUSE_LEFT)) {
+                m_hSlabDrawing = false;
+                float dx = std::abs(m_hSlabEnd.x - m_hSlabStart.x);
+                float dz = std::abs(m_hSlabEnd.z - m_hSlabStart.z);
+                if (dx >= 1.0f && dz >= 1.0f) {
+                    float floorW = std::round(dx);
+                    float floorD = std::round(dz);
+                    float minX = std::min(m_hSlabStart.x, m_hSlabEnd.x);
+                    float minZ = std::min(m_hSlabStart.z, m_hSlabEnd.z);
+                    float cx = minX + floorW * 0.5f;
+                    float cz = minZ + floorD * 0.5f;
+                    float avgY = (m_hSlabStart.y + m_hSlabEnd.y) * 0.5f;
+
+                    glm::vec4 floorColor = {0.6f, 0.6f, 0.6f, 1.0f};
+                    auto mesh = PrimitiveMeshBuilder::createCube(1.0f, floorColor);
+                    uint32_t handle = m_modelRenderer->createModel(mesh.vertices, mesh.indices);
+
+                    auto obj = std::make_unique<SceneObject>(
+                        "Floor_" + std::to_string(m_sceneObjects.size()));
+                    obj->setBufferHandle(handle);
+                    obj->setIndexCount(static_cast<uint32_t>(mesh.indices.size()));
+                    obj->setVertexCount(static_cast<uint32_t>(mesh.vertices.size()));
+                    obj->setLocalBounds(mesh.bounds);
+                    obj->setMeshData(mesh.vertices, mesh.indices);
+                    obj->setPrimitiveType(PrimitiveType::Cube);
+                    obj->setPrimitiveSize(1.0f);
+                    obj->setPrimitiveColor(floorColor);
+                    obj->setBuildingType("platform_slab");
+                    obj->setAABBCollision(true);
+
+                    obj->getTransform().setPosition({cx, avgY, cz});
+                    obj->getTransform().setScale({floorW, m_hSlabThickness, floorD});
+
+                    m_sceneObjects.push_back(std::move(obj));
+                }
+                // Auto-deactivate after placing in play mode (one-shot); in the
+                // edit-mode Build panel keep the tool armed to place several floors.
+                if (m_isPlayMode) m_hSlabBrushMode = false;
+            }
+        } else if (!m_hSlabBrushMode) {
+            m_hSlabDrawing = false;
+        }
+    }
+
     void updatePlayMode(float deltaTime) {
         m_gizmo.setVisible(false);
         m_splineRenderer->setVisible(false);
@@ -12185,143 +12503,7 @@ private:
         }
         m_fsLeftWasDown = leftDown;
 
-        // Floor brush mode — click+drag on terrain to draw rectangular floor slabs (game mode)
-        m_hSlabPreviewValid = false;
-        if (m_hSlabBrushMode && m_isPlayMode && !m_filesystemBrowser.isActive() && !ImGui::GetIO().WantCaptureMouse) {
-            float aspect = static_cast<float>(getWindow().getWidth()) / getWindow().getHeight();
-            glm::mat4 proj = m_camera.getProjectionMatrix(aspect, 0.1f, 5000.0f);
-            glm::mat4 view = m_camera.getViewMatrix();
-            glm::mat4 invVP = glm::inverse(proj * view);
-            float ndcX = 0.0f, ndcY = 0.0f;
-            if (m_playModeCursorVisible) {
-                glm::vec2 mouse = Input::getMousePosition();
-                ndcX = (2.0f * mouse.x / getWindow().getWidth()) - 1.0f;
-                ndcY = 1.0f - (2.0f * mouse.y / getWindow().getHeight());
-            }
-            glm::vec4 nearPt = invVP * glm::vec4(ndcX, ndcY, -1, 1); nearPt /= nearPt.w;
-            glm::vec4 farPt  = invVP * glm::vec4(ndcX, ndcY,  1, 1); farPt  /= farPt.w;
-            glm::vec3 rayO = glm::vec3(nearPt);
-            glm::vec3 rayD = glm::normalize(glm::vec3(farPt - nearPt));
-
-            // Hit test: wall/slab AABB, snap to top surface, then terrain
-            glm::vec3 terrainHitPt{0.0f};
-            bool terrainHit = false;
-            float bestFloorT = std::numeric_limits<float>::max();
-
-            // Check walls and slabs — snap Y to nearest 1m increment on the surface
-            for (auto& obj : m_sceneObjects) {
-                if (!obj) continue;
-                const auto& bt = obj->getBuildingType();
-                if (bt != "platform_wall" && bt != "platform_slab") continue;
-                float dist = obj->getWorldBounds().intersect(rayO, rayD);
-                if (dist >= 0 && dist < 200.0f && dist < bestFloorT) {
-                    bestFloorT = dist;
-                    glm::vec3 hp = rayO + rayD * dist;
-                    // Snap Y to nearest 1m increment (allows H-slabs at any height on a wall)
-                    float snappedY = std::round(hp.y);
-                    // Clamp to wall bounds
-                    AABB wb = obj->getWorldBounds();
-                    snappedY = std::max(snappedY, std::round(wb.min.y));
-                    snappedY = std::min(snappedY, std::round(wb.max.y));
-                    terrainHitPt = {std::round(hp.x), snappedY, std::round(hp.z)};
-                    terrainHit = true;
-                }
-            }
-
-            // Fall back to terrain
-            if (!terrainHit && rayD.y < -0.001f) {
-                for (float t = 1.0f; t < 500.0f; t += 0.5f) {
-                    glm::vec3 p = rayO + rayD * t;
-                    float terrY = m_terrain.getHeightAt(p.x, p.z);
-                    if (p.y <= terrY + 0.5f) {
-                        terrainHitPt = {std::round(p.x), terrY, std::round(p.z)};
-                        terrainHit = true;
-                        break;
-                    }
-                }
-            }
-
-            // Right-click to delete floor under cursor (skip when tumbling in build mode)
-            if (Input::isMouseButtonPressed(Input::MOUSE_RIGHT) && !m_hSlabDrawing && !m_isTumbling) {
-                float bestDist = std::numeric_limits<float>::max();
-                int bestIdx = -1;
-                for (int fi = 0; fi < static_cast<int>(m_sceneObjects.size()); fi++) {
-                    auto& obj = m_sceneObjects[fi];
-                    if (!obj || obj->getBuildingType() != "platform_slab") continue;
-                    float dist = obj->getWorldBounds().intersect(rayO, rayD);
-                    if (dist >= 0 && dist < 200.0f && dist < bestDist) {
-                        bestDist = dist;
-                        bestIdx = fi;
-                    }
-                }
-                if (bestIdx >= 0) {
-                    deleteObject(bestIdx);
-                }
-            }
-
-            if (terrainHit) {
-                if (leftPressed && !m_hSlabDrawing) {
-                    m_hSlabStart = terrainHitPt;
-                    m_hSlabEnd = terrainHitPt;
-                    m_hSlabDrawing = true;
-                }
-            }
-
-            // While dragging, project ray onto the starting Y plane so the slab
-            // extends freely beyond the wall/slab that was initially hit
-            if (m_hSlabDrawing) {
-                if (std::abs(rayD.y) > 0.001f) {
-                    float t = (m_hSlabStart.y - rayO.y) / rayD.y;
-                    if (t > 0 && t < 500.0f) {
-                        glm::vec3 hp = rayO + rayD * t;
-                        m_hSlabEnd = {std::round(hp.x), m_hSlabStart.y, std::round(hp.z)};
-                        m_hSlabPreviewValid = true;
-                    }
-                }
-            }
-
-            // Release: create the floor slab
-            if (m_hSlabDrawing && !Input::isMouseButtonDown(Input::MOUSE_LEFT)) {
-                m_hSlabDrawing = false;
-                float dx = std::abs(m_hSlabEnd.x - m_hSlabStart.x);
-                float dz = std::abs(m_hSlabEnd.z - m_hSlabStart.z);
-                if (dx >= 1.0f && dz >= 1.0f) {
-                    float floorW = std::round(dx);
-                    float floorD = std::round(dz);
-                    float minX = std::min(m_hSlabStart.x, m_hSlabEnd.x);
-                    float minZ = std::min(m_hSlabStart.z, m_hSlabEnd.z);
-                    float cx = minX + floorW * 0.5f;
-                    float cz = minZ + floorD * 0.5f;
-                    float avgY = (m_hSlabStart.y + m_hSlabEnd.y) * 0.5f;
-
-                    glm::vec4 floorColor = {0.6f, 0.6f, 0.6f, 1.0f};
-                    auto mesh = PrimitiveMeshBuilder::createCube(1.0f, floorColor);
-                    uint32_t handle = m_modelRenderer->createModel(mesh.vertices, mesh.indices);
-
-                    auto obj = std::make_unique<SceneObject>(
-                        "Floor_" + std::to_string(m_sceneObjects.size()));
-                    obj->setBufferHandle(handle);
-                    obj->setIndexCount(static_cast<uint32_t>(mesh.indices.size()));
-                    obj->setVertexCount(static_cast<uint32_t>(mesh.vertices.size()));
-                    obj->setLocalBounds(mesh.bounds);
-                    obj->setMeshData(mesh.vertices, mesh.indices);
-                    obj->setPrimitiveType(PrimitiveType::Cube);
-                    obj->setPrimitiveSize(1.0f);
-                    obj->setPrimitiveColor(floorColor);
-                    obj->setBuildingType("platform_slab");
-                    obj->setAABBCollision(true);
-
-                    obj->getTransform().setPosition({cx, avgY, cz});
-                    obj->getTransform().setScale({floorW, m_hSlabThickness, floorD});
-
-                    m_sceneObjects.push_back(std::move(obj));
-                }
-                // Auto-deactivate brush after placing
-                m_hSlabBrushMode = false;
-            }
-        } else if (!m_hSlabBrushMode) {
-            m_hSlabDrawing = false;
-        }
+        updateHSlabPlacement();
 
         // Game-mode wall brush — click+drag on floor slabs to draw walls
         if (m_wallBrushMode && m_isPlayMode && !m_filesystemBrowser.isActive() && !ImGui::GetIO().WantCaptureMouse) {
@@ -16566,8 +16748,14 @@ private:
     }
 
     void updateEditorMode(float deltaTime) {
-        // Terrain brush/deform tools — only active when terrain tools checkbox is on
-        if (m_editorUI.isTerrainToolsEnabled()) {
+        // Build placement tools run in edit mode too (self-guards on the tool
+        // being armed via the Build panel).
+        updateHSlabPlacement();
+
+        // Terrain brush/deform tools — only active when terrain tools checkbox is
+        // on, and not while a build placement brush is armed (so a placement click
+        // doesn't also sculpt).
+        if (m_editorUI.isTerrainToolsEnabled() && !buildBrushActive()) {
             m_brushTool->setMode(m_editorUI.getBrushMode());
             m_brushTool->setRadius(m_editorUI.getBrushRadius());
             m_brushTool->setStrength(m_editorUI.getBrushStrength());
@@ -16883,7 +17071,7 @@ private:
             m_wallDrawing = false;
         }
 
-        bool inMoveObjectMode = m_editorUI.getBrushMode() == BrushMode::MoveObject;
+        bool inMoveObjectMode = m_editorUI.getBrushMode() == BrushMode::MoveObject && !buildBrushActive();
         bool inTransformMode = inMoveObjectMode && m_transformMode != TransformMode::Select;
         bool hasSelection = m_selectedObjectIndex >= 0 && m_selectedObjectIndex < static_cast<int>(m_sceneObjects.size());
 
@@ -18946,6 +19134,126 @@ private:
         ImGui::End();
     }
 
+    // RTS-style unit selection: LMB click picks one, LMB-drag box-selects many.
+    // Shift adds to selection. Requires play-mode cursor visible (Alt+RMB toggles).
+    void updateUnitSelection() {
+        if (!m_isPlayMode) return;
+        if (m_battleUnits.empty()) { m_selectedUnits.clear(); m_boxSelectActive = false; return; }
+
+        if (!m_playModeCursorVisible) {
+            // Cancel any in-progress drag if cursor mode flips off
+            m_boxSelectActive = false;
+            return;
+        }
+
+        // Don't start selections through ImGui windows, but always allow finishing one
+        ImGuiIO& io = ImGui::GetIO();
+        bool overUI = io.WantCaptureMouse && !m_boxSelectActive;
+
+        float windowW = static_cast<float>(getWindow().getWidth());
+        float windowH = static_cast<float>(getWindow().getHeight());
+        float aspect  = windowW / windowH;
+        glm::mat4 view = m_camera.getViewMatrix();
+        glm::mat4 proj = m_camera.getProjectionMatrix(aspect, 0.1f, 5000.0f);
+        glm::mat4 vp   = proj * view;
+
+        auto projectToScreen = [&](const glm::vec3& worldPos, glm::vec2& out) -> bool {
+            glm::vec4 clip = vp * glm::vec4(worldPos, 1.0f);
+            if (clip.w <= 0.0f) return false;
+            glm::vec3 ndc = glm::vec3(clip) / clip.w;
+            out.x = (ndc.x + 1.0f) * 0.5f * windowW;
+            out.y = (1.0f - ndc.y) * 0.5f * windowH;
+            return true;
+        };
+
+        glm::vec2 mousePos = Input::getMousePosition();
+        bool lmbDown    = Input::isMouseButtonDown(Input::MOUSE_LEFT);
+        bool shiftHeld  = Input::isKeyDown(Input::KEY_LEFT_SHIFT) || Input::isKeyDown(Input::KEY_RIGHT_SHIFT);
+
+        static bool wasLmbDown = false;
+        bool lmbPressed  =  lmbDown && !wasLmbDown;
+        bool lmbReleased = !lmbDown &&  wasLmbDown;
+        wasLmbDown = lmbDown;
+
+        if (lmbPressed && !overUI) {
+            m_boxSelectActive = true;
+            m_boxSelectStart  = mousePos;
+            m_boxSelectEnd    = mousePos;
+        } else if (lmbDown && m_boxSelectActive) {
+            m_boxSelectEnd = mousePos;
+        } else if (lmbReleased && m_boxSelectActive) {
+            glm::vec2 delta = m_boxSelectEnd - m_boxSelectStart;
+            float dragLen = std::sqrt(delta.x * delta.x + delta.y * delta.y);
+
+            std::set<int> hits;
+            if (dragLen < 4.0f) {
+                // Click: pick nearest alive unit within 30px of cursor
+                int   bestIdx  = -1;
+                float bestDist = 30.0f;
+                for (size_t i = 0; i < m_battleUnits.size(); ++i) {
+                    const BattleUnit& u = m_battleUnits[i];
+                    if (!u.alive || !u.obj) continue;
+                    glm::vec2 sp;
+                    if (!projectToScreen(u.obj->getTransform().getPosition(), sp)) continue;
+                    float dx = sp.x - mousePos.x, dy = sp.y - mousePos.y;
+                    float d = std::sqrt(dx * dx + dy * dy);
+                    if (d < bestDist) { bestDist = d; bestIdx = static_cast<int>(i); }
+                }
+                if (bestIdx >= 0) hits.insert(bestIdx);
+            } else {
+                float minX = std::min(m_boxSelectStart.x, m_boxSelectEnd.x);
+                float maxX = std::max(m_boxSelectStart.x, m_boxSelectEnd.x);
+                float minY = std::min(m_boxSelectStart.y, m_boxSelectEnd.y);
+                float maxY = std::max(m_boxSelectStart.y, m_boxSelectEnd.y);
+                for (size_t i = 0; i < m_battleUnits.size(); ++i) {
+                    const BattleUnit& u = m_battleUnits[i];
+                    if (!u.alive || !u.obj) continue;
+                    glm::vec2 sp;
+                    if (!projectToScreen(u.obj->getTransform().getPosition(), sp)) continue;
+                    if (sp.x >= minX && sp.x <= maxX && sp.y >= minY && sp.y <= maxY) {
+                        hits.insert(static_cast<int>(i));
+                    }
+                }
+            }
+
+            if (shiftHeld) {
+                for (int idx : hits) m_selectedUnits.insert(idx);
+            } else {
+                m_selectedUnits = hits;
+            }
+            m_boxSelectActive = false;
+        }
+
+        // --- Render: drag box + selection rings ---
+        auto* drawList = ImGui::GetForegroundDrawList();
+
+        if (m_boxSelectActive) {
+            float minX = std::min(m_boxSelectStart.x, m_boxSelectEnd.x);
+            float maxX = std::max(m_boxSelectStart.x, m_boxSelectEnd.x);
+            float minY = std::min(m_boxSelectStart.y, m_boxSelectEnd.y);
+            float maxY = std::max(m_boxSelectStart.y, m_boxSelectEnd.y);
+            drawList->AddRectFilled(ImVec2(minX, minY), ImVec2(maxX, maxY), IM_COL32(80, 220, 120, 40));
+            drawList->AddRect      (ImVec2(minX, minY), ImVec2(maxX, maxY), IM_COL32(120, 255, 160, 220), 0.0f, 0, 1.5f);
+        }
+
+        // Rings around each selected unit. Centered on the unit, radius computed
+        // from a camera-right offset so it stays aligned with the screen plane.
+        glm::vec3 camRight = m_camera.getRight();
+        for (int idx : m_selectedUnits) {
+            if (idx < 0 || idx >= static_cast<int>(m_battleUnits.size())) continue;
+            const BattleUnit& u = m_battleUnits[idx];
+            if (!u.alive || !u.obj) continue;
+            glm::vec3 center = u.obj->getTransform().getPosition();
+            glm::vec2 sp, spEdge;
+            if (!projectToScreen(center, sp)) continue;
+            float radius = 12.0f;
+            if (projectToScreen(center + camRight * 0.9f, spEdge)) {
+                radius = std::clamp(glm::length(spEdge - sp), 8.0f, 60.0f);
+            }
+            drawList->AddCircle(ImVec2(sp.x, sp.y), radius, IM_COL32(120, 255, 160, 220), 28, 2.0f);
+        }
+    }
+
     void renderToolbarUI() {
         auto* drawList = ImGui::GetForegroundDrawList();
         float windowW = static_cast<float>(getWindow().getWidth());
@@ -19218,7 +19526,8 @@ private:
             m_editorUI.renderBuildingTextureWindow();
         }
         if (m_showServerManager) m_serverManager.renderImGui(&m_showServerManager);
-        renderToolbarUI();
+        // renderToolbarUI();  // Hotbar disabled — not used in this game
+        updateUnitSelection();
 
         // SAM2 segmentation progress overlay
         if (m_filesystemBrowser.isSegmenting()) {
@@ -19463,13 +19772,8 @@ private:
         float cy = getWindow().getHeight() * 0.5f;
         float size = 10.0f;
 
-        // Draw crosshair only when not in building cursor mode
-        if (!m_playModeCursorVisible) {
-            float thickness = 2.0f;
-            ImU32 color = IM_COL32(255, 255, 255, 200);
-            drawList->AddLine(ImVec2(cx - size, cy), ImVec2(cx + size, cy), color, thickness);
-            drawList->AddLine(ImVec2(cx, cy - size), ImVec2(cx, cy + size), color, thickness);
-        }
+        // Crosshair removed — RTS-style box selection used instead
+        (void)cx; (void)cy; (void)size;
 
         // Hotbar tooltip (shown to the left of the hotbar)
         if (m_hotbarTooltipTimer > 0.0f && !m_hotbarTooltip.empty() && m_isPlayMode) {
@@ -22762,6 +23066,120 @@ private:
         std::cout << "New level created" << std::endl;
     }
 
+    // ---- Build tools shared between play-mode building and the edit-mode editor ----
+    // The build placement/selection code was written for play mode; these
+    // predicates let the same code run in the edit-mode editor too.
+    // "Building UI is up" — play mode's Tab building, OR the edit-mode Build panel.
+    bool buildActive() const {
+        return (m_isPlayMode && m_showSiloConfig) || (!m_isPlayMode && m_editBuildMode);
+    }
+    // Whether to pick with the real mouse (vs play mode's screen-center crosshair).
+    // Edit mode always has a visible OS cursor.
+    bool buildUseMouse() const { return !m_isPlayMode || m_playModeCursorVisible; }
+    // A placement brush is armed — suppress the editor's own click tools so a
+    // placement click doesn't also sculpt terrain or grab the gizmo.
+    bool buildBrushActive() const {
+        return m_hSlabBrushMode || m_wallBrushMode || m_roomBrushMode || m_framePlacementMode;
+    }
+
+    // Small edit-mode Build panel (entry point for the build tools outside play
+    // mode). Rendered every frame; only shows in edit mode.
+    void renderEditBuildPanel() {
+        if (m_isPlayMode) return;   // play mode uses F5+Tab building
+        ImGui::SetNextWindowSize(ImVec2(230, 0), ImGuiCond_FirstUseEver);
+        if (ImGui::Begin("Build")) {
+            bool prev = m_editBuildMode;
+            ImGui::Checkbox("Build mode", &m_editBuildMode);
+            if (!prev && m_editBuildMode) {
+                // Start in Select/Move so clicking picks pieces via the gizmo.
+                m_hSlabBrushMode = false;
+                m_editorUI.setBrushMode(BrushMode::MoveObject);
+            }
+            if (prev && !m_editBuildMode) m_hSlabBrushMode = false;
+
+            if (m_editBuildMode) {
+                ImGui::Separator();
+                ImGui::TextDisabled("Tool:");
+                // Select/Move — no placement brush armed; uses the editor gizmo.
+                if (ImGui::RadioButton("Select / Move", !buildBrushActive())) {
+                    m_hSlabBrushMode = false;
+                    m_editorUI.setBrushMode(BrushMode::MoveObject);
+                }
+                // H-Slab placement.
+                if (ImGui::RadioButton("H-Slab (floor)", m_hSlabBrushMode)) {
+                    m_hSlabBrushMode = true;
+                }
+                ImGui::Separator();
+                if (m_hSlabBrushMode)
+                    ImGui::TextDisabled("Drag on the ground to place.\nStays armed for more.");
+                else
+                    ImGui::TextDisabled("Click a piece to select.\nPress W, then drag the gizmo\nto move it.");
+            }
+        }
+        ImGui::End();
+    }
+
+    // "New Level" size modal — rendered every frame in either mode so File>New
+    // and Ctrl+N can open it. 1 world unit = 1 foot.
+    void renderNewLevelDialog() {
+        if (m_newLevelPopup) {
+            ImGui::OpenPopup("New Level##NewLevelSize");
+            m_newLevelPopup = false;
+        }
+        if (ImGui::BeginPopupModal("New Level##NewLevelSize", nullptr,
+                                   ImGuiWindowFlags_AlwaysAutoResize)) {
+            ImGui::TextUnformatted("New map size  (1 unit = 1 foot)");
+            ImGui::SliderInt("##nlsize", &m_newLevelSizeFeet, 10, 200, "%d ft");
+            ImGui::InputInt("feet##nlsizein", &m_newLevelSizeFeet);
+            m_newLevelSizeFeet = std::clamp(m_newLevelSizeFeet, 10, 200);
+            ImGui::TextDisabled("%d x %d ft  (%d grid squares per side)",
+                                m_newLevelSizeFeet, m_newLevelSizeFeet, m_newLevelSizeFeet / 5);
+            ImGui::Separator();
+            if (ImGui::Button("Create", ImVec2(120, 0))) {
+                rebuildTerrainAndNewLevel(m_newLevelSizeFeet);
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Cancel", ImVec2(120, 0))) {
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::EndPopup();
+        }
+    }
+
+    // Resize the terrain to a `feet` x `feet` map (1 world unit = 1 foot) and
+    // start a fresh level on it. Keeps the default 64-vertex chunk density and
+    // scales tileSize so a single chunk spans exactly `feet` units.
+    void rebuildTerrainAndNewLevel(int feet) {
+        feet = std::clamp(feet, 10, 200);
+
+        TerrainConfig cfg = m_terrain.getConfig();
+        cfg.tileSize = static_cast<float>(feet) / (cfg.chunkResolution - 1);  // (res-1)*tile = feet
+        cfg.useFixedBounds = true;
+        cfg.minChunk = {0, 0};
+        cfg.maxChunk = {0, 0};   // a single square chunk
+        cfg.wrapWorld = false;
+
+        // Swap the terrain out: free old GPU buffers, reconfigure, re-preload.
+        getContext().waitIdle();
+        m_chunkManager->releaseAllChunkBuffers(m_terrain);
+        m_terrain.reconfigure(cfg);
+        m_chunkManager->preloadAllChunks(m_terrain, nullptr);
+        for (auto& [coord, chunk] : m_terrain.getAllChunks()) {
+            if (chunk->needsUpload()) m_chunkManager->uploadChunk(*chunk);
+        }
+
+        // Reset the rest of the scene, then frame the new map from above.
+        newLevel();
+        float c = feet * 0.5f;
+        m_camera.setPosition({c, feet * 1.2f, c});
+        m_camera.setPitch(-55.0f);   // look down at the small map
+        m_terrain.update(m_camera.getPosition());
+
+        std::cout << "New " << feet << "x" << feet << " ft map created (tileSize "
+                  << cfg.tileSize << ")" << std::endl;
+    }
+
     void newTestLevel() {
         // First clear everything
         newLevel();
@@ -23595,10 +24013,10 @@ private:
 
     void enterPlayMode() {
         m_isPlayMode = true;
-        m_playModeCursorVisible = false;  // Start with cursor hidden (mouse look active)
+        m_playModeCursorVisible = true;   // RTS: cursor always visible
         m_playModeDebug = false;          // Debug visuals off by default
         m_selectedFaces.clear();
-        Input::setMouseCaptured(true);
+        Input::setMouseCaptured(false);   // RTS: never capture the mouse
 
         // Clear all editor selections so yellow outlines don't carry over
         for (auto& obj : m_sceneObjects) {
@@ -23693,23 +24111,22 @@ private:
         int startMinute = static_cast<int>(m_gameTimeMinutes);
         checkInitialGameTimeTriggers(startMinute);
 
-        // Camera movement mode is controlled by double-tap ALT at runtime
-        Input::setMouseCaptured(true);
+        // RTS: cursor stays visible, no mouse capture
+        Input::setMouseCaptured(false);
 
-        // Force walk mode in play mode (no flying)
-        m_camera.setMovementMode(MovementMode::Walk);
-        m_lastMovementMode = MovementMode::Walk;
+        // RTS: free-fly camera, no terrain stick / collision
+        m_camera.setMovementMode(MovementMode::Fly);
+        m_camera.setNoClip(true);
+        m_lastMovementMode = MovementMode::Fly;
 
-        // Snap camera to terrain height if below ground
+        // RTS overhead view: lift camera high above the unit spawn area, looking down
         {
-            glm::vec3 startPos = m_camera.getPosition();
+            glm::vec3 startPos(0.0f, 0.0f, 25.0f);
             float terrainHeight = m_terrain.getHeightAt(startPos.x, startPos.z);
-            float eyeHeight = 1.7f;
-            float minY = terrainHeight + eyeHeight;
-            if (startPos.y < minY) {
-                startPos.y = minY;
-                m_camera.setPosition(startPos);
-            }
+            startPos.y = terrainHeight + 60.0f;
+            m_camera.setPosition(startPos);
+            m_camera.setYaw(-90.0f);     // face -Z (toward unit spawn cells)
+            m_camera.setPitch(-55.0f);   // look down at the battlefield
         }
 
         // Get physics backend from EditorUI (may have been changed by user)
@@ -28003,6 +28420,14 @@ private:
         .wrapWorld = true
     }};
 
+    // "New Level" size dialog state (1 world unit = 1 foot).
+    bool m_newLevelPopup = false;
+    int  m_newLevelSizeFeet = 50;
+
+    // Edit-mode building: the play-mode build tools (hslab/vslab/...) surfaced in
+    // the edit-mode editor too, so there's one editor. Toggled via the Build panel.
+    bool m_editBuildMode = false;
+
     // Filesystem browser (3D file/folder objects)
     eden::FilesystemBrowser m_filesystemBrowser;
 
@@ -28825,6 +29250,12 @@ private:
     };
     std::vector<BattleUnit> m_battleUnits;
     bool m_showTerrainGrid = true;  // toggled with G
+
+    // RTS-style unit selection (LMB click + LMB-drag box)
+    std::set<int> m_selectedUnits;       // indices into m_battleUnits
+    bool m_boxSelectActive = false;
+    glm::vec2 m_boxSelectStart{0.0f};    // pixel space, top-left origin
+    glm::vec2 m_boxSelectEnd{0.0f};
 
     // Jettisoned cargo (floating objects that can be picked up)
     struct JettisonedCargo {

@@ -110,6 +110,19 @@ void ChunkManager::updateModifiedChunks(Terrain& terrain) {
     }
 }
 
+void ChunkManager::releaseAllChunkBuffers(Terrain& terrain) {
+    // The GPU must be idle before calling this. We free each chunk's mesh
+    // buffers directly (rather than deferring) since a resize is a heavy,
+    // user-initiated operation, then invalidate the handle so nothing double-frees.
+    for (auto& [coord, chunk] : terrain.getAllChunks()) {
+        uint32_t h = chunk->getBufferHandle();
+        if (h != UINT32_MAX) {
+            m_bufferManager.destroyMeshBuffers(h);
+            chunk->setBufferHandle(UINT32_MAX);
+        }
+    }
+}
+
 void ChunkManager::processPendingDeletes() {
     for (auto it = m_pendingDeletes.begin(); it != m_pendingDeletes.end(); ) {
         it->framesRemaining--;

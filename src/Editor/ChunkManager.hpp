@@ -30,6 +30,10 @@ public:
     // Process deferred buffer deletions (call each frame)
     void processPendingDeletes();
 
+    // Immediately destroy every current chunk's GPU buffers. Call after the GPU
+    // is idle (waitIdle) and before Terrain::reconfigure() when resizing terrain.
+    void releaseAllChunkBuffers(Terrain& terrain);
+
     // Get loading state
     bool isLoading() const { return m_isLoading; }
     int getChunksLoaded() const { return m_chunksLoaded; }

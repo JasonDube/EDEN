@@ -982,7 +982,15 @@ float Terrain::getHeightAt(float worldX, float worldZ) const {
         return chunk->getHeightAtLocal(localX, localZ);
     }
 
-    // Fall back to noise
+    // Outside the loaded chunks. For a fixed-size world there is simply no terrain
+    // out here, so report "far below" (like a hole) rather than procedural noise —
+    // otherwise raycasts (e.g. build-tool placement) falsely hit invisible noise
+    // terrain just beyond a small map. Only infinite/streaming terrain uses noise.
+    if (m_config.useFixedBounds) {
+        return -100000.0f;
+    }
+
+    // Fall back to noise (infinite/streaming terrain only)
     float height = Noise::fbmNormalized(
         worldX * m_config.noiseScale,
         worldZ * m_config.noiseScale,
