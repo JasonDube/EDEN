@@ -1,10 +1,13 @@
 // EDEN Tabletop — the game's first vertical slice: a 3D table viewed straight
-// down, a battle grid, and a mini figure you can click and drag across the
-// board. Top-down orthographic camera with scroll-zoom and right-drag pan.
+// down, a battle grid, and a party of minis played out in initiative order.
+// Top-down orthographic camera with scroll-zoom and middle-drag pan.
 //
 // This is the "game" target (as opposed to the terrain_editor authoring tool).
-// It renders with the full engine (Camera + ModelRenderer) and will grow to load
-// levels authored in the editor, spawn the party, and host the ImGui rules panels.
+// The turn/round/movement rules live in the UI-free encounter.hpp (unit-tested);
+// this file owns the camera, rendering, and the ImGui encounter panel. On each
+// combatant's turn you drag their mini within its movement range (reachable
+// squares highlighted); "End Turn" advances initiative and rolls the round over.
+// It will grow to load editor-authored levels and host the full SRD rules.
 
 #include "Renderer/VulkanApplicationBase.hpp"
 #include "Renderer/VulkanContext.hpp"
@@ -12,6 +15,8 @@
 #include "Renderer/ModelRenderer.hpp"
 #include "Renderer/ImGuiManager.hpp"
 #include "Editor/PrimitiveMeshBuilder.hpp"
+
+#include "encounter.hpp"
 
 #include <eden/Camera.hpp>
 #include <eden/Input.hpp>
@@ -28,10 +33,12 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
 #include <memory>
+#include <string>
 #include <vector>
 
 using namespace eden;
@@ -39,7 +46,16 @@ using namespace eden;
 namespace {
 constexpr float kBoardHalf = 16.0f;   // table extends [-16,16] in X and Z
 constexpr float kGridStep  = 2.0f;    // one grid cell = 2 world units (~a 5ft square)
-constexpr float kMiniR     = 0.7f;    // mini base radius (also the click radius)
+constexpr float kMiniR     = 0.7f;    // mini base radius
+constexpr int   kGridN     = static_cast<int>((2 * kBoardHalf) / kGridStep);  // cells per axis (16)
+
+// World<->cell mapping. Cells are indexed [0, kGridN); cell centers sit on the
+// grid squares, cell edges on the grid lines.
+inline float cellCenter(int c) { return -kBoardHalf + (c + 0.5f) * kGridStep; }
+inline float cellEdge(int i)   { return -kBoardHalf + i * kGridStep; }
+inline int   worldToCell(float w) {
+    return std::clamp(static_cast<int>(std::floor((w + kBoardHalf) / kGridStep)), 0, kGridN - 1);
+}
 }  // namespace
 
 class TabletopApp : public VulkanApplicationBase {
@@ -65,17 +81,32 @@ protected:
         m_camera.setViewPreset(ViewPreset::Top, glm::vec3(0.0f));
         m_camera.setNoClip(true);
 
-        // Table slab (top surface at y=0) and one draggable mini.
+        // Table slab (top surface at y=0).
         auto table = PrimitiveMeshBuilder::createFoundation(
             {-kBoardHalf, -kBoardHalf}, {kBoardHalf, kBoardHalf}, -0.3f, 0.3f,
             glm::vec4(0.30f, 0.23f, 0.16f, 1.0f));
         m_tableHandle = m_modelRenderer->createModel(table.vertices, table.indices);
 
-        auto mini = PrimitiveMeshBuilder::createCylinder(
-            kMiniR, 1.8f, 28, glm::vec4(0.85f, 0.18f, 0.18f, 1.0f));
-        m_miniHandle = m_modelRenderer->createModel(mini.vertices, mini.indices);
-
         m_grid = buildGrid();
+
+        // A small sample party + a foe, each a colored mini on the grid. Every
+        // combatant gets its own cylinder model so it can carry its own color.
+        auto spawn = [&](const char* name, int init, int spd, int cx, int cy,
+                         glm::vec3 col, bool foe) {
+            rpgtt::Combatant c;
+            c.name = name; c.initiative = init; c.speedFeet = spd;
+            c.cx = cx; c.cy = cy; c.cr = col.r; c.cg = col.g; c.cb = col.b; c.foe = foe;
+            m_enc.add(c);
+            auto mesh = PrimitiveMeshBuilder::createCylinder(kMiniR, 1.8f, 28, glm::vec4(col, 1.0f));
+            m_miniHandles.push_back(m_modelRenderer->createModel(mesh.vertices, mesh.indices));
+        };
+        spawn("Mera the Swift", 20, 35, 5,  8, {0.30f, 0.72f, 0.38f}, false);
+        spawn("Sir Aldric",     17, 30, 6,  8, {0.28f, 0.48f, 0.86f}, false);
+        spawn("Bandit",         14, 30, 10, 8, {0.82f, 0.22f, 0.20f}, true);
+        spawn("Doran Stone",    12, 25, 6,  9, {0.72f, 0.56f, 0.28f}, false);
+
+        m_spawn = m_enc.combatants();   // remember starting layout for Reset
+        m_enc.start();
     }
 
     void onCleanup() override {
@@ -127,10 +158,35 @@ protected:
 
         glm::mat4 viewProj = computeViewProj();
         m_modelRenderer->render(cmd, viewProj, m_tableHandle, glm::mat4(1.0f));
-        m_modelRenderer->renderLines(cmd, viewProj, m_grid, glm::vec3(0.45f, 0.42f, 0.34f));
-        glm::mat4 miniM = glm::translate(glm::mat4(1.0f),
-                                         glm::vec3(m_miniPos.x, 0.0f, m_miniPos.y));
-        m_modelRenderer->render(cmd, viewProj, m_miniHandle, miniM);
+        m_modelRenderer->renderLines(cmd, viewProj, m_grid, glm::vec3(0.42f, 0.40f, 0.34f));
+
+        // Reachable squares for the active mover, drawn as a green sub-grid.
+        if (m_enc.hasActive()) {
+            const auto& a = m_enc.active();
+            auto reach = buildReach(a.cx, a.cy, m_enc.cellsLeft());
+            m_modelRenderer->renderLines(cmd, viewProj, reach, glm::vec3(0.30f, 0.80f, 0.42f));
+        }
+
+        // Minis. The active mini follows the cursor (snapped to a cell) while
+        // being dragged; a ring marks whose turn it is — yellow if the hovered
+        // cell is a legal move, red if it's out of range.
+        for (int i = 0; i < static_cast<int>(m_enc.combatants().size()); ++i) {
+            const auto& c = m_enc.combatants()[i];
+            bool isActive = m_enc.hasActive() && i == m_enc.activeId();
+            int px = c.cx, py = c.cy;
+            if (isActive && m_dragging) { px = m_hoverCx; py = m_hoverCy; }
+            float wx = cellCenter(px), wz = cellCenter(py);
+            glm::mat4 mm = glm::translate(glm::mat4(1.0f), glm::vec3(wx, 0.0f, wz));
+            m_modelRenderer->render(cmd, viewProj, m_miniHandles[i], mm);
+
+            if (isActive) {
+                bool ok = !m_dragging || m_enc.canActiveReach(m_hoverCx, m_hoverCy, kGridN);
+                glm::vec3 ringCol = ok ? glm::vec3(0.96f, 0.86f, 0.22f)
+                                       : glm::vec3(0.90f, 0.26f, 0.20f);
+                auto ring = buildRing(wx, wz, kMiniR * 1.35f, 0.06f);
+                m_modelRenderer->renderLines(cmd, viewProj, ring, ringCol);
+            }
+        }
 
         renderUI();
         ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), cmd);
@@ -212,18 +268,21 @@ private:
             m_panning = false;
         }
 
-        // Pick / drag the mini (left button).
+        // Move the active mini (left button). You may only move the combatant
+        // whose turn it is, and only by grabbing its own cell; on release the
+        // move commits if the target cell is within movement range.
         glm::vec2 board;
-        if (Input::isMouseButtonPressed(Input::MOUSE_LEFT) && !overUI) {
-            if (mouseOnBoard(board) && glm::distance(board, m_miniPos) <= kMiniR * 1.5f)
-                m_dragging = true;
+        bool overBoard = mouseOnBoard(board);
+        if (overBoard) { m_hoverCx = worldToCell(board.x); m_hoverCy = worldToCell(board.y); }
+
+        if (Input::isMouseButtonPressed(Input::MOUSE_LEFT) && !overUI && overBoard &&
+            m_enc.hasActive()) {
+            const auto& a = m_enc.active();
+            if (m_hoverCx == a.cx && m_hoverCy == a.cy) m_dragging = true;
         }
-        if (m_dragging && Input::isMouseButtonDown(Input::MOUSE_LEFT)) {
-            if (mouseOnBoard(board)) {
-                m_miniPos.x = std::clamp(board.x, -kBoardHalf, kBoardHalf);
-                m_miniPos.y = std::clamp(board.y, -kBoardHalf, kBoardHalf);
-            }
-        } else {
+        if (m_dragging && !Input::isMouseButtonDown(Input::MOUSE_LEFT)) {
+            // Released: commit if reachable (moveActiveTo rejects illegal moves).
+            if (overBoard) m_enc.moveActiveTo(m_hoverCx, m_hoverCy, kGridN);
             m_dragging = false;
         }
     }
@@ -238,20 +297,83 @@ private:
         return lines;
     }
 
+    // The reachable region for a mover at (ax,ay) with `cells` of movement is a
+    // square (Chebyshev metric), clamped to the board. Draw it as a sub-grid so
+    // the individual reachable squares read clearly over the base grid.
+    std::vector<glm::vec3> buildReach(int ax, int ay, int cells) const {
+        std::vector<glm::vec3> lines;
+        const float y = 0.03f;
+        int c0 = std::max(0, ax - cells), c1 = std::min(kGridN - 1, ax + cells);
+        int r0 = std::max(0, ay - cells), r1 = std::min(kGridN - 1, ay + cells);
+        for (int c = c0; c <= c1 + 1; ++c) {
+            lines.push_back({cellEdge(c), y, cellEdge(r0)});
+            lines.push_back({cellEdge(c), y, cellEdge(r1 + 1)});
+        }
+        for (int r = r0; r <= r1 + 1; ++r) {
+            lines.push_back({cellEdge(c0), y, cellEdge(r)});
+            lines.push_back({cellEdge(c1 + 1), y, cellEdge(r)});
+        }
+        return lines;
+    }
+
+    std::vector<glm::vec3> buildRing(float cx, float cz, float radius, float y) const {
+        std::vector<glm::vec3> pts;
+        const int seg = 28;
+        const float tau = 6.28318530718f;
+        for (int i = 0; i < seg; ++i) {
+            float a0 = tau * i / seg, a1 = tau * (i + 1) / seg;
+            pts.push_back({cx + radius * std::cos(a0), y, cz + radius * std::sin(a0)});
+            pts.push_back({cx + radius * std::cos(a1), y, cz + radius * std::sin(a1)});
+        }
+        return pts;
+    }
+
     void renderUI() {
         ImGui::NewFrame();
         ImGui::SetNextWindowPos(ImVec2(10, 10), ImGuiCond_FirstUseEver);
-        ImGui::SetNextWindowSize(ImVec2(300, 0), ImGuiCond_FirstUseEver);
-        ImGui::Begin("Tabletop");
-        ImGui::TextUnformatted("EDEN Tabletop - prototype");
+        ImGui::SetNextWindowSize(ImVec2(280, 0), ImGuiCond_FirstUseEver);
+        ImGui::Begin("Encounter");
+
+        ImGui::Text("Round %d", m_enc.round());
         ImGui::Separator();
-        ImGui::BulletText("Left-drag the red mini to move it");
-        ImGui::BulletText("Middle-drag to pan");
-        ImGui::BulletText("Scroll to zoom");
+
+        // Initiative order, current mover marked and highlighted.
+        ImGui::TextUnformatted("Initiative order");
+        const auto& order = m_enc.order();
+        for (int oi = 0; oi < static_cast<int>(order.size()); ++oi) {
+            const auto& c = m_enc.combatants()[order[oi]];
+            bool current = (oi == m_enc.turnIndex());
+            ImGui::ColorButton((std::string("##sw") + std::to_string(oi)).c_str(),
+                               ImVec4(c.cr, c.cg, c.cb, 1.0f),
+                               ImGuiColorEditFlags_NoTooltip | ImGuiColorEditFlags_NoInputs,
+                               ImVec2(12, 12));
+            ImGui::SameLine();
+            if (current)
+                ImGui::TextColored(ImVec4(1.0f, 0.92f, 0.4f, 1.0f),
+                                   "> %s  (init %d)", c.name.c_str(), c.initiative);
+            else
+                ImGui::Text("   %s  (init %d)", c.name.c_str(), c.initiative);
+        }
+
+        ImGui::Separator();
+        if (m_enc.hasActive()) {
+            const auto& a = m_enc.active();
+            ImGui::Text("Turn: %s%s", a.name.c_str(), a.foe ? "  (foe)" : "");
+            ImGui::Text("Movement: %d ft  (%d squares)", a.moveLeftFeet, m_enc.cellsLeft());
+        }
+
         ImGui::Spacing();
-        ImGui::Text("Mini:  (%.1f, %.1f)", m_miniPos.x, m_miniPos.y);
-        ImGui::Text("Zoom:  %.1f", m_orthoSize);
-        if (ImGui::Button("Recenter mini")) m_miniPos = glm::vec2(0.0f);
+        if (ImGui::Button("End Turn")) m_enc.endTurn();
+        ImGui::SameLine();
+        if (ImGui::Button("Reset")) {
+            m_enc.combatants() = m_spawn;
+            m_enc.start();
+            m_dragging = false;
+        }
+
+        ImGui::Separator();
+        ImGui::TextDisabled("Drag the highlighted mini to move");
+        ImGui::TextDisabled("Middle-drag pan  \xc2\xb7  Scroll zoom");
         ImGui::End();
         ImGui::Render();
     }
@@ -323,13 +445,16 @@ private:
     Camera m_camera;
 
     uint32_t m_tableHandle = 0;
-    uint32_t m_miniHandle  = 0;
+    std::vector<uint32_t> m_miniHandles;   // one per combatant, indexed by combatant id
     std::vector<glm::vec3> m_grid;
 
-    glm::vec2 m_miniPos{0.0f, 0.0f};   // mini position on the board (world XZ)
-    bool      m_dragging = false;
+    rpgtt::Encounter m_enc;                // turn/round/movement state (rules in encounter.hpp)
+    std::vector<rpgtt::Combatant> m_spawn; // starting layout, for Reset
+    int  m_hoverCx = 0, m_hoverCy = 0;     // grid cell under the cursor this frame
+
+    bool      m_dragging = false;          // dragging the active mini
     bool      m_panning  = false;
-    glm::vec2 m_panAnchor{0.0f, 0.0f}; // board point grabbed at pan start (world XZ)
+    glm::vec2 m_panAnchor{0.0f, 0.0f};     // board point grabbed at pan start (world XZ)
     float     m_orthoSize = 18.0f;
 
     // dev screenshot
