@@ -186,11 +186,17 @@ public:
     // doubles the dice, not the flat modifier). A natural 20 always hits and
     // crits; a natural 1 always misses.
     AttackOutcome attack(int targetId, int d20, int damageDiceTotal) {
+        if (!canAttack(targetId)) return {};   // valid == false
+        active().actionUsed = true;
+        return resolveAttack(activeId(), targetId, d20, damageDiceTotal);
+    }
+
+    // Core hit/damage math shared by normal attacks and opportunity attacks.
+    // No action-economy side effects — the caller decides what resource it costs.
+    AttackOutcome resolveAttack(int attackerId, int targetId, int d20, int damageDiceTotal) {
         AttackOutcome o;
-        if (!canAttack(targetId)) return o;   // o.valid == false
-        Combatant& a = active();
+        Combatant& a = m_c[attackerId];
         Combatant& t = m_c[targetId];
-        a.actionUsed = true;
         o.valid = true;
         o.attacker = a.name;
         o.target = t.name;
@@ -204,6 +210,47 @@ public:
             o.dropped = t.isDown();
         }
         return o;
+    }
+
+    // ----- opportunity attacks (reactions) -----
+
+    // Could `attackerId` make an opportunity attack against `targetId` right now?
+    // Needs an unspent reaction, a living opposite-team target within reach.
+    bool canOpportunityAttack(int attackerId, int targetId) const {
+        if (attackerId < 0 || attackerId >= static_cast<int>(m_c.size())) return false;
+        if (targetId  < 0 || targetId  >= static_cast<int>(m_c.size())) return false;
+        const Combatant& a = m_c[attackerId];
+        const Combatant& t = m_c[targetId];
+        if (a.isDown() || t.isDown() || a.reactionUsed || a.foe == t.foe) return false;
+        return cellDistance(a.cx, a.cy, t.cx, t.cy) <= a.reachCells;
+    }
+
+    // Resolve an opportunity attack, spending the attacker's reaction.
+    AttackOutcome opportunityAttack(int attackerId, int targetId, int d20, int dice) {
+        if (!canOpportunityAttack(attackerId, targetId)) return {};
+        m_c[attackerId].reactionUsed = true;
+        return resolveAttack(attackerId, targetId, d20, dice);
+    }
+
+    // Which enemies get an opportunity attack when `moverId` moves from
+    // (fromX,fromY) to (toX,toY)? A foe provokes when the mover leaves its reach
+    // (was in reach, now isn't) — unless the mover is Disengaging. Only foes with
+    // a reaction available and line to strike are returned. (We check the move's
+    // endpoints, not every 5 ft, since moves here are a direct reposition.)
+    std::vector<int> provokers(int moverId, int fromX, int fromY, int toX, int toY) const {
+        std::vector<int> out;
+        if (moverId < 0 || moverId >= static_cast<int>(m_c.size())) return out;
+        const Combatant& m = m_c[moverId];
+        if (m.disengaging) return out;
+        for (int i = 0; i < static_cast<int>(m_c.size()); ++i) {
+            if (i == moverId) continue;
+            const Combatant& e = m_c[i];
+            if (e.isDown() || e.reactionUsed || e.foe == m.foe) continue;
+            bool wasInReach = cellDistance(e.cx, e.cy, fromX, fromY) <= e.reachCells;
+            bool nowInReach = cellDistance(e.cx, e.cy, toX, toY) <= e.reachCells;
+            if (wasInReach && !nowInReach) out.push_back(i);
+        }
+        return out;
     }
 
     // Flanking (house rule — the DMG optional grid variant, not core SRD):

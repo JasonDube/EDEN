@@ -183,6 +183,37 @@ int main() {
     g.combatants()[g.activeId()].cx = 9;         // adjacent to hero at (10,0)
     assert(g.aiDestination(ghId, 16).x == 9);
 
+    // ----- opportunity attacks -----
+    Encounter oa;
+    Combatant om; om.name = "M"; om.foe = false; om.cx = 5; om.cy = 5;
+    om.initiative = 20; om.speedFeet = 30; om.maxHp = om.hp = 20; om.ac = 10;
+    Combatant oe; oe.name = "E"; oe.foe = true; oe.cx = 6; oe.cy = 5;
+    oe.initiative = 5; oe.reachCells = 1; oe.attackBonus = 10; oe.dmgBonus = 3;
+    oe.maxHp = oe.hp = 20;
+    oa.add(om); oa.add(oe);
+    oa.start();
+    int mId = 0, eId = 1;
+
+    // Mover leaves the adjacent foe's reach -> that foe provokes.
+    auto p = oa.provokers(mId, 5, 5, 5, 3);
+    assert(p.size() == 1 && p[0] == eId);
+    // Moving but staying adjacent -> no provoke.
+    assert(oa.provokers(mId, 5, 5, 6, 4).empty());
+    // Disengage suppresses opportunity attacks entirely.
+    oa.combatants()[mId].disengaging = true;
+    assert(oa.provokers(mId, 5, 5, 5, 3).empty());
+    oa.combatants()[mId].disengaging = false;
+
+    // Resolve the opportunity attack: d20 15 + 10 vs AC 10 hits; 4 dice + 3 = 7.
+    assert(oa.canOpportunityAttack(eId, mId));
+    AttackOutcome oo = oa.opportunityAttack(eId, mId, 15, 4);
+    assert(oo.valid && oo.hit && oo.damage == 7);
+    assert(oa.combatants()[mId].hp == 13);
+    assert(oa.combatants()[eId].reactionUsed);
+    // Reaction spent: no second opportunity attack until the foe's turn refreshes.
+    assert(!oa.canOpportunityAttack(eId, mId));
+    assert(oa.provokers(mId, 5, 5, 5, 3).empty());
+
     std::puts("encounter_test: all checks passed");
     return 0;
 }

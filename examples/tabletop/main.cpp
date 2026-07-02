@@ -311,8 +311,9 @@ private:
             }
         }
         if (m_dragging && !Input::isMouseButtonDown(Input::MOUSE_LEFT)) {
-            // Released: commit if reachable (moveActiveTo rejects illegal moves).
-            if (overBoard) m_enc.moveActiveTo(m_hoverCx, m_hoverCy, kGridN);
+            // Released: commit if reachable (commitMove rejects illegal moves and
+            // resolves any opportunity attacks provoked by leaving melee).
+            if (overBoard) commitMove(m_hoverCx, m_hoverCy);
             m_dragging = false;
         }
     }
@@ -408,6 +409,29 @@ private:
         if (m_log.size() > 5) m_log.erase(m_log.begin());
     }
 
+    // Move the active combatant to (toX,toY), first resolving any opportunity
+    // attacks provoked by leaving a foe's reach. Used by both the player (drag
+    // release) and the AI. If an OA drops the mover, it falls where it stood.
+    void commitMove(int toX, int toY) {
+        if (!m_enc.hasActive() || !m_enc.canActiveReach(toX, toY, kGridN)) return;
+        int me = m_enc.activeId();
+        int fromX = m_enc.active().cx, fromY = m_enc.active().cy;
+        if (toX == fromX && toY == fromY) return;
+        for (int eid : m_enc.provokers(me, fromX, fromY, toX, toY)) {
+            const rpgtt::Combatant& atk = m_enc.combatants()[eid];
+            const rpgtt::Combatant& mov = m_enc.combatants()[me];
+            int d20 = mov.dodging ? std::min(rollD20(), rollD20()) : rollD20();
+            int sets = (d20 == 20) ? 2 : 1;
+            int dice = 0;
+            for (int s = 0; s < sets; ++s)
+                for (int i = 0; i < atk.dmgDice; ++i) dice += rollDie(atk.dmgSides);
+            rpgtt::AttackOutcome o = m_enc.opportunityAttack(eid, me, d20, dice);
+            if (o.valid) logAttack(o, m_enc.combatants()[me], "  (opportunity)");
+            if (m_enc.combatants()[me].isDown()) break;   // dropped mid-move
+        }
+        if (!m_enc.active().isDown()) m_enc.moveActiveTo(toX, toY, kGridN);
+    }
+
     // ----- enemy AI driver -----
     // A foe's turn plays out over a few beats so it's watchable: move, then
     // strike, then end the turn. Heroes are left entirely to the player.
@@ -436,13 +460,14 @@ private:
         int tid = m_enc.aiTarget();
         if (tid < 0) return;
         rpgtt::GridCell d = m_enc.aiDestination(tid, kGridN);
-        m_enc.moveActiveTo(d.x, d.y, kGridN);
+        commitMove(d.x, d.y);                       // may provoke from other heroes
+        if (m_enc.active().isDown()) return;        // cut down on the approach
         const rpgtt::Combatant& a = m_enc.active();
         const rpgtt::Combatant& t = m_enc.combatants()[tid];
         if (rpgtt::cellDistance(a.cx, a.cy, t.cx, t.cy) > a.reachCells && !a.actionUsed) {
             if (m_enc.dash()) {
                 rpgtt::GridCell d2 = m_enc.aiDestination(tid, kGridN);
-                m_enc.moveActiveTo(d2.x, d2.y, kGridN);
+                commitMove(d2.x, d2.y);
             }
         }
     }
@@ -540,6 +565,7 @@ private:
         ImGui::TextDisabled("Drag the highlighted mini to move");
         ImGui::TextDisabled("Click an adjacent foe to attack");
         ImGui::TextDisabled("Flank (ally opposite) = advantage");
+        ImGui::TextDisabled("Leaving melee provokes; Disengage avoids");
         ImGui::TextDisabled("Middle-drag pan  \xc2\xb7  Scroll zoom");
         ImGui::End();
         ImGui::Render();
