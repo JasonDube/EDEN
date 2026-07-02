@@ -630,6 +630,7 @@ private:
         stopTitleMusic();
         m_rollsUsed = 1;        // the initial roll counts as the first of three
         m_halfElfBonus.fill(false);
+        m_skillPick.fill(false);
         rollAbilityScores();
     }
 
@@ -700,6 +701,11 @@ private:
         m_pc.maxHP = m_pc.curHP = m_pc.hitDieSize + m_pc.mod(rpgc::CON);   // level-1 max hit die + CON
         m_pc.speed = 30;
         m_pc.armorClass = 10 + m_pc.mod(rpgc::DEX);
+        // Class proficiencies: fixed saving throws + chosen skills.
+        auto cp = rpgc::classProficiencies(m_pc.className);
+        m_pc.saveProf[cp.save1] = true;
+        m_pc.saveProf[cp.save2] = true;
+        for (int i = 0; i < 18; ++i) m_pc.skillProf[i] = m_skillPick[i];
         int pt = playerTokenIndex();
         if (pt >= 0) m_tokens[pt].name = m_pc.name;
         std::cerr << "created: " << m_pc.name << " the " << m_pc.race << " " << m_pc.className
@@ -724,7 +730,9 @@ private:
             }
         };
         combo("Race", m_raceIdx, rpgc::raceOptions());
+        int prevClass = m_classIdx;
         combo("Class", m_classIdx, rpgc::classOptions());
+        if (m_classIdx != prevClass) m_skillPick.fill(false);   // class list changed
 
         // Half-Elf uniquely gets +1 to two abilities of the player's choice.
         if (isHalfElf()) {
@@ -809,16 +817,37 @@ private:
             ImGui::PopID();
         }
 
+        // Skills: choose the class's allotment; the class saves are automatic.
+        ImGui::Separator();
+        auto cp = rpgc::classProficiencies(rpgc::classOptions()[m_classIdx]);
+        int skPicks = 0; for (int s : cp.skillList) if (m_skillPick[s]) ++skPicks;
+        ImGui::Text("Skills - choose %d for your %s  (%d/%d)", cp.skillCount,
+                    rpgc::classOptions()[m_classIdx], skPicks, cp.skillCount);
+        for (int k = 0; k < static_cast<int>(cp.skillList.size()); ++k) {
+            if (k % 2 == 1) ImGui::SameLine(280.0f);
+            int sk = cp.skillList[k];
+            bool checked = m_skillPick[sk];
+            ImGui::BeginDisabled(!checked && skPicks >= cp.skillCount);
+            std::string label = std::string(rpgc::skills()[sk].name) + " (" +
+                                rpgc::abilityAbbr(rpgc::skills()[sk].ability) + ")";
+            if (ImGui::Checkbox(label.c_str(), &checked)) m_skillPick[sk] = checked;
+            ImGui::EndDisabled();
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", rpgc::skillDesc(sk));
+        }
+        ImGui::TextDisabled("Saving throws (from class): %s & %s",
+                            rpgc::abilityName(cp.save1), rpgc::abilityName(cp.save2));
+
         ImGui::Separator();
         bool halfElfOk = !isHalfElf() || halfElfPickCount() == 2;
-        bool ready = m_nameBuf[0] != '\0' && allAssigned() && halfElfOk;
+        bool ready = m_nameBuf[0] != '\0' && allAssigned() && halfElfOk && skPicks == cp.skillCount;
         ImGui::BeginDisabled(!ready);
         if (ImGui::Button("Begin Adventure", ImVec2(200, 0))) finishCharCreate();
         ImGui::EndDisabled();
         if (!ready) {
             const char* why = m_nameBuf[0] == '\0' ? "enter a name"
                             : !allAssigned()       ? "assign all six abilities"
-                                                   : "choose Half-Elf's two +1 abilities";
+                            : !halfElfOk           ? "choose Half-Elf's two +1 abilities"
+                                                   : "choose your class skills";
             ImGui::SameLine();
             ImGui::TextDisabled("%s", why);
         }
@@ -1461,6 +1490,7 @@ private:
     int   m_assign[6] = {0, 1, 2, 3, 4, 5};// ability a gets score m_rolled[m_assign[a]]
     int   m_rollsUsed = 0;                 // 1 initial + up to 2 re-rolls = 3 total
     std::array<bool, rpgc::ABILITY_COUNT> m_halfElfBonus{};  // Half-Elf: +1 to two of your choice
+    std::array<bool, 18> m_skillPick{};    // chosen class skill proficiencies
 
     // Level preview (loaded from a terrain_editor .edenbin via TABLETOP_LEVEL)
     std::string m_levelPath, m_levelName;

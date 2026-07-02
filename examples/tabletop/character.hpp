@@ -41,6 +41,31 @@ inline const std::array<SkillDef, 18>& skills() {
 }
 inline int perceptionSkillIndex() { return 11; }  // "Perception" above
 
+// Plain-language help for each skill (indices match skills() above).
+inline const char* skillDesc(int i) {
+    static const char* d[18] = {
+        "Acrobatics (DEX) - keep your balance, tumble, escape a grapple.",
+        "Animal Handling (WIS) - calm or control animals, sense their intent, ride.",
+        "Arcana (INT) - recall lore about spells, magic items, planes, symbols.",
+        "Athletics (STR) - climb, jump, swim, and grapple; raw physical feats.",
+        "Deception (CHA) - lie convincingly, mislead, hide your true intent.",
+        "History (INT) - recall past events, people, kingdoms, wars, legends.",
+        "Insight (WIS) - read a creature's true intentions and detect lies.",
+        "Intimidation (CHA) - sway others with threats and force of presence.",
+        "Investigation (INT) - search for clues, deduce, find hidden things.",
+        "Medicine (WIS) - stabilize the dying, diagnose illness, treat wounds.",
+        "Nature (INT) - recall lore about terrain, plants, animals, weather.",
+        "Perception (WIS) - notice things by sight, sound, or smell. Very common.",
+        "Performance (CHA) - entertain a crowd with music, dance, or acting.",
+        "Persuasion (CHA) - win people over with tact, warmth, and good faith.",
+        "Religion (INT) - recall lore about deities, rites, and the divine.",
+        "Sleight of Hand (DEX) - pickpocket, palm objects, manual trickery.",
+        "Stealth (DEX) - hide and move unseen and unheard.",
+        "Survival (WIS) - track, forage, navigate the wild, predict weather.",
+    };
+    return (i >= 0 && i < 18) ? d[i] : "";
+}
+
 // ── identity pick-lists ──────────────────────────────────────────────────────
 // Options for the character sheet's dropdowns. The underlying text fields stay
 // editable, so homebrew entries are still allowed — these just prevent typos on
@@ -134,6 +159,29 @@ inline std::array<int, ABILITY_COUNT> classAbilityPriority(const std::string& cl
     if (cls == "Warlock")   return {{CHA, CON, DEX, WIS, INT, STR}};
     if (cls == "Wizard")    return {{INT, CON, DEX, WIS, CHA, STR}};
     return {{STR, CON, DEX, WIS, CHA, INT}};
+}
+
+// Class-granted proficiencies (SRD): how many skills you choose, the skill list
+// to choose from (indices into skills()), and the two fixed saving throws.
+struct ClassProfs {
+    int skillCount = 2;
+    std::vector<int> skillList;
+    int save1 = STR, save2 = CON;
+};
+inline ClassProfs classProficiencies(const std::string& cls) {
+    if (cls == "Barbarian") return {2, {1, 3, 7, 10, 11, 17}, STR, CON};
+    if (cls == "Bard")      return {3, {0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17}, DEX, CHA};
+    if (cls == "Cleric")    return {2, {5, 6, 9, 13, 14}, WIS, CHA};
+    if (cls == "Druid")     return {2, {2, 1, 6, 9, 10, 11, 14, 17}, INT, WIS};
+    if (cls == "Fighter")   return {2, {0, 1, 3, 5, 6, 7, 11, 17}, STR, CON};
+    if (cls == "Monk")      return {2, {0, 3, 5, 6, 14, 16}, STR, DEX};
+    if (cls == "Paladin")   return {2, {3, 6, 7, 9, 13, 14}, WIS, CHA};
+    if (cls == "Ranger")    return {3, {1, 3, 6, 8, 10, 11, 16, 17}, STR, DEX};
+    if (cls == "Rogue")     return {4, {0, 3, 4, 6, 7, 8, 11, 12, 13, 15, 16}, DEX, INT};
+    if (cls == "Sorcerer")  return {2, {2, 4, 6, 7, 13, 14}, CON, CHA};
+    if (cls == "Warlock")   return {2, {2, 4, 5, 7, 8, 10, 14}, WIS, CHA};
+    if (cls == "Wizard")    return {2, {2, 5, 6, 8, 9, 14}, INT, WIS};
+    return {2, {}, STR, CON};
 }
 
 // ── starting wealth by class ─────────────────────────────────────────────────
