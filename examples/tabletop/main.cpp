@@ -644,8 +644,13 @@ private:
             ImGui::SetWindowFontScale(1.0f);
         };
         const ImVec4 dim(0.62f, 0.62f, 0.66f, 1.0f);
+        // Auto-fit the title to ~90% of the window width (capped) so long titles
+        // don't overflow.
+        const char* title = "CHRONICLES OF THE IRON TEMPLE";
+        ImGui::SetWindowFontScale(1.0f);
+        float titleScale = std::min(5.0f, (disp.x * 0.9f) / std::max(ImGui::CalcTextSize(title).x, 1.0f));
         ImGui::SetCursorPosY(disp.y * 0.22f);
-        center("SAVAGE LANDS", 5.0f, ImVec4(0.86f, 0.74f, 0.42f, 1.0f));
+        center(title, titleScale, ImVec4(0.86f, 0.74f, 0.42f, 1.0f));
         ImGui::Dummy(ImVec2(0.0f, 14.0f));
         center("a CRPG by Jason Mark Dub\xc3\xa9", 1.8f, ImVec4(0.85f, 0.85f, 0.85f, 1.0f));
         ImGui::Dummy(ImVec2(0.0f, 6.0f));
