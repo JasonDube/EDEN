@@ -160,6 +160,8 @@ protected:
 
         handleCameraAndPieces();
         stepAI(dt);
+        if (m_hasLevel) updateFacing();
+        if (m_hintTimer > 0.0f) m_hintTimer -= dt;
 
         // Fire the dev screenshot once the countdown elapses.
         if (m_shotCountdown >= 0 && --m_shotCountdown < 0) {
@@ -213,6 +215,18 @@ protected:
                 const Token& t = m_tokens[m_dragToken];
                 auto ring = buildRing(t.cx * 5.0f + 2.5f, t.cy * 5.0f + 2.5f, 2.4f, 0.4f);
                 m_modelRenderer->renderLines(cmd, viewProj, ring, glm::vec3(0.96f, 0.86f, 0.22f));
+            }
+            // Interaction affordance: ring under NPCs/foes adjacent to your piece
+            // (green = talk, red = hostile), so you can see who you can act on.
+            if (int p = playerTokenIndex(); p >= 0) {
+                for (int i = 0; i < static_cast<int>(m_tokens.size()); ++i) {
+                    const Token& t = m_tokens[i];
+                    if (t.attitude == Attitude::Player || !tokensAdjacent(m_tokens[p], t)) continue;
+                    glm::vec3 col = (t.attitude == Attitude::Hostile)
+                                        ? glm::vec3(0.92f, 0.25f, 0.20f) : glm::vec3(0.30f, 0.85f, 0.42f);
+                    auto ring = buildRing(t.cx * 5.0f + 2.5f, t.cy * 5.0f + 2.5f, 2.4f, 0.42f);
+                    m_modelRenderer->renderLines(cmd, viewProj, ring, col);
+                }
             }
             renderUI();
             ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), cmd);
@@ -542,6 +556,11 @@ private:
         applyOrbitCamera();
     }
 
+    // Disposition — decides what "click an adjacent token" does. Hostile is
+    // attacked; everyone else is talked to. Peaceful NPCs can never be attacked
+    // by a normal click (that path just doesn't exist for them).
+    enum class Attitude { Player, Ally, Neutral, Hostile };
+
     // A character token: GLB meshes + the transform data to stand it upright,
     // feet on the floor, centered on a 5-ft grid cell.
     struct Token {
@@ -551,16 +570,27 @@ private:
         float minY = 0.0f;             // local bounds min.y (to set feet on floor)
         glm::vec2 centerXZ{0.0f};      // local XZ center (to center on the cell)
         int cx = 0, cy = 0;            // grid cell
+        Attitude attitude = Attitude::Neutral;
+        std::string dialog;           // greeting line (Neutral/Ally NPCs)
+        float faceYaw = 0.0f;         // current facing (radians, world)
+        float defaultYaw = 0.0f;      // facing when not engaged
     };
+
+    // Offset for the GLB's local "front" so faceYaw points that front at a
+    // target. 0 = model faces +Z; adjust by pi / +-pi/2 if it faces away/sideways.
+    static constexpr float kModelFrontYaw = 0.0f;
 
     // Load the character GLBs as movable tokens: one model per mesh (textured),
     // uniformly scaled to a target height in feet with feet on the floor and the
     // XZ centered on a grid cell.
     void loadCharacters() {
-        struct Spawn { const char* path; const char* name; int cx, cy; float heightFt; };
+        struct Spawn { const char* path; const char* name; int cx, cy; float heightFt;
+                       Attitude attitude; const char* dialog; };
         const Spawn spawns[] = {
-            {"assets/characters/percy_the_knight.glb",   "Percy", 2, 2, 6.0f},
-            {"assets/characters/orlen_the_merchant.glb", "Orlen", 7, 7, 5.8f},
+            {"assets/characters/percy_the_knight.glb",   "Percy", 2, 2, 6.0f,
+             Attitude::Player, ""},
+            {"assets/characters/orlen_the_merchant.glb", "Orlen", 7, 7, 5.8f,
+             Attitude::Neutral, "Welcome to Orlens Wares, traveler. Have a look at my goods."},
         };
         for (const auto& sp : spawns) {
             eden::LoadResult r = eden::GLBLoader::load(sp.path);
@@ -572,6 +602,7 @@ private:
             for (const auto& m : r.meshes) { mn = glm::min(mn, m.bounds.min); mx = glm::max(mx, m.bounds.max); }
             Token t;
             t.name = sp.name; t.cx = sp.cx; t.cy = sp.cy;
+            t.attitude = sp.attitude; t.dialog = sp.dialog;
             t.scale = sp.heightFt / std::max(mx.y - mn.y, 0.001f);
             t.minY = mn.y;
             t.centerXZ = { (mn.x + mx.x) * 0.5f, (mn.z + mx.z) * 0.5f };
@@ -586,13 +617,43 @@ private:
         }
     }
 
-    // World transform placing a token upright on its grid cell (5-ft cells).
+    // World transform placing a token upright on its grid cell (5-ft cells),
+    // rotated to its facing.
     glm::mat4 tokenMatrix(const Token& t) const {
         float wx = t.cx * 5.0f + 2.5f, wz = t.cy * 5.0f + 2.5f;
         glm::mat4 M = glm::translate(glm::mat4(1.0f), glm::vec3(wx, 0.12f, wz));
+        M = glm::rotate(M, t.faceYaw + kModelFrontYaw, glm::vec3(0.0f, 1.0f, 0.0f));
         M = glm::scale(M, glm::vec3(t.scale));
         M = glm::translate(M, glm::vec3(-t.centerXZ.x, -t.minY, -t.centerXZ.y));
         return M;
+    }
+
+    // Yaw (radians) that points a +Z-forward model from one cell toward another.
+    static float yawToFace(int fromCx, int fromCy, int toCx, int toCy) {
+        float dx = static_cast<float>(toCx - fromCx), dz = static_cast<float>(toCy - fromCy);
+        if (dx == 0.0f && dz == 0.0f) return 0.0f;
+        return std::atan2(dx, dz);
+    }
+
+    // When your piece stands next to an NPC, both turn to face each other; when
+    // not engaged, tokens return to their default facing.
+    void updateFacing() {
+        int p = playerTokenIndex();
+        bool playerEngaged = false;
+        for (int i = 0; i < static_cast<int>(m_tokens.size()); ++i) {
+            if (i == p) continue;
+            Token& t = m_tokens[i];
+            if (p >= 0 && tokensAdjacent(m_tokens[p], t)) {
+                t.faceYaw = yawToFace(t.cx, t.cy, m_tokens[p].cx, m_tokens[p].cy);
+                if (!playerEngaged) {
+                    m_tokens[p].faceYaw = yawToFace(m_tokens[p].cx, m_tokens[p].cy, t.cx, t.cy);
+                    playerEngaged = true;
+                }
+            } else {
+                t.faceYaw = t.defaultYaw;
+            }
+        }
+        if (p >= 0 && !playerEngaged) m_tokens[p].faceYaw = m_tokens[p].defaultYaw;
     }
 
     // Snap a world coordinate to a level grid cell index, clamped to the floor.
@@ -619,10 +680,26 @@ private:
         return best;
     }
 
-    // Left-drag a character token across the grid (right/middle stay camera).
+    int playerTokenIndex() const {
+        for (int i = 0; i < static_cast<int>(m_tokens.size()); ++i)
+            if (m_tokens[i].attitude == Attitude::Player) return i;
+        return -1;
+    }
+    static bool tokensAdjacent(const Token& a, const Token& b) {
+        return std::max(std::abs(a.cx - b.cx), std::abs(a.cy - b.cy)) == 1;
+    }
+
+    // Left-click a token: drag your own piece to move it, or interact with an NPC
+    // (right/middle stay camera). Interaction requires being adjacent.
     void handleTokenDrag(bool overUI) {
-        if (Input::isMouseButtonPressed(Input::MOUSE_LEFT) && !overUI)
-            m_dragToken = pickToken();
+        if (m_dialogActive) return;   // dialog owns input while it's open
+        if (Input::isMouseButtonPressed(Input::MOUSE_LEFT) && !overUI) {
+            int picked = pickToken();
+            if (picked >= 0) {
+                if (m_tokens[picked].attitude == Attitude::Player) m_dragToken = picked;
+                else                                               interactWith(picked);
+            }
+        }
         if (m_dragToken >= 0 && Input::isMouseButtonDown(Input::MOUSE_LEFT)) {
             glm::vec2 floorPt;
             if (mouseOnBoard(floorPt)) {
@@ -632,6 +709,25 @@ private:
             }
         } else {
             m_dragToken = -1;
+        }
+    }
+
+    // Move-adjacent-then-click interaction: Hostile -> attack (combat comes
+    // later), everyone else -> talk. Peaceful NPCs are never attacked.
+    void interactWith(int tokenIdx) {
+        int p = playerTokenIndex();
+        if (p < 0) return;
+        const Token& target = m_tokens[tokenIdx];
+        if (!tokensAdjacent(m_tokens[p], target)) {
+            m_hint = "Move next to " + target.name + " to interact.";
+            m_hintTimer = 2.5f;
+        } else if (target.attitude == Attitude::Hostile) {
+            m_hint = "Combat in this scene isn't wired up yet.";
+            m_hintTimer = 2.5f;
+        } else {
+            m_dialogActive = true;
+            m_dialogName = target.name;
+            m_dialogText = target.dialog.empty() ? "..." : target.dialog;
         }
     }
 
@@ -844,10 +940,40 @@ private:
                         m_levelMax.x - m_levelMin.x, m_levelMax.y - m_levelMin.y,
                         (m_levelMax.x - m_levelMin.x) / 5.0f, (m_levelMax.y - m_levelMin.y) / 5.0f);
             ImGui::Separator();
-            ImGui::TextDisabled("Left-drag a character to move it");
+            ImGui::TextDisabled("Left-drag your piece to move it");
+            ImGui::TextDisabled("Move next to an NPC, click to talk");
             ImGui::TextDisabled("Right-drag orbit  \xc2\xb7  Middle-drag pan");
             ImGui::TextDisabled("Scroll zoom  \xc2\xb7  T = top-down tactical");
             ImGui::End();
+
+            // Transient hint (e.g. "move closer").
+            if (m_hintTimer > 0.0f && !m_hint.empty()) {
+                ImVec2 disp = ImGui::GetIO().DisplaySize;
+                ImGui::SetNextWindowPos(ImVec2(disp.x * 0.5f, 44.0f), ImGuiCond_Always, ImVec2(0.5f, 0.0f));
+                ImGui::Begin("##hint", nullptr,
+                             ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+                             ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoMove |
+                             ImGuiWindowFlags_NoInputs);
+                ImGui::TextUnformatted(m_hint.c_str());
+                ImGui::End();
+            }
+
+            // Dialog box.
+            if (m_dialogActive) {
+                ImVec2 disp = ImGui::GetIO().DisplaySize;
+                ImGui::SetNextWindowPos(ImVec2(disp.x * 0.5f, disp.y * 0.74f), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+                ImGui::SetNextWindowSize(ImVec2(500, 0), ImGuiCond_Always);
+                ImGui::Begin(m_dialogName.c_str(), nullptr,
+                             ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoMove);
+                ImGui::TextWrapped("%s", m_dialogText.c_str());
+                ImGui::Spacing();
+                ImGui::Separator();
+                if (ImGui::Button("Close", ImVec2(120, 0))) m_dialogActive = false;
+                ImGui::SameLine();
+                ImGui::TextDisabled("(trade & more coming)");
+                ImGui::End();
+            }
+
             ImGui::Render();
             return;
         }
@@ -1032,6 +1158,12 @@ private:
     // Character tokens (GLB), placed on the level's 5-ft grid.
     std::vector<Token> m_tokens;
     int m_dragToken = -1;                  // token being dragged (level mode), or -1
+
+    // Dialog + transient on-screen hint (interaction feedback).
+    bool m_dialogActive = false;
+    std::string m_dialogName, m_dialogText;
+    std::string m_hint;
+    float m_hintTimer = 0.0f;
 
     // Free orbit camera (level mode): perspective free-look + ortho top-down (T).
     glm::vec3 m_camTarget{0.0f};
