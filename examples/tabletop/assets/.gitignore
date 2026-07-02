@@ -3,3 +3,7 @@
 *.glb
 *.gltf
 *.bin
+*.mp3
+*.ogg
+*.wav
+*.flac

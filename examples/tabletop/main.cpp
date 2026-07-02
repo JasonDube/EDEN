@@ -18,6 +18,8 @@
 #include "Editor/BinaryLevelReader.hpp"
 #include "Editor/GLBLoader.hpp"
 
+#include <eden/Audio.hpp>
+
 #include "encounter.hpp"
 
 #include <eden/Camera.hpp>
@@ -105,6 +107,10 @@ protected:
             m_grid = buildLevelGrid();
             frameCameraOnLevel();
             loadCharacters();
+            // Open on the Savage Lands title screen with looping theme music.
+            m_screen = Screen::Title;
+            eden::Audio::getInstance().init();
+            startTitleMusic();
             return;
         }
 
@@ -142,6 +148,8 @@ protected:
     }
 
     void onCleanup() override {
+        stopTitleMusic();
+        eden::Audio::getInstance().shutdown();
         vkDeviceWaitIdle(getContext().getDevice());
         m_modelRenderer.reset();
         m_imgui.cleanup();
@@ -160,7 +168,8 @@ protected:
 
         handleCameraAndPieces();
         stepAI(dt);
-        if (m_hasLevel) updateFacing();
+        if (m_screen == Screen::Title) m_titlePulse += dt;
+        if (m_hasLevel && m_screen == Screen::Game) updateFacing();
         if (m_hintTimer > 0.0f) m_hintTimer -= dt;
 
         // Fire the dev screenshot once the countdown elapses.
@@ -192,6 +201,16 @@ protected:
         vkCmdBeginRenderPass(cmd, &rp, VK_SUBPASS_CONTENTS_INLINE);
 
         glm::mat4 viewProj = computeViewProj();
+
+        if (m_hasLevel && m_screen == Screen::Title) {
+            // Title screen: dark clear + the Savage Lands splash, no level yet.
+            renderUI();
+            ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), cmd);
+            vkCmdEndRenderPass(cmd);
+            vkEndCommandBuffer(cmd);
+            m_lastImageIndex = imageIndex;
+            return;
+        }
 
         if (m_hasLevel) {
             // Level preview: render the loaded meshes (textured) + the 5-ft grid.
@@ -354,6 +373,13 @@ private:
         ImGuiIO& io = ImGui::GetIO();
         bool overUI = io.WantCaptureMouse;
 
+        if (m_hasLevel && m_screen == Screen::Title) {
+            if (Input::isMouseButtonPressed(Input::MOUSE_LEFT) ||
+                Input::isMouseButtonPressed(Input::MOUSE_RIGHT) ||
+                Input::isKeyPressed(Input::KEY_SPACE) || Input::isKeyPressed(Input::KEY_ENTER))
+                beginGame();
+            return;
+        }
         if (m_hasLevel) { handleTokenDrag(overUI); handleLevelCamera(overUI); return; }
 
         // Zoom (scroll): smaller ortho size = closer.
@@ -579,6 +605,65 @@ private:
     // Offset for the GLB's local "front" so faceYaw points that front at a
     // target. 0 = model faces +Z; adjust by pi / +-pi/2 if it faces away/sideways.
     static constexpr float kModelFrontYaw = 0.0f;
+
+    // ----- title screen -----
+    void startTitleMusic() {
+        // miniaudio handles mp3/ogg/wav/flac; try a few names, first that loads wins.
+        const char* candidates[] = {
+            "assets/music/title.ogg", "assets/music/title.mp3", "assets/music/title.wav",
+            "assets/music/savage_lands.ogg", "assets/music/savage_lands.mp3",
+        };
+        for (const char* path : candidates) {
+            m_musicLoop = eden::Audio::getInstance().startLoop(path, 0.5f);
+            if (m_musicLoop >= 0) { std::cerr << "title music: " << path << "\n"; return; }
+        }
+        std::cerr << "title music: none found (drop a title.mp3/ogg/wav in assets/music/)\n";
+    }
+    void stopTitleMusic() {
+        if (m_musicLoop >= 0) { eden::Audio::getInstance().stopLoop(m_musicLoop); m_musicLoop = -1; }
+    }
+    void beginGame() {
+        m_screen = Screen::Game;
+        stopTitleMusic();
+    }
+
+    void renderTitleScreen() {
+        ImGuiIO& io = ImGui::GetIO();
+        ImVec2 disp = io.DisplaySize;
+        ImGui::SetNextWindowPos(ImVec2(0, 0));
+        ImGui::SetNextWindowSize(disp);
+        ImGui::Begin("##title", nullptr,
+                     ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
+                     ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoBackground |
+                     ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoInputs);
+        auto center = [&](const char* txt, float scale, ImVec4 col) {
+            ImGui::SetWindowFontScale(scale);
+            float tw = ImGui::CalcTextSize(txt).x;
+            ImGui::SetCursorPosX((disp.x - tw) * 0.5f);
+            ImGui::TextColored(col, "%s", txt);
+            ImGui::SetWindowFontScale(1.0f);
+        };
+        const ImVec4 dim(0.62f, 0.62f, 0.66f, 1.0f);
+        ImGui::SetCursorPosY(disp.y * 0.22f);
+        center("SAVAGE LANDS", 5.0f, ImVec4(0.86f, 0.74f, 0.42f, 1.0f));
+        ImGui::Dummy(ImVec2(0.0f, 14.0f));
+        center("a CRPG by Jason Mark Dub\xc3\xa9", 1.8f, ImVec4(0.85f, 0.85f, 0.85f, 1.0f));
+        ImGui::Dummy(ImVec2(0.0f, 6.0f));
+        center("Coded by Claude 4.8", 1.2f, dim);
+        ImGui::Dummy(ImVec2(0.0f, 2.0f));
+        center("Pre-Alpha  \xc2\xb7  v0.1.0  \xc2\xb7  July 2026", 1.0f, dim);
+
+        ImGui::SetCursorPosY(disp.y * 0.72f);
+        float a = 0.5f + 0.5f * std::sin(m_titlePulse * 3.0f);
+        center("Click or press any key to begin", 1.6f, ImVec4(0.92f, 0.86f, 0.6f, a));
+
+        ImGui::SetCursorPosY(disp.y - 72.0f);
+        center("This work includes material from the System Reference Document 5.1",
+               1.0f, ImVec4(0.58f, 0.58f, 0.58f, 1.0f));
+        center("by Wizards of the Coast LLC, licensed under CC-BY-4.0.",
+               1.0f, ImVec4(0.58f, 0.58f, 0.58f, 1.0f));
+        ImGui::End();
+    }
 
     // Load the character GLBs as movable tokens: one model per mesh (textured),
     // uniformly scaled to a target height in feet with feet on the floor and the
@@ -930,6 +1015,12 @@ private:
     void renderUI() {
         ImGui::NewFrame();
 
+        if (m_hasLevel && m_screen == Screen::Title) {
+            renderTitleScreen();
+            ImGui::Render();
+            return;
+        }
+
         if (m_hasLevel) {
             ImGui::SetNextWindowPos(ImVec2(10, 10), ImGuiCond_FirstUseEver);
             ImGui::Begin("Level preview");
@@ -1146,6 +1237,12 @@ private:
     uint32_t m_tableHandle = 0;
     std::vector<uint32_t> m_miniHandles;   // one per combatant, indexed by combatant id
     std::vector<glm::vec3> m_grid;
+
+    // Title screen -> game flow (game/level mode only).
+    enum class Screen { Title, Game };
+    Screen m_screen = Screen::Game;   // set to Title when a level is loaded
+    int    m_musicLoop = -1;          // title-music loop id (-1 = none)
+    float  m_titlePulse = 0.0f;       // for the "press to begin" pulse
 
     // Level preview (loaded from a terrain_editor .edenbin via TABLETOP_LEVEL)
     std::string m_levelPath, m_levelName;
