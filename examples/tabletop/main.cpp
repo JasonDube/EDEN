@@ -208,6 +208,12 @@ protected:
                     m_modelRenderer->render(cmd, viewProj, h, M, 0.0f, 1.0f, 1.0f,
                                             /*twoSided*/false, /*indoor*/false, /*transparent*/false);
             }
+            // Ring under the token being dragged.
+            if (m_dragToken >= 0 && m_dragToken < static_cast<int>(m_tokens.size())) {
+                const Token& t = m_tokens[m_dragToken];
+                auto ring = buildRing(t.cx * 5.0f + 2.5f, t.cy * 5.0f + 2.5f, 2.4f, 0.4f);
+                m_modelRenderer->renderLines(cmd, viewProj, ring, glm::vec3(0.96f, 0.86f, 0.22f));
+            }
             renderUI();
             ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), cmd);
             vkCmdEndRenderPass(cmd);
@@ -285,19 +291,24 @@ private:
 
     // Unproject the mouse onto the y=0 board plane. Correct for orthographic
     // (Camera::screenToWorldRay is perspective-only, so we invert VP ourselves).
-    bool mouseOnBoard(glm::vec2& outXZ) const {
+    // Ray from the cursor into the world. computeViewProj flips clip Y to Vulkan
+    // convention (NDC y = -1 at screen top), so ndcY uses 2*y/h - 1 to match.
+    void mouseRay(glm::vec3& outO, glm::vec3& outD) const {
         float w = static_cast<float>(getWindow().getWidth());
         float h = static_cast<float>(getWindow().getHeight());
         glm::vec2 m = Input::getMousePosition();
         glm::mat4 invVP = glm::inverse(computeViewProj());
-        // computeViewProj() now flips clip Y (standard Vulkan), so the render is
-        // no longer mirrored — use the standard screen->NDC mapping.
         float ndcX = 2.0f * m.x / w - 1.0f;
-        float ndcY = 1.0f - 2.0f * m.y / h;
+        float ndcY = 2.0f * m.y / h - 1.0f;
         glm::vec4 nearP = invVP * glm::vec4(ndcX, ndcY, -1.0f, 1.0f); nearP /= nearP.w;
         glm::vec4 farP  = invVP * glm::vec4(ndcX, ndcY,  1.0f, 1.0f); farP  /= farP.w;
-        glm::vec3 o = glm::vec3(nearP);
-        glm::vec3 d = glm::normalize(glm::vec3(farP - nearP));
+        outO = glm::vec3(nearP);
+        outD = glm::normalize(glm::vec3(farP - nearP));
+    }
+
+    bool mouseOnBoard(glm::vec2& outXZ) const {
+        glm::vec3 o, d;
+        mouseRay(o, d);
         if (std::abs(d.y) < 1e-6f) return false;
         float t = -o.y / d.y;
         if (t < 0.0f) return false;
@@ -306,11 +317,30 @@ private:
         return true;
     }
 
+    // Ray vs axis-aligned box (slab method); returns entry distance in tHit.
+    static bool rayAABB(const glm::vec3& o, const glm::vec3& d,
+                        const glm::vec3& bmin, const glm::vec3& bmax, float& tHit) {
+        float tmin = -1e30f, tmax = 1e30f;
+        for (int a = 0; a < 3; ++a) {
+            if (std::abs(d[a]) < 1e-8f) {
+                if (o[a] < bmin[a] || o[a] > bmax[a]) return false;
+            } else {
+                float t1 = (bmin[a] - o[a]) / d[a], t2 = (bmax[a] - o[a]) / d[a];
+                if (t1 > t2) std::swap(t1, t2);
+                tmin = std::max(tmin, t1);
+                tmax = std::min(tmax, t2);
+            }
+        }
+        if (tmax < std::max(tmin, 0.0f)) return false;
+        tHit = tmin > 0.0f ? tmin : tmax;
+        return tHit >= 0.0f;
+    }
+
     void handleCameraAndPieces() {
         ImGuiIO& io = ImGui::GetIO();
         bool overUI = io.WantCaptureMouse;
 
-        if (m_hasLevel) { handleLevelCamera(overUI); return; }
+        if (m_hasLevel) { handleTokenDrag(overUI); handleLevelCamera(overUI); return; }
 
         // Zoom (scroll): smaller ortho size = closer.
         float scroll = Input::getScrollDelta();
@@ -565,6 +595,46 @@ private:
         return M;
     }
 
+    // Snap a world coordinate to a level grid cell index, clamped to the floor.
+    static int cellFromWorld(float w, float lo, float hi) {
+        return std::clamp(static_cast<int>(std::floor(w / 5.0f)),
+                          static_cast<int>(std::floor(lo / 5.0f)),
+                          static_cast<int>(std::floor((hi - 0.01f) / 5.0f)));
+    }
+
+    // Token under the cursor: ray-cast against each token's standing box (its
+    // grid cell footprint, ~7 ft tall) so you can click the character itself,
+    // not the floor spot the ray hits behind him. Nearest hit wins; else -1.
+    int pickToken() const {
+        glm::vec3 o, d;
+        mouseRay(o, d);
+        int best = -1;
+        float bestT = 1e30f;
+        for (int i = 0; i < static_cast<int>(m_tokens.size()); ++i) {
+            float wx = m_tokens[i].cx * 5.0f, wz = m_tokens[i].cy * 5.0f;
+            glm::vec3 bmin(wx, 0.0f, wz), bmax(wx + 5.0f, 7.0f, wz + 5.0f);
+            float t;
+            if (rayAABB(o, d, bmin, bmax, t) && t < bestT) { bestT = t; best = i; }
+        }
+        return best;
+    }
+
+    // Left-drag a character token across the grid (right/middle stay camera).
+    void handleTokenDrag(bool overUI) {
+        if (Input::isMouseButtonPressed(Input::MOUSE_LEFT) && !overUI)
+            m_dragToken = pickToken();
+        if (m_dragToken >= 0 && Input::isMouseButtonDown(Input::MOUSE_LEFT)) {
+            glm::vec2 floorPt;
+            if (mouseOnBoard(floorPt)) {
+                Token& t = m_tokens[m_dragToken];
+                t.cx = cellFromWorld(floorPt.x, m_levelMin.x, m_levelMax.x);
+                t.cy = cellFromWorld(floorPt.y, m_levelMin.y, m_levelMax.y);
+            }
+        } else {
+            m_dragToken = -1;
+        }
+    }
+
     // The reachable region for a mover at (ax,ay) with `cells` of movement is a
     // square (Chebyshev metric), clamped to the board. Draw it as a sub-grid so
     // the individual reachable squares read clearly over the base grid.
@@ -774,7 +844,7 @@ private:
                         m_levelMax.x - m_levelMin.x, m_levelMax.y - m_levelMin.y,
                         (m_levelMax.x - m_levelMin.x) / 5.0f, (m_levelMax.y - m_levelMin.y) / 5.0f);
             ImGui::Separator();
-            ImGui::TextDisabled("Green grid = 5 ft squares (1 unit = 1 ft)");
+            ImGui::TextDisabled("Left-drag a character to move it");
             ImGui::TextDisabled("Right-drag orbit  \xc2\xb7  Middle-drag pan");
             ImGui::TextDisabled("Scroll zoom  \xc2\xb7  T = top-down tactical");
             ImGui::End();
@@ -961,6 +1031,7 @@ private:
 
     // Character tokens (GLB), placed on the level's 5-ft grid.
     std::vector<Token> m_tokens;
+    int m_dragToken = -1;                  // token being dragged (level mode), or -1
 
     // Free orbit camera (level mode): perspective free-look + ortho top-down (T).
     glm::vec3 m_camTarget{0.0f};
