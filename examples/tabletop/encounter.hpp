@@ -26,6 +26,13 @@ struct Combatant {
     float cr = 0.80f, cg = 0.20f, cb = 0.20f;  // display color
     bool  foe = false;            // team flag (heroes vs foes), for later use
     int   moveLeftFeet = 0;       // movement remaining this turn
+
+    // Action economy for the current turn (all refreshed at the start of a turn).
+    bool  actionUsed   = false;   // the one action is spent
+    bool  bonusUsed    = false;   // the one bonus action is spent
+    bool  reactionUsed = false;   // reaction spent (refreshes at the start of your turn)
+    bool  dodging      = false;   // Dodge: attackers have disadvantage until your next turn
+    bool  disengaging  = false;   // Disengage: movement doesn't provoke opportunity attacks
 };
 
 // Chebyshev distance in cells: diagonals cost the same as orthogonal steps.
@@ -91,9 +98,50 @@ public:
         return true;
     }
 
+    // ----- actions in combat (all spend the turn's single action) -----
+
+    // Dash: gain extra movement equal to your speed.
+    bool dash() {
+        if (!hasActive() || active().actionUsed) return false;
+        active().actionUsed = true;
+        active().moveLeftFeet += active().speedFeet;
+        return true;
+    }
+    // Dodge: attackers roll against you at disadvantage until your next turn.
+    bool dodge() {
+        if (!hasActive() || active().actionUsed) return false;
+        active().actionUsed = true;
+        active().dodging = true;
+        return true;
+    }
+    // Disengage: your movement this turn doesn't provoke opportunity attacks.
+    bool disengage() {
+        if (!hasActive() || active().actionUsed) return false;
+        active().actionUsed = true;
+        active().disengaging = true;
+        return true;
+    }
+    // Bonus action / reaction: tracked here so features and triggers can spend
+    // them later (no default source of either yet).
+    bool useBonusAction() {
+        if (!hasActive() || active().bonusUsed) return false;
+        active().bonusUsed = true;
+        return true;
+    }
+    bool useReaction() {
+        if (!hasActive() || active().reactionUsed) return false;
+        active().reactionUsed = true;
+        return true;
+    }
+
 private:
+    // Refresh the active mover's per-turn resources at the start of its turn.
     void refreshActive() {
-        if (!m_order.empty()) active().moveLeftFeet = active().speedFeet;
+        if (m_order.empty()) return;
+        Combatant& a = active();
+        a.moveLeftFeet = a.speedFeet;
+        a.actionUsed = a.bonusUsed = a.reactionUsed = false;
+        a.dodging = a.disengaging = false;
     }
 
     std::vector<Combatant> m_c;

@@ -48,8 +48,27 @@ int main() {
     // Turn order marches through the roster, then the round rolls over.
     e.endTurn();
     assert(e.active().name == "Aldric" && e.active().moveLeftFeet == 30);
+
+    // Action economy: fresh turn has everything available.
+    assert(!e.active().actionUsed && !e.active().bonusUsed && !e.active().reactionUsed);
+
+    // Dash spends the action and grants extra movement equal to speed.
+    assert(e.dash());
+    assert(e.active().actionUsed);
+    assert(e.active().moveLeftFeet == 60);        // 30 + 30
+    assert(!e.dash());                            // action already spent
+    assert(!e.dodge() && !e.disengage());         // ditto — one action per turn
+
+    // Bonus action and reaction are independent of the action.
+    assert(e.useBonusAction());
+    assert(!e.useBonusAction());
+    assert(e.useReaction());
+    assert(!e.useReaction());
+
     e.endTurn();
     assert(e.active().name == "Bandit");
+    assert(e.dodge());                            // Dodge sets its status + spends the action
+    assert(e.active().dodging && e.active().actionUsed);
     e.endTurn();
     assert(e.active().name == "Doran" && e.active().moveLeftFeet == 25);
     assert(e.round() == 1);
@@ -57,6 +76,13 @@ int main() {
     assert(e.active().name == "Mera");
     assert(e.round() == 2);
     assert(e.active().moveLeftFeet == 35);        // fully refreshed on the new round
+    assert(!e.active().actionUsed);               // action refreshed too
+
+    // Aldric's Dash/bonus/reaction from round 1 are cleared when his turn returns.
+    e.endTurn();
+    assert(e.active().name == "Aldric");
+    assert(e.active().moveLeftFeet == 30 && !e.active().actionUsed &&
+           !e.active().bonusUsed && !e.active().reactionUsed);
 
     std::puts("encounter_test: all checks passed");
     return 0;

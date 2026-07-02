@@ -357,9 +357,33 @@ private:
 
         ImGui::Separator();
         if (m_enc.hasActive()) {
-            const auto& a = m_enc.active();
+            const rpgtt::Combatant& a = m_enc.active();
             ImGui::Text("Turn: %s%s", a.name.c_str(), a.foe ? "  (foe)" : "");
-            ImGui::Text("Movement: %d ft  (%d squares)", a.moveLeftFeet, m_enc.cellsLeft());
+
+            // Action: Dash/Dodge/Disengage all spend the turn's one action, so
+            // grey them out once it's used. Dash feeds straight back into the
+            // movement budget (and the reachable highlight grows to match).
+            ImGui::TextUnformatted("Action:");
+            ImGui::SameLine();
+            ImGui::BeginDisabled(a.actionUsed);
+            if (ImGui::Button("Dash"))      m_enc.dash();
+            ImGui::SameLine();
+            if (ImGui::Button("Dodge"))     m_enc.dodge();
+            ImGui::SameLine();
+            if (ImGui::Button("Disengage")) m_enc.disengage();
+            ImGui::EndDisabled();
+
+            // Read state back live (the buttons above may have just changed it).
+            const rpgtt::Combatant& a2 = m_enc.active();
+            const char* actState = !a2.actionUsed ? "ready"
+                                 : a2.dodging      ? "used (Dodging)"
+                                 : a2.disengaging  ? "used (Disengaging)"
+                                                   : "used";
+            ImGui::Text("Action: %s", actState);
+            ImGui::Text("Movement: %d ft  (%d squares)", a2.moveLeftFeet, m_enc.cellsLeft());
+            ImGui::Text("Bonus action: %s   Reaction: %s",
+                        a2.bonusUsed ? "used" : "ready",
+                        a2.reactionUsed ? "used" : "ready");
         }
 
         ImGui::Spacing();
