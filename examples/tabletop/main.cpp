@@ -158,8 +158,13 @@ private:
         float h = static_cast<float>(getWindow().getHeight());
         glm::vec2 m = Input::getMousePosition();
         glm::mat4 invVP = glm::inverse(computeViewProj());
+        // ModelRenderer draws glm's GL-convention (Y-up) projection into a
+        // positive-height Vulkan viewport with no flip, which mirrors the frame
+        // vertically. computeViewProj() is the un-mirrored matrix, so mirror the
+        // screen-Y here (2*m.y/h - 1, not 1 - 2*m.y/h) to unproject onto the
+        // board the way it's actually displayed — otherwise the Z axis inverts.
         float ndcX = 2.0f * m.x / w - 1.0f;
-        float ndcY = 1.0f - 2.0f * m.y / h;
+        float ndcY = 2.0f * m.y / h - 1.0f;
         glm::vec4 nearP = invVP * glm::vec4(ndcX, ndcY, -1.0f, 1.0f); nearP /= nearP.w;
         glm::vec4 farP  = invVP * glm::vec4(ndcX, ndcY,  1.0f, 1.0f); farP  /= farP.w;
         glm::vec3 o = glm::vec3(nearP);
@@ -183,15 +188,28 @@ private:
             m_camera.setOrthoSize(m_orthoSize);
         }
 
-        // Pan (right-drag): move the camera in the board plane. World units per
-        // pixel scale with the current zoom so panning feels 1:1 with the table.
-        if (Input::isMouseButtonDown(Input::MOUSE_RIGHT)) {
-            glm::vec2 delta = Input::getMouseDelta();
-            float wpp = (2.0f * m_orthoSize) / static_cast<float>(getWindow().getHeight());
-            glm::vec3 p = m_camera.getPosition();
-            p.x -= delta.x * wpp;
-            p.z -= delta.y * wpp;
-            m_camera.setPosition(p);
+        // Pan (middle-drag): "grab" the board point under the cursor at press and
+        // keep it pinned there as the mouse moves. We use absolute mouse->board
+        // unprojection rather than Input::getMouseDelta() — that delta is only
+        // tracked while the mouse is captured (first-person mode), which the
+        // tabletop never does, so it would always read zero here.
+        if (Input::isMouseButtonPressed(Input::MOUSE_MIDDLE) && !overUI) {
+            if (mouseOnBoard(m_panAnchor)) m_panning = true;
+        }
+        if (m_panning && Input::isMouseButtonDown(Input::MOUSE_MIDDLE)) {
+            glm::vec2 cur;
+            if (mouseOnBoard(cur)) {
+                // Move the camera so the anchored point slides back under the
+                // cursor. Ortho mapping is linear in camera position, so this
+                // converges in one step and the grabbed point stays put.
+                glm::vec2 shift = m_panAnchor - cur;
+                glm::vec3 p = m_camera.getPosition();
+                p.x += shift.x;
+                p.z += shift.y;
+                m_camera.setPosition(p);
+            }
+        } else {
+            m_panning = false;
         }
 
         // Pick / drag the mini (left button).
@@ -228,7 +246,7 @@ private:
         ImGui::TextUnformatted("EDEN Tabletop - prototype");
         ImGui::Separator();
         ImGui::BulletText("Left-drag the red mini to move it");
-        ImGui::BulletText("Right-drag to pan");
+        ImGui::BulletText("Middle-drag to pan");
         ImGui::BulletText("Scroll to zoom");
         ImGui::Spacing();
         ImGui::Text("Mini:  (%.1f, %.1f)", m_miniPos.x, m_miniPos.y);
@@ -310,6 +328,8 @@ private:
 
     glm::vec2 m_miniPos{0.0f, 0.0f};   // mini position on the board (world XZ)
     bool      m_dragging = false;
+    bool      m_panning  = false;
+    glm::vec2 m_panAnchor{0.0f, 0.0f}; // board point grabbed at pan start (world XZ)
     float     m_orthoSize = 18.0f;
 
     // dev screenshot
