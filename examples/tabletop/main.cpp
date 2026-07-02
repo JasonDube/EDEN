@@ -21,6 +21,7 @@
 #include <eden/Audio.hpp>
 
 #include "encounter.hpp"
+#include "character.hpp"
 
 #include <eden/Camera.hpp>
 #include <eden/Input.hpp>
@@ -202,8 +203,8 @@ protected:
 
         glm::mat4 viewProj = computeViewProj();
 
-        if (m_hasLevel && m_screen == Screen::Title) {
-            // Title screen: dark clear + the Savage Lands splash, no level yet.
+        if (m_hasLevel && m_screen != Screen::Game) {
+            // Title / character-creation screens: dark clear + UI, no level yet.
             renderUI();
             ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), cmd);
             vkCmdEndRenderPass(cmd);
@@ -380,6 +381,7 @@ private:
                 beginGame();
             return;
         }
+        if (m_hasLevel && m_screen == Screen::CharCreate) return;   // ImGui-driven wizard
         if (m_hasLevel) { handleTokenDrag(overUI); handleLevelCamera(overUI); return; }
 
         // Zoom (scroll): smaller ortho size = closer.
@@ -622,9 +624,170 @@ private:
     void stopTitleMusic() {
         if (m_musicLoop >= 0) { eden::Audio::getInstance().stopLoop(m_musicLoop); m_musicLoop = -1; }
     }
+    // Title -> character creation. Silence the theme for the creator.
     void beginGame() {
+        m_screen = Screen::CharCreate;
+        stopTitleMusic();
+        m_rollsUsed = 1;        // the initial roll counts as the first of three
+        rollAbilityScores();
+    }
+
+    // ----- character creation -----
+    int roll4d6DropLowest() {
+        int d[4]; for (int i = 0; i < 4; ++i) d[i] = rollDie(6);
+        int lo = std::min({d[0], d[1], d[2], d[3]});
+        return d[0] + d[1] + d[2] + d[3] - lo;
+    }
+    void rollAbilityScores() {
+        for (int i = 0; i < 6; ++i) m_rolled[i] = roll4d6DropLowest();
+        for (int a = 0; a < 6; ++a) m_assign[a] = -1;   // unassigned; player drags them
+    }
+    bool isAssigned(int rolledIdx) const {
+        for (int a = 0; a < 6; ++a) if (m_assign[a] == rolledIdx) return true;
+        return false;
+    }
+    bool allAssigned() const {
+        for (int a = 0; a < 6; ++a) if (m_assign[a] < 0) return false;
+        return true;
+    }
+    // Drop rolled value `rolledIdx` onto `ability`. If it was on another ability,
+    // swap; if it came from the pool, the ability's old value drops back to the pool.
+    void assignRoll(int ability, int rolledIdx) {
+        int src = -1;
+        for (int b = 0; b < 6; ++b) if (m_assign[b] == rolledIdx) src = b;
+        int old = m_assign[ability];
+        m_assign[ability] = rolledIdx;
+        if (src >= 0 && src != ability) m_assign[src] = old;
+    }
+    // Put the highest rolls in the abilities this class cares about most.
+    void autoAssignForClass() {
+        auto pr = rpgc::classAbilityPriority(rpgc::classOptions()[m_classIdx]);
+        std::array<int, 6> order = {0, 1, 2, 3, 4, 5};
+        std::sort(order.begin(), order.end(), [&](int a, int b) { return m_rolled[a] > m_rolled[b]; });
+        for (int i = 0; i < 6; ++i) m_assign[pr[i]] = order[i];
+    }
+    static int classHitDie(const std::string& cls) {
+        std::string s; for (char c : cls) s += static_cast<char>(std::tolower((unsigned char)c));
+        if (s == "barbarian") return 12;
+        if (s == "fighter" || s == "paladin" || s == "ranger") return 10;
+        if (s == "sorcerer" || s == "wizard") return 6;
+        return 8;   // d8: bard, cleric, druid, monk, rogue, warlock
+    }
+    // Turn the wizard choices into the player's character + name the world token.
+    void finishCharCreate() {
+        m_pc = rpgc::Character{};
+        m_pc.name = m_nameBuf;
+        m_pc.race = rpgc::raceOptions()[m_raceIdx];
+        m_pc.className = rpgc::classOptions()[m_classIdx];
+        m_pc.level = 1;
+        auto rb = rpgc::raceAbilityBonuses(m_pc.race);
+        for (int a = 0; a < 6; ++a) m_pc.abilities[a] = m_rolled[m_assign[a]] + rb[a];
+        m_pc.hitDieSize = classHitDie(m_pc.className);
+        m_pc.hitDiceTotal = 1;
+        m_pc.maxHP = m_pc.curHP = m_pc.hitDieSize + m_pc.mod(rpgc::CON);   // level-1 max hit die + CON
+        m_pc.speed = 30;
+        m_pc.armorClass = 10 + m_pc.mod(rpgc::DEX);
+        int pt = playerTokenIndex();
+        if (pt >= 0) m_tokens[pt].name = m_pc.name;
+        std::cerr << "created: " << m_pc.name << " the " << m_pc.race << " " << m_pc.className
+                  << " (HP " << m_pc.maxHP << ", AC " << m_pc.armorClass << ")\n";
         m_screen = Screen::Game;
         stopTitleMusic();
+    }
+
+    void renderCharCreate() {
+        ImVec2 disp = ImGui::GetIO().DisplaySize;
+        ImGui::SetNextWindowPos(ImVec2(disp.x * 0.5f, disp.y * 0.5f), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+        ImGui::SetNextWindowSize(ImVec2(560, 0), ImGuiCond_Always);
+        ImGui::Begin("Create Your Character", nullptr,
+                     ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse);
+
+        ImGui::InputText("Name", m_nameBuf, sizeof(m_nameBuf));
+        auto combo = [](const char* label, int& idx, const std::vector<const char*>& opts) {
+            if (ImGui::BeginCombo(label, opts[idx])) {
+                for (int i = 0; i < static_cast<int>(opts.size()); ++i)
+                    if (ImGui::Selectable(opts[i], idx == i)) idx = i;
+                ImGui::EndCombo();
+            }
+        };
+        combo("Race", m_raceIdx, rpgc::raceOptions());
+        combo("Class", m_classIdx, rpgc::classOptions());
+
+        ImGui::Separator();
+        ImGui::TextUnformatted("Ability scores  -  drag a rolled value onto an ability (hover a name for help)");
+        // Only 3 rolls total: one initial + two re-rolls. Choose carefully.
+        int rerollsLeft = 3 - m_rollsUsed;
+        std::string rlabel = rerollsLeft > 0 ? ("Re-roll (" + std::to_string(rerollsLeft) + " left)")
+                                             : "No re-rolls left";
+        ImGui::BeginDisabled(rerollsLeft <= 0);
+        if (ImGui::Button(rlabel.c_str())) { rollAbilityScores(); ++m_rollsUsed; }
+        ImGui::EndDisabled();
+        ImGui::SameLine();
+        if (ImGui::Button(("Auto-assign for " + std::string(rpgc::classOptions()[m_classIdx])).c_str()))
+            autoAssignForClass();
+        ImGui::TextDisabled("You get 3 rolls total (1 initial + 2 re-rolls) - live with what you roll.");
+
+        // Pool of unassigned rolls (drag sources).
+        ImGui::TextUnformatted("Rolled:");
+        bool anyInPool = false;
+        for (int i = 0; i < 6; ++i) {
+            if (isAssigned(i)) continue;
+            anyInPool = true;
+            ImGui::SameLine();
+            ImGui::PushID(2000 + i);
+            ImGui::Button(std::to_string(m_rolled[i]).c_str(), ImVec2(40, 0));
+            if (ImGui::BeginDragDropSource()) {
+                ImGui::SetDragDropPayload("ROLL", &i, sizeof(int));
+                ImGui::Text("%d", m_rolled[i]);
+                ImGui::EndDragDropSource();
+            }
+            ImGui::PopID();
+        }
+        if (!anyInPool) { ImGui::SameLine(); ImGui::TextDisabled("(all assigned)"); }
+
+        ImGui::Spacing();
+        auto raceBonus = rpgc::raceAbilityBonuses(rpgc::raceOptions()[m_raceIdx]);
+        // Ability slots (drop targets; also drag sources to rearrange).
+        for (int a = 0; a < 6; ++a) {
+            ImGui::PushID(a);
+            ImGui::TextUnformatted(rpgc::abilityName(a));
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", rpgc::abilityDesc(a));
+            ImGui::SameLine(150.0f);
+            std::string face = (m_assign[a] >= 0) ? std::to_string(m_rolled[m_assign[a]]) : "  --  ";
+            ImGui::Button(face.c_str(), ImVec2(56, 0));
+            if (m_assign[a] >= 0 && ImGui::BeginDragDropSource()) {
+                int idx = m_assign[a];
+                ImGui::SetDragDropPayload("ROLL", &idx, sizeof(int));
+                ImGui::Text("%d", m_rolled[idx]);
+                ImGui::EndDragDropSource();
+            }
+            if (ImGui::BeginDragDropTarget()) {
+                if (const ImGuiPayload* pl = ImGui::AcceptDragDropPayload("ROLL"))
+                    assignRoll(a, *static_cast<const int*>(pl->Data));
+                ImGui::EndDragDropTarget();
+            }
+            ImGui::SameLine();
+            if (raceBonus[a] != 0) ImGui::TextColored(ImVec4(0.5f, 0.8f, 1.0f, 1.0f), "%+d race", raceBonus[a]);
+            else ImGui::TextDisabled("      ");
+            if (m_assign[a] >= 0) {
+                int total = m_rolled[m_assign[a]] + raceBonus[a];
+                ImGui::SameLine();
+                ImGui::Text("=  %2d  (%+d)", total, rpgc::abilityMod(total));
+            }
+            ImGui::PopID();
+        }
+
+        ImGui::Separator();
+        bool ready = m_nameBuf[0] != '\0' && allAssigned();
+        ImGui::BeginDisabled(!ready);
+        if (ImGui::Button("Begin Adventure", ImVec2(200, 0))) finishCharCreate();
+        ImGui::EndDisabled();
+        if (!ready) {
+            ImGui::SameLine();
+            ImGui::TextDisabled("%s", m_nameBuf[0] == '\0' ? "enter a name" : "assign all six abilities");
+        }
+        ImGui::TextDisabled("(skills, portrait & equipment coming next)");
+        ImGui::End();
     }
 
     void renderTitleScreen() {
@@ -1025,6 +1188,11 @@ private:
             ImGui::Render();
             return;
         }
+        if (m_hasLevel && m_screen == Screen::CharCreate) {
+            renderCharCreate();
+            ImGui::Render();
+            return;
+        }
 
         if (m_hasLevel) {
             ImGui::SetNextWindowPos(ImVec2(10, 10), ImGuiCond_FirstUseEver);
@@ -1243,11 +1411,19 @@ private:
     std::vector<uint32_t> m_miniHandles;   // one per combatant, indexed by combatant id
     std::vector<glm::vec3> m_grid;
 
-    // Title screen -> game flow (game/level mode only).
-    enum class Screen { Title, Game };
+    // Title -> character creation -> game flow (game/level mode only).
+    enum class Screen { Title, CharCreate, Game };
     Screen m_screen = Screen::Game;   // set to Title when a level is loaded
     int    m_musicLoop = -1;          // title-music loop id (-1 = none)
     float  m_titlePulse = 0.0f;       // for the "press to begin" pulse
+
+    // Character creation state.
+    rpgc::Character m_pc;             // the player's character
+    char  m_nameBuf[48] = "";
+    int   m_raceIdx = 0, m_classIdx = 4;   // default class = Fighter
+    int   m_rolled[6] = {0, 0, 0, 0, 0, 0};
+    int   m_assign[6] = {0, 1, 2, 3, 4, 5};// ability a gets score m_rolled[m_assign[a]]
+    int   m_rollsUsed = 0;                 // 1 initial + up to 2 re-rolls = 3 total
 
     // Level preview (loaded from a terrain_editor .edenbin via TABLETOP_LEVEL)
     std::string m_levelPath, m_levelName;
