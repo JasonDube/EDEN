@@ -84,6 +84,49 @@ int main() {
     assert(e.active().moveLeftFeet == 30 && !e.active().actionUsed &&
            !e.active().bonusUsed && !e.active().reactionUsed);
 
+    // ----- combat: attacks, HP, downing, victory -----
+    Encounter b;
+    Combatant hero;  hero.name = "Hero";  hero.foe = false; hero.cx = 0; hero.cy = 0;
+    hero.ac = 15; hero.maxHp = hero.hp = 20; hero.attackBonus = 5; hero.dmgBonus = 3;
+    Combatant orc;   orc.name = "Orc";    orc.foe = true;  orc.cx = 1; orc.cy = 0;
+    orc.ac = 13; orc.maxHp = orc.hp = 15; orc.attackBonus = 4; orc.dmgBonus = 2;
+    b.add(hero);
+    b.add(orc);
+    b.start();
+    assert(b.active().name == "Hero");   // both init 10 -> insertion order
+
+    int heroId = 0, orcId = 1;
+    assert(b.canAttack(orcId));          // adjacent foe, action ready
+    assert(!b.canAttack(heroId));        // can't attack a teammate/self
+
+    // A hit: d20=12, +5 = 17 vs AC 13. Damage dice total 6, +3 bonus = 9.
+    AttackOutcome o = b.attack(orcId, 12, 6);
+    assert(o.valid && o.hit && !o.crit && o.damage == 9);
+    assert(b.combatants()[orcId].hp == 6);          // 15 - 9
+    assert(b.active().actionUsed);                   // attacking spent the action
+    assert(!b.canAttack(orcId));                     // one attack per action
+
+    // A miss doesn't change HP or drop the target (also confirms auto-miss on 1).
+    b.endTurn();                                      // Orc's turn
+    assert(b.active().name == "Orc");
+    AttackOutcome m = b.attack(heroId, 1, 6);         // natural 1 always misses
+    assert(m.valid && !m.hit && m.damage == 0);
+    assert(b.combatants()[heroId].hp == 20);
+
+    // Next round: Hero crits and drops the Orc. Caller doubles the dice on a
+    // crit, so it passes the already-doubled total (say 10).
+    b.endTurn();                                      // back to Hero, round 2
+    assert(b.active().name == "Hero" && b.round() == 2);
+    AttackOutcome c = b.attack(orcId, 20, 10);        // nat 20: auto-hit + crit
+    assert(c.valid && c.hit && c.crit && c.damage == 13);  // 10 + 3
+    assert(b.combatants()[orcId].hp == 0 && c.dropped);
+    assert(b.combatants()[orcId].isDown());
+    assert(b.living(true) == 0 && b.living(false) == 1);   // foes wiped
+
+    // Turn order skips the downed Orc: endTurn returns to the Hero.
+    b.endTurn();
+    assert(b.active().name == "Hero" && b.round() == 3);
+
     std::puts("encounter_test: all checks passed");
     return 0;
 }

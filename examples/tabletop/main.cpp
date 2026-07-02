@@ -34,10 +34,12 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
 #include <memory>
+#include <random>
 #include <string>
 #include <vector>
 
@@ -89,21 +91,26 @@ protected:
 
         m_grid = buildGrid();
 
-        // A small sample party + a foe, each a colored mini on the grid. Every
+        // A small sample party + two foes, each a colored mini on the grid. Every
         // combatant gets its own cylinder model so it can carry its own color.
         auto spawn = [&](const char* name, int init, int spd, int cx, int cy,
-                         glm::vec3 col, bool foe) {
+                         glm::vec3 col, bool foe, int hp, int ac,
+                         int atk, int dDice, int dSides, int dBonus) {
             rpgtt::Combatant c;
             c.name = name; c.initiative = init; c.speedFeet = spd;
             c.cx = cx; c.cy = cy; c.cr = col.r; c.cg = col.g; c.cb = col.b; c.foe = foe;
+            c.maxHp = c.hp = hp; c.ac = ac; c.attackBonus = atk;
+            c.dmgDice = dDice; c.dmgSides = dSides; c.dmgBonus = dBonus;
             m_enc.add(c);
             auto mesh = PrimitiveMeshBuilder::createCylinder(kMiniR, 1.8f, 28, glm::vec4(col, 1.0f));
             m_miniHandles.push_back(m_modelRenderer->createModel(mesh.vertices, mesh.indices));
         };
-        spawn("Mera the Swift", 20, 35, 5,  8, {0.30f, 0.72f, 0.38f}, false);
-        spawn("Sir Aldric",     17, 30, 6,  8, {0.28f, 0.48f, 0.86f}, false);
-        spawn("Bandit",         14, 30, 10, 8, {0.82f, 0.22f, 0.20f}, true);
-        spawn("Doran Stone",    12, 25, 6,  9, {0.72f, 0.56f, 0.28f}, false);
+        //     name             init spd  cx  cy  color                    foe    hp  ac atk dice sides bonus
+        spawn("Mera the Swift",   20, 35,  5,  8, {0.30f,0.72f,0.38f}, false, 24, 14,  5,  1,  6,  3);
+        spawn("Sir Aldric",       17, 30,  6,  8, {0.28f,0.48f,0.86f}, false, 30, 18,  5,  1,  8,  3);
+        spawn("Bandit",           14, 30,  9,  8, {0.82f,0.22f,0.20f}, true,  28, 13,  4,  1,  6,  2);
+        spawn("Doran Stone",      12, 25,  6,  9, {0.72f,0.56f,0.28f}, false, 32, 16,  4,  1, 10,  2);
+        spawn("Cutthroat",        10, 30, 10,  9, {0.90f,0.42f,0.20f}, true,  22, 14,  5,  1,  6,  3);
 
         m_spawn = m_enc.combatants();   // remember starting layout for Reset
         m_enc.start();
@@ -177,14 +184,21 @@ protected:
             if (isActive && m_dragging) { px = m_hoverCx; py = m_hoverCy; }
             float wx = cellCenter(px), wz = cellCenter(py);
             glm::mat4 mm = glm::translate(glm::mat4(1.0f), glm::vec3(wx, 0.0f, wz));
+            if (c.isDown())  // fallen: flatten the token to the tabletop
+                mm = glm::scale(mm, glm::vec3(1.25f, 0.10f, 1.25f));
             m_modelRenderer->render(cmd, viewProj, m_miniHandles[i], mm);
 
-            if (isActive) {
+            if (isActive && !c.isDown()) {
                 bool ok = !m_dragging || m_enc.canActiveReach(m_hoverCx, m_hoverCy, kGridN);
                 glm::vec3 ringCol = ok ? glm::vec3(0.96f, 0.86f, 0.22f)
                                        : glm::vec3(0.90f, 0.26f, 0.20f);
                 auto ring = buildRing(wx, wz, kMiniR * 1.35f, 0.06f);
                 m_modelRenderer->renderLines(cmd, viewProj, ring, ringCol);
+            } else if (!c.isDown() && m_hoverCx == c.cx && m_hoverCy == c.cy &&
+                       m_enc.canAttack(i)) {
+                // Hovering a foe the active mover can strike: red target ring.
+                auto ring = buildRing(wx, wz, kMiniR * 1.35f, 0.06f);
+                m_modelRenderer->renderLines(cmd, viewProj, ring, glm::vec3(0.92f, 0.22f, 0.18f));
             }
         }
 
@@ -278,7 +292,12 @@ private:
         if (Input::isMouseButtonPressed(Input::MOUSE_LEFT) && !overUI && overBoard &&
             m_enc.hasActive()) {
             const auto& a = m_enc.active();
-            if (m_hoverCx == a.cx && m_hoverCy == a.cy) m_dragging = true;
+            if (m_hoverCx == a.cx && m_hoverCy == a.cy) {
+                m_dragging = true;              // grabbed its own cell: move it
+            } else {
+                int tid = combatantAt(m_hoverCx, m_hoverCy);   // clicked another mini?
+                if (tid >= 0 && m_enc.canAttack(tid)) doAttack(tid);
+            }
         }
         if (m_dragging && !Input::isMouseButtonDown(Input::MOUSE_LEFT)) {
             // Released: commit if reachable (moveActiveTo rejects illegal moves).
@@ -328,6 +347,47 @@ private:
         return pts;
     }
 
+    // ----- combat helpers -----
+    int rollDie(int sides) { std::uniform_int_distribution<int> d(1, sides); return d(m_rng); }
+    int rollD20() { return rollDie(20); }
+
+    // Index of a living combatant standing on a cell, or -1.
+    int combatantAt(int cx, int cy) const {
+        const auto& cs = m_enc.combatants();
+        for (int i = 0; i < static_cast<int>(cs.size()); ++i)
+            if (!cs[i].isDown() && cs[i].cx == cx && cs[i].cy == cy) return i;
+        return -1;
+    }
+
+    // Roll and resolve the active combatant's attack against a target, then log
+    // it. Dodge on the target imposes disadvantage; a natural 20 doubles the
+    // damage dice (rolled twice), per RAW.
+    void doAttack(int targetId) {
+        const rpgtt::Combatant& a = m_enc.active();
+        const rpgtt::Combatant& t = m_enc.combatants()[targetId];
+        int d20 = t.dodging ? std::min(rollD20(), rollD20()) : rollD20();
+        int sets = (d20 == 20) ? 2 : 1;
+        int dice = 0;
+        for (int s = 0; s < sets; ++s)
+            for (int i = 0; i < a.dmgDice; ++i) dice += rollDie(a.dmgSides);
+        rpgtt::AttackOutcome o = m_enc.attack(targetId, d20, dice);
+        if (o.valid) logAttack(o, m_enc.combatants()[targetId]);
+    }
+
+    void logAttack(const rpgtt::AttackOutcome& o, const rpgtt::Combatant& t) {
+        char buf[192];
+        if (o.hit)
+            std::snprintf(buf, sizeof buf, "%s %s %s (d20 %d%s) - %d dmg  [%s %d/%d]%s",
+                          o.attacker.c_str(), o.crit ? "CRITS" : "hits", o.target.c_str(),
+                          o.d20, o.crit ? "!" : "", o.damage, t.name.c_str(), t.hp, t.maxHp,
+                          o.dropped ? "  DOWN!" : "");
+        else
+            std::snprintf(buf, sizeof buf, "%s misses %s (%d vs AC %d)",
+                          o.attacker.c_str(), o.target.c_str(), o.total, t.ac);
+        m_log.emplace_back(buf);
+        if (m_log.size() > 5) m_log.erase(m_log.begin());
+    }
+
     void renderUI() {
         ImGui::NewFrame();
         ImGui::SetNextWindowPos(ImVec2(10, 10), ImGuiCond_FirstUseEver);
@@ -348,11 +408,13 @@ private:
                                ImGuiColorEditFlags_NoTooltip | ImGuiColorEditFlags_NoInputs,
                                ImVec2(12, 12));
             ImGui::SameLine();
-            if (current)
+            if (c.isDown())
+                ImGui::TextDisabled("   %s  (down)", c.name.c_str());
+            else if (current)
                 ImGui::TextColored(ImVec4(1.0f, 0.92f, 0.4f, 1.0f),
-                                   "> %s  (init %d)", c.name.c_str(), c.initiative);
+                                   "> %s  %d/%d", c.name.c_str(), c.hp, c.maxHp);
             else
-                ImGui::Text("   %s  (init %d)", c.name.c_str(), c.initiative);
+                ImGui::Text("   %s  %d/%d", c.name.c_str(), c.hp, c.maxHp);
         }
 
         ImGui::Separator();
@@ -386,6 +448,13 @@ private:
                         a2.reactionUsed ? "used" : "ready");
         }
 
+        // Victory / defeat once a side is wiped out.
+        int foesLeft = m_enc.living(true), heroesLeft = m_enc.living(false);
+        if (foesLeft == 0)
+            ImGui::TextColored(ImVec4(0.4f, 0.9f, 0.45f, 1.0f), "Foes defeated - victory!");
+        else if (heroesLeft == 0)
+            ImGui::TextColored(ImVec4(0.95f, 0.4f, 0.35f, 1.0f), "The party has fallen.");
+
         ImGui::Spacing();
         if (ImGui::Button("End Turn")) m_enc.endTurn();
         ImGui::SameLine();
@@ -393,10 +462,18 @@ private:
             m_enc.combatants() = m_spawn;
             m_enc.start();
             m_dragging = false;
+            m_log.clear();
+        }
+
+        if (!m_log.empty()) {
+            ImGui::Separator();
+            ImGui::TextUnformatted("Log");
+            for (const auto& line : m_log) ImGui::TextWrapped("%s", line.c_str());
         }
 
         ImGui::Separator();
         ImGui::TextDisabled("Drag the highlighted mini to move");
+        ImGui::TextDisabled("Click an adjacent foe to attack");
         ImGui::TextDisabled("Middle-drag pan  \xc2\xb7  Scroll zoom");
         ImGui::End();
         ImGui::Render();
@@ -474,6 +551,8 @@ private:
 
     rpgtt::Encounter m_enc;                // turn/round/movement state (rules in encounter.hpp)
     std::vector<rpgtt::Combatant> m_spawn; // starting layout, for Reset
+    std::vector<std::string> m_log;        // recent combat-log lines (last 5)
+    std::mt19937 m_rng{std::random_device{}()};  // dice RNG
     int  m_hoverCx = 0, m_hoverCy = 0;     // grid cell under the cursor this frame
 
     bool      m_dragging = false;          // dragging the active mini

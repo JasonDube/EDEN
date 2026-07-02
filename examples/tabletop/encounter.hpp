@@ -33,6 +33,31 @@ struct Combatant {
     bool  reactionUsed = false;   // reaction spent (refreshes at the start of your turn)
     bool  dodging      = false;   // Dodge: attackers have disadvantage until your next turn
     bool  disengaging  = false;   // Disengage: movement doesn't provoke opportunity attacks
+
+    // Combat stats. Damage is `dmgDice`d`dmgSides` + `dmgBonus` (e.g. 1d8+3).
+    int   maxHp = 10;
+    int   hp    = 10;
+    int   ac    = 12;
+    int   attackBonus = 4;
+    int   dmgDice  = 1;
+    int   dmgSides = 6;
+    int   dmgBonus = 2;
+    int   reachCells = 1;         // melee reach, in cells (1 = adjacent incl. diagonal)
+
+    bool isDown() const { return hp <= 0; }
+};
+
+// Result of resolving one attack (returned by Encounter::attack).
+struct AttackOutcome {
+    bool valid = false;   // false if the attack was illegal (no state changed)
+    bool hit   = false;
+    bool crit  = false;
+    int  d20   = 0;
+    int  total = 0;       // d20 + attacker's attack bonus
+    int  damage = 0;      // 0 on a miss
+    bool dropped = false; // this attack reduced the target to 0 HP
+    std::string attacker;
+    std::string target;
 };
 
 // Chebyshev distance in cells: diagonals cost the same as orthogonal steps.
@@ -69,12 +94,16 @@ public:
     Combatant&       active()       { return m_c[m_order[m_turn]]; }
     const Combatant& active() const { return m_c[m_order[m_turn]]; }
 
-    // Advance to the next combatant; wrapping past the last starts a new round.
-    // The new mover's movement budget is refreshed.
+    // Advance to the next living combatant; wrapping past the last starts a new
+    // round. Downed combatants are skipped. The new mover's turn resources are
+    // refreshed. If nobody is left standing, we stop on the next slot as-is.
     void endTurn() {
         if (m_order.empty()) return;
-        ++m_turn;
-        if (m_turn >= static_cast<int>(m_order.size())) { m_turn = 0; ++m_round; }
+        for (int guard = 0; guard < static_cast<int>(m_order.size()); ++guard) {
+            ++m_turn;
+            if (m_turn >= static_cast<int>(m_order.size())) { m_turn = 0; ++m_round; }
+            if (!active().isDown()) break;
+        }
         refreshActive();
     }
 
@@ -132,6 +161,54 @@ public:
         if (!hasActive() || active().reactionUsed) return false;
         active().reactionUsed = true;
         return true;
+    }
+
+    // ----- attacks -----
+
+    // May the active combatant attack combatant `targetId` right now? Requires
+    // an unspent action, a living foe of the opposite team within melee reach.
+    bool canAttack(int targetId) const {
+        if (!hasActive() || active().actionUsed) return false;
+        if (targetId < 0 || targetId >= static_cast<int>(m_c.size())) return false;
+        if (targetId == activeId()) return false;
+        const Combatant& a = active();
+        const Combatant& t = m_c[targetId];
+        if (a.isDown() || t.isDown() || t.foe == a.foe) return false;
+        return cellDistance(a.cx, a.cy, t.cx, t.cy) <= a.reachCells;
+    }
+
+    // Resolve an attack by the active combatant against `targetId`, spending the
+    // action. The caller supplies the rolls: `d20` (already the lower of two on
+    // disadvantage / higher on advantage) and `damageDiceTotal` (the summed
+    // damage dice — the caller rolls the dice a second time on a crit, since RAW
+    // doubles the dice, not the flat modifier). A natural 20 always hits and
+    // crits; a natural 1 always misses.
+    AttackOutcome attack(int targetId, int d20, int damageDiceTotal) {
+        AttackOutcome o;
+        if (!canAttack(targetId)) return o;   // o.valid == false
+        Combatant& a = active();
+        Combatant& t = m_c[targetId];
+        a.actionUsed = true;
+        o.valid = true;
+        o.attacker = a.name;
+        o.target = t.name;
+        o.d20 = d20;
+        o.crit = (d20 == 20);
+        o.total = d20 + a.attackBonus;
+        o.hit = o.crit || (d20 != 1 && o.total >= t.ac);
+        if (o.hit) {
+            o.damage = std::max(0, damageDiceTotal + a.dmgBonus);
+            t.hp = std::max(0, t.hp - o.damage);
+            o.dropped = t.isDown();
+        }
+        return o;
+    }
+
+    // Count living combatants on a side — for victory/defeat checks.
+    int living(bool foe) const {
+        int n = 0;
+        for (const auto& c : m_c) if (c.foe == foe && !c.isDown()) ++n;
+        return n;
     }
 
 private:
