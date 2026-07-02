@@ -15,6 +15,7 @@
 #include "Renderer/ModelRenderer.hpp"
 #include "Renderer/ImGuiManager.hpp"
 #include "Editor/PrimitiveMeshBuilder.hpp"
+#include "Editor/BinaryLevelReader.hpp"
 
 #include "encounter.hpp"
 
@@ -73,6 +74,9 @@ public:
             m_shotCountdown = 8;
             m_shotExit = std::getenv("TABLETOP_SHOT_EXIT") != nullptr;
         }
+        // TABLETOP_LEVEL=<path.edenbin> loads a terrain_editor level for a
+        // top-down preview (scale/pipeline check) instead of the combat sandbox.
+        if (const char* lp = std::getenv("TABLETOP_LEVEL"); lp && *lp) m_levelPath = lp;
     }
 
 protected:
@@ -81,12 +85,26 @@ protected:
             getContext(), getSwapchain().getRenderPass(), getSwapchain().getExtent());
         m_imgui.init(getContext(), getSwapchain(), getWindow().getHandle(), "imgui_tabletop.ini");
 
+        // Light the scene — without this the model shader gets ~zero ambient/sun
+        // and everything renders dark. Bright, mostly-flat top-down lighting.
+        m_modelRenderer->setLights({});
+        m_modelRenderer->setDayNight(/*sunY*/0.8f, /*ambientLevel*/0.55f);
+
         // Top-down orthographic camera. Set the zoom (ortho half-height) first;
         // the Top preset positions the camera above the target and switches to
         // orthographic for us.
         m_camera.setOrthoSize(m_orthoSize);
         m_camera.setViewPreset(ViewPreset::Top, glm::vec3(0.0f));
         m_camera.setNoClip(true);
+
+        // Level-preview mode: load a real level, frame it, and skip the combat
+        // sandbox entirely.
+        if (!m_levelPath.empty()) loadLevel(m_levelPath);
+        if (m_hasLevel) {
+            m_grid = buildLevelGrid();
+            frameCameraOnLevel();
+            return;
+        }
 
         // Table slab (top surface at y=0).
         auto table = PrimitiveMeshBuilder::createFoundation(
@@ -170,6 +188,25 @@ protected:
         vkCmdBeginRenderPass(cmd, &rp, VK_SUBPASS_CONTENTS_INLINE);
 
         glm::mat4 viewProj = computeViewProj();
+
+        if (m_hasLevel) {
+            // Level preview: render the loaded meshes (textured) + the 5-ft grid.
+            // Force opaque — floor/wall textures can carry an alpha channel that
+            // the editor treats as "frosted glass", which would let the dark
+            // background bleed through and make the floor look cloudy.
+            for (const auto& d : m_levelDraws)
+                m_modelRenderer->render(cmd, viewProj, m_levelMeshHandles[d.meshIdx], d.model,
+                                        0.0f, 1.0f, 1.0f, /*twoSided*/false, /*indoor*/false,
+                                        /*transparent*/false);
+            m_modelRenderer->renderLines(cmd, viewProj, m_grid, glm::vec3(0.28f, 0.46f, 0.34f));
+            renderUI();
+            ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), cmd);
+            vkCmdEndRenderPass(cmd);
+            vkEndCommandBuffer(cmd);
+            m_lastImageIndex = imageIndex;
+            return;
+        }
+
         m_modelRenderer->render(cmd, viewProj, m_tableHandle, glm::mat4(1.0f));
         m_modelRenderer->renderLines(cmd, viewProj, m_grid, glm::vec3(0.42f, 0.40f, 0.34f));
 
@@ -326,6 +363,78 @@ private:
             lines.push_back({-kBoardHalf, y, c}); lines.push_back({kBoardHalf, y, c});
         }
         return lines;
+    }
+
+    // ----- level preview (load a terrain_editor .edenbin, render it textured) -----
+    void loadLevel(const std::string& path) {
+        eden::BinaryLevelReader reader;
+        eden::BinaryLevelData data = reader.load(path);
+        if (!data.success) {
+            std::cerr << "level load FAILED: " << path << "  (" << data.error << ")\n";
+            return;
+        }
+        std::cerr << "level loaded: " << path << " — " << data.meshes.size() << " meshes, "
+                  << data.textures.size() << " textures, " << data.objects.size() << " objects\n";
+
+        // One GPU model per binary mesh, carrying its baked texture (if any).
+        m_levelMeshHandles.assign(data.meshes.size(), 0u);
+        for (size_t i = 0; i < data.meshes.size(); ++i) {
+            const auto& mesh = data.meshes[i];
+            const unsigned char* px = nullptr; int w = 0, h = 0;
+            if (mesh.textureId >= 0 && mesh.textureId < static_cast<int>(data.textures.size())) {
+                const auto& t = data.textures[mesh.textureId];
+                if (!t.pixels.empty()) { px = t.pixels.data(); w = t.width; h = t.height; }
+            }
+            m_levelMeshHandles[i] =
+                m_modelRenderer->createModel(mesh.vertices, mesh.indices, px, w, h);
+        }
+
+        // One draw per object at its transform; accumulate the floor-plan bounds.
+        glm::vec2 mn(1e9f), mx(-1e9f);
+        for (const auto& o : data.objects) {
+            if (!o.visible || o.meshId < 0 ||
+                o.meshId >= static_cast<int>(m_levelMeshHandles.size())) continue;
+            glm::mat4 m = glm::translate(glm::mat4(1.0f), o.position);
+            m = glm::rotate(m, glm::radians(o.rotation.y), glm::vec3(0, 1, 0));
+            m = glm::rotate(m, glm::radians(o.rotation.x), glm::vec3(1, 0, 0));
+            m = glm::rotate(m, glm::radians(o.rotation.z), glm::vec3(0, 0, 1));
+            m = glm::scale(m, o.scale);
+            m_levelDraws.push_back({o.meshId, m, o.transparent});
+            glm::vec2 c(o.position.x, o.position.z);
+            glm::vec2 half(std::abs(o.scale.x) * 0.5f, std::abs(o.scale.z) * 0.5f);
+            mn = glm::min(mn, c - half);
+            mx = glm::max(mx, c + half);
+        }
+        if (m_levelDraws.empty()) return;
+        m_levelMin = mn; m_levelMax = mx;
+        auto slash = path.find_last_of("/\\");
+        m_levelName = (slash == std::string::npos) ? path : path.substr(slash + 1);
+        m_hasLevel = true;
+    }
+
+    // 5-ft grid (1 unit = 1 ft), aligned to world 5-ft lines but CLIPPED to the
+    // floor plan (no margin), drawn just above the floor.
+    std::vector<glm::vec3> buildLevelGrid() const {
+        std::vector<glm::vec3> lines;
+        const float step = 5.0f;
+        const float y = 0.16f;   // just over the floor slab (top at y=0.1)
+        float x0 = std::ceil(m_levelMin.x / step) * step, x1 = std::floor(m_levelMax.x / step) * step;
+        float z0 = std::ceil(m_levelMin.y / step) * step, z1 = std::floor(m_levelMax.y / step) * step;
+        for (float x = x0; x <= x1 + 0.01f; x += step) {
+            lines.push_back({x, y, m_levelMin.y}); lines.push_back({x, y, m_levelMax.y});
+        }
+        for (float z = z0; z <= z1 + 0.01f; z += step) {
+            lines.push_back({m_levelMin.x, y, z}); lines.push_back({m_levelMax.x, y, z});
+        }
+        return lines;
+    }
+
+    void frameCameraOnLevel() {
+        glm::vec2 c = (m_levelMin + m_levelMax) * 0.5f;
+        glm::vec2 size = m_levelMax - m_levelMin;
+        m_orthoSize = std::max({size.x, size.y, 8.0f}) * 0.5f * 1.15f;
+        m_camera.setOrthoSize(m_orthoSize);
+        m_camera.setViewPreset(ViewPreset::Top, glm::vec3(c.x, 0.0f, c.y));
     }
 
     // The reachable region for a mover at (ax,ay) with `cells` of movement is a
@@ -526,6 +635,24 @@ private:
 
     void renderUI() {
         ImGui::NewFrame();
+
+        if (m_hasLevel) {
+            ImGui::SetNextWindowPos(ImVec2(10, 10), ImGuiCond_FirstUseEver);
+            ImGui::Begin("Level preview");
+            ImGui::Text("%s", m_levelName.c_str());
+            ImGui::Text("Floor plan:  X %.0f..%.0f ft", m_levelMin.x, m_levelMax.x);
+            ImGui::Text("             Z %.0f..%.0f ft", m_levelMin.y, m_levelMax.y);
+            ImGui::Text("Size:  %.0f x %.0f ft  (%.0f x %.0f squares)",
+                        m_levelMax.x - m_levelMin.x, m_levelMax.y - m_levelMin.y,
+                        (m_levelMax.x - m_levelMin.x) / 5.0f, (m_levelMax.y - m_levelMin.y) / 5.0f);
+            ImGui::Separator();
+            ImGui::TextDisabled("Green grid = 5 ft squares (1 unit = 1 ft)");
+            ImGui::TextDisabled("Middle-drag pan  \xc2\xb7  Scroll zoom");
+            ImGui::End();
+            ImGui::Render();
+            return;
+        }
+
         ImGui::SetNextWindowPos(ImVec2(10, 10), ImGuiCond_FirstUseEver);
         ImGui::SetNextWindowSize(ImVec2(280, 0), ImGuiCond_FirstUseEver);
         ImGui::Begin("Encounter");
@@ -694,6 +821,14 @@ private:
     uint32_t m_tableHandle = 0;
     std::vector<uint32_t> m_miniHandles;   // one per combatant, indexed by combatant id
     std::vector<glm::vec3> m_grid;
+
+    // Level preview (loaded from a terrain_editor .edenbin via TABLETOP_LEVEL)
+    std::string m_levelPath, m_levelName;
+    bool m_hasLevel = false;
+    std::vector<uint32_t> m_levelMeshHandles;              // one per binary mesh
+    struct LevelDraw { int meshIdx; glm::mat4 model; bool transparent; };
+    std::vector<LevelDraw> m_levelDraws;                   // one per object
+    glm::vec2 m_levelMin{0.0f}, m_levelMax{0.0f};          // floor-plan XZ bounds (feet)
 
     rpgtt::Encounter m_enc;                // turn/round/movement state (rules in encounter.hpp)
     std::vector<rpgtt::Combatant> m_spawn; // starting layout, for Reset
