@@ -11336,7 +11336,7 @@ private:
                     AABB wb = obj->getWorldBounds();
                     snappedY = std::max(snappedY, std::round(wb.min.y));
                     snappedY = std::min(snappedY, std::round(wb.max.y));
-                    terrainHitPt = {std::round(hp.x), snappedY, std::round(hp.z)};
+                    terrainHitPt = {snapFt(hp.x), snappedY, snapFt(hp.z)};
                     terrainHit = true;
                 }
             }
@@ -11347,7 +11347,7 @@ private:
                     glm::vec3 p = rayO + rayD * t;
                     float terrY = m_terrain.getHeightAt(p.x, p.z);
                     if (p.y <= terrY + 0.5f) {
-                        terrainHitPt = {std::round(p.x), terrY, std::round(p.z)};
+                        terrainHitPt = {snapFt(p.x), terrY, snapFt(p.z)};
                         terrainHit = true;
                         break;
                     }
@@ -11387,7 +11387,7 @@ private:
                     float t = (m_hSlabStart.y - rayO.y) / rayD.y;
                     if (t > 0 && t < 500.0f) {
                         glm::vec3 hp = rayO + rayD * t;
-                        m_hSlabEnd = {std::round(hp.x), m_hSlabStart.y, std::round(hp.z)};
+                        m_hSlabEnd = {snapFt(hp.x), m_hSlabStart.y, snapFt(hp.z)};
                         m_hSlabPreviewValid = true;
                     }
                 }
@@ -11435,6 +11435,304 @@ private:
             }
         } else if (!m_hSlabBrushMode) {
             m_hSlabDrawing = false;
+        }
+    }
+
+    // Vertical-slab / wall placement — shared by play-mode building and the
+    // edit-mode Build panel. Self-guards on the wall tool being armed.
+    void updateWallPlacement() {
+        bool leftPressed = Input::isMouseButtonPressed(Input::MOUSE_LEFT);
+        // Game-mode wall brush — click+drag on floor slabs to draw walls
+        if (m_wallBrushMode && buildActive() && !m_filesystemBrowser.isActive() && !ImGui::GetIO().WantCaptureMouse) {
+            float aspect = static_cast<float>(getWindow().getWidth()) / getWindow().getHeight();
+            glm::mat4 proj = m_camera.getProjectionMatrix(aspect, 0.1f, 5000.0f);
+            glm::mat4 view = m_camera.getViewMatrix();
+            glm::mat4 invVP = glm::inverse(proj * view);
+            float ndcX = 0.0f, ndcY = 0.0f;
+            if (buildUseMouse()) {
+                glm::vec2 mouse = Input::getMousePosition();
+                ndcX = (2.0f * mouse.x / getWindow().getWidth()) - 1.0f;
+                ndcY = 1.0f - (2.0f * mouse.y / getWindow().getHeight());
+            }
+            glm::vec4 nearPt = invVP * glm::vec4(ndcX, ndcY, -1, 1); nearPt /= nearPt.w;
+            glm::vec4 farPt  = invVP * glm::vec4(ndcX, ndcY,  1, 1); farPt  /= farPt.w;
+            glm::vec3 rayO = glm::vec3(nearPt);
+            glm::vec3 rayD = glm::normalize(glm::vec3(farPt - nearPt));
+
+            // Hit test: platform_slab floors or terrain
+            glm::vec3 floorHitPt{0.0f};
+            bool floorHit = false;
+
+            // Try hitting a platform_slab first
+            float bestSlabDist = std::numeric_limits<float>::max();
+            for (auto& obj : m_sceneObjects) {
+                if (!obj || obj->getBuildingType() != "platform_slab") continue;
+                float dist = obj->getWorldBounds().intersect(rayO, rayD);
+                if (dist >= 0 && dist < 200.0f && dist < bestSlabDist) {
+                    bestSlabDist = dist;
+                    glm::vec3 hp = rayO + rayD * dist;
+                    // Snap to top of slab
+                    AABB slabBounds = obj->getWorldBounds();
+                    floorHitPt = {snapFt(hp.x), slabBounds.max.y, snapFt(hp.z)};
+                    floorHit = true;
+                }
+            }
+
+            // Fall back to terrain
+            if (!floorHit && rayD.y < -0.001f) {
+                for (float t = 1.0f; t < 500.0f; t += 0.5f) {
+                    glm::vec3 p = rayO + rayD * t;
+                    float terrY = m_terrain.getHeightAt(p.x, p.z);
+                    if (p.y <= terrY + 0.5f) {
+                        floorHitPt = {snapFt(p.x), terrY, snapFt(p.z)};
+                        floorHit = true;
+                        break;
+                    }
+                }
+            }
+
+            // Check for existing wall click (select for deletion)
+            // Only select a wall if it's closer than any slab we hit (don't pick through floors)
+            SceneObject* hitExistingWall = nullptr;
+            if (leftPressed && !m_wallBrushDrawing) {
+                float bestDist = floorHit ? bestSlabDist : std::numeric_limits<float>::max();
+                for (auto& obj : m_sceneObjects) {
+                    if (!obj || obj->getBuildingType() != "platform_wall") continue;
+                    float dist = obj->getWorldBounds().intersect(rayO, rayD);
+                    if (dist >= 0 && dist < 200.0f && dist < bestDist) {
+                        bestDist = dist;
+                        hitExistingWall = obj.get();
+                    }
+                }
+                if (hitExistingWall) {
+                    clearBuildSelection();
+                    hitExistingWall->setSelected(true);
+                }
+            }
+
+            // Right-click to delete wall (skip when tumbling)
+            if (Input::isMouseButtonPressed(Input::MOUSE_RIGHT) && !m_wallBrushDrawing && !m_isTumbling) {
+                float bestDist = std::numeric_limits<float>::max();
+                int bestIdx = -1;
+                for (int wi = 0; wi < static_cast<int>(m_sceneObjects.size()); wi++) {
+                    auto& obj = m_sceneObjects[wi];
+                    if (!obj || obj->getBuildingType() != "platform_wall") continue;
+                    float dist = obj->getWorldBounds().intersect(rayO, rayD);
+                    if (dist >= 0 && dist < 200.0f && dist < bestDist) {
+                        bestDist = dist;
+                        bestIdx = wi;
+                    }
+                }
+                if (bestIdx >= 0) {
+                    deleteObject(bestIdx);
+                }
+            }
+
+            if (floorHit && !hitExistingWall) {
+                if (leftPressed && !m_wallBrushDrawing) {
+                    m_wallBrushStart = floorHitPt;
+                    m_wallBrushEnd = floorHitPt;
+                    m_wallBrushDrawing = true;
+                }
+                if (m_wallBrushDrawing) {
+                    m_wallBrushEnd = floorHitPt;
+                    // Constrain to 1m thick: snap to dominant axis
+                    float dx = std::abs(m_wallBrushEnd.x - m_wallBrushStart.x);
+                    float dz = std::abs(m_wallBrushEnd.z - m_wallBrushStart.z);
+                    if (dx >= dz) {
+                        m_wallBrushEnd.z = m_wallBrushStart.z;
+                    } else {
+                        m_wallBrushEnd.x = m_wallBrushStart.x;
+                    }
+                    m_wallBrushPreviewValid = true;
+                }
+            }
+
+            // Release: create the wall
+            if (m_wallBrushDrawing && !Input::isMouseButtonDown(Input::MOUSE_LEFT)) {
+                m_wallBrushDrawing = false;
+                float dx = std::abs(m_wallBrushEnd.x - m_wallBrushStart.x);
+                float dz = std::abs(m_wallBrushEnd.z - m_wallBrushStart.z);
+                float wallLen = std::round(std::max(dx, dz));
+                if (wallLen >= 1.0f) {
+                    float wallHeight = m_wallBrushHeight;
+                    float wallThick = m_wallBrushThickness;
+                    float minX = std::min(m_wallBrushStart.x, m_wallBrushEnd.x);
+                    float minZ = std::min(m_wallBrushStart.z, m_wallBrushEnd.z);
+                    float cx, cz;
+                    glm::vec3 wallScale;
+                    bool alongX = (dx >= dz);
+                    if (alongX) {
+                        cx = minX + wallLen * 0.5f;
+                        cz = m_wallBrushStart.z + wallThick * 0.5f;
+                        wallScale = {wallLen, wallHeight, wallThick};
+                    } else {
+                        cx = m_wallBrushStart.x + wallThick * 0.5f;
+                        cz = minZ + wallLen * 0.5f;
+                        wallScale = {wallThick, wallHeight, wallLen};
+                    }
+
+                    glm::vec4 wallColor = {0.7f, 0.7f, 0.7f, 1.0f};
+                    auto mesh = PrimitiveMeshBuilder::createCube(1.0f, wallColor);
+                    uint32_t handle = m_modelRenderer->createModel(mesh.vertices, mesh.indices);
+
+                    auto obj = std::make_unique<SceneObject>(
+                        "Wall_" + std::to_string(m_sceneObjects.size()));
+                    obj->setBufferHandle(handle);
+                    obj->setIndexCount(static_cast<uint32_t>(mesh.indices.size()));
+                    obj->setVertexCount(static_cast<uint32_t>(mesh.vertices.size()));
+                    obj->setLocalBounds(mesh.bounds);
+                    obj->setMeshData(mesh.vertices, mesh.indices);
+                    obj->setPrimitiveType(PrimitiveType::Cube);
+                    obj->setPrimitiveSize(1.0f);
+                    obj->setPrimitiveColor(wallColor);
+                    obj->setBuildingType("platform_wall");
+                    obj->setAABBCollision(true);
+
+                    obj->getTransform().setPosition({cx, m_wallBrushStart.y, cz});
+                    obj->getTransform().setScale(wallScale);
+
+                    m_sceneObjects.push_back(std::move(obj));
+                }
+                // Auto-deactivate after placing in play mode; the editor keeps it armed.
+                if (m_isPlayMode) m_wallBrushMode = false;
+                m_wallBrushPreviewValid = false;
+            }
+        }
+    }
+
+    // Room placement (drags out 4 walls) — shared by play-mode building and
+    // the edit-mode Build panel. Self-guards on the room tool being armed.
+    void updateRoomPlacement() {
+        bool leftPressed = Input::isMouseButtonPressed(Input::MOUSE_LEFT);
+        // Room brush mode — drag out a rectangle, creates 4 separate walls on release
+        m_roomBrushPreviewValid = false;
+        if (m_roomBrushMode && buildActive() && !m_filesystemBrowser.isActive() && !ImGui::GetIO().WantCaptureMouse) {
+            float aspect = static_cast<float>(getWindow().getWidth()) / getWindow().getHeight();
+            glm::mat4 proj = m_camera.getProjectionMatrix(aspect, 0.1f, 5000.0f);
+            glm::mat4 view = m_camera.getViewMatrix();
+            glm::mat4 invVP = glm::inverse(proj * view);
+            float ndcX = 0.0f, ndcY = 0.0f;
+            if (buildUseMouse()) {
+                glm::vec2 mouse = Input::getMousePosition();
+                ndcX = (2.0f * mouse.x / getWindow().getWidth()) - 1.0f;
+                ndcY = 1.0f - (2.0f * mouse.y / getWindow().getHeight());
+            }
+            glm::vec4 nearPt = invVP * glm::vec4(ndcX, ndcY, -1, 1); nearPt /= nearPt.w;
+            glm::vec4 farPt  = invVP * glm::vec4(ndcX, ndcY,  1, 1); farPt  /= farPt.w;
+            glm::vec3 rayO = glm::vec3(nearPt);
+            glm::vec3 rayD = glm::normalize(glm::vec3(farPt - nearPt));
+
+            // Hit test: slabs then terrain (same as H-slab brush)
+            glm::vec3 hitPt{0.0f};
+            bool hit = false;
+            float bestT = std::numeric_limits<float>::max();
+
+            for (auto& obj : m_sceneObjects) {
+                if (!obj) continue;
+                const auto& bt = obj->getBuildingType();
+                if (bt != "platform_wall" && bt != "platform_slab") continue;
+                float dist = obj->getWorldBounds().intersect(rayO, rayD);
+                if (dist >= 0 && dist < 200.0f && dist < bestT) {
+                    bestT = dist;
+                    glm::vec3 hp = rayO + rayD * dist;
+                    AABB wb = obj->getWorldBounds();
+                    float snappedY = std::round(hp.y);
+                    snappedY = std::max(snappedY, std::round(wb.min.y));
+                    snappedY = std::min(snappedY, std::round(wb.max.y));
+                    hitPt = {snapFt(hp.x), snappedY, snapFt(hp.z)};
+                    hit = true;
+                }
+            }
+
+            if (!hit && rayD.y < -0.001f) {
+                for (float t = 1.0f; t < 500.0f; t += 0.5f) {
+                    glm::vec3 p = rayO + rayD * t;
+                    float terrY = m_terrain.getHeightAt(p.x, p.z);
+                    if (p.y <= terrY + 0.5f) {
+                        hitPt = {snapFt(p.x), terrY, snapFt(p.z)};
+                        hit = true;
+                        break;
+                    }
+                }
+            }
+
+            if (hit) {
+                if (leftPressed && !m_roomBrushDrawing) {
+                    m_roomBrushStart = hitPt;
+                    m_roomBrushEnd = hitPt;
+                    m_roomBrushDrawing = true;
+                }
+            }
+
+            // While dragging, project onto starting Y plane
+            if (m_roomBrushDrawing) {
+                if (std::abs(rayD.y) > 0.001f) {
+                    float t = (m_roomBrushStart.y - rayO.y) / rayD.y;
+                    if (t > 0 && t < 500.0f) {
+                        glm::vec3 hp = rayO + rayD * t;
+                        m_roomBrushEnd = {snapFt(hp.x), m_roomBrushStart.y, snapFt(hp.z)};
+                        m_roomBrushPreviewValid = true;
+                    }
+                }
+            }
+
+            // Release: create 4 walls
+            if (m_roomBrushDrawing && !Input::isMouseButtonDown(Input::MOUSE_LEFT)) {
+                m_roomBrushDrawing = false;
+                float dx = std::abs(m_roomBrushEnd.x - m_roomBrushStart.x);
+                float dz = std::abs(m_roomBrushEnd.z - m_roomBrushStart.z);
+                if (dx >= 1.0f && dz >= 1.0f) {
+                    float roomW = std::round(dx);
+                    float roomD = std::round(dz);
+                    float minX = std::min(m_roomBrushStart.x, m_roomBrushEnd.x);
+                    float minZ = std::min(m_roomBrushStart.z, m_roomBrushEnd.z);
+                    float baseY = m_roomBrushStart.y;
+                    float wallH = m_wallBrushHeight;
+                    float wallT = m_wallBrushThickness;
+
+                    // Wall definitions: {centerX, centerZ, scaleX, scaleZ}
+                    struct WallDef { float cx, cz, sx, sz; const char* label; };
+                    WallDef walls[4] = {
+                        // Front wall (min Z edge, along X)
+                        { minX + roomW * 0.5f, minZ + wallT * 0.5f, roomW, wallT, "Front" },
+                        // Back wall (max Z edge, along X)
+                        { minX + roomW * 0.5f, minZ + roomD - wallT * 0.5f, roomW, wallT, "Back" },
+                        // Left wall (min X edge, along Z)
+                        { minX + wallT * 0.5f, minZ + roomD * 0.5f, wallT, roomD, "Left" },
+                        // Right wall (max X edge, along Z)
+                        { minX + roomW - wallT * 0.5f, minZ + roomD * 0.5f, wallT, roomD, "Right" },
+                    };
+
+                    for (int i = 0; i < 4; i++) {
+                        glm::vec4 wallColor = {0.7f, 0.7f, 0.7f, 1.0f};
+                        auto mesh = PrimitiveMeshBuilder::createCube(1.0f, wallColor);
+                        uint32_t handle = m_modelRenderer->createModel(mesh.vertices, mesh.indices);
+
+                        auto obj = std::make_unique<SceneObject>(
+                            "RoomWall_" + std::string(walls[i].label) + "_" + std::to_string(m_sceneObjects.size()));
+                        obj->setBufferHandle(handle);
+                        obj->setIndexCount(static_cast<uint32_t>(mesh.indices.size()));
+                        obj->setVertexCount(static_cast<uint32_t>(mesh.vertices.size()));
+                        obj->setLocalBounds(mesh.bounds);
+                        obj->setMeshData(mesh.vertices, mesh.indices);
+                        obj->setPrimitiveType(PrimitiveType::Cube);
+                        obj->setPrimitiveSize(1.0f);
+                        obj->setPrimitiveColor(wallColor);
+                        obj->setBuildingType("platform_wall");
+                        obj->setAABBCollision(true);
+
+                        obj->getTransform().setPosition({walls[i].cx, baseY, walls[i].cz});
+                        obj->getTransform().setScale({walls[i].sx, wallH, walls[i].sz});
+
+                        m_sceneObjects.push_back(std::move(obj));
+                    }
+                }
+                if (m_isPlayMode) m_roomBrushMode = false;
+                m_roomBrushPreviewValid = false;
+            }
+        } else if (!m_roomBrushMode) {
+            m_roomBrushDrawing = false;
         }
     }
 
@@ -12505,293 +12803,9 @@ private:
 
         updateHSlabPlacement();
 
-        // Game-mode wall brush — click+drag on floor slabs to draw walls
-        if (m_wallBrushMode && m_isPlayMode && !m_filesystemBrowser.isActive() && !ImGui::GetIO().WantCaptureMouse) {
-            float aspect = static_cast<float>(getWindow().getWidth()) / getWindow().getHeight();
-            glm::mat4 proj = m_camera.getProjectionMatrix(aspect, 0.1f, 5000.0f);
-            glm::mat4 view = m_camera.getViewMatrix();
-            glm::mat4 invVP = glm::inverse(proj * view);
-            float ndcX = 0.0f, ndcY = 0.0f;
-            if (m_playModeCursorVisible) {
-                glm::vec2 mouse = Input::getMousePosition();
-                ndcX = (2.0f * mouse.x / getWindow().getWidth()) - 1.0f;
-                ndcY = 1.0f - (2.0f * mouse.y / getWindow().getHeight());
-            }
-            glm::vec4 nearPt = invVP * glm::vec4(ndcX, ndcY, -1, 1); nearPt /= nearPt.w;
-            glm::vec4 farPt  = invVP * glm::vec4(ndcX, ndcY,  1, 1); farPt  /= farPt.w;
-            glm::vec3 rayO = glm::vec3(nearPt);
-            glm::vec3 rayD = glm::normalize(glm::vec3(farPt - nearPt));
+        updateWallPlacement();
 
-            // Hit test: platform_slab floors or terrain
-            glm::vec3 floorHitPt{0.0f};
-            bool floorHit = false;
-
-            // Try hitting a platform_slab first
-            float bestSlabDist = std::numeric_limits<float>::max();
-            for (auto& obj : m_sceneObjects) {
-                if (!obj || obj->getBuildingType() != "platform_slab") continue;
-                float dist = obj->getWorldBounds().intersect(rayO, rayD);
-                if (dist >= 0 && dist < 200.0f && dist < bestSlabDist) {
-                    bestSlabDist = dist;
-                    glm::vec3 hp = rayO + rayD * dist;
-                    // Snap to top of slab
-                    AABB slabBounds = obj->getWorldBounds();
-                    floorHitPt = {std::round(hp.x), slabBounds.max.y, std::round(hp.z)};
-                    floorHit = true;
-                }
-            }
-
-            // Fall back to terrain
-            if (!floorHit && rayD.y < -0.001f) {
-                for (float t = 1.0f; t < 500.0f; t += 0.5f) {
-                    glm::vec3 p = rayO + rayD * t;
-                    float terrY = m_terrain.getHeightAt(p.x, p.z);
-                    if (p.y <= terrY + 0.5f) {
-                        floorHitPt = {std::round(p.x), terrY, std::round(p.z)};
-                        floorHit = true;
-                        break;
-                    }
-                }
-            }
-
-            // Check for existing wall click (select for deletion)
-            // Only select a wall if it's closer than any slab we hit (don't pick through floors)
-            SceneObject* hitExistingWall = nullptr;
-            if (leftPressed && !m_wallBrushDrawing) {
-                float bestDist = floorHit ? bestSlabDist : std::numeric_limits<float>::max();
-                for (auto& obj : m_sceneObjects) {
-                    if (!obj || obj->getBuildingType() != "platform_wall") continue;
-                    float dist = obj->getWorldBounds().intersect(rayO, rayD);
-                    if (dist >= 0 && dist < 200.0f && dist < bestDist) {
-                        bestDist = dist;
-                        hitExistingWall = obj.get();
-                    }
-                }
-                if (hitExistingWall) {
-                    clearBuildSelection();
-                    hitExistingWall->setSelected(true);
-                }
-            }
-
-            // Right-click to delete wall (skip when tumbling)
-            if (Input::isMouseButtonPressed(Input::MOUSE_RIGHT) && !m_wallBrushDrawing && !m_isTumbling) {
-                float bestDist = std::numeric_limits<float>::max();
-                int bestIdx = -1;
-                for (int wi = 0; wi < static_cast<int>(m_sceneObjects.size()); wi++) {
-                    auto& obj = m_sceneObjects[wi];
-                    if (!obj || obj->getBuildingType() != "platform_wall") continue;
-                    float dist = obj->getWorldBounds().intersect(rayO, rayD);
-                    if (dist >= 0 && dist < 200.0f && dist < bestDist) {
-                        bestDist = dist;
-                        bestIdx = wi;
-                    }
-                }
-                if (bestIdx >= 0) {
-                    deleteObject(bestIdx);
-                }
-            }
-
-            if (floorHit && !hitExistingWall) {
-                if (leftPressed && !m_wallBrushDrawing) {
-                    m_wallBrushStart = floorHitPt;
-                    m_wallBrushEnd = floorHitPt;
-                    m_wallBrushDrawing = true;
-                }
-                if (m_wallBrushDrawing) {
-                    m_wallBrushEnd = floorHitPt;
-                    // Constrain to 1m thick: snap to dominant axis
-                    float dx = std::abs(m_wallBrushEnd.x - m_wallBrushStart.x);
-                    float dz = std::abs(m_wallBrushEnd.z - m_wallBrushStart.z);
-                    if (dx >= dz) {
-                        m_wallBrushEnd.z = m_wallBrushStart.z;
-                    } else {
-                        m_wallBrushEnd.x = m_wallBrushStart.x;
-                    }
-                    m_wallBrushPreviewValid = true;
-                }
-            }
-
-            // Release: create the wall
-            if (m_wallBrushDrawing && !Input::isMouseButtonDown(Input::MOUSE_LEFT)) {
-                m_wallBrushDrawing = false;
-                float dx = std::abs(m_wallBrushEnd.x - m_wallBrushStart.x);
-                float dz = std::abs(m_wallBrushEnd.z - m_wallBrushStart.z);
-                float wallLen = std::round(std::max(dx, dz));
-                if (wallLen >= 1.0f) {
-                    float wallHeight = m_wallBrushHeight;
-                    float wallThick = m_wallBrushThickness;
-                    float minX = std::min(m_wallBrushStart.x, m_wallBrushEnd.x);
-                    float minZ = std::min(m_wallBrushStart.z, m_wallBrushEnd.z);
-                    float cx, cz;
-                    glm::vec3 wallScale;
-                    bool alongX = (dx >= dz);
-                    if (alongX) {
-                        cx = minX + wallLen * 0.5f;
-                        cz = m_wallBrushStart.z + wallThick * 0.5f;
-                        wallScale = {wallLen, wallHeight, wallThick};
-                    } else {
-                        cx = m_wallBrushStart.x + wallThick * 0.5f;
-                        cz = minZ + wallLen * 0.5f;
-                        wallScale = {wallThick, wallHeight, wallLen};
-                    }
-
-                    glm::vec4 wallColor = {0.7f, 0.7f, 0.7f, 1.0f};
-                    auto mesh = PrimitiveMeshBuilder::createCube(1.0f, wallColor);
-                    uint32_t handle = m_modelRenderer->createModel(mesh.vertices, mesh.indices);
-
-                    auto obj = std::make_unique<SceneObject>(
-                        "Wall_" + std::to_string(m_sceneObjects.size()));
-                    obj->setBufferHandle(handle);
-                    obj->setIndexCount(static_cast<uint32_t>(mesh.indices.size()));
-                    obj->setVertexCount(static_cast<uint32_t>(mesh.vertices.size()));
-                    obj->setLocalBounds(mesh.bounds);
-                    obj->setMeshData(mesh.vertices, mesh.indices);
-                    obj->setPrimitiveType(PrimitiveType::Cube);
-                    obj->setPrimitiveSize(1.0f);
-                    obj->setPrimitiveColor(wallColor);
-                    obj->setBuildingType("platform_wall");
-                    obj->setAABBCollision(true);
-
-                    obj->getTransform().setPosition({cx, m_wallBrushStart.y, cz});
-                    obj->getTransform().setScale(wallScale);
-
-                    m_sceneObjects.push_back(std::move(obj));
-                }
-                // Auto-deactivate brush after placing
-                m_wallBrushMode = false;
-                m_wallBrushPreviewValid = false;
-            }
-        }
-
-        // Room brush mode — drag out a rectangle, creates 4 separate walls on release
-        m_roomBrushPreviewValid = false;
-        if (m_roomBrushMode && m_isPlayMode && !m_filesystemBrowser.isActive() && !ImGui::GetIO().WantCaptureMouse) {
-            float aspect = static_cast<float>(getWindow().getWidth()) / getWindow().getHeight();
-            glm::mat4 proj = m_camera.getProjectionMatrix(aspect, 0.1f, 5000.0f);
-            glm::mat4 view = m_camera.getViewMatrix();
-            glm::mat4 invVP = glm::inverse(proj * view);
-            float ndcX = 0.0f, ndcY = 0.0f;
-            if (m_playModeCursorVisible) {
-                glm::vec2 mouse = Input::getMousePosition();
-                ndcX = (2.0f * mouse.x / getWindow().getWidth()) - 1.0f;
-                ndcY = 1.0f - (2.0f * mouse.y / getWindow().getHeight());
-            }
-            glm::vec4 nearPt = invVP * glm::vec4(ndcX, ndcY, -1, 1); nearPt /= nearPt.w;
-            glm::vec4 farPt  = invVP * glm::vec4(ndcX, ndcY,  1, 1); farPt  /= farPt.w;
-            glm::vec3 rayO = glm::vec3(nearPt);
-            glm::vec3 rayD = glm::normalize(glm::vec3(farPt - nearPt));
-
-            // Hit test: slabs then terrain (same as H-slab brush)
-            glm::vec3 hitPt{0.0f};
-            bool hit = false;
-            float bestT = std::numeric_limits<float>::max();
-
-            for (auto& obj : m_sceneObjects) {
-                if (!obj) continue;
-                const auto& bt = obj->getBuildingType();
-                if (bt != "platform_wall" && bt != "platform_slab") continue;
-                float dist = obj->getWorldBounds().intersect(rayO, rayD);
-                if (dist >= 0 && dist < 200.0f && dist < bestT) {
-                    bestT = dist;
-                    glm::vec3 hp = rayO + rayD * dist;
-                    AABB wb = obj->getWorldBounds();
-                    float snappedY = std::round(hp.y);
-                    snappedY = std::max(snappedY, std::round(wb.min.y));
-                    snappedY = std::min(snappedY, std::round(wb.max.y));
-                    hitPt = {std::round(hp.x), snappedY, std::round(hp.z)};
-                    hit = true;
-                }
-            }
-
-            if (!hit && rayD.y < -0.001f) {
-                for (float t = 1.0f; t < 500.0f; t += 0.5f) {
-                    glm::vec3 p = rayO + rayD * t;
-                    float terrY = m_terrain.getHeightAt(p.x, p.z);
-                    if (p.y <= terrY + 0.5f) {
-                        hitPt = {std::round(p.x), terrY, std::round(p.z)};
-                        hit = true;
-                        break;
-                    }
-                }
-            }
-
-            if (hit) {
-                if (leftPressed && !m_roomBrushDrawing) {
-                    m_roomBrushStart = hitPt;
-                    m_roomBrushEnd = hitPt;
-                    m_roomBrushDrawing = true;
-                }
-            }
-
-            // While dragging, project onto starting Y plane
-            if (m_roomBrushDrawing) {
-                if (std::abs(rayD.y) > 0.001f) {
-                    float t = (m_roomBrushStart.y - rayO.y) / rayD.y;
-                    if (t > 0 && t < 500.0f) {
-                        glm::vec3 hp = rayO + rayD * t;
-                        m_roomBrushEnd = {std::round(hp.x), m_roomBrushStart.y, std::round(hp.z)};
-                        m_roomBrushPreviewValid = true;
-                    }
-                }
-            }
-
-            // Release: create 4 walls
-            if (m_roomBrushDrawing && !Input::isMouseButtonDown(Input::MOUSE_LEFT)) {
-                m_roomBrushDrawing = false;
-                float dx = std::abs(m_roomBrushEnd.x - m_roomBrushStart.x);
-                float dz = std::abs(m_roomBrushEnd.z - m_roomBrushStart.z);
-                if (dx >= 1.0f && dz >= 1.0f) {
-                    float roomW = std::round(dx);
-                    float roomD = std::round(dz);
-                    float minX = std::min(m_roomBrushStart.x, m_roomBrushEnd.x);
-                    float minZ = std::min(m_roomBrushStart.z, m_roomBrushEnd.z);
-                    float baseY = m_roomBrushStart.y;
-                    float wallH = m_wallBrushHeight;
-                    float wallT = m_wallBrushThickness;
-
-                    // Wall definitions: {centerX, centerZ, scaleX, scaleZ}
-                    struct WallDef { float cx, cz, sx, sz; const char* label; };
-                    WallDef walls[4] = {
-                        // Front wall (min Z edge, along X)
-                        { minX + roomW * 0.5f, minZ + wallT * 0.5f, roomW, wallT, "Front" },
-                        // Back wall (max Z edge, along X)
-                        { minX + roomW * 0.5f, minZ + roomD - wallT * 0.5f, roomW, wallT, "Back" },
-                        // Left wall (min X edge, along Z)
-                        { minX + wallT * 0.5f, minZ + roomD * 0.5f, wallT, roomD, "Left" },
-                        // Right wall (max X edge, along Z)
-                        { minX + roomW - wallT * 0.5f, minZ + roomD * 0.5f, wallT, roomD, "Right" },
-                    };
-
-                    for (int i = 0; i < 4; i++) {
-                        glm::vec4 wallColor = {0.7f, 0.7f, 0.7f, 1.0f};
-                        auto mesh = PrimitiveMeshBuilder::createCube(1.0f, wallColor);
-                        uint32_t handle = m_modelRenderer->createModel(mesh.vertices, mesh.indices);
-
-                        auto obj = std::make_unique<SceneObject>(
-                            "RoomWall_" + std::string(walls[i].label) + "_" + std::to_string(m_sceneObjects.size()));
-                        obj->setBufferHandle(handle);
-                        obj->setIndexCount(static_cast<uint32_t>(mesh.indices.size()));
-                        obj->setVertexCount(static_cast<uint32_t>(mesh.vertices.size()));
-                        obj->setLocalBounds(mesh.bounds);
-                        obj->setMeshData(mesh.vertices, mesh.indices);
-                        obj->setPrimitiveType(PrimitiveType::Cube);
-                        obj->setPrimitiveSize(1.0f);
-                        obj->setPrimitiveColor(wallColor);
-                        obj->setBuildingType("platform_wall");
-                        obj->setAABBCollision(true);
-
-                        obj->getTransform().setPosition({walls[i].cx, baseY, walls[i].cz});
-                        obj->getTransform().setScale({walls[i].sx, wallH, walls[i].sz});
-
-                        m_sceneObjects.push_back(std::move(obj));
-                    }
-                }
-                m_roomBrushMode = false;
-                m_roomBrushPreviewValid = false;
-            }
-        } else if (!m_roomBrushMode) {
-            m_roomBrushDrawing = false;
-        }
+        updateRoomPlacement();
 
         // Game-mode frame placement — click on a wall or floor to place a frame
         if (m_framePlacementMode && m_isPlayMode && !m_filesystemBrowser.isActive() && !ImGui::GetIO().WantCaptureMouse) {
@@ -16751,6 +16765,8 @@ private:
         // Build placement tools run in edit mode too (self-guards on the tool
         // being armed via the Build panel).
         updateHSlabPlacement();
+        updateWallPlacement();
+        updateRoomPlacement();
 
         // Terrain brush/deform tools — only active when terrain tools checkbox is
         // on, and not while a build placement brush is armed (so a placement click
@@ -23081,6 +23097,14 @@ private:
     bool buildBrushActive() const {
         return m_hSlabBrushMode || m_wallBrushMode || m_roomBrushMode || m_framePlacementMode;
     }
+    // Arm exactly one build placement tool (or none), disarming the others.
+    void armBuildTool(bool* tool) {
+        m_hSlabBrushMode = m_wallBrushMode = m_roomBrushMode = m_framePlacementMode = false;
+        if (tool) *tool = true;
+    }
+    // Snap a world coordinate to the 5-ft grid, so build pieces land on the same
+    // 5-ft squares the tabletop uses (1 world unit = 1 foot).
+    static float snapFt(float v) { return std::round(v / 5.0f) * 5.0f; }
 
     // Small edit-mode Build panel (entry point for the build tools outside play
     // mode). Rendered every frame; only shows in edit mode.
@@ -23102,18 +23126,17 @@ private:
                 ImGui::TextDisabled("Tool:");
                 // Select/Move — no placement brush armed; uses the editor gizmo.
                 if (ImGui::RadioButton("Select / Move", !buildBrushActive())) {
-                    m_hSlabBrushMode = false;
+                    armBuildTool(nullptr);
                     m_editorUI.setBrushMode(BrushMode::MoveObject);
                 }
-                // H-Slab placement.
-                if (ImGui::RadioButton("H-Slab (floor)", m_hSlabBrushMode)) {
-                    m_hSlabBrushMode = true;
-                }
+                if (ImGui::RadioButton("H-Slab (floor)", m_hSlabBrushMode)) armBuildTool(&m_hSlabBrushMode);
+                if (ImGui::RadioButton("V-Slab (wall)",  m_wallBrushMode))  armBuildTool(&m_wallBrushMode);
+                if (ImGui::RadioButton("Room (4 walls)", m_roomBrushMode))  armBuildTool(&m_roomBrushMode);
                 ImGui::Separator();
-                if (m_hSlabBrushMode)
-                    ImGui::TextDisabled("Drag on the ground to place.\nStays armed for more.");
+                if (buildBrushActive())
+                    ImGui::TextDisabled("Drag to place; stays armed for\nmore. Right-click deletes.");
                 else
-                    ImGui::TextDisabled("Click a piece to select.\nPress W, then drag the gizmo\nto move it.");
+                    ImGui::TextDisabled("Click a piece to select.\nPress W, then drag the gizmo.");
             }
         }
         ImGui::End();
