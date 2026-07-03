@@ -263,6 +263,15 @@ protected:
                 auto ring = buildRing(t.cx * 5.0f + 2.5f, t.cy * 5.0f + 2.5f, 2.4f, 0.4f);
                 m_modelRenderer->renderLines(cmd, viewProj, ring, glm::vec3(0.96f, 0.86f, 0.22f));
             }
+            // Highlight the active party member's token on the grid (the PC maps to
+            // the player token; companions have no token yet).
+            if (m_activePartyIdx == 0) {
+                if (int p = playerTokenIndex(); p >= 0) {
+                    const Token& t = m_tokens[p];
+                    auto ring = buildRing(t.cx * 5.0f + 2.5f, t.cy * 5.0f + 2.5f, 2.7f, 0.5f);
+                    m_modelRenderer->renderLines(cmd, viewProj, ring, glm::vec3(0.93f, 0.80f, 0.36f));
+                }
+            }
             // Interaction affordance: ring under NPCs/foes adjacent to your piece
             // (green = talk, red = hostile), so you can see who you can act on.
             if (int p = playerTokenIndex(); p >= 0) {
@@ -1927,7 +1936,9 @@ private:
         auto mk = [](const char* name, const char* race, const char* cls, int wtp, int narc, int honor,
                      int comp, int cruel, int temper, int skept, int soc, int piety, int cur) {
             rpgc::Character c;
-            c.name = name; c.race = race; c.className = cls;
+            c.name = name; c.race = race; c.className = cls; c.level = 3;
+            c.abilities = {{14, 13, 14, 11, 12, 13}};   // STR DEX CON INT WIS CHA
+            c.speed = 30;
             c.willToPower = wtp; c.narcissism = narc; c.honor = honor; c.compassion = comp;
             c.cruelty = cruel; c.temper = temper; c.skepticism = skept; c.sociability = soc;
             c.piety = piety; c.curiosity = cur; c.carnality = 10; c.greed = 10; c.diligence = 11;
@@ -1939,6 +1950,111 @@ private:
             mk("Sister Enna", "Human",    "Paladin", 9,  8, 13, 17,  3,  8,  8, 11, 15, 10),
             mk("Zyrix",       "Tiefling", "Warlock",11, 12, 11, 12,  8, 10, 13, 12,  5, 16),
         };
+        auto give = [](rpgc::Character& c, const char* name) {
+            rpgc::Item it; it.name = name; it.qty = 1; it.equipped = true; c.items.push_back(it);
+        };
+        int por = 0;
+        for (auto& c : m_companions) {
+            // starter kit by class -> real AC and attack on the cards
+            if (c.className == "Fighter")      { give(c, "Longsword"); give(c, "Chain Mail"); give(c, "Shield"); }
+            else if (c.className == "Paladin") { give(c, "Warhammer"); give(c, "Chain Mail"); give(c, "Shield"); }
+            else if (c.className == "Cleric")  { give(c, "Mace"); give(c, "Scale Mail"); give(c, "Shield"); }
+            else                               { give(c, "Dagger"); give(c, "Leather Armor"); }
+            recomputeAC(c);
+            int hd = classHitDie(c.className);
+            c.hitDieSize = hd;
+            c.maxHP = c.level * (hd / 2 + 1 + c.mod(rpgc::CON));
+            c.curHP = c.maxHP;
+            // a race-matched portrait if any are loaded (round-robin for variety)
+            std::string want = baseRaceFolder(c.race);
+            std::vector<int> pics;
+            for (int i = 0; i < (int)m_portraits.size(); ++i)
+                if (m_portraits[i].race == want) pics.push_back(i);
+            if (!pics.empty()) c.portraitPath = m_portraits[pics[por++ % pics.size()]].path;
+        }
+    }
+
+    // The active party (the PC first, then companions) as pointers.
+    std::vector<rpgc::Character*> party() {
+        std::vector<rpgc::Character*> v{&m_pc};
+        for (auto& c : m_companions) v.push_back(&c);
+        return v;
+    }
+    ImTextureID portraitTex(const rpgc::Character& c) const {
+        if (c.portraitPath.empty()) return (ImTextureID)nullptr;
+        for (const auto& p : m_portraits) if (p.path == c.portraitPath) return (ImTextureID)p.descriptor;
+        return (ImTextureID)nullptr;
+    }
+
+    // A portrait thumbnail, or a lettered placeholder if none is set.
+    void portraitThumb(const rpgc::Character& c, float w, float h) {
+        ImTextureID tex = portraitTex(c);
+        if (tex) { ImGui::Image(tex, ImVec2(w, h)); return; }
+        ImVec2 p0 = ImGui::GetCursorScreenPos();
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        dl->AddRectFilled(p0, ImVec2(p0.x + w, p0.y + h), IM_COL32(48, 52, 60, 255), 3.0f);
+        dl->AddRect(p0, ImVec2(p0.x + w, p0.y + h), IM_COL32(80, 86, 96, 255), 3.0f);
+        char ini[2] = {(char)(c.name.empty() ? '?' : c.name[0]), 0};
+        ImVec2 ts = ImGui::CalcTextSize(ini);
+        dl->AddText(ImVec2(p0.x + (w - ts.x) * 0.5f, p0.y + (h - ts.y) * 0.5f), IM_COL32(200, 202, 212, 255), ini);
+        ImGui::Dummy(ImVec2(w, h));
+    }
+
+    void renderPartyCard(int idx, const rpgc::Character& c) {
+        bool active = (idx == m_activePartyIdx);
+        ImGui::PushStyleColor(ImGuiCol_Border, active ? IM_COL32(232, 200, 92, 255) : IM_COL32(66, 72, 82, 255));
+        ImGui::PushStyleVar(ImGuiStyleVar_ChildBorderSize, active ? 2.5f : 1.0f);
+        ImGui::BeginChild((std::string("##card") + std::to_string(idx)).c_str(), ImVec2(0, 96), true);
+        portraitThumb(c, 52.0f, 66.0f);
+        ImGui::SameLine();
+        ImGui::BeginGroup();
+        if (ImGui::Selectable(c.name.c_str(), active))   // click the name to select / highlight
+            m_activePartyIdx = active ? -1 : idx;
+        if (m_cardBack[idx]) {
+            ImGui::TextDisabled("%s %s", c.race.c_str(), c.className.c_str());
+            ImGui::Text("Init %+d  Spd %d ft", c.mod(rpgc::DEX), c.speed);
+            int prof = rpgc::proficiencyBonus(c.level);
+            ImGui::TextWrapped("Saves: STR %+d DEX %+d CON %+d", c.mod(rpgc::STR) + (c.saveProf[0] ? prof : 0),
+                               c.mod(rpgc::DEX) + (c.saveProf[1] ? prof : 0), c.mod(rpgc::CON) + (c.saveProf[2] ? prof : 0));
+        } else {
+            // HP bar
+            float frac = c.maxHP > 0 ? std::clamp((float)c.curHP / c.maxHP, 0.0f, 1.0f) : 1.0f;
+            ImGui::Text("HP %d/%d", c.curHP, c.maxHP);
+            ImVec2 bp = ImGui::GetCursorScreenPos();
+            const float bw = 92.0f, bh = 8.0f;
+            ImDrawList* dl = ImGui::GetWindowDrawList();
+            dl->AddRectFilled(bp, ImVec2(bp.x + bw, bp.y + bh), IM_COL32(38, 42, 48, 255), 2.0f);
+            ImU32 hpc = frac > 0.5f ? IM_COL32(92, 190, 104, 255) : frac > 0.25f ? IM_COL32(210, 180, 80, 255) : IM_COL32(212, 84, 74, 255);
+            dl->AddRectFilled(bp, ImVec2(bp.x + bw * frac, bp.y + bh), hpc, 2.0f);
+            ImGui::Dummy(ImVec2(bw, bh));
+            ImGui::Text("AC %d", c.armorClass);
+            ImGui::PushTextWrapPos(0.0f);
+            ImGui::TextDisabled("%s", attackLine(c, false).c_str());
+            ImGui::PopTextWrapPos();
+        }
+        ImGui::EndGroup();
+        ImGui::EndChild();
+        ImGui::PopStyleVar();
+        ImGui::PopStyleColor();
+        // a small flip toggle under the card
+        if (ImGui::SmallButton((std::string(m_cardBack[idx] ? "Front##" : "Flip##") + std::to_string(idx)).c_str()))
+            m_cardBack[idx] = !m_cardBack[idx];
+    }
+
+    void renderPartyBar() {
+        if (m_companions.empty()) buildCompanions();
+        auto pty = party();
+        if ((int)m_cardBack.size() != (int)pty.size()) m_cardBack.assign(pty.size(), 0);
+        ImVec2 disp = ImGui::GetIO().DisplaySize;
+        const float cardW = 186.0f, pad = 8.0f;
+        ImGui::SetNextWindowPos(ImVec2(disp.x - cardW - pad, pad), ImGuiCond_Always);
+        ImGui::SetNextWindowSize(ImVec2(cardW, disp.y - 2.0f * pad), ImGuiCond_Always);
+        ImGui::Begin("##partybar", nullptr,
+                     ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
+                     ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoBringToFrontOnFocus);
+        ImGui::TextColored(ImVec4(0.76f, 0.63f, 0.42f, 1.0f), "Party");
+        for (int i = 0; i < (int)pty.size(); ++i) { ImGui::PushID(i); renderPartyCard(i, *pty[i]); ImGui::PopID(); }
+        ImGui::End();
     }
     static ImU32 dynamicColor(const std::string& d, bool toxic) {
         if (toxic)                return IM_COL32(196, 90, 150, 255);   // exploitation - orchid
@@ -2500,20 +2616,20 @@ private:
         ImGui::End();
     }
 
-    // ── equipment ──
-    int equippedInSlot(rpgs::ItemKind kind) const {
-        for (int i = 0; i < (int)m_pc.items.size(); ++i)
-            if (m_pc.items[i].equipped && rpgs::itemDef(m_pc.items[i].name).kind == kind) return i;
+    // ── equipment (generic over any character) ──
+    static int equippedIdx(const rpgc::Character& c, rpgs::ItemKind kind) {
+        for (int i = 0; i < (int)c.items.size(); ++i)
+            if (c.items[i].equipped && rpgs::itemDef(c.items[i].name).kind == kind) return i;
         return -1;
     }
-    void recomputeAC() {
-        int dex = m_pc.mod(rpgc::DEX);
+    static void recomputeAC(rpgc::Character& c) {
+        int dex = c.mod(rpgc::DEX);
         int ac = 10 + dex;                                        // unarmored
-        int ai = equippedInSlot(rpgs::ARMOR);
-        if (ai >= 0) { auto d = rpgs::itemDef(m_pc.items[ai].name); ac = d.baseAC + std::min(dex, d.dexCap); }
-        int si = equippedInSlot(rpgs::SHIELD);
-        if (si >= 0) ac += rpgs::itemDef(m_pc.items[si].name).shieldBonus;
-        m_pc.armorClass = ac;
+        int ai = equippedIdx(c, rpgs::ARMOR);
+        if (ai >= 0) { auto d = rpgs::itemDef(c.items[ai].name); ac = d.baseAC + std::min(dex, d.dexCap); }
+        int si = equippedIdx(c, rpgs::SHIELD);
+        if (si >= 0) ac += rpgs::itemDef(c.items[si].name).shieldBonus;
+        c.armorClass = ac;
     }
     void equipItem(int idx) {
         auto d = rpgs::itemDef(m_pc.items[idx].name);
@@ -2523,29 +2639,33 @@ private:
         if (d.kind == rpgs::WEAPON && d.twoHanded)                // a two-hander frees the off-hand
             for (auto& it : m_pc.items) if (rpgs::itemDef(it.name).kind == rpgs::SHIELD) it.equipped = false;
         if (d.kind == rpgs::SHIELD) {                             // ...and a shield drops a two-hander
-            int w = equippedInSlot(rpgs::WEAPON);
+            int w = equippedIdx(m_pc, rpgs::WEAPON);
             if (w >= 0 && rpgs::itemDef(m_pc.items[w].name).twoHanded) m_pc.items[w].equipped = false;
         }
-        recomputeAC();
+        recomputeAC(m_pc);
     }
-    void unequipItem(int idx) { m_pc.items[idx].equipped = false; recomputeAC(); }
+    void unequipItem(int idx) { m_pc.items[idx].equipped = false; recomputeAC(m_pc); }
 
-    // The equipped weapon's attack line (to-hit + damage), or an unarmed strike.
-    std::string weaponLine() const {
-        int prof = rpgc::proficiencyBonus(m_pc.level);
-        int str = m_pc.mod(rpgc::STR), dex = m_pc.mod(rpgc::DEX);
+    // The equipped weapon's attack. `full` gives the sheet's "to hit / damage type"
+    // form; otherwise a compact "Longsword +5, 1d8+3" for the party cards.
+    static std::string attackLine(const rpgc::Character& c, bool full) {
+        int prof = rpgc::proficiencyBonus(c.level);
+        int str = c.mod(rpgc::STR), dex = c.mod(rpgc::DEX);
         char buf[160];
-        int wi = equippedInSlot(rpgs::WEAPON);
+        int wi = equippedIdx(c, rpgs::WEAPON);
         if (wi < 0) {
-            std::snprintf(buf, sizeof buf, "Unarmed strike:  %+d to hit,  %d bludgeoning", str + prof, std::max(1, 1 + str));
+            std::snprintf(buf, sizeof buf, full ? "Unarmed strike:  %+d to hit,  %d bludgeoning" : "Unarmed %+d, %d",
+                          str + prof, std::max(1, 1 + str));
             return buf;
         }
-        auto d = rpgs::itemDef(m_pc.items[wi].name);
+        auto d = rpgs::itemDef(c.items[wi].name);
         int abil = d.ranged ? dex : (d.finesse ? std::max(str, dex) : str);
         std::string dmg = d.dmg;
-        if (d.versatile[0] && equippedInSlot(rpgs::SHIELD) < 0) dmg = d.versatile;   // two-handed grip
-        std::snprintf(buf, sizeof buf, "%s:  %+d to hit,  %s %+d %s",
-                      m_pc.items[wi].name.c_str(), abil + prof, dmg.c_str(), abil, d.dmgType);
+        if (d.versatile[0] && equippedIdx(c, rpgs::SHIELD) < 0) dmg = d.versatile;   // two-handed grip
+        if (full) std::snprintf(buf, sizeof buf, "%s:  %+d to hit,  %s %+d %s",
+                                c.items[wi].name.c_str(), abil + prof, dmg.c_str(), abil, d.dmgType);
+        else      std::snprintf(buf, sizeof buf, "%s %+d, %s%+d",
+                                c.items[wi].name.c_str(), abil + prof, dmg.c_str(), abil);
         return buf;
     }
 
@@ -2557,13 +2677,18 @@ private:
         ImGui::Begin("Character", &m_sheetOpen, ImGuiWindowFlags_NoCollapse);
         int prof = rpgc::proficiencyBonus(m_pc.level);
 
-        // identity
+        // identity (portrait + heading)
+        portraitThumb(m_pc, 64.0f, 80.0f);
+        ImGui::SameLine();
+        ImGui::BeginGroup();
         std::string who = m_pc.name;
         if (!m_pc.surname.empty()) who += " " + m_pc.surname;
         ImGui::TextColored(ImVec4(0.91f, 0.89f, 0.85f, 1.0f), "%s", who.c_str());
-        ImGui::SameLine(); ImGui::TextDisabled("Level %d  %s %s", m_pc.level, m_pc.race.c_str(), m_pc.className.c_str());
+        ImGui::TextDisabled("Level %d  %s %s", m_pc.level, m_pc.race.c_str(), m_pc.className.c_str());
         std::string seat = m_pc.house.empty() ? m_pc.origin : (m_pc.standing + " " + m_pc.house);
-        ImGui::TextDisabled("%s  -  %s  -  %s", m_pc.alignment.c_str(), m_pc.background.c_str(), seat.c_str());
+        ImGui::TextDisabled("%s  -  %s", m_pc.alignment.c_str(), m_pc.background.c_str());
+        ImGui::TextDisabled("%s", seat.c_str());
+        ImGui::EndGroup();
         ImGui::Separator();
 
         // Left: abilities, combat, saves
@@ -2575,7 +2700,7 @@ private:
         ImGui::TextColored(gold, "Combat");
         ImGui::Text("AC %d     HP %d / %d     Speed %d ft", m_pc.armorClass, m_pc.curHP, m_pc.maxHP, m_pc.speed);
         ImGui::Text("Initiative %+d     Proficiency %+d", m_pc.mod(rpgc::DEX), prof);
-        ImGui::TextWrapped("%s", weaponLine().c_str());
+        ImGui::TextWrapped("%s", attackLine(m_pc, true).c_str());
         ImGui::Separator();
         ImGui::TextColored(gold, "Saving Throws");
         for (int a = 0; a < 6; ++a) {
@@ -2863,6 +2988,7 @@ private:
             // C toggles the character sheet (unless a text field is focused).
             if (ImGui::IsKeyPressed(ImGuiKey_C) && !ImGui::GetIO().WantTextInput) m_sheetOpen = !m_sheetOpen;
 
+            if (m_showParty) renderPartyBar();
             if (m_showRelations) renderRelationsPanel();
             if (m_sheetOpen) renderCharacterSheet();
 
@@ -3132,6 +3258,9 @@ private:
 
     // Dialog + transient on-screen hint (interaction feedback).
     std::vector<rpgc::Character> m_companions;   // demo party for the relationships panel
+    int m_activePartyIdx = -1;                   // whose turn / selected card (-1 = none)
+    std::vector<char> m_cardBack;                // per-card flip state
+    bool m_showParty = true;                     // the right-edge party card strip
     bool m_showRelations = false;
     bool m_dialogActive = false;
     bool m_dialogMerchant = false;   // the current NPC runs a shop
