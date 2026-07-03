@@ -23,6 +23,7 @@
 #include "encounter.hpp"
 #include "character.hpp"
 #include "houses.hpp"
+#include "family.hpp"
 
 #include <eden/Camera.hpp>
 #include <eden/Input.hpp>
@@ -718,6 +719,8 @@ private:
         if (m_houseIdx < 0) assignHouse();
         m_pc.house = rpgw::houses()[m_houseIdx].name;
         m_pc.standing = m_houseStanding;
+        m_pc.surname = m_family.pcSurname;
+        m_pc.ironLegacy = m_family.legacyName;
         m_pc.level = 1;
         auto rb = effectiveRaceBonus();
         for (int a = 0; a < 6; ++a) m_pc.abilities[a] = m_rolled[m_assign[a]] + rb[a];
@@ -1042,13 +1045,21 @@ private:
         if (bg == "Sailor")        return "a deckhand of";
         return "sworn to";
     }
+    void genFamily() {
+        if (m_houseIdx < 0) return;
+        m_family = rpgw::generateFamily(rpgw::houses()[m_houseIdx],
+                                        rpgc::backgroundOptions()[m_bgIdx], m_rng);
+    }
     void assignHouse() {
         bool noble = (rpgc::backgroundOptions()[m_bgIdx] == std::string("Noble"));
         auto pool = noble ? rpgw::greatHouseIndices() : rpgw::lesserHouseIndices();
-        if (pool.empty()) { m_houseIdx = 0; return; }
-        std::uniform_int_distribution<int> d(0, static_cast<int>(pool.size()) - 1);
-        m_houseIdx = pool[d(m_rng)];
+        if (pool.empty()) { m_houseIdx = 0; }
+        else {
+            std::uniform_int_distribution<int> d(0, static_cast<int>(pool.size()) - 1);
+            m_houseIdx = pool[d(m_rng)];
+        }
         m_houseStanding = standingFor(rpgc::backgroundOptions()[m_bgIdx], rpgw::houses()[m_houseIdx].rank);
+        genFamily();   // a new house means a new family
     }
 
     void renderHouseCard() {
@@ -1084,6 +1095,142 @@ private:
                             rpgw::blazon(h).c_str(), h.liege[0] ? h.liege : "the Crown itself");
     }
 
+    // Draw one kin node (box + name + relation) and register a hover tooltip.
+    void kinNode(ImDrawList* dl, ImVec2 c, float w, float hgt, const std::string& name,
+                 const std::string& relation, const std::string& status, const std::string& tip,
+                 bool you, bool heir, bool holdsSeat, int id) {
+        ImVec2 tl(c.x - w * 0.5f, c.y - hgt * 0.5f), br(c.x + w * 0.5f, c.y + hgt * 0.5f);
+        bool dead = (status == "dead");
+        bool away = (status == "estranged" || status == "missing");
+        ImU32 bg = you ? IM_COL32(46, 40, 28, 255) : IM_COL32(34, 39, 46, 255);
+        ImU32 border = you ? IM_COL32(194, 160, 107, 255)
+                     : dead ? IM_COL32(66, 66, 74, 255)
+                     : away ? IM_COL32(150, 110, 60, 255)
+                            : IM_COL32(74, 84, 95, 255);
+        dl->AddRectFilled(tl, br, bg, 4.0f);
+        dl->AddRect(tl, br, border, 4.0f, 0, you ? 2.0f : 1.4f);
+        dl->PushClipRect(tl, br, true);
+        ImU32 nameCol = dead ? IM_COL32(140, 140, 146, 255) : IM_COL32(232, 228, 218, 255);
+        ImVec2 ns = ImGui::CalcTextSize(name.c_str());
+        dl->AddText(ImVec2(c.x - ns.x * 0.5f, c.y - 15.0f), nameCol, name.c_str());
+        std::string rel = relation + (heir ? "  * HEIR" : "");
+        ImVec2 rs = ImGui::CalcTextSize(rel.c_str());
+        dl->AddText(ImVec2(c.x - rs.x * 0.5f, c.y + 2.0f), IM_COL32(150, 159, 169, 255), rel.c_str());
+        dl->PopClipRect();
+        if (holdsSeat) dl->AddCircleFilled(ImVec2(tl.x + 8.0f, tl.y + 8.0f), 3.5f, IM_COL32(194, 160, 107, 255));
+        ImGui::SetCursorScreenPos(tl);
+        ImGui::PushID(id);
+        ImGui::InvisibleButton("kn", ImVec2(w, hgt));
+        if (ImGui::IsItemHovered() && !tip.empty()) {
+            ImGui::BeginTooltip(); ImGui::PushTextWrapPos(300.0f);
+            ImGui::TextUnformatted(tip.c_str());
+            ImGui::PopTextWrapPos(); ImGui::EndTooltip();
+        }
+        ImGui::PopID();
+    }
+
+    void renderFamilyTree() {
+        if (m_houseIdx < 0) assignHouse();
+        const rpgw::Family& fam = m_family;
+        ImGui::TextUnformatted("Your Family");
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Cast lots again##fam")) genFamily();
+
+        ImGui::BeginChild("##familytree", ImVec2(0, 322), true);
+        // Seat header
+        ImGui::TextColored(ImVec4(0.76f, 0.63f, 0.42f, 1.0f), "The Seat of %s, %s",
+                           (m_houseIdx >= 0 ? rpgw::houses()[m_houseIdx].name : ""),
+                           (m_houseIdx >= 0 ? rpgw::houses()[m_houseIdx].seat : ""));
+        ImGui::TextDisabled("held by %s (%s)", fam.seatHolder.c_str(), fam.seatRelation.c_str());
+
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        float canvasW = ImGui::GetContentRegionAvail().x;
+        const float canvasH = 210.0f;
+        ImVec2 p0 = ImGui::GetCursorScreenPos();
+        ImGui::Dummy(ImVec2(canvasW, canvasH));
+
+        // ---- parents row ----
+        float pW = 158.0f, nodeH = 46.0f;
+        float parY = p0.y + 30.0f;
+        ImVec2 fc(p0.x + canvasW * 0.33f, parY), mc(p0.x + canvasW * 0.64f, parY);
+        auto kinTip = [](const rpgw::Kin& k) {
+            return k.trait + "\nToward you: " + k.disposition + "\nStatus: " + k.status;
+        };
+
+        // ---- children row (elders, YOU, youngers) ----
+        struct Node { std::string name, rel, status, tip; bool you, heir, seat; };
+        std::vector<Node> kids;
+        for (const auto& s : fam.siblings) if (s.elder)
+            kids.push_back({s.name, s.relation, s.status, kinTip(s), false, s.heir, s.holdsSeat});
+        std::string youName = (m_nameBuf[0] ? std::string(m_nameBuf) : std::string("You"));
+        if (!fam.pcSurname.empty()) youName += " " + fam.pcSurname;
+        std::string youRel = fam.bastard ? "baseborn - no claim"
+                           : (fam.successionRank == 1 ? "Heir"
+                              : rpgw::fdetail::ordinal(fam.successionRank) + " child");
+        kids.push_back({youName, youRel, "living", fam.successionLine,
+                        true, (!fam.bastard && fam.successionRank == 1), fam.seatRelation == "you"});
+        for (const auto& s : fam.siblings) if (!s.elder)
+            kids.push_back({s.name, s.relation, s.status, kinTip(s), false, s.heir, s.holdsSeat});
+
+        int nkids = (int)kids.size();
+        float reserveBet = fam.hasBetrothed ? 150.0f : 0.0f;
+        float availW = canvasW - reserveBet - 8.0f;
+        float gap = 10.0f;
+        float cw = std::min(148.0f, (availW - (nkids - 1) * gap) / std::max(1, nkids));
+        cw = std::max(cw, 96.0f);
+        float total = nkids * cw + (nkids - 1) * gap;
+        float startx = p0.x + 4.0f + (availW - total) * 0.5f + cw * 0.5f;
+        float kidY = p0.y + 150.0f;
+
+        // ---- connectors ----
+        ImU32 line = IM_COL32(90, 100, 110, 255);
+        float pBot = parY + nodeH * 0.5f;
+        float jx = (fc.x + mc.x) * 0.5f, jy = pBot + 12.0f;
+        dl->AddLine(ImVec2(fc.x, pBot), ImVec2(fc.x, jy), line, 1.6f);
+        dl->AddLine(ImVec2(mc.x, pBot), ImVec2(mc.x, jy), line, 1.6f);
+        dl->AddLine(ImVec2(fc.x, jy), ImVec2(mc.x, jy), line, 1.6f);
+        float busY = kidY - nodeH * 0.5f - 16.0f;
+        dl->AddLine(ImVec2(jx, jy), ImVec2(jx, busY), line, 1.6f);
+        float firstX = startx, lastX = startx + (nkids - 1) * (cw + gap);
+        dl->AddLine(ImVec2(std::min(firstX, jx), busY), ImVec2(std::max(lastX, jx), busY), line, 1.6f);
+        for (int i = 0; i < nkids; ++i) {
+            float cx = startx + i * (cw + gap);
+            dl->AddLine(ImVec2(cx, busY), ImVec2(cx, kidY - nodeH * 0.5f), line, 1.6f);
+        }
+
+        // ---- nodes ----
+        int id = 0;
+        kinNode(dl, fc, pW, nodeH, fam.father.name, "Father", fam.father.status, kinTip(fam.father), false, false, fam.father.holdsSeat, id++);
+        kinNode(dl, mc, pW, nodeH, fam.mother.name, "Mother", fam.mother.status, kinTip(fam.mother), false, false, fam.mother.holdsSeat, id++);
+        float youX = startx;
+        for (int i = 0; i < nkids; ++i) {
+            float cx = startx + i * (cw + gap);
+            if (kids[i].you) youX = cx;
+            kinNode(dl, ImVec2(cx, kidY), cw, nodeH, kids[i].name, kids[i].rel, kids[i].status,
+                    kids[i].tip, kids[i].you, kids[i].heir, kids[i].seat, id++);
+        }
+        // ---- betrothed ----
+        if (fam.hasBetrothed) {
+            ImVec2 bc(p0.x + canvasW - 78.0f, kidY);
+            dl->AddLine(ImVec2(youX + cw * 0.5f, kidY), ImVec2(bc.x - 74.0f, kidY), IM_COL32(150, 110, 60, 200), 1.4f);
+            dl->AddText(ImVec2((youX + cw * 0.5f + bc.x - 74.0f) * 0.5f - 26.0f, kidY - 16.0f),
+                        IM_COL32(150, 110, 60, 255), "betrothed");
+            kinNode(dl, bc, 148.0f, nodeH, fam.betrothed.name, "Betrothed", "living", fam.betrothed.trait, false, false, false, id++);
+        }
+
+        ImGui::SetCursorScreenPos(ImVec2(p0.x, p0.y + canvasH));
+        ImGui::TextWrapped("%s", fam.successionLine.c_str());
+        ImGui::TextColored(ImVec4(0.62f, 0.72f, 0.85f, 1.0f), "Iron Legacy: %s  (?)", fam.legacyName.c_str());
+        if (ImGui::IsItemHovered()) {
+            ImGui::BeginTooltip(); ImGui::PushTextWrapPos(320.0f);
+            ImGui::Text("%s", fam.legacyDesc.c_str());
+            ImGui::Spacing();
+            ImGui::TextUnformatted(fam.legacyEffect.c_str());
+            ImGui::PopTextWrapPos(); ImGui::EndTooltip();
+        }
+        ImGui::EndChild();
+    }
+
     void renderCharCreate() {
         ImVec2 disp = ImGui::GetIO().DisplaySize;
         ImGui::SetNextWindowPos(ImVec2(disp.x * 0.5f, disp.y * 0.5f), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
@@ -1117,9 +1264,12 @@ private:
         if (m_bgIdx != prevBg) {
             bool wasNoble = (rpgc::backgroundOptions()[prevBg] == std::string("Noble"));
             bool isNoble  = (rpgc::backgroundOptions()[m_bgIdx] == std::string("Noble"));
-            if (wasNoble != isNoble) assignHouse();      // pool changed -> draw a new house
-            else if (m_houseIdx >= 0)                     // same pool -> keep house, update rung
+            if (wasNoble != isNoble) {
+                assignHouse();                            // pool changed -> new house (+ family)
+            } else if (m_houseIdx >= 0) {                 // same pool -> keep house, refresh rung + family
                 m_houseStanding = standingFor(rpgc::backgroundOptions()[m_bgIdx], rpgw::houses()[m_houseIdx].rank);
+                genFamily();
+            }
         }
         {
             auto bi = rpgc::backgroundInfo(rpgc::backgroundOptions()[m_bgIdx]);
@@ -1235,6 +1385,9 @@ private:
 
         ImGui::Separator();
         renderHouseCard();
+
+        ImGui::Separator();
+        renderFamilyTree();
 
         ImGui::Separator();
         bool halfElfOk = !isHalfElf() || halfElfPickCount() == 2;
@@ -1893,6 +2046,7 @@ private:
     int m_bgIdx = 0;                       // chosen background index
     int m_houseIdx = -1;                   // assigned house (index into rpgw::houses())
     std::string m_houseStanding;           // rung within the house, from background
+    rpgw::Family m_family;                  // generated family tree
 
     // Portrait gallery (scanned from assets/portraits/, drop-and-appear).
     std::vector<Portrait> m_portraits;
