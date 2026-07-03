@@ -2463,6 +2463,8 @@ private:
             if (ImGui::SmallButton("Buy")) buyWare(w);
             ImGui::EndDisabled();
             ImGui::SameLine(); ImGui::Text("%-21s %s", w.name, rpgs::priceStr(price).c_str());
+            const char* wst = rpgs::itemStats(w.name);
+            if (*wst && ImGui::IsItemHovered()) ImGui::SetTooltip("%s", wst);
             ImGui::PopID();
         }
         ImGui::EndChild();
@@ -2484,6 +2486,8 @@ private:
             ImGui::SameLine();
             if (it.qty > 1) ImGui::Text("%s  x%d", it.name.c_str(), it.qty);
             else            ImGui::Text("%s", it.name.c_str());
+            const char* ist = rpgs::itemStats(it.name);
+            if (*ist && ImGui::IsItemHovered()) ImGui::SetTooltip("%s", ist);
             if (gain > 0) { ImGui::SameLine(); ImGui::TextDisabled("(%s)", rpgs::priceStr(gain).c_str()); }
             ImGui::PopID();
         }

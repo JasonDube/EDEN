@@ -64,6 +64,46 @@ inline const std::vector<Ware>& orlensWares() {
     return v;
 }
 
+// SRD combat/use stats for the tooltip - damage & properties for weapons, AC for
+// armor, and the relevant effect for gear. "" for items with nothing to show.
+inline const char* itemStats(const std::string& n) {
+    // ── weapons ──
+    if (n == "Dagger")          return "Simple melee - 1d4 piercing. Finesse, light, thrown (20/60 ft).";
+    if (n == "Quarterstaff")    return "Simple melee - 1d6 bludgeoning. Versatile (1d8).";
+    if (n == "Spear")           return "Simple melee - 1d6 piercing. Thrown (20/60 ft), versatile (1d8).";
+    if (n == "Handaxe")         return "Simple melee - 1d6 slashing. Light, thrown (20/60 ft).";
+    if (n == "Mace")            return "Simple melee - 1d6 bludgeoning.";
+    if (n == "Shortsword")      return "Martial melee - 1d6 piercing. Finesse, light.";
+    if (n == "Battleaxe")       return "Martial melee - 1d8 slashing. Versatile (1d10).";
+    if (n == "Longsword")       return "Martial melee - 1d8 slashing. Versatile (1d10).";
+    if (n == "Warhammer")       return "Martial melee - 1d8 bludgeoning. Versatile (1d10).";
+    if (n == "Shortbow")        return "Simple ranged - 1d6 piercing. Ammunition, range 80/320, two-handed.";
+    if (n == "Light Crossbow")  return "Simple ranged - 1d8 piercing. Ammunition, range 80/320, loading, two-handed.";
+    if (n == "Longbow")         return "Martial ranged - 1d8 piercing. Ammunition, range 150/600, heavy, two-handed.";
+    if (n == "Arrows (20)")     return "Ammunition for bows.";
+    // ── armor ──
+    if (n == "Padded Armor")    return "Light armor - AC 11 + Dex. Disadvantage on Stealth.";
+    if (n == "Leather Armor")   return "Light armor - AC 11 + Dex.";
+    if (n == "Shield")          return "+2 AC (held in one hand).";
+    if (n == "Studded Leather") return "Light armor - AC 12 + Dex.";
+    if (n == "Chain Shirt")     return "Medium armor - AC 13 + Dex (max 2).";
+    if (n == "Scale Mail")      return "Medium armor - AC 14 + Dex (max 2). Disadvantage on Stealth.";
+    if (n == "Chain Mail")      return "Heavy armor - AC 16. Requires Str 13. Disadvantage on Stealth.";
+    // ── gear with a mechanical effect ──
+    if (n == "Potion of Healing") return "Drink (an action) to regain 2d4+2 hit points.";
+    if (n == "Healer's Kit")    return "10 uses - stabilize a dying creature with no check.";
+    if (n == "Torch")           return "Bright light 20 ft; 1d4 fire as an improvised weapon.";
+    if (n == "Oil (flask)")     return "Throw for a 5-ft splash; 5 fire damage if lit.";
+    if (n == "Thieves' Tools")  return "Proficiency to pick locks and disarm traps.";
+    if (n == "Holy Symbol")     return "Spellcasting focus for clerics and paladins.";
+    if (n == "Component Pouch") return "Spellcasting focus (material components).";
+    if (n == "Hooded Lantern")  return "Bright light 30 ft; burns 6 hours per flask of oil.";
+    if (n == "Rope, Hempen (50ft)") return "2 HP; bursts on a DC 17 Strength check.";
+    if (n == "Grappling Hook")  return "Anchor a rope to a ledge or battlement.";
+    if (n == "Crowbar")         return "Advantage on Strength checks where leverage helps.";
+    return "";
+}
+
 // Half the list price is what Orlen pays for goods he stocks; 0 if he won't buy it.
 inline int sellPriceCp(const std::string& name) {
     for (const auto& w : orlensWares()) if (name == w.name) return w.priceCp / 2;
