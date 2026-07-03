@@ -1092,7 +1092,7 @@ private:
 
         // ---- right: large preview + confirm ----
         ImGui::SameLine();
-        ImGui::BeginChild("##galleryPreview", ImVec2(0, panelH), true);
+        ImGui::BeginChild("##galleryPreview", ImVec2(0, panelH), true, ImGuiWindowFlags_NoScrollWithMouse);
         int pv = m_previewPortrait;
         if (pv >= 0 && pv < static_cast<int>(m_portraits.size())) {
             Portrait& p = m_portraits[pv];
@@ -1523,7 +1523,7 @@ private:
         ImGui::SameLine();
         if (ImGui::SmallButton("Cast lots again")) assignHouse();
 
-        ImGui::BeginChild("##housecard", ImVec2(0, 158), true);
+        ImGui::BeginChild("##housecard", ImVec2(0, 158), true, ImGuiWindowFlags_NoScrollWithMouse);
         ImVec2 p0 = ImGui::GetCursorScreenPos();
         const float bw = 96.0f;
         drawShield(ImGui::GetWindowDrawList(), ImVec2(p0.x + 6.0f, p0.y + 4.0f), bw, h);
@@ -1556,7 +1556,7 @@ private:
         ImGui::SameLine();
         if (ImGui::SmallButton("Cast lots again##origin"))
             m_origin = rpgw::originFor(rpgc::raceOptions()[m_raceIdx], m_rng);
-        ImGui::BeginChild("##origincard", ImVec2(0, 118), true);
+        ImGui::BeginChild("##origincard", ImVec2(0, 118), true, ImGuiWindowFlags_NoScrollWithMouse);
         ImGui::TextColored(ImVec4(0.62f, 0.72f, 0.85f, 1.0f), "%s of %s",
                            rpgc::raceOptions()[m_raceIdx], m_origin.homeland.c_str());
         ImGui::Spacing();
@@ -1577,7 +1577,7 @@ private:
         ImGui::SameLine();
         if (ImGui::SmallButton("Cast lots again##elf")) assignElfLineage();
 
-        ImGui::BeginChild("##elfcard", ImVec2(0, 176), true);
+        ImGui::BeginChild("##elfcard", ImVec2(0, 176), true, ImGuiWindowFlags_NoScrollWithMouse);
         ImVec2 p0 = ImGui::GetCursorScreenPos();
         const float R = 46.0f;
         drawMedallion(ImGui::GetWindowDrawList(), ImVec2(p0.x + 6.0f + R, p0.y + 6.0f + R), R, h.sigil, col);
@@ -1607,7 +1607,7 @@ private:
         ImGui::SameLine();
         if (ImGui::SmallButton("Cast lots again##dwarf")) assignDwarfClan();
 
-        ImGui::BeginChild("##dwarfcard", ImVec2(0, 176), true);
+        ImGui::BeginChild("##dwarfcard", ImVec2(0, 176), true, ImGuiWindowFlags_NoScrollWithMouse);
         ImVec2 p0 = ImGui::GetCursorScreenPos();
         const float R = 46.0f;
         drawCartouche(ImGui::GetWindowDrawList(), ImVec2(p0.x + 6.0f + R, p0.y + 6.0f + R), R, c.sigil, col);
@@ -1635,7 +1635,7 @@ private:
         ImGui::SameLine();
         if (ImGui::SmallButton("Cast lots again##dragon")) assignDragonClan();
 
-        ImGui::BeginChild("##dragoncard", ImVec2(0, 182), true);
+        ImGui::BeginChild("##dragoncard", ImVec2(0, 182), true, ImGuiWindowFlags_NoScrollWithMouse);
         ImVec2 p0 = ImGui::GetCursorScreenPos();
         const float R = 48.0f;
         drawScale(ImGui::GetWindowDrawList(), ImVec2(p0.x + 6.0f + R, p0.y + 6.0f + R * 1.15f), R, c.sigil, c.color);
@@ -1663,7 +1663,7 @@ private:
         ImGui::SameLine();
         if (ImGui::SmallButton("Cast lots again##fey")) assignFeyHouse();
 
-        ImGui::BeginChild("##feycard", ImVec2(0, 176), true);
+        ImGui::BeginChild("##feycard", ImVec2(0, 176), true, ImGuiWindowFlags_NoScrollWithMouse);
         ImVec2 p0 = ImGui::GetCursorScreenPos();
         const float R = 46.0f;
         drawBloom(ImGui::GetWindowDrawList(), ImVec2(p0.x + 8.0f + R, p0.y + 8.0f + R), R, h.sigil, h.color);
@@ -1691,7 +1691,7 @@ private:
         ImGui::SameLine();
         if (ImGui::SmallButton("Cast lots again##inf")) assignInfernalHouse();
 
-        ImGui::BeginChild("##infcard", ImVec2(0, 182), true);
+        ImGui::BeginChild("##infcard", ImVec2(0, 182), true, ImGuiWindowFlags_NoScrollWithMouse);
         ImVec2 p0 = ImGui::GetCursorScreenPos();
         const float R = 48.0f;
         drawHornedSeal(ImGui::GetWindowDrawList(), ImVec2(p0.x + 8.0f + R, p0.y + 14.0f + R), R, h.sigil, h.color);
@@ -1713,7 +1713,7 @@ private:
     // Drow are the Sundered: exiles of Aelvarin, of no lineage.
     void renderSunderedCard() {
         ImGui::TextUnformatted("Your Origin");
-        ImGui::BeginChild("##sundered", ImVec2(0, 138), true);
+        ImGui::BeginChild("##sundered", ImVec2(0, 138), true, ImGuiWindowFlags_NoScrollWithMouse);
         ImGui::TextColored(ImVec4(0.69f, 0.42f, 0.52f, 1.0f), "The Sundered  -  drow, exiled beneath Aelvarin");
         ImGui::Spacing();
         ImGui::TextWrapped("%s", rpgw::sunderedBlurb());
@@ -1761,7 +1761,7 @@ private:
         ImGui::SameLine();
         if (ImGui::SmallButton("Cast lots again##fam")) genFamily();
 
-        ImGui::BeginChild("##familytree", ImVec2(0, 322), true);
+        ImGui::BeginChild("##familytree", ImVec2(0, 322), true, ImGuiWindowFlags_NoScrollWithMouse);
         // Seat header
         ImGui::TextColored(ImVec4(0.76f, 0.63f, 0.42f, 1.0f), "The Seat of %s, %s",
                            (m_houseIdx >= 0 ? rpgw::houses()[m_houseIdx].name : ""),
@@ -2217,7 +2217,7 @@ private:
     void renderCharCreate() {
         ImVec2 disp = ImGui::GetIO().DisplaySize;
         ImGui::SetNextWindowPos(ImVec2(disp.x * 0.5f, disp.y * 0.5f), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
-        ImGui::SetNextWindowSize(ImVec2(640, std::min(disp.y - 24.0f, 940.0f)), ImGuiCond_Always);
+        ImGui::SetNextWindowSize(ImVec2(640, std::min(disp.y - 40.0f, 860.0f)), ImGuiCond_Always);
         ImGui::Begin("Create Your Character", nullptr,
                      ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse);
 
