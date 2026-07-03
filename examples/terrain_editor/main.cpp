@@ -2082,7 +2082,7 @@ protected:
             // HP bars over battle-test units (play mode only)
             if (m_isPlayMode) renderBattleHpBars();
 
-            // Uniform 50m grid covering the full terrain (toggled by G)
+            // 5-ft (5-unit) grid around the working focus (off by default, toggled by G)
             if (m_showTerrainGrid) renderTerrainGrid();
 
             // Debug: render facing direction arrow for AI NPCs (Xenk + Eve)
@@ -3491,6 +3491,15 @@ protected:
                         zLines.push_back(zEnd); zLines.push_back(ab - p2 * (size * 0.1f));
                     }
                     m_modelRenderer->renderLines(cmd, vp, zLines, zColor);
+
+                    // Uniform-scale handle: a small box at the gizmo origin. Drag it to
+                    // scale the object evenly on all three axes at once.
+                    if (isScale) {
+                        glm::vec3 cColor = (hovered == GizmoAxis::Center)
+                                             ? glm::vec3(1.0f, 1.0f, 0.0f)   // yellow when hovered/active
+                                             : glm::vec3(0.9f, 0.9f, 0.9f);  // white otherwise
+                        m_modelRenderer->renderLines(cmd, vp, makeCubeLines(gizmoPos, size * 0.14f), cColor);
+                    }
 
                     // Negative axis arms (dimmer colors)
                     // -X axis
@@ -8170,7 +8179,7 @@ private:
             wasF10 = f10;
         }
 
-        // G — toggle the 50m terrain grid overlay
+        // G — toggle the 5-ft terrain grid overlay
         if (!ImGui::GetIO().WantCaptureKeyboard) {
             static bool wasG = false;
             bool g = Input::isKeyDown(71); // GLFW_KEY_G
@@ -17134,6 +17143,14 @@ private:
                 return GizmoAxis::Z;
             }
 
+            // Scale: the uniform-scale box at the origin is picked first, so it wins
+            // over the axis arms that all pass through the center.
+            if (m_transformMode == TransformMode::Scale) {
+                glm::vec3 toCenter = gizmoPos - rayOrigin;
+                glm::vec3 perp = toCenter - rayDir * glm::dot(toCenter, rayDir);
+                if (glm::length(perp) < size * 0.18f) return GizmoAxis::Center;
+            }
+
             // Move/Scale: pick axis lines (positive and negative directions)
             float dX = std::min(rayAxisDist(rayOrigin, rayDir, gizmoPos, glm::vec3(1,0,0), size),
                                 rayAxisDist(rayOrigin, rayDir, gizmoPos, glm::vec3(-1,0,0), size));
@@ -17303,7 +17320,8 @@ private:
                         float scaleFactor = 1.0f + mouseDelta.x * 0.005f;
                         if (scaleFactor < 0.01f) scaleFactor = 0.01f;
                         glm::vec3 s = selected->getTransform().getScale();
-                        if (m_gizmoActiveAxis == GizmoAxis::X) s.x *= scaleFactor;
+                        if (m_gizmoActiveAxis == GizmoAxis::Center) s *= scaleFactor;  // uniform
+                        else if (m_gizmoActiveAxis == GizmoAxis::X) s.x *= scaleFactor;
                         else if (m_gizmoActiveAxis == GizmoAxis::Y) s.y *= scaleFactor;
                         else if (m_gizmoActiveAxis == GizmoAxis::Z) s.z *= scaleFactor;
                         selected->getTransform().setScale(s);
@@ -26521,8 +26539,9 @@ private:
         }
     }
 
-    // Uniform 50m grid covering the full terrain. White lines, always visible.
-    // Each line is subdivided so the segments hug terrain height.
+    // 5-ft (5-unit) grid matching the game board, over a window around the working
+    // focus. White lines; off by default, toggled with G. Each line is subdivided
+    // so the segments hug terrain height.
     void renderTerrainGrid() {
         VkExtent2D extent = getSwapchain().getExtent();
         float screenW = static_cast<float>(extent.width);
@@ -26539,22 +26558,57 @@ private:
             return ndc.z > 0.0f && ndc.z < 1.0f;
         };
 
-        const float CELL = 50.0f;
-        const float SEG  = 50.0f;          // sample terrain height every 50m along a line
+        // One cell = 5 world units = a 5-ft square, matching the game board
+        // (the tabletop level grid uses step = 5.0f, 1 unit = 1 ft).
+        const float CELL = 5.0f;
+        const float SEG  = 10.0f;          // sample terrain height every 10 units along a line
         const float yOff = 0.05f;          // lift to avoid z-fighting
-        const float lineW = 2.0f;
-        const ImU32 white = IM_COL32(255, 255, 255, 200);
+        const float lineW = 1.5f;
+        const ImU32 white = IM_COL32(255, 255, 255, 170);
 
-        // Use the terrain's actual world extent so the grid spans everything.
-        glm::vec2 worldSize = m_terrain.getWorldSize();
-        float halfX = worldSize.x * 0.5f;
-        float halfZ = worldSize.y * 0.5f;
+        // Decide the region to grid. A full 5-ft grid over a multi-km terrain would
+        // be tens of thousands of lines and a white blob, so:
+        //  - a bounded terrain that isn't enormous (the game levels) is gridded
+        //    end to end, so every cell is present;
+        //  - a huge or unbounded terrain falls back to a window centered on the
+        //    point the camera is actually looking at.
+        // Lines are snapped to world 5-unit lines so cells line up with the board.
+        // Use the terrain's ACTUAL world corners (it is not necessarily centered on
+        // the origin) so the grid lands where the terrain really is.
+        const auto& cfg = m_terrain.getConfig();
+        bool bounded = cfg.useFixedBounds;
+        float chunkWorldSize = (cfg.chunkResolution - 1) * cfg.tileSize;
+        float wMinX = cfg.minChunk.x * chunkWorldSize;
+        float wMaxX = (cfg.maxChunk.x + 1) * chunkWorldSize;
+        float wMinZ = cfg.minChunk.y * chunkWorldSize;
+        float wMaxZ = (cfg.maxChunk.y + 1) * chunkWorldSize;
+        float spanX = wMaxX - wMinX, spanZ = wMaxZ - wMinZ;
 
-        // Snap extents to multiples of CELL so grid lines pass through origin (0).
-        float minX = -std::floor(halfX / CELL) * CELL;
-        float maxX = +std::floor(halfX / CELL) * CELL;
-        float minZ = -std::floor(halfZ / CELL) * CELL;
-        float maxZ = +std::floor(halfZ / CELL) * CELL;
+        const float MAXSPAN = 400.0f;      // largest terrain we grid end to end (80 cells/axis)
+        const float HALF    = 150.0f;      // window half-extent for huge/unbounded terrain
+
+        auto snapLo = [&](float v) { return std::ceil(v / CELL) * CELL; };
+        auto snapHi = [&](float v) { return std::floor(v / CELL) * CELL; };
+
+        float minX, maxX, minZ, maxZ;
+        if (bounded && spanX <= MAXSPAN && spanZ <= MAXSPAN) {
+            minX = snapLo(wMinX); maxX = snapHi(wMaxX);
+            minZ = snapLo(wMinZ); maxZ = snapHi(wMaxZ);
+        } else {
+            // Center on where the camera looks: forward ray hit on the y=0 plane.
+            glm::vec3 cp = m_camera.getPosition();
+            glm::vec3 cf = m_camera.getFront();
+            glm::vec2 c(cp.x, cp.z);
+            if (cf.y < -0.02f) { float t = -cp.y / cf.y; c = glm::vec2(cp.x + cf.x * t, cp.z + cf.z * t); }
+            float loX = c.x - HALF, hiX = c.x + HALF, loZ = c.y - HALF, hiZ = c.y + HALF;
+            if (bounded) {
+                loX = std::max(loX, wMinX); hiX = std::min(hiX, wMaxX);
+                loZ = std::max(loZ, wMinZ); hiZ = std::min(hiZ, wMaxZ);
+            }
+            minX = snapLo(loX); maxX = snapHi(hiX);
+            minZ = snapLo(loZ); maxZ = snapHi(hiZ);
+        }
+
 
         ImDrawList* dl = ImGui::GetForegroundDrawList();
 
@@ -26569,9 +26623,22 @@ private:
                 float t = static_cast<float>(i) / segs;
                 float x = x0 + dx * t;
                 float z = z0 + dz * t;
-                glm::vec3 p(x, m_terrain.getHeightAt(x, z) + yOff, z);
+                // A point exactly on the terrain's far edge (world == wMax) maps to the
+                // NEXT chunk coordinate, which isn't loaded, so getHeightAt returns its
+                // sentinel. Nudge the height sample just inside the last real chunk (the
+                // edge is flat, so the height matches) while drawing the line where it is.
+                float sx = x, sz = z;
+                if (bounded) {
+                    sx = std::clamp(x, wMinX, wMaxX - 0.05f);
+                    sz = std::clamp(z, wMinZ, wMaxZ - 0.05f);
+                }
+                float h = m_terrain.getHeightAt(sx, sz);
+                // getHeightAt still returns the sentinel (-100000) for genuine holes and
+                // for cells outside the loaded chunks. Skip those so the grid stops
+                // cleanly at the terrain edge instead of plunging off-screen.
+                glm::vec3 p(x, h + yOff, z);
                 ImVec2 cur;
-                bool valid = project(p, cur);
+                bool valid = (h > -1000.0f) && project(p, cur);
                 if (valid && prevValid) dl->AddLine(prev, cur, white, lineW);
                 prev = cur;
                 prevValid = valid;
@@ -29272,7 +29339,7 @@ private:
         float targetTimer = 0.0f;      // s until target reacquire
     };
     std::vector<BattleUnit> m_battleUnits;
-    bool m_showTerrainGrid = true;  // toggled with G
+    bool m_showTerrainGrid = false;  // off by default; toggled with G (5-ft squares)
 
     // RTS-style unit selection (LMB click + LMB-drag box)
     std::set<int> m_selectedUnits;       // indices into m_battleUnits

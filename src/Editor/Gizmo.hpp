@@ -10,7 +10,8 @@ enum class GizmoAxis {
     None,
     X,
     Y,
-    Z
+    Z,
+    Center   // uniform-scale handle at the gizmo origin
 };
 
 struct GizmoVertex {
