@@ -662,8 +662,11 @@ private:
         m_selectedPortrait = -1;
         m_previewPortrait = -1;
         scanPortraits();
-        assignHouse();
         rollAbilityScores();
+        m_classIdx = -1;                    // force determineClass to fire on first frame
+        determineClass();                   // calling from the roll
+        allotBackground();                  // background suited to the calling (25% Noble)
+        assignHouse();                      // house from race + background
     }
 
     // ----- character creation -----
@@ -1363,7 +1366,7 @@ private:
 
     // The dice decide your calling: rank classes by the rolled abilities (with race
     // bonuses) and temperament, and adopt the best fit.
-    void determineClass() {
+    bool determineClass() {   // returns true if the calling changed
         auto rb = effectiveRaceBonus();
         std::array<int, 6> ab;
         for (int i = 0; i < 6; ++i) ab[i] = m_rolled[i] + rb[i];
@@ -1378,7 +1381,28 @@ private:
         const auto& opts = rpgc::classOptions();
         for (int i = 0; i < static_cast<int>(opts.size()); ++i)
             if (m_classRanked.front().cls == opts[i]) { idx = i; break; }
-        if (idx != m_classIdx) { m_classIdx = idx; m_skillPick.fill(false); }
+        if (idx != m_classIdx) { m_classIdx = idx; m_skillPick.fill(false); return true; }
+        return false;
+    }
+
+    int backgroundIndex(const std::string& name) const {
+        const auto& bg = rpgc::backgroundOptions();
+        for (int i = 0; i < static_cast<int>(bg.size()); ++i)
+            if (name == bg[i]) return i;
+        return 0;
+    }
+    // In the roll-down system the background is not chosen: after the class is
+    // fixed, a 25% roll makes you Noble (and eligible for the better houses),
+    // otherwise you get a background that suits the class the dice gave you.
+    void allotBackground() {
+        std::uniform_int_distribution<int> pct(1, 100);
+        if (pct(m_rng) <= 25) {
+            m_bgIdx = backgroundIndex("Noble");
+        } else {
+            auto fits = rpgc::classBackgrounds(rpgc::classOptions()[m_classIdx]);
+            std::uniform_int_distribution<int> d(0, static_cast<int>(fits.size()) - 1);
+            m_bgIdx = backgroundIndex(fits[d(m_rng)]);
+        }
     }
 
     void renderHouseCard() {
@@ -1919,7 +1943,7 @@ private:
     void renderCharCreate() {
         ImVec2 disp = ImGui::GetIO().DisplaySize;
         ImGui::SetNextWindowPos(ImVec2(disp.x * 0.5f, disp.y * 0.5f), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
-        ImGui::SetNextWindowSize(ImVec2(640, 0), ImGuiCond_Always);
+        ImGui::SetNextWindowSize(ImVec2(640, std::min(disp.y - 24.0f, 940.0f)), ImGuiCond_Always);
         ImGui::Begin("Create Your Character", nullptr,
                      ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse);
 
@@ -1944,31 +1968,7 @@ private:
         if (m_raceIdx != prevRace) assignHouse();
         else if (gender != prevGender) genFamily();
 
-        // Background: hover each option for what it is and what it grants.
-        int prevBg = m_bgIdx;
-        if (ImGui::BeginCombo("Background", rpgc::backgroundOptions()[m_bgIdx])) {
-            for (int i = 0; i < static_cast<int>(rpgc::backgroundOptions().size()); ++i) {
-                if (ImGui::Selectable(rpgc::backgroundOptions()[i], m_bgIdx == i)) m_bgIdx = i;
-                if (ImGui::IsItemHovered())
-                    ImGui::SetTooltip("%s", rpgc::backgroundInfo(rpgc::backgroundOptions()[i]).desc);
-            }
-            ImGui::EndCombo();
-        }
-        if (m_bgIdx != prevBg) {
-            bool wasNoble = (rpgc::backgroundOptions()[prevBg] == std::string("Noble"));
-            bool isNoble  = (rpgc::backgroundOptions()[m_bgIdx] == std::string("Noble"));
-            if (wasNoble != isNoble) {
-                assignHouse();                            // pool changed -> new house (+ family)
-            } else if (m_houseIdx >= 0) {                 // same pool -> keep house, refresh rung + family
-                m_houseStanding = standingFor(rpgc::backgroundOptions()[m_bgIdx], rpgw::houses()[m_houseIdx].rank);
-                genFamily();
-            }
-        }
-        {
-            auto bi = rpgc::backgroundInfo(rpgc::backgroundOptions()[m_bgIdx]);
-            ImGui::TextDisabled("Background skills: %s & %s  (hover the list to compare)",
-                                rpgc::skills()[bi.skill1].name, rpgc::skills()[bi.skill2].name);
-        }
+        // Background is NOT chosen: it is allotted from the determined class below.
 
         // Half-Elf uniquely gets +1 to two abilities of the player's choice.
         if (isHalfElf()) {
@@ -1990,13 +1990,18 @@ private:
         }
 
         ImGui::Separator();
-        determineClass();   // the dice decide your calling - recompute from the current rolls + race
+        // The dice decide your calling; when it changes, the background (and so the
+        // house) is re-allotted to suit it.
+        if (determineClass()) { allotBackground(); assignHouse(); }
         ImGui::TextUnformatted("Ability scores  -  rolled straight down; you are what the dice made you");
         int rerollsLeft = 3 - m_rollsUsed;
         std::string rlabel = rerollsLeft > 0 ? ("Re-roll fate (" + std::to_string(rerollsLeft) + " left)")
                                              : "No re-rolls left";
         ImGui::BeginDisabled(rerollsLeft <= 0);
-        if (ImGui::Button(rlabel.c_str())) { rollAbilityScores(); ++m_rollsUsed; }
+        if (ImGui::Button(rlabel.c_str())) {
+            rollAbilityScores(); ++m_rollsUsed;
+            determineClass(); allotBackground(); assignHouse();   // fresh calling, background & house
+        }
         ImGui::EndDisabled();
         ImGui::SameLine();
         ImGui::TextDisabled("3 rolls total (1 + 2 re-rolls) - live with what you get.");
@@ -2026,6 +2031,15 @@ private:
             ImGui::TextUnformatted("The dice shape who you are. Your abilities and temperament fit these best:");
             for (int i = 0; i < 3; ++i) ImGui::BulletText("%s", m_classRanked[i].cls.c_str());
             ImGui::PopTextWrapPos(); ImGui::EndTooltip();
+        }
+        // Background is allotted to suit the calling (25% chance of Noble birth).
+        {
+            const char* bgName = rpgc::backgroundOptions()[m_bgIdx];
+            auto bi = rpgc::backgroundInfo(bgName);
+            ImGui::TextColored(ImVec4(0.76f, 0.63f, 0.42f, 1.0f), "Your past:  %s  (?)", bgName);
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", bi.desc);
+            ImGui::SameLine();
+            ImGui::TextDisabled("(skills: %s & %s)", rpgc::skills()[bi.skill1].name, rpgc::skills()[bi.skill2].name);
         }
 
         ImGui::Separator();

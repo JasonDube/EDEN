@@ -120,6 +120,25 @@ inline BackgroundInfo backgroundInfo(const std::string& bg) {
     return {6, 14, "A background shapes your past, granting two skill proficiencies and a social feature."};
 }
 
+// Backgrounds that thematically suit each class - used by the roll-down system to
+// auto-allot a background AFTER the class is determined. Noble is handled
+// separately (a flat chance), so it is not listed here.
+inline std::vector<const char*> classBackgrounds(const std::string& cls) {
+    if (cls == "Barbarian") return {"Outlander", "Folk Hero", "Soldier"};
+    if (cls == "Bard")      return {"Entertainer", "Charlatan", "Guild Artisan", "Sailor"};
+    if (cls == "Cleric")    return {"Acolyte", "Hermit", "Sage"};
+    if (cls == "Druid")     return {"Hermit", "Outlander", "Folk Hero"};
+    if (cls == "Fighter")   return {"Soldier", "Folk Hero", "Guild Artisan"};
+    if (cls == "Monk")      return {"Hermit", "Acolyte", "Outlander"};
+    if (cls == "Paladin")   return {"Acolyte", "Soldier", "Folk Hero"};
+    if (cls == "Ranger")    return {"Outlander", "Folk Hero", "Soldier"};
+    if (cls == "Rogue")     return {"Criminal", "Charlatan", "Urchin", "Sailor"};
+    if (cls == "Sorcerer")  return {"Hermit", "Charlatan", "Sage"};
+    if (cls == "Warlock")   return {"Charlatan", "Sage", "Hermit"};
+    if (cls == "Wizard")    return {"Sage", "Hermit", "Acolyte", "Guild Artisan"};
+    return {"Folk Hero", "Soldier", "Sage"};
+}
+
 inline const std::vector<const char*>& alignmentOptions() {
     static const std::vector<const char*> v = {
         "Lawful Good", "Neutral Good", "Chaotic Good",
