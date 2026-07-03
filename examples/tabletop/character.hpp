@@ -97,6 +97,29 @@ inline const std::vector<const char*>& backgroundOptions() {
     };
     return v;
 }
+// Background = two fixed skill proficiencies + a social feature + a plain-language
+// blurb for new players. Skill indices match skills() below.
+struct BackgroundInfo { int skill1 = 0, skill2 = 0; const char* desc = ""; };
+inline BackgroundInfo backgroundInfo(const std::string& bg) {
+    // skill indices: 0 Acrobatics 1 AnimalHandling 2 Arcana 3 Athletics 4 Deception
+    // 5 History 6 Insight 7 Intimidation 8 Investigation 9 Medicine 10 Nature
+    // 11 Perception 12 Performance 13 Persuasion 14 Religion 15 SleightOfHand 16 Stealth 17 Survival
+    if (bg == "Acolyte")       return {6, 14, "ACOLYTE\nA servant of a temple, versed in rites and doctrine.\nSkills: Insight, Religion.\nFeature: Shelter of the Faithful - temples of your faith give you aid and lodging."};
+    if (bg == "Charlatan")     return {4, 15, "CHARLATAN\nA smooth-talking con artist who lives by the scam.\nSkills: Deception, Sleight of Hand.\nFeature: False Identity - you have a second persona and can forge documents."};
+    if (bg == "Criminal")      return {4, 16, "CRIMINAL\nA thief, smuggler, or enforcer of the underworld.\nSkills: Deception, Stealth.\nFeature: Criminal Contact - a reliable go-between to the criminal network."};
+    if (bg == "Entertainer")   return {0, 12, "ENTERTAINER\nA performer who thrives before a crowd.\nSkills: Acrobatics, Performance.\nFeature: By Popular Demand - you can always find a place to perform for food and lodging."};
+    if (bg == "Folk Hero")     return {1, 17, "FOLK HERO\nA commoner who stood up for the downtrodden.\nSkills: Animal Handling, Survival.\nFeature: Rustic Hospitality - common folk shelter and hide you."};
+    if (bg == "Guild Artisan") return {6, 13, "GUILD ARTISAN\nA skilled craftsperson and guild member.\nSkills: Insight, Persuasion.\nFeature: Guild Membership - your guild offers lodging, aid, and political sway."};
+    if (bg == "Hermit")        return {9, 14, "HERMIT\nOne who lived in seclusion, seeking insight.\nSkills: Medicine, Religion.\nFeature: Discovery - you learned a unique and powerful secret in your isolation."};
+    if (bg == "Noble")         return {5, 13, "NOBLE\nBorn to title and privilege - well suited to a world of feudal intrigue.\nSkills: History, Persuasion.\nFeature: Position of Privilege - highborn folk receive you as one of their own."};
+    if (bg == "Outlander")     return {3, 17, "OUTLANDER\nRaised in the wilds, far from civilization.\nSkills: Athletics, Survival.\nFeature: Wanderer - you can always find food and water and never forget terrain you've crossed."};
+    if (bg == "Sage")          return {2,  5, "SAGE\nA scholar of lore, magic, and history.\nSkills: Arcana, History.\nFeature: Researcher - you know where and from whom to learn what you don't know."};
+    if (bg == "Sailor")        return {3, 11, "SAILOR\nA salt of the sea who has weathered many voyages.\nSkills: Athletics, Perception.\nFeature: Ship's Passage - you can secure free passage on a sailing ship for you and companions."};
+    if (bg == "Soldier")       return {3,  7, "SOLDIER\nA veteran of a militia, mercenary band, or army.\nSkills: Athletics, Intimidation.\nFeature: Military Rank - soldiers loyal to your old force recognize your authority."};
+    if (bg == "Urchin")        return {15, 16, "URCHIN\nYou grew up on the streets, alone and clever.\nSkills: Sleight of Hand, Stealth.\nFeature: City Secrets - you know the hidden ways through any city, moving at double speed."};
+    return {6, 14, "A background shapes your past, granting two skill proficiencies and a social feature."};
+}
+
 inline const std::vector<const char*>& alignmentOptions() {
     static const std::vector<const char*> v = {
         "Lawful Good", "Neutral Good", "Chaotic Good",

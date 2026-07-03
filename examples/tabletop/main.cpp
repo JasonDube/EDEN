@@ -712,6 +712,7 @@ private:
         m_pc.name = m_nameBuf;
         m_pc.race = rpgc::raceOptions()[m_raceIdx];
         m_pc.className = rpgc::classOptions()[m_classIdx];
+        m_pc.background = rpgc::backgroundOptions()[m_bgIdx];
         m_pc.level = 1;
         auto rb = effectiveRaceBonus();
         for (int a = 0; a < 6; ++a) m_pc.abilities[a] = m_rolled[m_assign[a]] + rb[a];
@@ -725,6 +726,10 @@ private:
         m_pc.saveProf[cp.save1] = true;
         m_pc.saveProf[cp.save2] = true;
         for (int i = 0; i < 18; ++i) m_pc.skillProf[i] = m_skillPick[i];
+        // Background grants two more fixed skill proficiencies (on top of class skills).
+        auto bi = rpgc::backgroundInfo(m_pc.background);
+        m_pc.skillProf[bi.skill1] = true;
+        m_pc.skillProf[bi.skill2] = true;
         if (m_selectedPortrait >= 0 && m_selectedPortrait < (int)m_portraits.size())
             m_pc.portraitPath = m_portraits[m_selectedPortrait].path;
         int pt = playerTokenIndex();
@@ -955,6 +960,21 @@ private:
         int prevClass = m_classIdx;
         combo("Class", m_classIdx, rpgc::classOptions());
         if (m_classIdx != prevClass) m_skillPick.fill(false);   // class list changed
+
+        // Background: hover each option for what it is and what it grants.
+        if (ImGui::BeginCombo("Background", rpgc::backgroundOptions()[m_bgIdx])) {
+            for (int i = 0; i < static_cast<int>(rpgc::backgroundOptions().size()); ++i) {
+                if (ImGui::Selectable(rpgc::backgroundOptions()[i], m_bgIdx == i)) m_bgIdx = i;
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("%s", rpgc::backgroundInfo(rpgc::backgroundOptions()[i]).desc);
+            }
+            ImGui::EndCombo();
+        }
+        {
+            auto bi = rpgc::backgroundInfo(rpgc::backgroundOptions()[m_bgIdx]);
+            ImGui::TextDisabled("Background skills: %s & %s  (hover the list to compare)",
+                                rpgc::skills()[bi.skill1].name, rpgc::skills()[bi.skill2].name);
+        }
 
         // Half-Elf uniquely gets +1 to two abilities of the player's choice.
         if (isHalfElf()) {
@@ -1716,6 +1736,7 @@ private:
     int   m_rollsUsed = 0;                 // 1 initial + up to 2 re-rolls = 3 total
     std::array<bool, rpgc::ABILITY_COUNT> m_halfElfBonus{};  // Half-Elf: +1 to two of your choice
     std::array<bool, 18> m_skillPick{};    // chosen class skill proficiencies
+    int m_bgIdx = 0;                       // chosen background index
 
     // Portrait gallery (scanned from assets/portraits/, drop-and-appear).
     std::vector<Portrait> m_portraits;
