@@ -1907,6 +1907,7 @@ protected:
         } else {
             m_editorUI.render();
             renderModulePanel();
+            renderDoorInspector();
             renderZoneOverlay();
 
             // Terminal emulator window (lazy-init on first show)
@@ -26775,6 +26776,35 @@ private:
         glm::vec3 camPos = m_camera.getPosition();
         // Position the avatar at feet level (camera is at eye height ~1.7m)
         m_playerAvatar->getTransform().setPosition(camPos - glm::vec3(0, 1.5f, 0));
+    }
+
+    // Inspector for a selected Door primitive: set where it leads. The game reads
+    // these off the object (doorId / targetLevel / targetDoorId). The hero emerges
+    // in the target level at the door whose Door ID equals this door's Target door.
+    void renderDoorInspector() {
+        if (m_isPlayMode) return;
+        if (m_selectedObjectIndex < 0 || m_selectedObjectIndex >= static_cast<int>(m_sceneObjects.size())) return;
+        SceneObject* obj = m_sceneObjects[m_selectedObjectIndex].get();
+        if (!obj || !obj->isDoor()) return;
+
+        ImGui::SetNextWindowSize(ImVec2(330, 0), ImGuiCond_FirstUseEver);
+        ImGui::Begin("Door");
+        ImGui::TextUnformatted("Level-transition door");
+        ImGui::TextDisabled("Sits on one 5-ft cell. Not drawn in game.");
+        ImGui::Separator();
+
+        char buf[256];
+        auto field = [&](const char* label, const std::string& cur, auto setter) {
+            std::snprintf(buf, sizeof(buf), "%s", cur.c_str());
+            if (ImGui::InputText(label, buf, sizeof(buf))) setter(std::string(buf));
+        };
+        field("Door ID",        obj->getDoorId(),       [&](const std::string& s){ obj->setDoorId(s); });
+        field("Target level",   obj->getTargetLevel(),  [&](const std::string& s){ obj->setTargetLevel(s); });
+        field("Target door ID", obj->getTargetDoorId(), [&](const std::string& s){ obj->setTargetDoorId(s); });
+
+        ImGui::Spacing();
+        ImGui::TextDisabled("Target level: destination level's file name\n(no folder, no .edenbin). Leave blank for an\narrival-only door. Target door ID: the Door ID\nof the door to emerge from over there.");
+        ImGui::End();
     }
 
     void addDoor(float size = 2.0f) {

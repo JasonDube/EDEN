@@ -106,9 +106,11 @@ public:
             m_shotCountdown = 8;
             m_shotExit = std::getenv("TABLETOP_SHOT_EXIT") != nullptr;
         }
-        // TABLETOP_LEVEL=<path.edenbin> loads a terrain_editor level for a
-        // top-down preview (scale/pipeline check) instead of the combat sandbox.
+        // TABLETOP_LEVEL=<path.edenbin> loads a specific terrain_editor level;
+        // otherwise the official starting level (Orlen's shop) loads by default.
+        // Path is relative to the tabletop binary's directory (build/examples/tabletop).
         if (const char* lp = std::getenv("TABLETOP_LEVEL"); lp && *lp) m_levelPath = lp;
+        else m_levelPath = "../terrain_editor/levels/orlen_shop.edenbin";
     }
 
 protected:
@@ -501,23 +503,21 @@ private:
     }
 
     // ----- level preview (load a terrain_editor .edenbin, render it textured) -----
-    // Read the sidecar "<level>.doors" file (if any). Each non-comment line:
-    //   cx cy destLevel destCx destCy
-    void readDoors(const std::string& levelPath) {
-        m_doors.clear();
-        std::string sc = levelPath;
-        auto dot = sc.rfind(".edenbin");
-        sc = (dot == std::string::npos) ? sc + ".doors" : sc.substr(0, dot) + ".doors";
-        std::ifstream f(sc);
-        if (!f) return;
-        std::string line;
-        while (std::getline(f, line)) {
-            if (line.empty() || line[0] == '#') continue;
-            std::istringstream is(line);
-            Door d;
-            if (is >> d.cx >> d.cy >> d.dest >> d.sx >> d.sy) m_doors.push_back(d);
+    // A Door primitive's targetLevel may be a bare name, a relative path, or carry a
+    // .edenbin/.eden extension. doTransition wants the basename (the level sits beside
+    // the current one), so strip the directory and any known extension.
+    static std::string doorDestBasename(const std::string& t) {
+        std::string s = t;
+        auto slash = s.find_last_of("/\\");
+        if (slash != std::string::npos) s = s.substr(slash + 1);
+        for (const char* ext : {".edenbin", ".eden"}) {
+            std::string e(ext);
+            if (s.size() >= e.size() && s.compare(s.size() - e.size(), e.size(), e) == 0) {
+                s = s.substr(0, s.size() - e.size());
+                break;
+            }
         }
-        std::cerr << "doors: loaded " << m_doors.size() << " from " << sc << "\n";
+        return s;
     }
 
     void loadLevel(const std::string& path) {
@@ -528,6 +528,7 @@ private:
             return;
         }
         m_levelDraws.clear();          // clear prior draws so this also works as a re-load
+        m_doors.clear();               // (rebuilt below from Door primitives)
         std::cerr << "level loaded: " << path << " — " << data.meshes.size() << " meshes, "
                   << data.textures.size() << " textures, " << data.objects.size() << " objects\n";
 
@@ -545,8 +546,18 @@ private:
         }
 
         // One draw per object at its transform; accumulate the floor-plan bounds.
+        // Door primitives and spawn markers are authoring markers: collect the doors
+        // (to derive their cells below) and render neither.
+        constexpr int PRIM_SPAWN = 3;  // PrimitiveType::SpawnMarker
+        struct RawDoor { glm::vec3 pos; std::string id, dest, target; };
+        std::vector<RawDoor> rawDoors;
         glm::vec2 mn(1e9f), mx(-1e9f);
         for (const auto& o : data.objects) {
+            if (o.isDoor) {
+                rawDoors.push_back({o.position, o.doorId, doorDestBasename(o.targetLevel), o.targetDoorId});
+                continue;                                  // marker: not drawn, not in bounds
+            }
+            if (o.isPrimitive && o.primitiveType == PRIM_SPAWN) continue;   // marker: not drawn
             if (!o.visible || o.meshId < 0 ||
                 o.meshId >= static_cast<int>(m_levelMeshHandles.size())) continue;
             glm::mat4 m = glm::translate(glm::mat4(1.0f), o.position);
@@ -562,11 +573,20 @@ private:
         }
         if (m_levelDraws.empty()) return;
         m_levelMin = mn; m_levelMax = mx;
+
+        // Now that the floor bounds are known, snap each door marker to its grid cell.
+        for (const auto& r : rawDoors) {
+            Door d;
+            d.cx = cellFromWorld(r.pos.x, m_levelMin.x, m_levelMax.x);
+            d.cy = cellFromWorld(r.pos.z, m_levelMin.y, m_levelMax.y);
+            d.dest = r.dest; d.id = r.id; d.target = r.target;
+            m_doors.push_back(d);
+        }
+        std::cerr << "doors: " << m_doors.size() << " Door primitive(s)\n";
         auto slash = path.find_last_of("/\\");
         m_levelName = (slash == std::string::npos) ? path : path.substr(slash + 1);
         m_levelPath = path;
         m_hasLevel = true;
-        readDoors(path);
     }
 
     // Deferred level change: swap the loaded level and drop the hero at the entry.
@@ -584,12 +604,21 @@ private:
         }
         test.close();
         vkDeviceWaitIdle(getContext().getDevice());
-        loadLevel(path);                       // clears+rebuilds draws, reads the new doors
+        loadLevel(path);                       // clears+rebuilds draws and the new doors
+        // Emerge at the paired door: the one whose id matches this transition's target.
         int p = playerTokenIndex();
-        if (p >= 0) { m_tokens[p].cx = m_pendingSpawnX; m_tokens[p].cy = m_pendingSpawnY; }
+        if (p >= 0 && !m_doors.empty()) {
+            const Door* arrive = nullptr;
+            if (!m_pendingTargetDoorId.empty())
+                for (const auto& d : m_doors)
+                    if (d.id == m_pendingTargetDoorId) { arrive = &d; break; }
+            if (!arrive) arrive = &m_doors[0];   // no/unknown target: first door in the level
+            m_tokens[p].cx = arrive->cx; m_tokens[p].cy = arrive->cy;
+        }
         m_haveLastMouse = false;
         frameCameraOnLevel();
         m_pendingLevel.clear();
+        m_pendingTargetDoorId.clear();
     }
 
     // 5-ft grid (1 unit = 1 ft), aligned to world 5-ft lines but CLIPPED to the
@@ -3150,13 +3179,14 @@ private:
             if (int pp = playerTokenIndex(); pp >= 0) {
                 for (const auto& d : m_doors) {
                     if (m_tokens[pp].cx != d.cx || m_tokens[pp].cy != d.cy) continue;
+                    if (d.dest.empty()) continue;   // arrival-only door: nowhere to leave to
                     ImVec2 disp = ImGui::GetIO().DisplaySize;
                     ImGui::SetNextWindowPos(ImVec2(disp.x * 0.5f, disp.y * 0.85f), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
                     ImGui::Begin("##door", nullptr,
                                  ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
                                  ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoMove);
                     if (ImGui::Button("Leave through the door", ImVec2(240, 0))) {
-                        m_pendingLevel = d.dest; m_pendingSpawnX = d.sx; m_pendingSpawnY = d.sy;
+                        m_pendingLevel = d.dest; m_pendingTargetDoorId = d.target;
                     }
                     ImGui::End();
                     break;
@@ -3403,12 +3433,14 @@ private:
     int  m_previewPortrait  = -1;      // clicked/being-previewed portrait
     bool m_showAllPortraits = false;
 
-    // Doors: designated grid cells that lead to another level (read from a sidecar
-    // "<level>.doors" file: lines of "cx cy destLevel destCx destCy").
-    struct Door { int cx = 0, cy = 0, sx = 2, sy = 2; std::string dest; };
+    // Doors: level-transition markers authored in the terrain editor as Door
+    // primitives (PrimitiveType::Door). Each carries a doorId, a target level, and
+    // the id of the door to emerge from there. The marker itself isn't rendered in
+    // game; its grid cell is derived from the object's world position.
+    struct Door { int cx = 0, cy = 0; std::string dest, id, target; };
     std::vector<Door> m_doors;
     std::string m_pendingLevel;                 // deferred level transition (basename), or ""
-    int m_pendingSpawnX = 2, m_pendingSpawnY = 2;
+    std::string m_pendingTargetDoorId;          // door to emerge from in the destination
 
     // Level preview (loaded from a terrain_editor .edenbin via TABLETOP_LEVEL)
     std::string m_levelPath, m_levelName;
