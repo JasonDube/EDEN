@@ -2357,7 +2357,7 @@ private:
     // Left-click a token: drag your own piece to move it, or interact with an NPC
     // (right/middle stay camera). Interaction requires being adjacent.
     void handleTokenDrag(bool overUI) {
-        if (m_dialogActive || m_shopOpen) return;   // dialog/shop owns input while open
+        if (m_dialogActive || m_shopOpen || m_sheetOpen) return;   // an overlay owns input
         if (Input::isMouseButtonPressed(Input::MOUSE_LEFT) && !overUI) {
             int picked = pickToken();
             if (picked >= 0) {
@@ -2497,6 +2497,131 @@ private:
         ImGui::Separator();
         if (ImGui::Button("Done", ImVec2(120, 0))) m_shopOpen = false;
         ImGui::SameLine(); ImGui::TextDisabled("Orlen buys back his own goods at half the list price.");
+        ImGui::End();
+    }
+
+    // ── equipment ──
+    int equippedInSlot(rpgs::ItemKind kind) const {
+        for (int i = 0; i < (int)m_pc.items.size(); ++i)
+            if (m_pc.items[i].equipped && rpgs::itemDef(m_pc.items[i].name).kind == kind) return i;
+        return -1;
+    }
+    void recomputeAC() {
+        int dex = m_pc.mod(rpgc::DEX);
+        int ac = 10 + dex;                                        // unarmored
+        int ai = equippedInSlot(rpgs::ARMOR);
+        if (ai >= 0) { auto d = rpgs::itemDef(m_pc.items[ai].name); ac = d.baseAC + std::min(dex, d.dexCap); }
+        int si = equippedInSlot(rpgs::SHIELD);
+        if (si >= 0) ac += rpgs::itemDef(m_pc.items[si].name).shieldBonus;
+        m_pc.armorClass = ac;
+    }
+    void equipItem(int idx) {
+        auto d = rpgs::itemDef(m_pc.items[idx].name);
+        if (d.kind == rpgs::GEAR) return;
+        for (auto& it : m_pc.items) if (rpgs::itemDef(it.name).kind == d.kind) it.equipped = false;   // one per slot
+        m_pc.items[idx].equipped = true;
+        if (d.kind == rpgs::WEAPON && d.twoHanded)                // a two-hander frees the off-hand
+            for (auto& it : m_pc.items) if (rpgs::itemDef(it.name).kind == rpgs::SHIELD) it.equipped = false;
+        if (d.kind == rpgs::SHIELD) {                             // ...and a shield drops a two-hander
+            int w = equippedInSlot(rpgs::WEAPON);
+            if (w >= 0 && rpgs::itemDef(m_pc.items[w].name).twoHanded) m_pc.items[w].equipped = false;
+        }
+        recomputeAC();
+    }
+    void unequipItem(int idx) { m_pc.items[idx].equipped = false; recomputeAC(); }
+
+    // The equipped weapon's attack line (to-hit + damage), or an unarmed strike.
+    std::string weaponLine() const {
+        int prof = rpgc::proficiencyBonus(m_pc.level);
+        int str = m_pc.mod(rpgc::STR), dex = m_pc.mod(rpgc::DEX);
+        char buf[160];
+        int wi = equippedInSlot(rpgs::WEAPON);
+        if (wi < 0) {
+            std::snprintf(buf, sizeof buf, "Unarmed strike:  %+d to hit,  %d bludgeoning", str + prof, std::max(1, 1 + str));
+            return buf;
+        }
+        auto d = rpgs::itemDef(m_pc.items[wi].name);
+        int abil = d.ranged ? dex : (d.finesse ? std::max(str, dex) : str);
+        std::string dmg = d.dmg;
+        if (d.versatile[0] && equippedInSlot(rpgs::SHIELD) < 0) dmg = d.versatile;   // two-handed grip
+        std::snprintf(buf, sizeof buf, "%s:  %+d to hit,  %s %+d %s",
+                      m_pc.items[wi].name.c_str(), abil + prof, dmg.c_str(), abil, d.dmgType);
+        return buf;
+    }
+
+    void renderCharacterSheet() {
+        const ImVec4 gold(0.76f, 0.63f, 0.42f, 1.0f);
+        ImVec2 disp = ImGui::GetIO().DisplaySize;
+        ImGui::SetNextWindowPos(ImVec2(disp.x * 0.5f, disp.y * 0.5f), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+        ImGui::SetNextWindowSize(ImVec2(720, std::min(disp.y - 40.0f, 560.0f)), ImGuiCond_Always);
+        ImGui::Begin("Character", &m_sheetOpen, ImGuiWindowFlags_NoCollapse);
+        int prof = rpgc::proficiencyBonus(m_pc.level);
+
+        // identity
+        std::string who = m_pc.name;
+        if (!m_pc.surname.empty()) who += " " + m_pc.surname;
+        ImGui::TextColored(ImVec4(0.91f, 0.89f, 0.85f, 1.0f), "%s", who.c_str());
+        ImGui::SameLine(); ImGui::TextDisabled("Level %d  %s %s", m_pc.level, m_pc.race.c_str(), m_pc.className.c_str());
+        std::string seat = m_pc.house.empty() ? m_pc.origin : (m_pc.standing + " " + m_pc.house);
+        ImGui::TextDisabled("%s  -  %s  -  %s", m_pc.alignment.c_str(), m_pc.background.c_str(), seat.c_str());
+        ImGui::Separator();
+
+        // Left: abilities, combat, saves
+        ImGui::BeginChild("##sheetL", ImVec2(300, 296), true);
+        ImGui::TextColored(gold, "Abilities");
+        for (int a = 0; a < 6; ++a)
+            ImGui::Text("%-4s %2d  (%+d)", rpgc::abilityAbbr(a), m_pc.abilities[a], rpgc::abilityMod(m_pc.abilities[a]));
+        ImGui::Separator();
+        ImGui::TextColored(gold, "Combat");
+        ImGui::Text("AC %d     HP %d / %d     Speed %d ft", m_pc.armorClass, m_pc.curHP, m_pc.maxHP, m_pc.speed);
+        ImGui::Text("Initiative %+d     Proficiency %+d", m_pc.mod(rpgc::DEX), prof);
+        ImGui::TextWrapped("%s", weaponLine().c_str());
+        ImGui::Separator();
+        ImGui::TextColored(gold, "Saving Throws");
+        for (int a = 0; a < 6; ++a) {
+            int b = m_pc.mod(a) + (m_pc.saveProf[a] ? prof : 0);
+            ImGui::Text("%s %-4s %+d", m_pc.saveProf[a] ? "*" : " ", rpgc::abilityAbbr(a), b);
+            if (a % 2 == 0) ImGui::SameLine(150.0f);
+        }
+        ImGui::EndChild();
+        ImGui::SameLine();
+
+        // Right: skills
+        ImGui::BeginChild("##sheetSkills", ImVec2(0, 296), true);
+        ImGui::TextColored(gold, "Skills   (* = proficient)");
+        for (int i = 0; i < 18; ++i) {
+            const auto& sk = rpgc::skills()[i];
+            int b = m_pc.mod(sk.ability) + (m_pc.skillProf[i] ? prof : 0) + (m_pc.skillExpert[i] ? prof : 0);
+            ImGui::Text("%s %+d  %-16s(%s)", m_pc.skillProf[i] ? "*" : " ", b, sk.name, rpgc::abilityAbbr(sk.ability));
+        }
+        ImGui::EndChild();
+
+        // Equipment & pack
+        ImGui::TextColored(gold, "Equipment & Pack");
+        ImGui::SameLine();
+        ImGui::TextDisabled("   Coin %s     Load %.0f / %.0f lb",
+                            rpgs::priceStr(totalCp(m_pc)).c_str(), packWeight(), m_pc.abilities[rpgc::STR] * 15.0f);
+        ImGui::BeginChild("##sheetInv", ImVec2(0, 0), true);
+        if (m_pc.items.empty()) ImGui::TextDisabled("(empty - buy gear at Orlen's Wares)");
+        for (int i = 0; i < (int)m_pc.items.size(); ++i) {
+            auto& it = m_pc.items[i];
+            auto d = rpgs::itemDef(it.name);
+            ImGui::PushID(i);
+            if (d.kind != rpgs::GEAR) {
+                if (it.equipped) { if (ImGui::SmallButton("Unequip")) unequipItem(i); }
+                else             { if (ImGui::SmallButton("Equip  ")) equipItem(i); }
+            } else {
+                ImGui::Dummy(ImVec2(56.0f, 1.0f));
+            }
+            ImGui::SameLine();
+            std::string label = (it.equipped ? "[E] " : "") + it.name;
+            if (it.qty > 1) label += "  x" + std::to_string(it.qty);
+            ImGui::Text("%s", label.c_str());
+            const char* st = rpgs::itemStats(it.name);
+            if (*st && ImGui::IsItemHovered()) ImGui::SetTooltip("%s", st);
+            ImGui::PopID();
+        }
+        ImGui::EndChild();
         ImGui::End();
     }
 
@@ -2728,12 +2853,18 @@ private:
             ImGui::TextDisabled("Move next to an NPC, click to talk");
             ImGui::TextDisabled("Right-drag orbit  \xc2\xb7  Middle-drag pan");
             ImGui::TextDisabled("Scroll zoom  \xc2\xb7  T = top-down tactical");
+            ImGui::TextDisabled("C = character sheet");
             ImGui::Separator();
-            if (ImGui::Button(m_showRelations ? "Hide Relationships" : "Party & Relationships"))
-                m_showRelations = !m_showRelations;
+            if (ImGui::Button("Character (C)")) m_sheetOpen = !m_sheetOpen;
+            ImGui::SameLine();
+            if (ImGui::Button(m_showRelations ? "Hide Party" : "Party")) m_showRelations = !m_showRelations;
             ImGui::End();
 
+            // C toggles the character sheet (unless a text field is focused).
+            if (ImGui::IsKeyPressed(ImGuiKey_C) && !ImGui::GetIO().WantTextInput) m_sheetOpen = !m_sheetOpen;
+
             if (m_showRelations) renderRelationsPanel();
+            if (m_sheetOpen) renderCharacterSheet();
 
             // Transient hint (e.g. "move closer").
             if (m_hintTimer > 0.0f && !m_hint.empty()) {
@@ -3005,6 +3136,7 @@ private:
     bool m_dialogActive = false;
     bool m_dialogMerchant = false;   // the current NPC runs a shop
     bool m_shopOpen = false;         // Orlen's trade overlay is up
+    bool m_sheetOpen = false;        // the character sheet is up
     std::string m_dialogName, m_dialogText;
     std::string m_hint;
     float m_hintTimer = 0.0f;

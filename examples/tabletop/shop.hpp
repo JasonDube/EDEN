@@ -104,6 +104,50 @@ inline const char* itemStats(const std::string& n) {
     return "";
 }
 
+// Structured mechanics for equipping: what a thing is, and its numbers.
+enum ItemKind { GEAR, WEAPON, ARMOR, SHIELD };
+struct ItemDef {
+    ItemKind    kind = GEAR;
+    // weapon
+    const char* dmg = "";       // "1d8"
+    const char* dmgType = "";   // "slashing"
+    const char* versatile = ""; // two-handed damage, e.g. "1d10", else ""
+    bool finesse = false, ranged = false, twoHanded = false, light = false, thrown = false;
+    // armor
+    int  baseAC = 0;            // 0 = not armor
+    int  dexCap = 10;          // max Dex to AC (10 = light/uncapped, 2 = medium, 0 = heavy)
+    bool stealthDis = false;
+    int  strReq = 0;
+    int  shieldBonus = 0;      // shields only (+2)
+};
+
+inline ItemDef itemDef(const std::string& n) {
+    ItemDef d;
+    auto W = [&](const char* dm, const char* ty) { d.kind = WEAPON; d.dmg = dm; d.dmgType = ty; return d; };
+    if (n == "Dagger")        { d = W("1d4","piercing"); d.finesse = d.light = d.thrown = true; return d; }
+    if (n == "Quarterstaff")  { d = W("1d6","bludgeoning"); d.versatile = "1d8"; return d; }
+    if (n == "Spear")         { d = W("1d6","piercing"); d.thrown = true; d.versatile = "1d8"; return d; }
+    if (n == "Handaxe")       { d = W("1d6","slashing"); d.light = d.thrown = true; return d; }
+    if (n == "Mace")          { return W("1d6","bludgeoning"); }
+    if (n == "Shortsword")    { d = W("1d6","piercing"); d.finesse = d.light = true; return d; }
+    if (n == "Battleaxe")     { d = W("1d8","slashing"); d.versatile = "1d10"; return d; }
+    if (n == "Longsword")     { d = W("1d8","slashing"); d.versatile = "1d10"; return d; }
+    if (n == "Warhammer")     { d = W("1d8","bludgeoning"); d.versatile = "1d10"; return d; }
+    if (n == "Shortbow")      { d = W("1d6","piercing"); d.ranged = d.twoHanded = true; return d; }
+    if (n == "Light Crossbow"){ d = W("1d8","piercing"); d.ranged = d.twoHanded = true; return d; }
+    if (n == "Longbow")       { d = W("1d8","piercing"); d.ranged = d.twoHanded = true; return d; }
+
+    auto A = [&](int ac, int cap, bool st, int str) { d.kind = ARMOR; d.baseAC = ac; d.dexCap = cap; d.stealthDis = st; d.strReq = str; return d; };
+    if (n == "Padded Armor")   { return A(11, 10, true,  0); }
+    if (n == "Leather Armor")  { return A(11, 10, false, 0); }
+    if (n == "Studded Leather"){ return A(12, 10, false, 0); }
+    if (n == "Chain Shirt")    { return A(13, 2,  false, 0); }
+    if (n == "Scale Mail")     { return A(14, 2,  true,  0); }
+    if (n == "Chain Mail")     { return A(16, 0,  true, 13); }
+    if (n == "Shield")         { d.kind = SHIELD; d.shieldBonus = 2; return d; }
+    return d;   // GEAR
+}
+
 // Half the list price is what Orlen pays for goods he stocks; 0 if he won't buy it.
 inline int sellPriceCp(const std::string& name) {
     for (const auto& w : orlensWares()) if (name == w.name) return w.priceCp / 2;
