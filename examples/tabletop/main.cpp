@@ -53,6 +53,8 @@
 #include <array>
 #include <cmath>
 #include <filesystem>
+#include <fstream>
+#include <sstream>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -194,6 +196,7 @@ protected:
         ImGui_ImplVulkan_NewFrame();
         ImGui_ImplGlfw_NewFrame();
 
+        if (!m_pendingLevel.empty()) doTransition();   // a door was used last frame
         handleCameraAndPieces();
         stepAI(dt);
         if (m_screen == Screen::Title) m_titlePulse += dt;
@@ -262,6 +265,16 @@ protected:
                 const Token& t = m_tokens[m_dragToken];
                 auto ring = buildRing(t.cx * 5.0f + 2.5f, t.cy * 5.0f + 2.5f, 2.4f, 0.4f);
                 m_modelRenderer->renderLines(cmd, viewProj, ring, glm::vec3(0.96f, 0.86f, 0.22f));
+            }
+            // Doors: a blue ring on each door cell (brighter when the hero is on it).
+            {
+                int pp = playerTokenIndex();
+                for (const auto& d : m_doors) {
+                    bool onIt = pp >= 0 && m_tokens[pp].cx == d.cx && m_tokens[pp].cy == d.cy;
+                    auto ring = buildRing(d.cx * 5.0f + 2.5f, d.cy * 5.0f + 2.5f, 2.5f, 0.45f);
+                    m_modelRenderer->renderLines(cmd, viewProj, ring,
+                        onIt ? glm::vec3(0.55f, 0.78f, 1.0f) : glm::vec3(0.36f, 0.52f, 0.85f));
+                }
             }
             // Highlight the active party member's token on the grid (the PC maps to
             // the player token; companions have no token yet).
@@ -488,6 +501,25 @@ private:
     }
 
     // ----- level preview (load a terrain_editor .edenbin, render it textured) -----
+    // Read the sidecar "<level>.doors" file (if any). Each non-comment line:
+    //   cx cy destLevel destCx destCy
+    void readDoors(const std::string& levelPath) {
+        m_doors.clear();
+        std::string sc = levelPath;
+        auto dot = sc.rfind(".edenbin");
+        sc = (dot == std::string::npos) ? sc + ".doors" : sc.substr(0, dot) + ".doors";
+        std::ifstream f(sc);
+        if (!f) return;
+        std::string line;
+        while (std::getline(f, line)) {
+            if (line.empty() || line[0] == '#') continue;
+            std::istringstream is(line);
+            Door d;
+            if (is >> d.cx >> d.cy >> d.dest >> d.sx >> d.sy) m_doors.push_back(d);
+        }
+        std::cerr << "doors: loaded " << m_doors.size() << " from " << sc << "\n";
+    }
+
     void loadLevel(const std::string& path) {
         eden::BinaryLevelReader reader;
         eden::BinaryLevelData data = reader.load(path);
@@ -495,6 +527,7 @@ private:
             std::cerr << "level load FAILED: " << path << "  (" << data.error << ")\n";
             return;
         }
+        m_levelDraws.clear();          // clear prior draws so this also works as a re-load
         std::cerr << "level loaded: " << path << " — " << data.meshes.size() << " meshes, "
                   << data.textures.size() << " textures, " << data.objects.size() << " objects\n";
 
@@ -531,7 +564,32 @@ private:
         m_levelMin = mn; m_levelMax = mx;
         auto slash = path.find_last_of("/\\");
         m_levelName = (slash == std::string::npos) ? path : path.substr(slash + 1);
+        m_levelPath = path;
         m_hasLevel = true;
+        readDoors(path);
+    }
+
+    // Deferred level change: swap the loaded level and drop the hero at the entry.
+    void doTransition() {
+        std::string dir;
+        auto slash = m_levelPath.find_last_of("/\\");
+        if (slash != std::string::npos) dir = m_levelPath.substr(0, slash + 1);
+        std::string path = dir + m_pendingLevel + ".edenbin";
+        std::ifstream test(path);
+        if (!test) {
+            m_hint = "\"" + m_pendingLevel + "\" lies beyond - that place isn't built yet.";
+            m_hintTimer = 4.0f;
+            m_pendingLevel.clear();
+            return;
+        }
+        test.close();
+        vkDeviceWaitIdle(getContext().getDevice());
+        loadLevel(path);                       // clears+rebuilds draws, reads the new doors
+        int p = playerTokenIndex();
+        if (p >= 0) { m_tokens[p].cx = m_pendingSpawnX; m_tokens[p].cy = m_pendingSpawnY; }
+        m_haveLastMouse = false;
+        frameCameraOnLevel();
+        m_pendingLevel.clear();
     }
 
     // 5-ft grid (1 unit = 1 ft), aligned to world 5-ft lines but CLIPPED to the
@@ -2492,7 +2550,20 @@ private:
                 t.faceYaw = t.defaultYaw;
             }
         }
-        if (p >= 0 && !playerEngaged) m_tokens[p].faceYaw = m_tokens[p].defaultYaw;
+        if (p >= 0 && !playerEngaged) {
+            m_tokens[p].faceYaw = m_tokens[p].defaultYaw;
+            // Standing on a door? Turn to face it (outward, toward the level edge).
+            for (const auto& d : m_doors) {
+                if (m_tokens[p].cx != d.cx || m_tokens[p].cy != d.cy) continue;
+                glm::vec2 ctr = (m_levelMin + m_levelMax) * 0.5f;
+                glm::vec2 dw(d.cx * 5.0f + 2.5f, d.cy * 5.0f + 2.5f);
+                glm::vec2 out = dw - ctr;
+                int tx = d.cx + (out.x > 0.5f ? 1 : out.x < -0.5f ? -1 : 0);
+                int ty = d.cy + (out.y > 0.5f ? 1 : out.y < -0.5f ? -1 : 0);
+                if (tx != d.cx || ty != d.cy) m_tokens[p].faceYaw = yawToFace(d.cx, d.cy, tx, ty);
+                break;
+            }
+        }
     }
 
     // Snap a world coordinate to a level grid cell index, clamped to the floor.
@@ -3075,6 +3146,23 @@ private:
                 ImGui::End();
             }
 
+            // Door prompt: shown while the hero stands on a door cell.
+            if (int pp = playerTokenIndex(); pp >= 0) {
+                for (const auto& d : m_doors) {
+                    if (m_tokens[pp].cx != d.cx || m_tokens[pp].cy != d.cy) continue;
+                    ImVec2 disp = ImGui::GetIO().DisplaySize;
+                    ImGui::SetNextWindowPos(ImVec2(disp.x * 0.5f, disp.y * 0.85f), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+                    ImGui::Begin("##door", nullptr,
+                                 ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+                                 ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoMove);
+                    if (ImGui::Button("Leave through the door", ImVec2(240, 0))) {
+                        m_pendingLevel = d.dest; m_pendingSpawnX = d.sx; m_pendingSpawnY = d.sy;
+                    }
+                    ImGui::End();
+                    break;
+                }
+            }
+
             // Dialog box.
             if (m_dialogActive) {
                 ImVec2 disp = ImGui::GetIO().DisplaySize;
@@ -3314,6 +3402,13 @@ private:
     int  m_selectedPortrait = -1;      // confirmed portrait (via "Use This Portrait")
     int  m_previewPortrait  = -1;      // clicked/being-previewed portrait
     bool m_showAllPortraits = false;
+
+    // Doors: designated grid cells that lead to another level (read from a sidecar
+    // "<level>.doors" file: lines of "cx cy destLevel destCx destCy").
+    struct Door { int cx = 0, cy = 0, sx = 2, sy = 2; std::string dest; };
+    std::vector<Door> m_doors;
+    std::string m_pendingLevel;                 // deferred level transition (basename), or ""
+    int m_pendingSpawnX = 2, m_pendingSpawnY = 2;
 
     // Level preview (loaded from a terrain_editor .edenbin via TABLETOP_LEVEL)
     std::string m_levelPath, m_levelName;
