@@ -24,6 +24,7 @@
 #include "character.hpp"
 #include "houses.hpp"
 #include "family.hpp"
+#include "relations.hpp"
 
 #include <eden/Camera.hpp>
 #include <eden/Input.hpp>
@@ -1390,6 +1391,65 @@ private:
                 "Prodigal  <-----  prudent  ----->  Avaricious", rpgc::greedEffectNote());
     }
 
+    // ----- party relationships (demo) -----
+    void buildCompanions() {
+        auto mk = [](const char* name, const char* race, const char* cls, int wtp, int narc, int honor,
+                     int comp, int cruel, int temper, int skept, int soc, int piety, int cur) {
+            rpgc::Character c;
+            c.name = name; c.race = race; c.className = cls;
+            c.willToPower = wtp; c.narcissism = narc; c.honor = honor; c.compassion = comp;
+            c.cruelty = cruel; c.temper = temper; c.skepticism = skept; c.sociability = soc;
+            c.piety = piety; c.curiosity = cur; c.carnality = 10; c.greed = 10; c.diligence = 11;
+            return c;
+        };
+        m_companions = {
+            mk("Willa",       "Human",    "Cleric",  5,  7, 13, 15,  6,  9,  6, 10, 11,  9),
+            mk("Ser Aldric",  "Human",    "Fighter",12, 10, 16, 12,  8, 10, 11, 11, 13,  9),
+            mk("Sister Enna", "Human",    "Paladin", 9,  8, 13, 17,  3,  8,  8, 11, 15, 10),
+            mk("Zyrix",       "Tiefling", "Warlock",11, 12, 11, 12,  8, 10, 13, 12,  5, 16),
+        };
+    }
+    static ImU32 dynamicColor(const std::string& d, bool toxic) {
+        if (toxic)                return IM_COL32(196, 90, 150, 255);   // exploitation - orchid
+        if (d == "Feud")          return IM_COL32(212, 84, 78, 255);    // red
+        if (d == "Cold")          return IM_COL32(150, 128, 120, 255);  // dull
+        if (d == "Rivalry")       return IM_COL32(214, 150, 78, 255);   // orange
+        if (d == "Oathbond")      return IM_COL32(200, 165, 90, 255);   // gold
+        if (d == "Friendship")    return IM_COL32(110, 200, 120, 255);  // green
+        if (d == "Amicable")      return IM_COL32(120, 180, 150, 255);  // soft green
+        if (d == "Dominance")     return IM_COL32(120, 160, 210, 255);  // blue
+        return IM_COL32(150, 159, 169, 255);                            // neutral
+    }
+    void renderRelationsPanel() {
+        if (m_companions.empty()) buildCompanions();
+        std::vector<const rpgc::Character*> roster;
+        if (!m_pc.name.empty()) roster.push_back(&m_pc);
+        for (const auto& c : m_companions) roster.push_back(&c);
+
+        ImGui::SetNextWindowSize(ImVec2(600, 0), ImGuiCond_FirstUseEver);
+        ImGui::SetNextWindowPos(ImVec2(340, 60), ImGuiCond_FirstUseEver);
+        ImGui::Begin("Party & Relationships", &m_showRelations);
+        ImGui::TextDisabled("How your party would regard one another (from their personalities).");
+        ImGui::Spacing();
+        for (size_t i = 0; i < roster.size(); ++i)
+            for (size_t j = i + 1; j < roster.size(); ++j) {
+                auto r = rpgr::assess(*roster[i], *roster[j]);
+                ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(dynamicColor(r.dynamic, r.toxic)),
+                                   "%-12s", r.dynamic.c_str());
+                ImGui::SameLine(120.0f);
+                ImGui::Text("%s  &  %s", roster[i]->name.c_str(), roster[j]->name.c_str());
+                ImGui::SameLine(); ImGui::TextDisabled("(%+d / %+d)", r.opinionAB, r.opinionBA);
+                ImGui::SameLine(120.0f); ImGui::NewLine();
+                ImGui::Indent(120.0f);
+                ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(170, 176, 184, 255));
+                ImGui::TextWrapped("%s", r.note.c_str());
+                ImGui::PopStyleColor();
+                ImGui::Unindent(120.0f);
+                ImGui::Spacing();
+            }
+        ImGui::End();
+    }
+
     void renderCharCreate() {
         ImVec2 disp = ImGui::GetIO().DisplaySize;
         ImGui::SetNextWindowPos(ImVec2(disp.x * 0.5f, disp.y * 0.5f), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
@@ -1987,7 +2047,12 @@ private:
             ImGui::TextDisabled("Move next to an NPC, click to talk");
             ImGui::TextDisabled("Right-drag orbit  \xc2\xb7  Middle-drag pan");
             ImGui::TextDisabled("Scroll zoom  \xc2\xb7  T = top-down tactical");
+            ImGui::Separator();
+            if (ImGui::Button(m_showRelations ? "Hide Relationships" : "Party & Relationships"))
+                m_showRelations = !m_showRelations;
             ImGui::End();
+
+            if (m_showRelations) renderRelationsPanel();
 
             // Transient hint (e.g. "move closer").
             if (m_hintTimer > 0.0f && !m_hint.empty()) {
@@ -2239,6 +2304,8 @@ private:
     int m_dragToken = -1;                  // token being dragged (level mode), or -1
 
     // Dialog + transient on-screen hint (interaction feedback).
+    std::vector<rpgc::Character> m_companions;   // demo party for the relationships panel
+    bool m_showRelations = false;
     bool m_dialogActive = false;
     std::string m_dialogName, m_dialogText;
     std::string m_hint;
