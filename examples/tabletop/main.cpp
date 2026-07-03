@@ -871,22 +871,18 @@ private:
 
     void renderPortraitGallery() {
         ImGui::TextUnformatted("Portrait");
-        ImGui::SameLine(); ImGui::RadioButton("Male", &m_genderIdx, 0);
-        ImGui::SameLine(); ImGui::RadioButton("Female", &m_genderIdx, 1);
         ImGui::SameLine(); ImGui::Checkbox("All races", &m_showAllPortraits);
         ImGui::SameLine();
         if (ImGui::Button("Upload...")) { int i = uploadPortrait(); if (i >= 0) m_selectedPortrait = i; }
 
         std::string wantRace = baseRaceFolder(rpgc::raceOptions()[m_raceIdx]);
-        std::string wantGender = (m_genderIdx == 0) ? "male" : "female";
         ImGui::BeginChild("##portraits", ImVec2(0, 170), true);
         const float thumb = 92.0f;
         int shown = 0;
         for (int i = 0; i < static_cast<int>(m_portraits.size()); ++i) {
             Portrait& p = m_portraits[i];
             bool raceOk = m_showAllPortraits || p.race.empty() || p.race == wantRace;
-            bool genderOk = p.gender.empty() || p.gender == wantGender;
-            if (!raceOk || !genderOk) continue;
+            if (!raceOk) continue;
             if (shown % 4 != 0) ImGui::SameLine();
             ++shown;
             ImGui::PushID(i);
@@ -1688,7 +1684,6 @@ private:
     std::vector<Portrait> m_portraits;
     bool m_portraitsScanned = false;
     int  m_selectedPortrait = -1;
-    int  m_genderIdx = 0;                   // 0 = Male, 1 = Female
     bool m_showAllPortraits = false;
 
     // Level preview (loaded from a terrain_editor .edenbin via TABLETOP_LEVEL)
