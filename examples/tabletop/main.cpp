@@ -25,6 +25,7 @@
 #include "houses.hpp"
 #include "origins.hpp"
 #include "elfhouses.hpp"
+#include "dwarfhouses.hpp"
 #include "family.hpp"
 #include "relations.hpp"
 #include "classfit.hpp"
@@ -748,6 +749,12 @@ private:
             m_pc.standing = rpgw::strandName(rpgw::elfHouses()[m_elfIdx].strand);
             m_pc.surname.clear(); m_pc.ironLegacy.clear();
             m_pc.origin = "Of Aelvarin, the Verdant Reaches";
+        } else if (rpgw::isDwarf(m_pc.race)) {     // dwarves: a Kadmurn clan
+            if (m_dwarfIdx < 0) assignDwarfClan();
+            m_pc.house = rpgw::dwarfClans()[m_dwarfIdx].name;
+            m_pc.standing = rpgw::dstrandName(rpgw::dwarfClans()[m_dwarfIdx].strand);
+            m_pc.surname.clear(); m_pc.ironLegacy.clear();
+            m_pc.origin = "Of Kadmurn, the Deep Holds";
         } else {                                   // other outsiders: an Origin, no house
             if (m_origin.homeland.empty()) assignHouse();
             m_pc.house.clear(); m_pc.standing.clear(); m_pc.surname.clear(); m_pc.ironLegacy.clear();
@@ -1078,6 +1085,26 @@ private:
             tri(P(0.35f,0.02f),P(0.27f,-0.35f),P(0.43f,-0.35f));
             tri(P(-0.02f,-0.35f),P(0.35f,-0.43f),P(0.35f,-0.27f));
             pl({P(0.18f,-0.18f),P(-0.6f,0.66f)});
+        } else if (name == "mountain") {                              // dwarven: peaks
+            tri(P(0.0f,-0.62f),P(-0.5f,0.52f),P(0.5f,0.52f));
+            tri(P(-0.5f,-0.18f),P(-0.86f,0.52f),P(-0.14f,0.52f));
+            tri(P(0.5f,-0.18f),P(0.14f,0.52f),P(0.86f,0.52f));
+        } else if (name == "pick") {
+            pl({P(-0.72f,-0.3f),P(-0.35f,-0.5f),P(0.0f,-0.54f),P(0.35f,-0.5f),P(0.72f,-0.3f)});
+            quad(P(-0.09f,-0.5f),P(0.09f,-0.5f),P(0.09f,0.62f),P(-0.09f,0.62f));
+        } else if (name == "axe") {
+            quad(P(-0.12f,-0.7f),P(0.05f,-0.7f),P(0.05f,0.7f),P(-0.12f,0.7f));
+            polyf({P(0.05f,-0.58f),P(0.5f,-0.48f),P(0.66f,-0.12f),P(0.5f,0.28f),P(0.05f,0.2f)});
+        } else if (name == "gem") {
+            polyf({P(0.0f,-0.8f),P(0.55f,-0.05f),P(0.0f,0.8f),P(-0.55f,-0.05f)});
+        } else if (name == "rune") {
+            pl({P(-0.34f,-0.7f),P(-0.34f,0.7f)});
+            pl({P(-0.34f,-0.38f),P(0.32f,-0.7f)});
+            pl({P(-0.34f,-0.06f),P(0.32f,-0.38f)});
+            pl({P(-0.34f,-0.06f),P(0.36f,0.52f)});
+        } else if (name == "tankard") {
+            quad(P(-0.4f,-0.5f),P(0.4f,-0.5f),P(0.32f,0.66f),P(-0.32f,0.66f));
+            pl({P(0.4f,-0.28f),P(0.74f,-0.12f),P(0.74f,0.28f),P(0.4f,0.36f)});
         } else {
             disc(0.0f,0.0f,0.40f);
         }
@@ -1100,6 +1127,17 @@ private:
         dl->AddCircleFilled(c, radius, IM_COL32(22, 24, 34, 255), 44);
         dl->AddCircle(c, radius, IM_COL32(84, 76, 112, 255), 44, 1.6f);
         drawCharge(dl, c, radius * 0.60f, sigil, col);
+    }
+    // Dwarven marks sit in a gem-cut hexagon, forge-branded into stone.
+    void drawCartouche(ImDrawList* dl, ImVec2 c, float radius, const std::string& sigil, ImU32 col) {
+        ImVec2 hex[6];
+        for (int i = 0; i < 6; ++i) {
+            float a = 3.14159265f / 180.0f * (60.0f * i - 90.0f);
+            hex[i] = ImVec2(c.x + radius * cosf(a), c.y + radius * sinf(a));
+        }
+        dl->AddConvexPolyFilled(hex, 6, IM_COL32(27, 20, 13, 255));
+        dl->AddPolyline(hex, 6, IM_COL32(90, 74, 49, 255), ImDrawFlags_Closed, 2.0f);
+        drawCharge(dl, c, radius * 0.55f, sigil, col);
     }
 
     // Your rung within the house, flavored by background.
@@ -1136,23 +1174,39 @@ private:
         std::uniform_int_distribution<int> d(0, static_cast<int>(pool.size()) - 1);
         m_elfIdx = pool[d(m_rng)];
     }
+    // Pick a dwarven clan by subrace: Mountain -> Deep, Hill -> Hill, Dwarf -> any.
+    void assignDwarfClan() {
+        std::string race = rpgc::raceOptions()[m_raceIdx];
+        std::vector<int> pool =
+            race == "Mountain Dwarf" ? rpgw::dwarfClanIndicesByStrand(rpgw::DEEP, false)
+          : race == "Hill Dwarf"     ? rpgw::dwarfClanIndicesByStrand(rpgw::HILL, false)
+                                     : rpgw::dwarfClanIndicesAll(false);
+        if (pool.empty()) { m_dwarfIdx = 0; return; }
+        std::uniform_int_distribution<int> d(0, static_cast<int>(pool.size()) - 1);
+        m_dwarfIdx = pool[d(m_rng)];
+    }
     // Assign the character's origin: a House for humans/half-bloods, an Aelvarin
-    // lineage for elves (Sundered for drow), else a generic Origin.
+    // lineage for elves (Sundered for drow), a Kadmurn clan for dwarves, else Origin.
     void assignHouse() {
         std::string race = rpgc::raceOptions()[m_raceIdx];
         if (rpgw::isElf(race)) {
-            m_houseIdx = -1; m_houseStanding.clear(); m_family = rpgw::Family{};
+            m_houseIdx = -1; m_dwarfIdx = -1; m_houseStanding.clear(); m_family = rpgw::Family{};
             assignElfLineage();
             return;
         }
+        if (rpgw::isDwarf(race)) {
+            m_houseIdx = -1; m_elfIdx = -1; m_houseStanding.clear(); m_family = rpgw::Family{};
+            assignDwarfClan();
+            return;
+        }
         if (!rpgw::isHouseRace(race)) {
-            m_houseIdx = -1; m_elfIdx = -1;
+            m_houseIdx = -1; m_elfIdx = -1; m_dwarfIdx = -1;
             m_houseStanding.clear();
             m_family = rpgw::Family{};                          // outsiders have no house family
             m_origin = rpgw::originFor(race, m_rng);
             return;
         }
-        m_elfIdx = -1;
+        m_elfIdx = -1; m_dwarfIdx = -1;
         bool noble = (rpgc::backgroundOptions()[m_bgIdx] == std::string("Noble"));
         auto pool = noble ? rpgw::greatHouseIndices() : rpgw::lesserHouseIndices();
         if (pool.empty()) { m_houseIdx = 0; }
@@ -1262,6 +1316,36 @@ private:
         ImGui::EndChild();
         ImGui::TextDisabled("On the Fading: %s", h.stance);
         ImGui::TextDisabled("Led by its Elder - among the Aelvar, women lead as freely as men.");
+    }
+
+    // Dwarves belong to a Kadmurn clan (a gem-cut cartouche, forge-branded).
+    void renderDwarfClanCard() {
+        if (m_dwarfIdx < 0) assignDwarfClan();
+        const auto& c = rpgw::dwarfClans()[m_dwarfIdx];
+        ImU32 col = c.royal ? IM_COL32(230, 207, 156, 255)
+                  : (c.strand == rpgw::DEEP ? IM_COL32(216, 162, 94, 255)
+                                            : IM_COL32(201, 162, 75, 255));
+        ImGui::TextUnformatted("Your Clan");
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Cast lots again##dwarf")) assignDwarfClan();
+
+        ImGui::BeginChild("##dwarfcard", ImVec2(0, 176), true);
+        ImVec2 p0 = ImGui::GetCursorScreenPos();
+        const float R = 46.0f;
+        drawCartouche(ImGui::GetWindowDrawList(), ImVec2(p0.x + 6.0f + R, p0.y + 6.0f + R), R, c.sigil, col);
+        ImGui::Dummy(ImVec2(2.0f * R + 22.0f, 2.0f * R + 8.0f));
+        ImGui::SameLine();
+        ImGui::BeginGroup();
+        ImGui::TextColored(ImVec4(0.90f, 0.81f, 0.61f, 1.0f), "%s", c.name);
+        ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(col), "\"%s\"", c.words);
+        ImGui::TextDisabled("%s  -  %s", rpgw::dstrandName(c.strand), c.hold[0] ? c.hold : "no hold; they walk under oath");
+        ImGui::Spacing();
+        ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(col), "The Craft: %s", c.craft);
+        ImGui::TextWrapped("%s", c.gift);
+        ImGui::EndGroup();
+        ImGui::EndChild();
+        ImGui::TextDisabled("The Cause: %s", c.cause);
+        ImGui::TextDisabled("Led by seniority and worth - among the dwarrow, women stand equal in hall and hold.");
     }
 
     // Drow are the Sundered: exiles of Aelvarin, of no lineage.
@@ -1754,6 +1838,8 @@ private:
                 renderSunderedCard();
             } else if (rpgw::isElf(race)) {
                 renderElfHouseCard();
+            } else if (rpgw::isDwarf(race)) {
+                renderDwarfClanCard();
             } else {
                 renderOriginCard();
             }
@@ -2433,6 +2519,7 @@ private:
     rpgw::Family m_family;                  // generated family tree
     rpgw::Origin m_origin;                  // for non-house races (outsiders)
     int m_elfIdx = -1;                       // elven lineage (index into rpgw::elfHouses())
+    int m_dwarfIdx = -1;                      // dwarven clan (index into rpgw::dwarfClans())
     bool m_female = false;                  // succession favors men in Aldermarch
     std::vector<rpgcf::ClassScore> m_classRanked;   // class fit for the rolled scores
 
