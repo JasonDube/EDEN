@@ -36,9 +36,12 @@
 
 #include <stb_image_write.h>   // implementation already lives in libeden (GLBLoader.cpp)
 
+#include <stb_image.h>
+
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <filesystem>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -71,6 +74,17 @@ inline int   worldToCell(float w) {
 }  // namespace
 
 class TabletopApp : public VulkanApplicationBase {
+    // Portrait image + its ImGui texture handle (defined early so method
+    // signatures below can reference it).
+    struct Portrait {
+        std::string path, race, gender;    // race = subfolder; gender from filename
+        VkImage image = VK_NULL_HANDLE;
+        VkDeviceMemory memory = VK_NULL_HANDLE;
+        VkImageView view = VK_NULL_HANDLE;
+        VkSampler sampler = VK_NULL_HANDLE;
+        VkDescriptorSet descriptor = VK_NULL_HANDLE;
+    };
+
 public:
     TabletopApp() : VulkanApplicationBase(1280, 720, "EDEN Tabletop") {
         if (const char* p = std::getenv("TABLETOP_SHOT"); p && *p) {
@@ -152,6 +166,7 @@ protected:
         stopTitleMusic();
         eden::Audio::getInstance().shutdown();
         vkDeviceWaitIdle(getContext().getDevice());
+        destroyPortraits();     // RemoveTexture needs the ImGui Vulkan backend still alive
         m_modelRenderer.reset();
         m_imgui.cleanup();
     }
@@ -631,6 +646,8 @@ private:
         m_rollsUsed = 1;        // the initial roll counts as the first of three
         m_halfElfBonus.fill(false);
         m_skillPick.fill(false);
+        m_selectedPortrait = -1;
+        scanPortraits();
         rollAbilityScores();
     }
 
@@ -706,12 +723,184 @@ private:
         m_pc.saveProf[cp.save1] = true;
         m_pc.saveProf[cp.save2] = true;
         for (int i = 0; i < 18; ++i) m_pc.skillProf[i] = m_skillPick[i];
+        if (m_selectedPortrait >= 0 && m_selectedPortrait < (int)m_portraits.size())
+            m_pc.portraitPath = m_portraits[m_selectedPortrait].path;
         int pt = playerTokenIndex();
         if (pt >= 0) m_tokens[pt].name = m_pc.name;
         std::cerr << "created: " << m_pc.name << " the " << m_pc.race << " " << m_pc.className
                   << " (HP " << m_pc.maxHP << ", AC " << m_pc.armorClass << ")\n";
         m_screen = Screen::Game;
         stopTitleMusic();
+    }
+
+    // ----- portrait gallery -----
+    static std::string lower(std::string s) {
+        for (auto& c : s) c = static_cast<char>(std::tolower((unsigned char)c));
+        return s;
+    }
+    // Map a race (incl. subraces) to its portrait folder.
+    static std::string baseRaceFolder(const std::string& race) {
+        auto has = [&](const char* s) { return race.find(s) != std::string::npos; };
+        if (has("Half-Elf")) return "half-elf";
+        if (has("Half-Orc")) return "half-orc";
+        if (has("Dwarf"))    return "dwarf";
+        if (has("Elf") || has("Drow")) return "elf";
+        if (has("Halfling")) return "halfling";
+        if (has("Gnome"))    return "gnome";
+        if (has("Dragonborn")) return "dragonborn";
+        if (has("Tiefling")) return "tiefling";
+        if (has("Human"))    return "human";
+        return lower(race);
+    }
+
+    // Load an image file into a Vulkan texture + ImGui descriptor (mirrors the
+    // editor's ImageReferences pattern).
+    bool loadPortraitTexture(const std::string& path, Portrait& p) {
+        int w, h, ch;
+        unsigned char* pixels = stbi_load(path.c_str(), &w, &h, &ch, STBI_rgb_alpha);
+        if (!pixels) return false;
+        VkDevice device = getContext().getDevice();
+        VkDeviceSize sz = static_cast<VkDeviceSize>(w) * h * 4;
+        VkBuffer sbuf; VkDeviceMemory smem;
+        getContext().createBuffer(sz, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, sbuf, smem);
+        void* data; vkMapMemory(device, smem, 0, sz, 0, &data);
+        std::memcpy(data, pixels, sz); vkUnmapMemory(device, smem);
+        stbi_image_free(pixels);
+
+        VkImageCreateInfo ii{}; ii.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+        ii.imageType = VK_IMAGE_TYPE_2D; ii.format = VK_FORMAT_R8G8B8A8_SRGB;
+        ii.extent = {(uint32_t)w, (uint32_t)h, 1}; ii.mipLevels = 1; ii.arrayLayers = 1;
+        ii.samples = VK_SAMPLE_COUNT_1_BIT; ii.tiling = VK_IMAGE_TILING_OPTIMAL;
+        ii.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+        ii.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        vkCreateImage(device, &ii, nullptr, &p.image);
+        VkMemoryRequirements mr; vkGetImageMemoryRequirements(device, p.image, &mr);
+        VkMemoryAllocateInfo ai{}; ai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+        ai.allocationSize = mr.size;
+        ai.memoryTypeIndex = getContext().findMemoryType(mr.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+        vkAllocateMemory(device, &ai, nullptr, &p.memory);
+        vkBindImageMemory(device, p.image, p.memory, 0);
+
+        VkCommandBuffer cmd = getContext().beginSingleTimeCommands();
+        VkImageMemoryBarrier b{}; b.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        b.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED; b.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        b.srcQueueFamilyIndex = b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        b.image = p.image; b.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+        b.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                             0, 0, nullptr, 0, nullptr, 1, &b);
+        VkBufferImageCopy rg{}; rg.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+        rg.imageExtent = {(uint32_t)w, (uint32_t)h, 1};
+        vkCmdCopyBufferToImage(cmd, sbuf, p.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &rg);
+        b.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL; b.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        b.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT; b.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                             0, 0, nullptr, 0, nullptr, 1, &b);
+        getContext().endSingleTimeCommands(cmd);
+        vkDestroyBuffer(device, sbuf, nullptr); vkFreeMemory(device, smem, nullptr);
+
+        VkImageViewCreateInfo vi{}; vi.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+        vi.image = p.image; vi.viewType = VK_IMAGE_VIEW_TYPE_2D; vi.format = VK_FORMAT_R8G8B8A8_SRGB;
+        vi.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+        vkCreateImageView(device, &vi, nullptr, &p.view);
+        VkSamplerCreateInfo si{}; si.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+        si.magFilter = si.minFilter = VK_FILTER_LINEAR;
+        si.addressModeU = si.addressModeV = si.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        vkCreateSampler(device, &si, nullptr, &p.sampler);
+        p.descriptor = ImGui_ImplVulkan_AddTexture(p.sampler, p.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        return true;
+    }
+
+    void scanPortraits() {
+        if (m_portraitsScanned) return;
+        m_portraitsScanned = true;
+        namespace fs = std::filesystem;
+        std::error_code ec;
+        fs::path root = "assets/portraits";
+        if (!fs::exists(root, ec)) return;
+        for (auto it = fs::recursive_directory_iterator(root, ec);
+             it != fs::recursive_directory_iterator(); it.increment(ec)) {
+            if (ec) break;
+            if (!it->is_regular_file(ec)) continue;
+            std::string ext = lower(it->path().extension().string());
+            if (ext != ".png" && ext != ".jpg" && ext != ".jpeg" && ext != ".webp" && ext != ".bmp") continue;
+            Portrait p; p.path = it->path().string();
+            fs::path rel = fs::relative(it->path(), root, ec);
+            if (rel.has_parent_path()) p.race = lower(rel.begin()->string());
+            std::string lp = lower(p.path);
+            if (lp.find("female") != std::string::npos) p.gender = "female";
+            else if (lp.find("male") != std::string::npos) p.gender = "male";
+            if (loadPortraitTexture(p.path, p)) m_portraits.push_back(std::move(p));
+        }
+        std::cerr << "portraits: loaded " << m_portraits.size() << " from assets/portraits/\n";
+    }
+
+    void destroyPortraits() {
+        VkDevice device = getContext().getDevice();
+        for (auto& p : m_portraits) {
+            if (p.descriptor) ImGui_ImplVulkan_RemoveTexture(p.descriptor);
+            if (p.sampler) vkDestroySampler(device, p.sampler, nullptr);
+            if (p.view) vkDestroyImageView(device, p.view, nullptr);
+            if (p.image) vkDestroyImage(device, p.image, nullptr);
+            if (p.memory) vkFreeMemory(device, p.memory, nullptr);
+        }
+        m_portraits.clear();
+    }
+
+    // Native file chooser (zenity) -> load as a portrait, return its index or -1.
+    int uploadPortrait() {
+        FILE* pipe = popen("zenity --file-selection --title='Choose a portrait image' "
+                           "--file-filter='Images | *.png *.jpg *.jpeg *.webp *.bmp' 2>/dev/null", "r");
+        if (!pipe) return -1;
+        char buf[1024] = {0};
+        char* got = fgets(buf, sizeof buf, pipe);
+        pclose(pipe);
+        if (!got) return -1;
+        std::string path(buf);
+        while (!path.empty() && (path.back() == '\n' || path.back() == '\r')) path.pop_back();
+        if (path.empty()) return -1;
+        Portrait p; p.path = path;
+        std::string lp = lower(path);
+        if (lp.find("female") != std::string::npos) p.gender = "female";
+        else if (lp.find("male") != std::string::npos) p.gender = "male";
+        if (!loadPortraitTexture(path, p)) return -1;
+        m_portraits.push_back(std::move(p));
+        return static_cast<int>(m_portraits.size()) - 1;
+    }
+
+    void renderPortraitGallery() {
+        ImGui::TextUnformatted("Portrait");
+        ImGui::SameLine(); ImGui::RadioButton("Male", &m_genderIdx, 0);
+        ImGui::SameLine(); ImGui::RadioButton("Female", &m_genderIdx, 1);
+        ImGui::SameLine(); ImGui::Checkbox("All races", &m_showAllPortraits);
+        ImGui::SameLine();
+        if (ImGui::Button("Upload...")) { int i = uploadPortrait(); if (i >= 0) m_selectedPortrait = i; }
+
+        std::string wantRace = baseRaceFolder(rpgc::raceOptions()[m_raceIdx]);
+        std::string wantGender = (m_genderIdx == 0) ? "male" : "female";
+        ImGui::BeginChild("##portraits", ImVec2(0, 170), true);
+        const float thumb = 92.0f;
+        int shown = 0;
+        for (int i = 0; i < static_cast<int>(m_portraits.size()); ++i) {
+            Portrait& p = m_portraits[i];
+            bool raceOk = m_showAllPortraits || p.race.empty() || p.race == wantRace;
+            bool genderOk = p.gender.empty() || p.gender == wantGender;
+            if (!raceOk || !genderOk) continue;
+            if (shown % 4 != 0) ImGui::SameLine();
+            ++shown;
+            ImGui::PushID(i);
+            ImGui::Image((ImTextureID)p.descriptor, ImVec2(thumb, thumb));
+            if (ImGui::IsItemClicked()) m_selectedPortrait = i;
+            if (m_selectedPortrait == i)
+                ImGui::GetWindowDrawList()->AddRect(ImGui::GetItemRectMin(), ImGui::GetItemRectMax(),
+                                                    IM_COL32(255, 210, 90, 255), 0.0f, 0, 3.0f);
+            ImGui::PopID();
+        }
+        if (shown == 0)
+            ImGui::TextDisabled("No portraits here yet - drop images in\nassets/portraits/%s/  (or Upload).",
+                                wantRace.c_str());
+        ImGui::EndChild();
     }
 
     void renderCharCreate() {
@@ -836,6 +1025,9 @@ private:
         }
         ImGui::TextDisabled("Saving throws (from class): %s & %s",
                             rpgc::abilityName(cp.save1), rpgc::abilityName(cp.save2));
+
+        ImGui::Separator();
+        renderPortraitGallery();
 
         ImGui::Separator();
         bool halfElfOk = !isHalfElf() || halfElfPickCount() == 2;
@@ -1491,6 +1683,13 @@ private:
     int   m_rollsUsed = 0;                 // 1 initial + up to 2 re-rolls = 3 total
     std::array<bool, rpgc::ABILITY_COUNT> m_halfElfBonus{};  // Half-Elf: +1 to two of your choice
     std::array<bool, 18> m_skillPick{};    // chosen class skill proficiencies
+
+    // Portrait gallery (scanned from assets/portraits/, drop-and-appear).
+    std::vector<Portrait> m_portraits;
+    bool m_portraitsScanned = false;
+    int  m_selectedPortrait = -1;
+    int  m_genderIdx = 0;                   // 0 = Male, 1 = Female
+    bool m_showAllPortraits = false;
 
     // Level preview (loaded from a terrain_editor .edenbin via TABLETOP_LEVEL)
     std::string m_levelPath, m_levelName;
