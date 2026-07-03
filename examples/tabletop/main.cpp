@@ -24,6 +24,7 @@
 #include "character.hpp"
 #include "houses.hpp"
 #include "origins.hpp"
+#include "elfhouses.hpp"
 #include "family.hpp"
 #include "relations.hpp"
 #include "classfit.hpp"
@@ -738,7 +739,16 @@ private:
             m_pc.surname = m_family.pcSurname;
             m_pc.ironLegacy = m_family.legacyName;
             m_pc.origin.clear();
-        } else {                                   // outsider: an Origin, no house
+        } else if (rpgw::isDrow(m_pc.race)) {      // drow: the Sundered
+            m_pc.house.clear(); m_pc.standing.clear(); m_pc.surname.clear(); m_pc.ironLegacy.clear();
+            m_pc.origin = rpgw::sunderedBlurb();
+        } else if (rpgw::isElf(m_pc.race)) {       // elves: an Aelvarin lineage
+            if (m_elfIdx < 0) assignElfLineage();
+            m_pc.house = rpgw::elfHouses()[m_elfIdx].name;
+            m_pc.standing = rpgw::strandName(rpgw::elfHouses()[m_elfIdx].strand);
+            m_pc.surname.clear(); m_pc.ironLegacy.clear();
+            m_pc.origin = "Of Aelvarin, the Verdant Reaches";
+        } else {                                   // other outsiders: an Origin, no house
             if (m_origin.homeland.empty()) assignHouse();
             m_pc.house.clear(); m_pc.standing.clear(); m_pc.surname.clear(); m_pc.ironLegacy.clear();
             m_pc.origin = m_origin.blurb;
@@ -1044,6 +1054,30 @@ private:
             tri(P(-0.62f,0.02f),P(-0.28f,0.34f),P(-0.28f,-0.02f));
             disc(0.34f,-0.12f,0.20f);
             tri(P(0.50f,-0.15f),P(0.78f,-0.06f),P(0.50f,0.03f));
+        } else if (name == "star") {                                  // elven: 4-point star
+            tri(P(0.0f,-0.9f),P(-0.16f,0.0f),P(0.16f,0.0f));
+            tri(P(0.9f,0.0f),P(0.0f,-0.16f),P(0.0f,0.16f));
+            tri(P(0.0f,0.9f),P(-0.16f,0.0f),P(0.16f,0.0f));
+            tri(P(-0.9f,0.0f),P(0.0f,-0.16f),P(0.0f,0.16f));
+            disc(0.0f,0.0f,0.12f);
+        } else if (name == "crescent") {
+            pl({P(0.45f,-0.62f),P(-0.12f,-0.72f),P(-0.58f,-0.28f),P(-0.62f,0.28f),P(-0.2f,0.68f),P(0.42f,0.6f)});
+        } else if (name == "harp") {
+            pl({P(-0.42f,0.7f),P(-0.56f,0.18f),P(-0.34f,-0.42f),P(0.22f,-0.6f),P(0.46f,0.02f),P(0.5f,0.7f)});
+            pl({P(-0.12f,-0.38f),P(-0.03f,0.62f)}); pl({P(0.12f,-0.42f),P(0.2f,0.6f)});
+        } else if (name == "leaf") {
+            polyf({P(0.0f,-0.85f),P(0.4f,-0.2f),P(0.5f,0.2f),P(0.28f,0.6f),P(0.0f,0.82f),
+                   P(-0.28f,0.6f),P(-0.5f,0.2f),P(-0.4f,-0.2f)});
+        } else if (name == "thorn") {
+            pl({P(-0.55f,0.72f),P(-0.15f,0.35f),P(0.0f,-0.1f),P(0.0f,-0.5f),P(0.35f,-0.7f)});
+            pl({P(0.0f,-0.1f),P(0.3f,-0.04f)}); pl({P(0.0f,-0.42f),P(-0.3f,-0.52f)});
+            pl({P(-0.15f,0.35f),P(-0.42f,0.22f)});
+        } else if (name == "comet") {
+            tri(P(0.35f,-0.72f),P(0.27f,-0.35f),P(0.43f,-0.35f));
+            tri(P(0.72f,-0.35f),P(0.35f,-0.43f),P(0.35f,-0.27f));
+            tri(P(0.35f,0.02f),P(0.27f,-0.35f),P(0.43f,-0.35f));
+            tri(P(-0.02f,-0.35f),P(0.35f,-0.43f),P(0.35f,-0.27f));
+            pl({P(0.18f,-0.18f),P(-0.6f,0.66f)});
         } else {
             disc(0.0f,0.0f,0.40f);
         }
@@ -1060,6 +1094,12 @@ private:
         ImU32 border = (h.rank == rpgw::ROYAL) ? IM_COL32(194, 160, 107, 255) : IM_COL32(74, 84, 95, 255);
         dl->AddPolyline(pts, 9, border, ImDrawFlags_Closed, 2.5f);
         drawCharge(dl, ImVec2(mid, y + 0.5f * ht), w * 0.30f, h.charge, tinctureCol(h.chargeColor));
+    }
+    // Elven emblems are drawn in a round medallion, not stamped on a war-shield.
+    void drawMedallion(ImDrawList* dl, ImVec2 c, float radius, const std::string& sigil, ImU32 col) {
+        dl->AddCircleFilled(c, radius, IM_COL32(22, 24, 34, 255), 44);
+        dl->AddCircle(c, radius, IM_COL32(84, 76, 112, 255), 44, 1.6f);
+        drawCharge(dl, c, radius * 0.60f, sigil, col);
     }
 
     // Your rung within the house, flavored by background.
@@ -1084,15 +1124,35 @@ private:
         m_family = rpgw::generateFamily(rpgw::houses()[m_houseIdx],
                                         rpgc::backgroundOptions()[m_bgIdx], m_female, m_rng);
     }
-    // Assign the character's origin: a House for humans/half-bloods, else an Origin.
+    // Pick an elven lineage by subrace: High Elf -> Court, Wood Elf -> Wild, Elf -> any.
+    void assignElfLineage() {
+        std::string race = rpgc::raceOptions()[m_raceIdx];
+        if (rpgw::isDrow(race)) { m_elfIdx = -1; return; }     // drow are the Sundered - no lineage
+        std::vector<int> pool =
+            race == "High Elf" ? rpgw::elfHouseIndicesByStrand(rpgw::COURT, false)
+          : race == "Wood Elf" ? rpgw::elfHouseIndicesByStrand(rpgw::WILD, false)
+                               : rpgw::elfHouseIndicesAll(false);
+        if (pool.empty()) { m_elfIdx = 0; return; }
+        std::uniform_int_distribution<int> d(0, static_cast<int>(pool.size()) - 1);
+        m_elfIdx = pool[d(m_rng)];
+    }
+    // Assign the character's origin: a House for humans/half-bloods, an Aelvarin
+    // lineage for elves (Sundered for drow), else a generic Origin.
     void assignHouse() {
-        if (!rpgw::isHouseRace(rpgc::raceOptions()[m_raceIdx])) {
-            m_houseIdx = -1;
-            m_houseStanding.clear();
-            m_family = rpgw::Family{};                          // outsiders have no house family
-            m_origin = rpgw::originFor(rpgc::raceOptions()[m_raceIdx], m_rng);
+        std::string race = rpgc::raceOptions()[m_raceIdx];
+        if (rpgw::isElf(race)) {
+            m_houseIdx = -1; m_houseStanding.clear(); m_family = rpgw::Family{};
+            assignElfLineage();
             return;
         }
+        if (!rpgw::isHouseRace(race)) {
+            m_houseIdx = -1; m_elfIdx = -1;
+            m_houseStanding.clear();
+            m_family = rpgw::Family{};                          // outsiders have no house family
+            m_origin = rpgw::originFor(race, m_rng);
+            return;
+        }
+        m_elfIdx = -1;
         bool noble = (rpgc::backgroundOptions()[m_bgIdx] == std::string("Noble"));
         auto pool = noble ? rpgw::greatHouseIndices() : rpgw::lesserHouseIndices();
         if (pool.empty()) { m_houseIdx = 0; }
@@ -1171,6 +1231,46 @@ private:
         ImGui::TextWrapped("%s", m_origin.blurb.c_str());
         ImGui::Spacing();
         ImGui::TextDisabled("No Aldermarch house will claim you. (Homelands - and houses of your own - to come.)");
+        ImGui::EndChild();
+    }
+
+    // Elves belong to an Aelvarin lineage (a medallion, not a war-shield).
+    void renderElfHouseCard() {
+        if (m_elfIdx < 0) assignElfLineage();
+        const auto& h = rpgw::elfHouses()[m_elfIdx];
+        ImU32 col = h.royal ? IM_COL32(198, 180, 238, 255)
+                  : (h.strand == rpgw::COURT ? IM_COL32(216, 210, 236, 255)
+                                             : IM_COL32(132, 182, 144, 255));
+        ImGui::TextUnformatted("Your Lineage");
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Cast lots again##elf")) assignElfLineage();
+
+        ImGui::BeginChild("##elfcard", ImVec2(0, 176), true);
+        ImVec2 p0 = ImGui::GetCursorScreenPos();
+        const float R = 46.0f;
+        drawMedallion(ImGui::GetWindowDrawList(), ImVec2(p0.x + 6.0f + R, p0.y + 6.0f + R), R, h.sigil, col);
+        ImGui::Dummy(ImVec2(2.0f * R + 22.0f, 2.0f * R + 8.0f));
+        ImGui::SameLine();
+        ImGui::BeginGroup();
+        ImGui::TextColored(ImVec4(0.93f, 0.91f, 0.96f, 1.0f), "%s", h.name);
+        ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(col), "\"%s\"", h.words);
+        ImGui::TextDisabled("%s  -  %s", rpgw::strandName(h.strand), h.seat[0] ? h.seat : "no seat; they wander");
+        ImGui::Spacing();
+        ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(col), "The Art: %s", h.art);
+        ImGui::TextWrapped("%s", h.gift);
+        ImGui::EndGroup();
+        ImGui::EndChild();
+        ImGui::TextDisabled("On the Fading: %s", h.stance);
+        ImGui::TextDisabled("Led by its Elder - among the Aelvar, women lead as freely as men.");
+    }
+
+    // Drow are the Sundered: exiles of Aelvarin, of no lineage.
+    void renderSunderedCard() {
+        ImGui::TextUnformatted("Your Origin");
+        ImGui::BeginChild("##sundered", ImVec2(0, 138), true);
+        ImGui::TextColored(ImVec4(0.69f, 0.42f, 0.52f, 1.0f), "The Sundered  -  drow, exiled beneath Aelvarin");
+        ImGui::Spacing();
+        ImGui::TextWrapped("%s", rpgw::sunderedBlurb());
         ImGui::EndChild();
     }
 
@@ -1644,12 +1744,19 @@ private:
         renderPortraitGallery();
 
         ImGui::Separator();
-        if (rpgw::isHouseRace(rpgc::raceOptions()[m_raceIdx])) {
-            renderHouseCard();
-            ImGui::Separator();
-            renderFamilyTree();
-        } else {
-            renderOriginCard();
+        {
+            std::string race = rpgc::raceOptions()[m_raceIdx];
+            if (rpgw::isHouseRace(race)) {
+                renderHouseCard();
+                ImGui::Separator();
+                renderFamilyTree();
+            } else if (rpgw::isDrow(race)) {
+                renderSunderedCard();
+            } else if (rpgw::isElf(race)) {
+                renderElfHouseCard();
+            } else {
+                renderOriginCard();
+            }
         }
 
         ImGui::Separator();
@@ -2325,6 +2432,7 @@ private:
     std::string m_houseStanding;           // rung within the house, from background
     rpgw::Family m_family;                  // generated family tree
     rpgw::Origin m_origin;                  // for non-house races (outsiders)
+    int m_elfIdx = -1;                       // elven lineage (index into rpgw::elfHouses())
     bool m_female = false;                  // succession favors men in Aldermarch
     std::vector<rpgcf::ClassScore> m_classRanked;   // class fit for the rolled scores
 
