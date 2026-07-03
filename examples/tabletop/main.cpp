@@ -22,6 +22,7 @@
 
 #include "encounter.hpp"
 #include "character.hpp"
+#include "houses.hpp"
 
 #include <eden/Camera.hpp>
 #include <eden/Input.hpp>
@@ -650,6 +651,7 @@ private:
         m_selectedPortrait = -1;
         m_previewPortrait = -1;
         scanPortraits();
+        assignHouse();
         rollAbilityScores();
     }
 
@@ -713,6 +715,9 @@ private:
         m_pc.race = rpgc::raceOptions()[m_raceIdx];
         m_pc.className = rpgc::classOptions()[m_classIdx];
         m_pc.background = rpgc::backgroundOptions()[m_bgIdx];
+        if (m_houseIdx < 0) assignHouse();
+        m_pc.house = rpgw::houses()[m_houseIdx].name;
+        m_pc.standing = m_houseStanding;
         m_pc.level = 1;
         auto rb = effectiveRaceBonus();
         for (int a = 0; a < 6; ++a) m_pc.abilities[a] = m_rolled[m_assign[a]] + rb[a];
@@ -941,6 +946,137 @@ private:
         ImGui::EndChild();
     }
 
+    // ----- house & heraldry -----
+    static ImU32 tinctureCol(rpgw::Tincture t) {
+        auto c = rpgw::tinctureRGB(t); return IM_COL32(c.r, c.g, c.b, 255);
+    }
+    // Draw a heraldic charge (emblematic sigil) centered at c, half-size s.
+    void drawCharge(ImDrawList* dl, ImVec2 c, float s, const std::string& name, ImU32 col) {
+        auto P = [&](float x, float y) { return ImVec2(c.x + x * s, c.y + y * s); };
+        float th = s * 0.20f;
+        auto polyf = [&](std::vector<ImVec2> v) { dl->AddConvexPolyFilled(v.data(), (int)v.size(), col); };
+        auto pl = [&](std::vector<ImVec2> v) { dl->AddPolyline(v.data(), (int)v.size(), col, 0, th); };
+        auto disc = [&](float x, float y, float r) { dl->AddCircleFilled(P(x, y), r * s, col, 24); };
+        auto tri = [&](ImVec2 a, ImVec2 b, ImVec2 d) { dl->AddTriangleFilled(a, b, d, col); };
+        auto quad = [&](ImVec2 a, ImVec2 b, ImVec2 d, ImVec2 e) { dl->AddQuadFilled(a, b, d, e, col); };
+        if (name == "anvil") {
+            quad(P(-0.75f,-0.20f),P(0.55f,-0.20f),P(0.55f,0.12f),P(-0.75f,0.12f));
+            tri(P(0.55f,-0.20f),P(0.92f,-0.02f),P(0.55f,0.12f));
+            quad(P(-0.16f,0.12f),P(0.16f,0.12f),P(0.16f,0.42f),P(-0.16f,0.42f));
+            quad(P(-0.50f,0.42f),P(0.50f,0.42f),P(0.66f,0.66f),P(-0.66f,0.66f));
+        } else if (name == "hammer") {
+            quad(P(-0.55f,-0.50f),P(0.55f,-0.50f),P(0.55f,-0.12f),P(-0.55f,-0.12f));
+            quad(P(-0.13f,-0.12f),P(0.13f,-0.12f),P(0.13f,0.62f),P(-0.13f,0.62f));
+        } else if (name == "tower") {
+            quad(P(-0.45f,-0.20f),P(0.45f,-0.20f),P(0.45f,0.62f),P(-0.45f,0.62f));
+            quad(P(-0.45f,-0.45f),P(-0.20f,-0.45f),P(-0.20f,-0.20f),P(-0.45f,-0.20f));
+            quad(P(-0.12f,-0.45f),P(0.12f,-0.45f),P(0.12f,-0.20f),P(-0.12f,-0.20f));
+            quad(P(0.20f,-0.45f),P(0.45f,-0.45f),P(0.45f,-0.20f),P(0.20f,-0.20f));
+        } else if (name == "dagger") {
+            tri(P(0.0f,-0.72f),P(0.16f,-0.10f),P(-0.16f,-0.10f));
+            quad(P(-0.42f,-0.10f),P(0.42f,-0.10f),P(0.42f,0.02f),P(-0.42f,0.02f));
+            quad(P(-0.10f,0.02f),P(0.10f,0.02f),P(0.10f,0.50f),P(-0.10f,0.50f));
+            disc(0.0f,0.58f,0.12f);
+        } else if (name == "flame") {
+            polyf({P(0.0f,-0.75f),P(0.20f,-0.35f),P(0.40f,0.10f),P(0.34f,0.46f),P(0.14f,0.68f),
+                   P(-0.14f,0.68f),P(-0.34f,0.46f),P(-0.40f,0.10f),P(-0.20f,-0.35f)});
+        } else if (name == "oak") {
+            disc(0.0f,-0.22f,0.50f); disc(-0.36f,-0.02f,0.30f); disc(0.36f,-0.02f,0.30f);
+            quad(P(-0.12f,0.20f),P(0.12f,0.20f),P(0.12f,0.70f),P(-0.12f,0.70f));
+        } else if (name == "wheatsheaf") {
+            pl({P(0.0f,0.60f),P(0.0f,-0.62f)}); pl({P(0.0f,0.60f),P(-0.30f,-0.45f)});
+            pl({P(0.0f,0.60f),P(0.30f,-0.45f)}); pl({P(0.0f,0.60f),P(-0.52f,-0.18f)});
+            pl({P(0.0f,0.60f),P(0.52f,-0.18f)});
+            quad(P(-0.32f,0.12f),P(0.32f,0.12f),P(0.32f,0.30f),P(-0.32f,0.30f));
+        } else if (name == "gull") {
+            pl({P(-0.72f,0.12f),P(-0.34f,-0.32f),P(0.0f,0.14f),P(0.34f,-0.32f),P(0.72f,0.12f)});
+        } else if (name == "serpent") {
+            pl({P(-0.45f,0.62f),P(-0.45f,0.15f),P(0.12f,-0.02f),P(0.12f,-0.40f),P(-0.28f,-0.55f)});
+            tri(P(-0.50f,-0.66f),P(-0.12f,-0.58f),P(-0.36f,-0.34f));
+        } else if (name == "stag") {
+            disc(0.0f,0.34f,0.28f);
+            pl({P(-0.12f,0.12f),P(-0.30f,-0.22f),P(-0.52f,-0.46f)}); pl({P(-0.32f,-0.20f),P(-0.16f,-0.36f)});
+            pl({P(0.12f,0.12f),P(0.30f,-0.22f),P(0.52f,-0.46f)}); pl({P(0.32f,-0.20f),P(0.16f,-0.36f)});
+            disc(-0.22f,0.16f,0.09f); disc(0.22f,0.16f,0.09f);
+        } else if (name == "kraken") {
+            disc(0.0f,-0.12f,0.42f);
+            pl({P(-0.30f,0.20f),P(-0.40f,0.45f),P(-0.30f,0.66f)}); pl({P(-0.10f,0.28f),P(-0.14f,0.55f),P(-0.08f,0.72f)});
+            pl({P(0.10f,0.28f),P(0.14f,0.55f),P(0.08f,0.72f)}); pl({P(0.30f,0.20f),P(0.40f,0.45f),P(0.30f,0.66f)});
+        } else if (name == "raven") {
+            disc(-0.05f,0.16f,0.34f);
+            tri(P(-0.62f,0.02f),P(-0.28f,0.34f),P(-0.28f,-0.02f));
+            disc(0.34f,-0.12f,0.20f);
+            tri(P(0.50f,-0.15f),P(0.78f,-0.06f),P(0.50f,0.03f));
+        } else {
+            disc(0.0f,0.0f,0.40f);
+        }
+    }
+    void drawShield(ImDrawList* dl, ImVec2 tl, float w, const rpgw::House& h) {
+        float ht = w * 1.16f;
+        float x0 = tl.x, x1 = tl.x + w, y = tl.y, mid = tl.x + w * 0.5f;
+        ImVec2 pts[9] = {
+            {x0, y}, {x1, y}, {x1, y + 0.46f * ht},
+            {x0 + 0.86f * w, y + 0.72f * ht}, {x0 + 0.62f * w, y + 0.92f * ht}, {mid, y + ht},
+            {x0 + 0.38f * w, y + 0.92f * ht}, {x0 + 0.14f * w, y + 0.72f * ht}, {x0, y + 0.46f * ht}
+        };
+        dl->AddConvexPolyFilled(pts, 9, tinctureCol(h.field));
+        ImU32 border = (h.rank == rpgw::ROYAL) ? IM_COL32(194, 160, 107, 255) : IM_COL32(74, 84, 95, 255);
+        dl->AddPolyline(pts, 9, border, ImDrawFlags_Closed, 2.5f);
+        drawCharge(dl, ImVec2(mid, y + 0.5f * ht), w * 0.30f, h.charge, tinctureCol(h.chargeColor));
+    }
+
+    // Your rung within the house, flavored by background.
+    std::string standingFor(const std::string& bg, rpgw::Rank rank) {
+        if (rank == rpgw::GREAT || rank == rpgw::ROYAL || bg == "Noble") return "highborn of";
+        if (bg == "Soldier")       return "a sworn sword of";
+        if (bg == "Criminal")      return "disavowed by";
+        if (bg == "Urchin")        return "a bastard of";
+        if (bg == "Charlatan")     return "a false claimant to";
+        if (bg == "Folk Hero")     return "risen from the smallfolk of";
+        if (bg == "Outlander")     return "an estranged child of";
+        if (bg == "Acolyte")       return "pledged to the Iron Temple by";
+        if (bg == "Hermit")        return "an exile of";
+        if (bg == "Sage")          return "a scholar in service to";
+        if (bg == "Guild Artisan") return "a guild-sworn of";
+        if (bg == "Entertainer")   return "a minstrel of";
+        if (bg == "Sailor")        return "a deckhand of";
+        return "sworn to";
+    }
+    void assignHouse() {
+        bool noble = (rpgc::backgroundOptions()[m_bgIdx] == std::string("Noble"));
+        auto pool = noble ? rpgw::greatHouseIndices() : rpgw::lesserHouseIndices();
+        if (pool.empty()) { m_houseIdx = 0; return; }
+        std::uniform_int_distribution<int> d(0, static_cast<int>(pool.size()) - 1);
+        m_houseIdx = pool[d(m_rng)];
+        m_houseStanding = standingFor(rpgc::backgroundOptions()[m_bgIdx], rpgw::houses()[m_houseIdx].rank);
+    }
+
+    void renderHouseCard() {
+        if (m_houseIdx < 0) assignHouse();
+        const auto& h = rpgw::houses()[m_houseIdx];
+        ImGui::TextUnformatted("Your House");
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Cast lots again")) assignHouse();
+
+        ImGui::BeginChild("##housecard", ImVec2(0, 158), true);
+        ImVec2 p0 = ImGui::GetCursorScreenPos();
+        const float bw = 96.0f;
+        drawShield(ImGui::GetWindowDrawList(), ImVec2(p0.x + 6.0f, p0.y + 4.0f), bw, h);
+        ImGui::Dummy(ImVec2(bw + 18.0f, bw * 1.16f));
+        ImGui::SameLine();
+        ImGui::BeginGroup();
+        ImGui::TextColored(ImVec4(0.91f, 0.89f, 0.85f, 1.0f), "%s", h.name);
+        ImGui::TextColored(ImVec4(0.76f, 0.63f, 0.42f, 1.0f), "\"%s\"", h.words);
+        ImGui::TextWrapped("You are %s %s, of %s in %s.", m_houseStanding.c_str(), h.name, h.seat, h.region);
+        ImGui::Spacing();
+        ImGui::TextColored(ImVec4(0.76f, 0.63f, 0.42f, 1.0f), "House Gift: %s", h.trait);
+        ImGui::TextWrapped("%s", h.traitDesc);
+        ImGui::EndGroup();
+        ImGui::EndChild();
+        ImGui::TextDisabled("Blazon: %s   -   sworn to %s",
+                            rpgw::blazon(h).c_str(), h.liege[0] ? h.liege : "the Crown itself");
+    }
+
     void renderCharCreate() {
         ImVec2 disp = ImGui::GetIO().DisplaySize;
         ImGui::SetNextWindowPos(ImVec2(disp.x * 0.5f, disp.y * 0.5f), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
@@ -962,6 +1098,7 @@ private:
         if (m_classIdx != prevClass) m_skillPick.fill(false);   // class list changed
 
         // Background: hover each option for what it is and what it grants.
+        int prevBg = m_bgIdx;
         if (ImGui::BeginCombo("Background", rpgc::backgroundOptions()[m_bgIdx])) {
             for (int i = 0; i < static_cast<int>(rpgc::backgroundOptions().size()); ++i) {
                 if (ImGui::Selectable(rpgc::backgroundOptions()[i], m_bgIdx == i)) m_bgIdx = i;
@@ -969,6 +1106,13 @@ private:
                     ImGui::SetTooltip("%s", rpgc::backgroundInfo(rpgc::backgroundOptions()[i]).desc);
             }
             ImGui::EndCombo();
+        }
+        if (m_bgIdx != prevBg) {
+            bool wasNoble = (rpgc::backgroundOptions()[prevBg] == std::string("Noble"));
+            bool isNoble  = (rpgc::backgroundOptions()[m_bgIdx] == std::string("Noble"));
+            if (wasNoble != isNoble) assignHouse();      // pool changed -> draw a new house
+            else if (m_houseIdx >= 0)                     // same pool -> keep house, update rung
+                m_houseStanding = standingFor(rpgc::backgroundOptions()[m_bgIdx], rpgw::houses()[m_houseIdx].rank);
         }
         {
             auto bi = rpgc::backgroundInfo(rpgc::backgroundOptions()[m_bgIdx]);
@@ -1081,6 +1225,9 @@ private:
 
         ImGui::Separator();
         renderPortraitGallery();
+
+        ImGui::Separator();
+        renderHouseCard();
 
         ImGui::Separator();
         bool halfElfOk = !isHalfElf() || halfElfPickCount() == 2;
@@ -1737,6 +1884,8 @@ private:
     std::array<bool, rpgc::ABILITY_COUNT> m_halfElfBonus{};  // Half-Elf: +1 to two of your choice
     std::array<bool, 18> m_skillPick{};    // chosen class skill proficiencies
     int m_bgIdx = 0;                       // chosen background index
+    int m_houseIdx = -1;                   // assigned house (index into rpgw::houses())
+    std::string m_houseStanding;           // rung within the house, from background
 
     // Portrait gallery (scanned from assets/portraits/, drop-and-appear).
     std::vector<Portrait> m_portraits;

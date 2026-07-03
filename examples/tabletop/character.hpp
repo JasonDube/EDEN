@@ -263,6 +263,8 @@ struct Item {
 struct Character {
     // identity
     std::string name, className, race, background, alignment;
+    std::string house;          // assigned house (see houses.hpp), e.g. "House Cawood"
+    std::string standing;       // rung within the house, e.g. "sworn sword of"
     int level = 1;
     int xp    = 0;
 
@@ -357,6 +359,8 @@ inline std::string serialize(const Character& c) {
     detail::putStr(o, "race", c.race);
     detail::putStr(o, "background", c.background);
     detail::putStr(o, "alignment", c.alignment);
+    detail::putStr(o, "house", c.house);
+    detail::putStr(o, "standing", c.standing);
     o << "level " << c.level << '\n';
     o << "xp " << c.xp << '\n';
     o << "abilities";
@@ -407,7 +411,8 @@ inline bool deserialize(const std::string& text, Character& out) {
     std::string key;
     while (in >> key) {
         if (key == "name" || key == "class" || key == "race" ||
-            key == "background" || key == "alignment" || key == "attacks" ||
+            key == "background" || key == "alignment" || key == "house" ||
+            key == "standing" || key == "attacks" ||
             key == "equipment" || key == "features" || key == "proflangs" ||
             key == "personality" || key == "notes" || key == "portrait") {
             size_t n = 0; in >> n; in.ignore();  // eat the single space/newline before body
@@ -417,6 +422,8 @@ inline bool deserialize(const std::string& text, Character& out) {
             else if (key == "race")        out.race = v;
             else if (key == "background")  out.background = v;
             else if (key == "alignment")   out.alignment = v;
+            else if (key == "house")       out.house = v;
+            else if (key == "standing")    out.standing = v;
             else if (key == "attacks")     out.attacks = v;
             else if (key == "equipment")   out.equipment = v;
             else if (key == "features")    out.features = v;
