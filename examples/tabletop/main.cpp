@@ -23,6 +23,7 @@
 #include "encounter.hpp"
 #include "character.hpp"
 #include "houses.hpp"
+#include "origins.hpp"
 #include "family.hpp"
 #include "relations.hpp"
 #include "classfit.hpp"
@@ -729,11 +730,19 @@ private:
         m_pc.race = rpgc::raceOptions()[m_raceIdx];
         m_pc.className = rpgc::classOptions()[m_classIdx];
         m_pc.background = rpgc::backgroundOptions()[m_bgIdx];
-        if (m_houseIdx < 0) assignHouse();
-        m_pc.house = rpgw::houses()[m_houseIdx].name;
-        m_pc.standing = m_houseStanding;
-        m_pc.surname = m_family.pcSurname;
-        m_pc.ironLegacy = m_family.legacyName;
+        m_pc.gender = m_female ? "Female" : "Male";
+        if (rpgw::isHouseRace(m_pc.race)) {
+            if (m_houseIdx < 0) assignHouse();
+            m_pc.house = rpgw::houses()[m_houseIdx].name;
+            m_pc.standing = m_houseStanding;
+            m_pc.surname = m_family.pcSurname;
+            m_pc.ironLegacy = m_family.legacyName;
+            m_pc.origin.clear();
+        } else {                                   // outsider: an Origin, no house
+            if (m_origin.homeland.empty()) assignHouse();
+            m_pc.house.clear(); m_pc.standing.clear(); m_pc.surname.clear(); m_pc.ironLegacy.clear();
+            m_pc.origin = m_origin.blurb;
+        }
         m_pc.level = 1;
         auto rb = effectiveRaceBonus();
         for (int a = 0; a < 6; ++a) m_pc.abilities[a] = m_rolled[m_assign[a]] + rb[a];
@@ -1073,9 +1082,17 @@ private:
     void genFamily() {
         if (m_houseIdx < 0) return;
         m_family = rpgw::generateFamily(rpgw::houses()[m_houseIdx],
-                                        rpgc::backgroundOptions()[m_bgIdx], m_rng);
+                                        rpgc::backgroundOptions()[m_bgIdx], m_female, m_rng);
     }
+    // Assign the character's origin: a House for humans/half-bloods, else an Origin.
     void assignHouse() {
+        if (!rpgw::isHouseRace(rpgc::raceOptions()[m_raceIdx])) {
+            m_houseIdx = -1;
+            m_houseStanding.clear();
+            m_family = rpgw::Family{};                          // outsiders have no house family
+            m_origin = rpgw::originFor(rpgc::raceOptions()[m_raceIdx], m_rng);
+            return;
+        }
         bool noble = (rpgc::backgroundOptions()[m_bgIdx] == std::string("Noble"));
         auto pool = noble ? rpgw::greatHouseIndices() : rpgw::lesserHouseIndices();
         if (pool.empty()) { m_houseIdx = 0; }
@@ -1138,6 +1155,23 @@ private:
         ImGui::EndChild();
         ImGui::TextDisabled("Blazon: %s   -   sworn to %s",
                             rpgw::blazon(h).c_str(), h.liege[0] ? h.liege : "the Crown itself");
+    }
+
+    // Non-house races (outsiders) get an Origin instead of a House card.
+    void renderOriginCard() {
+        if (m_origin.homeland.empty()) m_origin = rpgw::originFor(rpgc::raceOptions()[m_raceIdx], m_rng);
+        ImGui::TextUnformatted("Your Origin");
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Cast lots again##origin"))
+            m_origin = rpgw::originFor(rpgc::raceOptions()[m_raceIdx], m_rng);
+        ImGui::BeginChild("##origincard", ImVec2(0, 118), true);
+        ImGui::TextColored(ImVec4(0.62f, 0.72f, 0.85f, 1.0f), "%s of %s",
+                           rpgc::raceOptions()[m_raceIdx], m_origin.homeland.c_str());
+        ImGui::Spacing();
+        ImGui::TextWrapped("%s", m_origin.blurb.c_str());
+        ImGui::Spacing();
+        ImGui::TextDisabled("No Aldermarch house will claim you. (Homelands - and houses of your own - to come.)");
+        ImGui::EndChild();
     }
 
     // Draw one kin node (box + name + relation) and register a hover tooltip.
@@ -1479,6 +1513,12 @@ private:
                      ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse);
 
         ImGui::InputText("Name", m_nameBuf, sizeof(m_nameBuf));
+        // Gender: in Aldermarch a woman rarely bears the first name of a house.
+        int gender = m_female ? 1 : 0, prevGender = gender;
+        ImGui::TextUnformatted("Gender"); ImGui::SameLine(120.0f);
+        ImGui::RadioButton("Man", &gender, 0); ImGui::SameLine();
+        ImGui::RadioButton("Woman", &gender, 1);
+        m_female = (gender == 1);
         auto combo = [](const char* label, int& idx, const std::vector<const char*>& opts) {
             if (ImGui::BeginCombo(label, opts[idx])) {
                 for (int i = 0; i < static_cast<int>(opts.size()); ++i)
@@ -1486,8 +1526,12 @@ private:
                 ImGui::EndCombo();
             }
         };
+        int prevRace = m_raceIdx;
         combo("Race", m_raceIdx, rpgc::raceOptions());
         // Class is not chosen - it is determined by your rolls (shown below).
+        // Race decides house-vs-origin; gender reshapes the succession.
+        if (m_raceIdx != prevRace) assignHouse();
+        else if (gender != prevGender) genFamily();
 
         // Background: hover each option for what it is and what it grants.
         int prevBg = m_bgIdx;
@@ -1600,10 +1644,13 @@ private:
         renderPortraitGallery();
 
         ImGui::Separator();
-        renderHouseCard();
-
-        ImGui::Separator();
-        renderFamilyTree();
+        if (rpgw::isHouseRace(rpgc::raceOptions()[m_raceIdx])) {
+            renderHouseCard();
+            ImGui::Separator();
+            renderFamilyTree();
+        } else {
+            renderOriginCard();
+        }
 
         ImGui::Separator();
         bool halfElfOk = !isHalfElf() || halfElfPickCount() == 2;
@@ -2277,6 +2324,8 @@ private:
     int m_houseIdx = -1;                   // assigned house (index into rpgw::houses())
     std::string m_houseStanding;           // rung within the house, from background
     rpgw::Family m_family;                  // generated family tree
+    rpgw::Origin m_origin;                  // for non-house races (outsiders)
+    bool m_female = false;                  // succession favors men in Aldermarch
     std::vector<rpgcf::ClassScore> m_classRanked;   // class fit for the rolled scores
 
     // Portrait gallery (scanned from assets/portraits/, drop-and-appear).

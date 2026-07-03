@@ -25,7 +25,8 @@ struct Kin {
     std::string trait;        // one-line
     std::string disposition;  // toward you: "loving","dutiful","cold","rival","scheming","wary"
     bool elder = false;       // (siblings) older than you
-    bool heir = false;        // stands to inherit
+    bool male = true;         // sons take precedence in the succession
+    bool heir = false;        // stands to inherit (the presumptive "first name")
     bool holdsSeat = false;   // currently holds the house seat
 };
 
@@ -113,7 +114,7 @@ namespace fdetail {
 }  // namespace fdetail
 
 // ── the generator ──────────────────────────────────────────────────────────
-inline Family generateFamily(const House& h, const std::string& bg, std::mt19937& rng) {
+inline Family generateFamily(const House& h, const std::string& bg, bool pcFemale, std::mt19937& rng) {
     using namespace fdetail;
     Family f;
     std::string surname = std::string(h.name).substr(6);  // strip "House "
@@ -155,6 +156,7 @@ inline Family generateFamily(const House& h, const std::string& bg, std::mt19937
         bool male = chance(rng, 50);
         bool elder = chance(rng, 50);
         s.elder = elder;
+        s.male = male;
         s.name = (male ? pick(maleNames(), rng) : pick(femaleNames(), rng)) + " " + surname;
         s.relation = std::string(elder ? "Elder " : "Younger ") + (male ? "brother" : "sister");
         s.status = mkStatus(grim ? 22 : 12);
@@ -165,37 +167,57 @@ inline Family generateFamily(const House& h, const std::string& bg, std::mt19937
         f.siblings.push_back(s);
     }
 
-    // succession — only LIVING elder siblings stand ahead of you in the line
-    int livingElders = 0;
-    for (auto& s : f.siblings) if (s.elder && s.status == "living") ++livingElders;
+    // ── succession: male-preference primogeniture ──
+    // Sons take precedence over daughters regardless of birth order. A woman
+    // rarely bears the "first name" of a house - only if no son of the line
+    // remains, and then by vote or as regent.
+    Kin* eldestSon = nullptr;
+    for (auto& s : f.siblings) if (s.male && s.elder && s.status == "living") { eldestSon = &s; break; }
+    if (!eldestSon) for (auto& s : f.siblings) if (s.male && !s.elder && s.status == "living") { eldestSon = &s; break; }
+    int livingElderBrothers = 0;
+    for (auto& s : f.siblings) if (s.male && s.elder && s.status == "living") ++livingElderBrothers;
+
+    const std::string houseName = std::string(h.name);
+    bool youAreFirstName = false;
     if (bastard) {
         f.successionRank = 0;
         f.successionLine = "Baseborn and unlanded, you carry your father's blood but no claim to " +
-                           std::string(h.name) + " - a name to make, or to prove.";
+                           houseName + " - a name to make, or to prove.";
+    } else if (!pcFemale) {
+        f.successionRank = livingElderBrothers + 1;
+        youAreFirstName = (livingElderBrothers == 0);
+        f.successionLine = youAreFirstName
+            ? "As eldest son, you are heir to " + houseName + " of " + h.seat +
+              " - the seat will be yours, if you live to hold it."
+            : "A younger son of " + houseName + " - your brothers stand between you and the seat; "
+              "you must make your own name.";
+    } else if (eldestSon) {
+        f.successionRank = 0;
+        f.successionLine = "A daughter of " + houseName + ". By custom the first name passes to your brother " +
+                           eldestSon->name + " - though a woman may yet be wed to a seat, voted to one, "
+                           "or take it by other means.";
     } else {
-        f.successionRank = livingElders + 1;
-        if (f.successionRank == 1) {
-            // eldest trueborn -> you are heir
-            f.successionLine = "As eldest, you are heir to " + std::string(h.name) + " of " + h.seat +
-                               " - the seat will be yours, if you live to hold it.";
-        } else {
-            f.successionLine = "The " + ordinal(f.successionRank) + " child of " + std::string(h.name) +
-                               " - far from the seat, you must make your own name.";
-        }
+        f.successionRank = 1;   // no son of the line remains
+        youAreFirstName = true;
+        f.successionLine = "No son remains to " + houseName + " of " + h.seat + ". A woman seldom bears the "
+                           "first name - yet you may be voted to the seat, or hold it in regency.";
     }
-    // mark the heir: you if rank 1, else the eldest LIVING elder sibling
-    if (!(!bastard && f.successionRank == 1))
-        for (auto& s : f.siblings) if (s.elder && s.status == "living") { s.heir = true; break; }
+    // the presumptive first name, if it is a sibling
+    if (!bastard && !youAreFirstName && eldestSon) eldestSon->heir = true;
 
-    // who holds the seat
-    auto firstLivingElder = [&]() -> Kin* {
-        for (auto& s : f.siblings) if (s.elder && s.status == "living") return &s;
-        return nullptr;
-    };
-    if (f.father.status == "living") { f.father.holdsSeat = true; f.seatHolder = f.father.name; f.seatRelation = "your father"; }
-    else if (f.mother.status == "living") { f.mother.holdsSeat = true; f.seatHolder = f.mother.name; f.seatRelation = "your mother, the dowager"; }
-    else if (Kin* e = firstLivingElder()) { e->holdsSeat = true; e->heir = true; f.seatHolder = e->name; f.seatRelation = "your " + e->relation; }
-    else { f.seatHolder = "you"; f.seatRelation = "you"; if (!bastard) f.successionRank = 1; }
+    // ── who currently holds the seat ──
+    if (f.father.status == "living") {
+        f.father.holdsSeat = true; f.seatHolder = f.father.name; f.seatRelation = "your father";
+    } else if (youAreFirstName) {
+        f.seatHolder = "you"; f.seatRelation = pcFemale ? "you, holding in regency" : "you";
+    } else if (eldestSon) {
+        eldestSon->holdsSeat = true; f.seatHolder = eldestSon->name; f.seatRelation = "your " + eldestSon->relation;
+    } else if (f.mother.status == "living") {
+        f.mother.holdsSeat = true; f.seatHolder = f.mother.name; f.seatRelation = "your mother, holding in regency";
+    } else {
+        f.seatHolder = "you"; f.seatRelation = pcFemale ? "you, holding in regency" : "you";
+        if (!bastard) f.successionRank = 1;
+    }
 
     // betrothal (a tie to another house)
     int betPct = bastard ? 5 : (titled ? 60 : 30);

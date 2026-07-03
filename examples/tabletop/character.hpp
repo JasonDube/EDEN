@@ -508,6 +508,8 @@ struct Character {
     std::string standing;       // rung within the house, e.g. "sworn sword of"
     std::string surname;        // family name, e.g. "Cawood" or a bastard name "Frost"
     std::string ironLegacy;     // heritable personal trait (see family.hpp)
+    std::string gender;         // "Male" | "Female" (feudal succession favors men)
+    std::string origin;         // for non-house races: where they hail from (see origins.hpp)
     int level = 1;
     int xp    = 0;
     int bravery = 10;           // morale stat (3-18); see braveryTier()
@@ -620,6 +622,8 @@ inline std::string serialize(const Character& c) {
     detail::putStr(o, "standing", c.standing);
     detail::putStr(o, "surname", c.surname);
     detail::putStr(o, "legacy", c.ironLegacy);
+    detail::putStr(o, "gender", c.gender);
+    detail::putStr(o, "origin", c.origin);
     o << "level " << c.level << '\n';
     o << "xp " << c.xp << '\n';
     o << "bravery " << c.bravery << '\n';
@@ -685,7 +689,8 @@ inline bool deserialize(const std::string& text, Character& out) {
     while (in >> key) {
         if (key == "name" || key == "class" || key == "race" ||
             key == "background" || key == "alignment" || key == "house" ||
-            key == "standing" || key == "surname" || key == "legacy" || key == "attacks" ||
+            key == "standing" || key == "surname" || key == "legacy" ||
+            key == "gender" || key == "origin" || key == "attacks" ||
             key == "equipment" || key == "features" || key == "proflangs" ||
             key == "personality" || key == "notes" || key == "portrait") {
             size_t n = 0; in >> n; in.ignore();  // eat the single space/newline before body
@@ -699,6 +704,8 @@ inline bool deserialize(const std::string& text, Character& out) {
             else if (key == "standing")    out.standing = v;
             else if (key == "surname")     out.surname = v;
             else if (key == "legacy")      out.ironLegacy = v;
+            else if (key == "gender")      out.gender = v;
+            else if (key == "origin")      out.origin = v;
             else if (key == "attacks")     out.attacks = v;
             else if (key == "equipment")   out.equipment = v;
             else if (key == "features")    out.features = v;

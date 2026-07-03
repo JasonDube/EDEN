@@ -42,6 +42,15 @@ inline const char* tinctureName(Tincture t) {
     return "?";
 }
 
+// Only humans and the half-blooded belong to the Aldermarch houses. The other
+// races are outsiders in the realm (they get an Origin instead of a House).
+// (Race-specific houses for dwarves, dragonborn, and elves come later.)
+inline bool isHouseRace(const std::string& race) {
+    return race == "Human"
+        || race.find("Half-Elf") != std::string::npos
+        || race.find("Half-Orc") != std::string::npos;
+}
+
 // ── House rank ────────────────────────────────────────────────────────────
 enum Rank { ROYAL, GREAT, LESSER };
 inline const char* rankName(Rank r) {
