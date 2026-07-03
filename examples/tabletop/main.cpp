@@ -1916,9 +1916,10 @@ private:
         if (!m_pc.name.empty()) roster.push_back(&m_pc);
         for (const auto& c : m_companions) roster.push_back(&c);
 
-        ImGui::SetNextWindowSize(ImVec2(600, 0), ImGuiCond_FirstUseEver);
+        ImGui::SetNextWindowSize(ImVec2(600, 0), ImGuiCond_Always);
         ImGui::SetNextWindowPos(ImVec2(340, 60), ImGuiCond_FirstUseEver);
-        ImGui::Begin("Party & Relationships", &m_showRelations);
+        ImGui::Begin("Party & Relationships", &m_showRelations,
+                     ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoCollapse);
         ImGui::TextDisabled("How your party would regard one another (from their personalities).");
         ImGui::Spacing();
         for (size_t i = 0; i < roster.size(); ++i)
@@ -2621,8 +2622,12 @@ private:
         }
 
         if (m_hasLevel) {
-            ImGui::SetNextWindowPos(ImVec2(10, 10), ImGuiCond_FirstUseEver);
-            ImGui::Begin("Level preview");
+            // Pinned HUD: no move/resize so it can't wander over the viewport or
+            // flash resize cursors that fight the camera for the mouse.
+            ImGui::SetNextWindowPos(ImVec2(10, 10), ImGuiCond_Always);
+            ImGui::Begin("Level preview", nullptr,
+                         ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize |
+                         ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_AlwaysAutoResize);
             ImGui::Text("%s", m_levelName.c_str());
             ImGui::Text("Floor plan:  X %.0f..%.0f ft", m_levelMin.x, m_levelMax.x);
             ImGui::Text("             Z %.0f..%.0f ft", m_levelMin.y, m_levelMax.y);
