@@ -78,6 +78,7 @@ class TabletopApp : public VulkanApplicationBase {
     // signatures below can reference it).
     struct Portrait {
         std::string path, race, gender;    // race = subfolder; gender from filename
+        int w = 0, h = 0;                  // source pixel size (for aspect-correct display)
         VkImage image = VK_NULL_HANDLE;
         VkDeviceMemory memory = VK_NULL_HANDLE;
         VkImageView view = VK_NULL_HANDLE;
@@ -647,6 +648,7 @@ private:
         m_halfElfBonus.fill(false);
         m_skillPick.fill(false);
         m_selectedPortrait = -1;
+        m_previewPortrait = -1;
         scanPortraits();
         rollAbilityScores();
     }
@@ -759,6 +761,7 @@ private:
         int w, h, ch;
         unsigned char* pixels = stbi_load(path.c_str(), &w, &h, &ch, STBI_rgb_alpha);
         if (!pixels) return false;
+        p.w = w; p.h = h;
         VkDevice device = getContext().getDevice();
         VkDeviceSize sz = static_cast<VkDeviceSize>(w) * h * 4;
         VkBuffer sbuf; VkDeviceMemory smem;
@@ -869,40 +872,74 @@ private:
         return static_cast<int>(m_portraits.size()) - 1;
     }
 
+    // Fit an image to a box while preserving its aspect ratio.
+    static ImVec2 fitBox(const Portrait& p, float maxW, float maxH) {
+        float w = p.w > 0 ? (float)p.w : 1.0f, h = p.h > 0 ? (float)p.h : 1.0f;
+        float s = std::min(maxW / w, maxH / h);
+        return ImVec2(w * s, h * s);
+    }
+
     void renderPortraitGallery() {
         ImGui::TextUnformatted("Portrait");
         ImGui::SameLine(); ImGui::Checkbox("All races", &m_showAllPortraits);
         ImGui::SameLine();
-        if (ImGui::Button("Upload...")) { int i = uploadPortrait(); if (i >= 0) m_selectedPortrait = i; }
+        if (ImGui::Button("Upload...")) { int i = uploadPortrait(); if (i >= 0) m_previewPortrait = i; }
 
         std::string wantRace = baseRaceFolder(rpgc::raceOptions()[m_raceIdx]);
-        ImGui::BeginChild("##portraits", ImVec2(0, 170), true);
-        const float thumb = 92.0f;
+        const float panelH = 300.0f;
+
+        // ---- left: thumbnail grid ----
+        ImGui::BeginChild("##galleryGrid", ImVec2(320, panelH), true);
+        const float cell = 135.0f;      // thumbnail box (aspect-fit within)
         int shown = 0;
         for (int i = 0; i < static_cast<int>(m_portraits.size()); ++i) {
             Portrait& p = m_portraits[i];
             bool raceOk = m_showAllPortraits || p.race.empty() || p.race == wantRace;
             if (!raceOk) continue;
-            if (shown % 4 != 0) ImGui::SameLine();
+            if (shown % 2 != 0) ImGui::SameLine();
             ++shown;
             ImGui::PushID(i);
-            ImGui::Image((ImTextureID)p.descriptor, ImVec2(thumb, thumb));
-            if (ImGui::IsItemClicked()) m_selectedPortrait = i;
-            if (m_selectedPortrait == i)
+            ImGui::Image((ImTextureID)p.descriptor, fitBox(p, cell, cell));
+            if (ImGui::IsItemClicked()) m_previewPortrait = i;
+            ImU32 border = 0;
+            if (i == m_selectedPortrait)      border = IM_COL32(90, 220, 120, 255);  // green = chosen
+            else if (i == m_previewPortrait)  border = IM_COL32(255, 210, 90, 255);   // gold = previewing
+            if (border)
                 ImGui::GetWindowDrawList()->AddRect(ImGui::GetItemRectMin(), ImGui::GetItemRectMax(),
-                                                    IM_COL32(255, 210, 90, 255), 0.0f, 0, 3.0f);
+                                                    border, 0.0f, 0, 3.0f);
             ImGui::PopID();
         }
         if (shown == 0)
-            ImGui::TextDisabled("No portraits here yet - drop images in\nassets/portraits/%s/  (or Upload).",
+            ImGui::TextDisabled("No portraits here yet -\ndrop images in\nassets/portraits/%s/\n(or use Upload).",
                                 wantRace.c_str());
+        ImGui::EndChild();
+
+        // ---- right: large preview + confirm ----
+        ImGui::SameLine();
+        ImGui::BeginChild("##galleryPreview", ImVec2(0, panelH), true);
+        int pv = m_previewPortrait;
+        if (pv >= 0 && pv < static_cast<int>(m_portraits.size())) {
+            Portrait& p = m_portraits[pv];
+            float availW = ImGui::GetContentRegionAvail().x;
+            ImVec2 sz = fitBox(p, availW, panelH - 70.0f);
+            float indent = (availW - sz.x) * 0.5f;
+            if (indent > 0) ImGui::SetCursorPosX(ImGui::GetCursorPosX() + indent);
+            ImGui::Image((ImTextureID)p.descriptor, sz);
+            if (pv == m_selectedPortrait) {
+                ImGui::TextColored(ImVec4(0.35f, 0.85f, 0.45f, 1.0f), "  In use");
+            } else {
+                if (ImGui::Button("Use This Portrait", ImVec2(-1, 0))) m_selectedPortrait = pv;
+            }
+        } else {
+            ImGui::TextDisabled("Click a portrait to\npreview it here, then\nconfirm your choice.");
+        }
         ImGui::EndChild();
     }
 
     void renderCharCreate() {
         ImVec2 disp = ImGui::GetIO().DisplaySize;
         ImGui::SetNextWindowPos(ImVec2(disp.x * 0.5f, disp.y * 0.5f), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
-        ImGui::SetNextWindowSize(ImVec2(560, 0), ImGuiCond_Always);
+        ImGui::SetNextWindowSize(ImVec2(640, 0), ImGuiCond_Always);
         ImGui::Begin("Create Your Character", nullptr,
                      ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse);
 
@@ -1683,7 +1720,8 @@ private:
     // Portrait gallery (scanned from assets/portraits/, drop-and-appear).
     std::vector<Portrait> m_portraits;
     bool m_portraitsScanned = false;
-    int  m_selectedPortrait = -1;
+    int  m_selectedPortrait = -1;      // confirmed portrait (via "Use This Portrait")
+    int  m_previewPortrait  = -1;      // clicked/being-previewed portrait
     bool m_showAllPortraits = false;
 
     // Level preview (loaded from a terrain_editor .edenbin via TABLETOP_LEVEL)
