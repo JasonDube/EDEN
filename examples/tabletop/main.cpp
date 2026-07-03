@@ -661,12 +661,10 @@ private:
         m_skillPick.fill(false);
         m_selectedPortrait = -1;
         m_previewPortrait = -1;
+        m_classIdx = 0; m_bgIdx = 0;         // player chooses (or hits "Roll a Random Hero")
         scanPortraits();
         rollAbilityScores();
-        m_classIdx = -1;                    // force determineClass to fire on first frame
-        determineClass();                   // calling from the roll
-        allotBackground();                  // background suited to the calling (25% Noble)
-        assignHouse();                      // house from race + background
+        assignHouse();
     }
 
     // ----- character creation -----
@@ -677,7 +675,7 @@ private:
     }
     void rollAbilityScores() {
         for (int i = 0; i < 6; ++i) m_rolled[i] = roll4d6DropLowest();
-        for (int a = 0; a < 6; ++a) m_assign[a] = a;    // straight down: ability a takes roll a
+        for (int a = 0; a < 6; ++a) m_assign[a] = -1;   // unassigned; player drags them (or auto-assign)
         // Personality scores are rolled as part of the same act (they re-roll with abilities).
         m_bravery = roll4d6DropLowest();                        // higher = braver (to a fault)
         m_narcissism = rollDie(6) + rollDie(6) + rollDie(6);    // 3d6 bell; middle is ideal
@@ -1404,6 +1402,42 @@ private:
             m_bgIdx = backgroundIndex(fits[d(m_rng)]);
         }
     }
+    // Generate a complete character from the dice (the "Roll a Random Hero" button;
+    // also the seed of later random-NPC generation). Fills every choice; the player
+    // can still edit afterward.
+    void fullRandom() {
+        std::uniform_int_distribution<int> coin(0, 1);
+        m_female = (coin(m_rng) == 1);
+        rollAbilityScores();               // fresh six + personality
+        determineClass();                  // best-fit class from the rolls
+        autoAssignForClass();              // slot the rolls by the class's priorities
+        allotBackground();                 // 25% Noble, else a class-fitting past
+        if (isHalfElf()) {                 // Half-Elf's two +1s, at random
+            m_halfElfBonus.fill(false);
+            std::array<int, 6> ord = {0, 1, 2, 3, 4, 5};
+            std::shuffle(ord.begin(), ord.end(), m_rng);
+            int n = 0; for (int a : ord) { if (a == rpgc::CHA) continue; m_halfElfBonus[a] = true; if (++n == 2) break; }
+        }
+        assignHouse();                     // race + background -> house/lineage/clan + family
+        // random class skills
+        m_skillPick.fill(false);
+        auto cp = rpgc::classProficiencies(rpgc::classOptions()[m_classIdx]);
+        std::vector<int> pool = cp.skillList;
+        std::shuffle(pool.begin(), pool.end(), m_rng);
+        for (int i = 0; i < cp.skillCount && i < (int)pool.size(); ++i) m_skillPick[pool[i]] = true;
+        // a random name to fit the gender
+        const auto& names = m_female ? rpgw::fdetail::femaleNames() : rpgw::fdetail::maleNames();
+        std::uniform_int_distribution<int> nd(0, (int)names.size() - 1);
+        std::snprintf(m_nameBuf, sizeof(m_nameBuf), "%s", names[nd(m_rng)].c_str());
+        // a random portrait for the race, if any are loaded
+        if (!m_portraits.empty()) {
+            std::string want = baseRaceFolder(rpgc::raceOptions()[m_raceIdx]);
+            std::vector<int> pics;
+            for (int i = 0; i < (int)m_portraits.size(); ++i)
+                if (m_portraits[i].race.empty() || m_portraits[i].race == want) pics.push_back(i);
+            if (!pics.empty()) { std::uniform_int_distribution<int> pd(0, (int)pics.size() - 1); m_selectedPortrait = pics[pd(m_rng)]; }
+        }
+    }
 
     void renderHouseCard() {
         if (m_houseIdx < 0) assignHouse();
@@ -1969,7 +2003,36 @@ private:
         if (m_raceIdx != prevRace) assignHouse();
         else if (gender != prevGender) genFamily();
 
-        // Background is NOT chosen: it is allotted from the determined class below.
+        int prevClass = m_classIdx;
+        combo("Class", m_classIdx, rpgc::classOptions());
+        if (m_classIdx != prevClass) m_skillPick.fill(false);   // new class -> new skill list
+
+        // Background (your choice; Noble opens the great houses).
+        int prevBg = m_bgIdx;
+        if (ImGui::BeginCombo("Background", rpgc::backgroundOptions()[m_bgIdx])) {
+            for (int i = 0; i < static_cast<int>(rpgc::backgroundOptions().size()); ++i) {
+                if (ImGui::Selectable(rpgc::backgroundOptions()[i], m_bgIdx == i)) m_bgIdx = i;
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("%s", rpgc::backgroundInfo(rpgc::backgroundOptions()[i]).desc);
+            }
+            ImGui::EndCombo();
+        }
+        if (m_bgIdx != prevBg) {
+            std::string race = rpgc::raceOptions()[m_raceIdx];
+            if (rpgw::isHouseRace(race) || rpgw::isTiefling(race)) {   // bg only shapes human/tiefling houses
+                bool wasNoble = rpgc::backgroundOptions()[prevBg] == std::string("Noble");
+                bool isNoble  = rpgc::backgroundOptions()[m_bgIdx] == std::string("Noble");
+                if (wasNoble != isNoble) assignHouse();
+                else if (m_houseIdx >= 0) {
+                    m_houseStanding = standingFor(rpgc::backgroundOptions()[m_bgIdx], rpgw::houses()[m_houseIdx].rank);
+                    genFamily();
+                }
+            }
+        }
+        {
+            auto bi = rpgc::backgroundInfo(rpgc::backgroundOptions()[m_bgIdx]);
+            ImGui::TextDisabled("Background skills: %s & %s", rpgc::skills()[bi.skill1].name, rpgc::skills()[bi.skill2].name);
+        }
 
         // Half-Elf uniquely gets +1 to two abilities of the player's choice.
         if (isHalfElf()) {
@@ -1991,56 +2054,70 @@ private:
         }
 
         ImGui::Separator();
-        // The dice decide your calling; when it changes, the background (and so the
-        // house) is re-allotted to suit it.
-        if (determineClass()) { allotBackground(); assignHouse(); }
-        ImGui::TextUnformatted("Ability scores  -  rolled straight down; you are what the dice made you");
+        if (ImGui::Button("Roll a Random Hero")) fullRandom();
+        ImGui::SameLine();
+        ImGui::TextDisabled("(rolls the lot: stats, class, background, house, temperament...)");
+
+        ImGui::Separator();
+        ImGui::TextUnformatted("Ability scores  -  roll, then drag each value onto an ability (hover a name for help)");
         int rerollsLeft = 3 - m_rollsUsed;
-        std::string rlabel = rerollsLeft > 0 ? ("Re-roll fate (" + std::to_string(rerollsLeft) + " left)")
+        std::string rlabel = rerollsLeft > 0 ? ("Re-roll (" + std::to_string(rerollsLeft) + " left)")
                                              : "No re-rolls left";
         ImGui::BeginDisabled(rerollsLeft <= 0);
-        if (ImGui::Button(rlabel.c_str())) {
-            rollAbilityScores(); ++m_rollsUsed;
-            determineClass(); allotBackground(); assignHouse();   // fresh calling, background & house
-        }
+        if (ImGui::Button(rlabel.c_str())) { rollAbilityScores(); ++m_rollsUsed; }
         ImGui::EndDisabled();
         ImGui::SameLine();
-        ImGui::TextDisabled("3 rolls total (1 + 2 re-rolls) - live with what you get.");
+        if (ImGui::Button(("Auto-assign for " + std::string(rpgc::classOptions()[m_classIdx])).c_str()))
+            autoAssignForClass();
+        ImGui::TextDisabled("You get 3 rolls total (1 initial + 2 re-rolls).");
 
+        // Pool of unassigned rolls (drag sources).
+        ImGui::TextUnformatted("Rolled:");
+        bool anyInPool = false;
+        for (int i = 0; i < 6; ++i) {
+            if (isAssigned(i)) continue;
+            anyInPool = true;
+            ImGui::SameLine();
+            ImGui::PushID(2000 + i);
+            ImGui::Button(std::to_string(m_rolled[i]).c_str(), ImVec2(40, 0));
+            if (ImGui::BeginDragDropSource()) {
+                ImGui::SetDragDropPayload("ROLL", &i, sizeof(int));
+                ImGui::Text("%d", m_rolled[i]);
+                ImGui::EndDragDropSource();
+            }
+            ImGui::PopID();
+        }
+        if (!anyInPool) { ImGui::SameLine(); ImGui::TextDisabled("(all assigned)"); }
+
+        ImGui::Spacing();
         auto raceBonus = effectiveRaceBonus();
         for (int a = 0; a < 6; ++a) {
             ImGui::PushID(a);
             ImGui::TextUnformatted(rpgc::abilityName(a));
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", rpgc::abilityDesc(a));
             ImGui::SameLine(150.0f);
-            int total = m_rolled[a] + raceBonus[a];
-            ImGui::Text("%2d", m_rolled[a]);
-            ImGui::SameLine(210.0f);
-            if (raceBonus[a] != 0) ImGui::TextColored(ImVec4(0.5f, 0.8f, 1.0f, 1.0f), "%+d race", raceBonus[a]);
-            else ImGui::TextDisabled("       ");
-            ImGui::SameLine(280.0f);
-            ImGui::Text("=  %2d  (%+d)", total, rpgc::abilityMod(total));
-            ImGui::PopID();
-        }
-
-        // The calling the dice chose for you.
-        ImGui::Spacing();
-        ImGui::TextColored(ImVec4(0.76f, 0.63f, 0.42f, 1.0f), "Your calling:  %s  (?)",
-                           rpgc::classOptions()[m_classIdx]);
-        if (ImGui::IsItemHovered() && m_classRanked.size() >= 3) {
-            ImGui::BeginTooltip(); ImGui::PushTextWrapPos(340.0f);
-            ImGui::TextUnformatted("The dice shape who you are. Your abilities and temperament fit these best:");
-            for (int i = 0; i < 3; ++i) ImGui::BulletText("%s", m_classRanked[i].cls.c_str());
-            ImGui::PopTextWrapPos(); ImGui::EndTooltip();
-        }
-        // Background is allotted to suit the calling (25% chance of Noble birth).
-        {
-            const char* bgName = rpgc::backgroundOptions()[m_bgIdx];
-            auto bi = rpgc::backgroundInfo(bgName);
-            ImGui::TextColored(ImVec4(0.76f, 0.63f, 0.42f, 1.0f), "Your past:  %s  (?)", bgName);
-            if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", bi.desc);
+            std::string face = (m_assign[a] >= 0) ? std::to_string(m_rolled[m_assign[a]]) : "  --  ";
+            ImGui::Button(face.c_str(), ImVec2(56, 0));
+            if (m_assign[a] >= 0 && ImGui::BeginDragDropSource()) {
+                int idx = m_assign[a];
+                ImGui::SetDragDropPayload("ROLL", &idx, sizeof(int));
+                ImGui::Text("%d", m_rolled[idx]);
+                ImGui::EndDragDropSource();
+            }
+            if (ImGui::BeginDragDropTarget()) {
+                if (const ImGuiPayload* pl = ImGui::AcceptDragDropPayload("ROLL"))
+                    assignRoll(a, *static_cast<const int*>(pl->Data));
+                ImGui::EndDragDropTarget();
+            }
             ImGui::SameLine();
-            ImGui::TextDisabled("(skills: %s & %s)", rpgc::skills()[bi.skill1].name, rpgc::skills()[bi.skill2].name);
+            if (raceBonus[a] != 0) ImGui::TextColored(ImVec4(0.5f, 0.8f, 1.0f, 1.0f), "%+d race", raceBonus[a]);
+            else ImGui::TextDisabled("      ");
+            if (m_assign[a] >= 0) {
+                int total = m_rolled[m_assign[a]] + raceBonus[a];
+                ImGui::SameLine();
+                ImGui::Text("=  %2d  (%+d)", total, rpgc::abilityMod(total));
+            }
+            ImGui::PopID();
         }
 
         ImGui::Separator();
