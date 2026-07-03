@@ -246,6 +246,247 @@ inline int proficiencyBonus(int level) {
     return 2 + (level - 1) / 4;
 }
 
+// ── Bravery / Morale (hidden stat) ─────────────────────────────────────────
+// A hidden character trait rolled 4d6-drop-lowest (3-18), a callback to the old
+// D&D morale check. When something frightening happens in a fight (badly wounded,
+// an ally falls, hopelessly outmatched), a morale check decides whether a
+// combatant holds or breaks and flees. Bravery gives the modifier.
+struct BraveryTier { const char* name; const char* desc; };
+inline BraveryTier braveryTier(int score) {
+    if (score <= 5)  return {"Cowardly",  "Bolts at the first real danger; morale breaks almost at once."};
+    if (score <= 8)  return {"Timid",     "Fearful under pressure; likely to falter when the fight turns."};
+    if (score <= 11) return {"Cautious",  "Steady until things go badly, then looks hard for a way out."};
+    if (score <= 14) return {"Stalwart",  "Holds the line; only breaks when the situation is truly dire."};
+    if (score <= 16) return {"Brave",     "Stands firm against fear and rarely gives ground."};
+    if (score <= 17) return {"Valiant",   "Nearly fearless; holds even as others around them flee."};
+    return             {"Foolhardy", "Fears nothing - and may charge into danger when retreat is the wiser call."};
+}
+// Morale modifier reuses the ability-mod curve: -4 (score 3) .. +4 (score 18).
+inline int braveryMod(int score) { return abilityMod(score); }
+// The morale check itself. Roll d20 + braveryMod vs a difficulty that rises with
+// how bad the situation is. Returns true if the combatant holds their nerve.
+// Foolhardy never breaks (bravery 18); the Cowardly end should be rolled at
+// disadvantage by the caller. Used by the encounter system.
+inline bool moraleHolds(int score, int dc, int d20) {
+    if (score >= 18) return true;                 // Foolhardy: holds (or charges) regardless
+    return d20 + braveryMod(score) >= dc;
+}
+
+// ── Self-Regard: Inferiority <-> Narcissism (centered stat) ────────────────
+// Unlike bravery, this is a CENTERED trait: the ideal is the middle. Too low is
+// crippling self-doubt; too high is grandiose ego. Both extremes are meant to be
+// detrimental. Rolled 3d6 (a bell curve, so "Grounded" is the common outcome).
+// The real effects will drive a later relationship-dynamics system.
+struct RegardTier { const char* name; const char* desc; };
+inline RegardTier narcissismTier(int score) {
+    if (score <= 5)  return {"Self-Loathing", "Crippling self-doubt; submits to stronger wills and undervalues all they do."};
+    if (score <= 8)  return {"Meek",          "Quietly insecure; defers to others and rarely asserts their worth."};
+    if (score <= 12) return {"Grounded",      "A steady, healthy sense of self - neither cowed nor conceited. The ideal balance."};
+    if (score <= 15) return {"Prideful",      "Vain and quick to take offense; hungry for credit and status."};
+    return             {"Narcissistic", "Grandiose and self-absorbed; craves admiration and struggles to value others."};
+}
+// How far off the ideal middle (0 = perfectly balanced .. larger = more extreme).
+inline int regardImbalance(int score) { int d = score - 10; return d < 0 ? -d : d; }
+inline const char* regardEffectNote() {
+    return "Planned (relationship dynamics): the extremes strain bonds - the meek are "
+           "dominated or exploited, the narcissistic alienate allies and burn goodwill. "
+           "A Grounded character forms the healthiest relationships.";
+}
+
+// ── Will to Power: Compliant <-> Dominant (directional stat) ───────────────
+// A dominance axis. High = dominant, ambitious, assertive, competitive. Low =
+// compliant, cooperative, unpurposeful, easily bossed around. Neither pole is
+// simply "good": a high score suits a would-be lord or royal; a low one suits a
+// loyal follower. Rolled 3d6 (a bell curve; most fall in the moderate middle).
+// Feeds the same relationship-dynamics system as Self-Regard: the strong-willed
+// dominate the weak-willed.
+struct WillTier { const char* name; const char* desc; };
+inline WillTier willTier(int score) {
+    if (score <= 5)  return {"Servile",   "Meek and indolent; easily dominated and content to be led. Others boss them at will."};
+    if (score <= 8)  return {"Yielding",  "Cooperative and compliant; happy to follow and slow to press their own aims."};
+    if (score <= 12) return {"Measured",  "A balanced drive - able to lead or to follow as the moment demands."};
+    if (score <= 15) return {"Ambitious", "Assertive and competitive; hungry to rise and to have their way."};
+    return             {"Imperious", "Commanding and relentless; born to dominate - the temper of a ruler, for good or ill."};
+}
+inline const char* willEffectNote() {
+    return "Planned (relationship dynamics): the strong-willed dominate the weak-willed - "
+           "high scores command obedience and push others aside; low scores are easily "
+           "bossed around. For a would-be lord or royal a high score is an asset; for a "
+           "loyal retainer, a low one keeps the peace.";
+}
+
+// ── Carnality: Chaste <-> Deviant (ideal is mid-to-low) ────────────────────
+// Sexual appetite. Both extremes are trouble: the utterly chaste are thought dull
+// and may leave no heirs; the deviant are sinful, disrespected, even shunned or
+// punished. A temperate, respectable appetite is safest. Rolled 3d6.
+struct CarnalityTier { const char* name; const char* desc; };
+inline CarnalityTier carnalityTier(int score) {
+    if (score <= 4)  return {"Chaste",     "Cold to such matters; respectable, but thought dull - and may sire no heirs."};
+    if (score <= 8)  return {"Temperate",  "A modest, respectable appetite. Well thought of at court."};
+    if (score <= 12) return {"Ardent",     "A hearty, healthy passion - and no shortage of heirs."};
+    if (score <= 15) return {"Licentious", "Ruled by appetite; the quiet subject of gossip and scandal."};
+    return             {"Deviant", "Perverse by the realm's lights; shunned, and in danger of the Temple's judgment."};
+}
+inline const char* carnalityEffectNote() {
+    return "Planned: the chaste may fail to produce heirs; the deviant risk scandal, "
+           "shunning, and the Temple's judgment. A temperate appetite is safest for both "
+           "reputation and succession.";
+}
+
+// ── Cruelty: Masochistic <-> Sadistic (ideal is the middle) ────────────────
+// Orientation toward pain. Both poles are dangerous: sadists are cruel to the
+// point of madness and feared; masochists turn hurt inward and grow unstable.
+// A steady middle is healthiest. Rolled 3d6.
+struct CrueltyTier { const char* name; const char* desc; };
+inline CrueltyTier crueltyTier(int score) {
+    if (score <= 5)  return {"Masochistic",  "Takes strange comfort in their own suffering; deranged, and unsettling to others."};
+    if (score <= 8)  return {"Self-Punishing","Turns hurt inward; prone to guilt and self-denial."};
+    if (score <= 12) return {"Even-Tempered","Neither cruel nor self-destructive - a steady, healthy balance."};
+    if (score <= 15) return {"Callous",      "A cruel streak; indifferent to others' pain, and willing to inflict it."};
+    return             {"Sadistic", "Delights in others' suffering; cruel to the point of madness, and feared for it."};
+}
+inline const char* crueltyEffectNote() {
+    return "Planned: sadists are feared and make enemies; masochists are unstable and "
+           "easily broken. A steady temperament keeps both allies and sanity.";
+}
+
+// ── Sociability: Reclusive <-> Overbearing (ideal avoids the extremes) ─────
+// How outgoing a character is. The painfully shy shun company and struggle to
+// bond; the overbearing exhaust and alienate. A comfortable middle wears best.
+// Rolled 3d6.
+struct SociabilityTier { const char* name; const char* desc; };
+inline SociabilityTier sociabilityTier(int score) {
+    if (score <= 5)  return {"Reclusive",  "Painfully withdrawn; shuns company and struggles among people."};
+    if (score <= 8)  return {"Reserved",   "Quiet and introverted; keeps their own counsel."};
+    if (score <= 12) return {"Sociable",   "At ease with others without needing a crowd. A comfortable balance."};
+    if (score <= 15) return {"Gregarious", "Outgoing and gregarious; thrives on company and attention."};
+    return             {"Overbearing", "Exhaustingly extroverted; overwhelms others and cannot abide solitude."};
+}
+inline const char* sociabilityEffectNote() {
+    return "Planned: recluses struggle to build bonds and alliances; the overbearing "
+           "exhaust and alienate. A comfortable middle makes the best courtier.";
+}
+
+// ── Skepticism: Gullible <-> Cynical (ideal is discerning) ─────────────────
+// Critical thinking vs innocent faith. The credulous swallow any lie; the cynical
+// trust no one and grow bitter and isolated. A discerning mind - the wide middle,
+// leaning a touch skeptical - sees through deceit without souring on the world.
+// Rolled 3d6.
+struct SkepticismTier { const char* name; const char* desc; };
+inline SkepticismTier skepticismTier(int score) {
+    if (score <= 5)  return {"Credulous",  "Believes almost anything; an easy mark, deceived and led astray."};
+    if (score <= 8)  return {"Trusting",   "Takes people at their word; innocent, and sometimes naive."};
+    if (score <= 13) return {"Discerning", "Weighs claims with sound, level judgment - sees through most deceit."};
+    if (score <= 16) return {"Skeptical",  "Questions everything; hard to fool, but slow to trust."};
+    return             {"Cynical", "Trusts no one; paranoid, bitter, and isolating."};
+}
+inline const char* skepticismEffectNote() {
+    return "Planned: the credulous are easy marks for lies and schemes; the cynical trust "
+           "no one and drive off allies. A discerning mind sees through deceit without "
+           "souring on the world.";
+}
+
+// ── Honor: Treacherous <-> Oathbound (directional; the oath axis) ──────────
+// The personality half of the Iron Oath system: who keeps their word and who
+// breaks it. High is virtuous but can be rigid to a fault. Rolled 3d6.
+struct HonorTier { const char* name; const char* desc; };
+inline HonorTier honorTier(int score) {
+    if (score <= 5)  return {"Treacherous","Breaks faith without a qualm; trusted by no one who knows them."};
+    if (score <= 8)  return {"Pragmatic",  "Bends their word when it suits; honor is negotiable."};
+    if (score <= 12) return {"Honest",     "Keeps their word in the main; a dependable sort."};
+    if (score <= 15) return {"Honorable",  "Holds their oaths as sacred; widely and rightly trusted."};
+    return             {"Oathbound", "Honor above all, even to a fault - cannot be made to bend, though wisdom counsel it."};
+}
+inline const char* honorEffectNote() {
+    return "Planned: honor governs oath-keeping. The treacherous break iron oaths freely - "
+           "flexible, but distrusted and cursed as oathbreakers; the oathbound keep every "
+           "vow, and can be trapped by their own word.";
+}
+
+// ── Piety: Impious <-> Zealot (ideal is devout, not fanatic) ───────────────
+struct PietyTier { const char* name; const char* desc; };
+inline PietyTier pietyTier(int score) {
+    if (score <= 5)  return {"Impious", "Scorns the Iron Temple; disfavored and quietly watched."};
+    if (score <= 8)  return {"Lax",     "Indifferent to the faith; observes little."};
+    if (score <= 13) return {"Faithful","Devout and observant; in good standing with the Temple."};
+    if (score <= 16) return {"Devout",  "Deeply pious; counted among the Temple's favored."};
+    return             {"Zealot", "Fanatical; sees heresy everywhere and burns to root it out."};
+}
+inline const char* pietyEffectNote() {
+    return "Planned: piety governs standing with the Iron Temple and the weight your oaths carry. "
+           "The impious win no Temple favor; zealots are feared and unbending.";
+}
+
+// ── Greed: Prodigal <-> Avaricious (ideal is prudent) ──────────────────────
+struct GreedTier { const char* name; const char* desc; };
+inline GreedTier greedTier(int score) {
+    if (score <= 5)  return {"Prodigal",    "Spends and gives recklessly; keeps nothing for the morrow."};
+    if (score <= 8)  return {"Open-Handed",  "Generous, sometimes to a fault."};
+    if (score <= 12) return {"Prudent",     "Balances generosity and thrift with a steady hand."};
+    if (score <= 15) return {"Grasping",    "Tight-fisted and acquisitive; parts with coin grudgingly."};
+    return             {"Avaricious", "Consumed by greed; hoards, cheats, and never has enough."};
+}
+inline const char* greedEffectNote() {
+    return "Planned: the prodigal squander their House's wealth; the avaricious hoard it and earn "
+           "enemies. A prudent hand serves a lord best.";
+}
+
+// ── Temper: Cold <-> Wrathful (ideal is composed) ──────────────────────────
+struct TemperTier { const char* name; const char* desc; };
+inline TemperTier temperTier(int score) {
+    if (score <= 5)  return {"Cold",         "Emotionally flat; detached, and hard to move to feeling."};
+    if (score <= 8)  return {"Placid",       "Very calm; slow to feel and slower to act on passion."};
+    if (score <= 12) return {"Composed",     "Feels deeply yet stays master of it - steady under strain."};
+    if (score <= 15) return {"Hot-Tempered", "Quick to anger; often ruled by passion."};
+    return             {"Wrathful", "Volatile and explosive; a danger to friend and foe alike."};
+}
+inline const char* temperEffectNote() {
+    return "Planned: the wrathful lash out and make enemies; the cold feel too little to bond. "
+           "A composed temper holds up best under pressure and at court.";
+}
+
+// ── Diligence: Slothful <-> Tireless (directional) ─────────────────────────
+struct DiligenceTier { const char* name; const char* desc; };
+inline DiligenceTier diligenceTier(int score) {
+    if (score <= 5)  return {"Slothful",    "Idle and undisciplined; leaves duties undone."};
+    if (score <= 8)  return {"Lax",         "Does the minimum; easily distracted."};
+    if (score <= 12) return {"Steady",      "Reliable and reasonably diligent."};
+    if (score <= 15) return {"Industrious", "Disciplined and hard-working; sees things through."};
+    return             {"Tireless", "Relentless - driven to work to the point of never resting."};
+}
+inline const char* diligenceEffectNote() {
+    return "Planned: the slothful let their affairs and holdings rot; the industrious build and "
+           "maintain. Discipline pays across every long endeavor.";
+}
+
+// ── Compassion: Callous <-> Tender-Hearted (directional) ───────────────────
+struct CompassionTier { const char* name; const char* desc; };
+inline CompassionTier compassionTier(int score) {
+    if (score <= 5)  return {"Callous",        "Cold to others' suffering; unmoved by pity."};
+    if (score <= 8)  return {"Hard",           "Practical and unsentimental; feeling rarely stays their hand."};
+    if (score <= 12) return {"Kindly",         "Warm and considerate in the main."};
+    if (score <= 15) return {"Compassionate",  "Deeply empathetic; feels others' pain as their own."};
+    return             {"Tender-Hearted", "So soft-hearted they are easily moved - and easily exploited."};
+}
+inline const char* compassionEffectNote() {
+    return "Planned: the callous strike cruel bargains but form few true bonds; the tender-hearted "
+           "are loved yet easily played upon. Warmth builds loyalty - to a point.";
+}
+
+// ── Curiosity: Hidebound <-> Heterodox (ideal is curious, not heretical) ───
+struct CuriosityTier { const char* name; const char* desc; };
+inline CuriosityTier curiosityTier(int score) {
+    if (score <= 5)  return {"Hidebound",    "Clings to tradition; suspicious of anything new."};
+    if (score <= 8)  return {"Conventional", "Content with the old ways and settled truths."};
+    if (score <= 12) return {"Curious",      "Open to new ideas without losing their footing."};
+    if (score <= 15) return {"Inventive",    "Restlessly curious; questions everything and tinkers."};
+    return             {"Heterodox", "Chases novelty and forbidden knowledge - and courts heresy."};
+}
+inline const char* curiosityEffectNote() {
+    return "Planned: the hidebound miss discovery and opportunity; the heterodox draw the Temple's "
+           "suspicion and charges of heresy. A curious but grounded mind fares best.";
+}
+
 // ── the character ────────────────────────────────────────────────────────────
 
 // One inventory line. `slot` and `imagePath` are unused by the Stage-1 list UI
@@ -269,6 +510,20 @@ struct Character {
     std::string ironLegacy;     // heritable personal trait (see family.hpp)
     int level = 1;
     int xp    = 0;
+    int bravery = 10;           // morale stat (3-18); see braveryTier()
+    int narcissism = 10;        // self-regard (3-18); middle ideal; see narcissismTier()
+    int willToPower = 10;       // dominance (3-18); low=compliant, high=dominant; see willTier()
+    int carnality = 10;         // appetite (3-18); ideal mid-low; see carnalityTier()
+    int cruelty = 10;           // sadism<->masochism (3-18); ideal middle; see crueltyTier()
+    int sociability = 10;       // introvert<->extrovert (3-18); ideal middle; see sociabilityTier()
+    int skepticism = 10;        // gullible<->cynical (3-18); ideal discerning; see skepticismTier()
+    int honor = 10;             // treacherous<->oathbound (3-18); see honorTier()
+    int piety = 10;             // impious<->zealot (3-18); ideal devout; see pietyTier()
+    int greed = 10;             // prodigal<->avaricious (3-18); ideal prudent; see greedTier()
+    int temper = 10;            // cold<->wrathful (3-18); ideal composed; see temperTier()
+    int diligence = 10;         // slothful<->tireless (3-18); see diligenceTier()
+    int compassion = 10;        // callous<->tender (3-18); see compassionTier()
+    int curiosity = 10;         // hidebound<->heterodox (3-18); ideal curious; see curiosityTier()
 
     // ability scores
     std::array<int, ABILITY_COUNT> abilities{{10, 10, 10, 10, 10, 10}};
@@ -367,6 +622,20 @@ inline std::string serialize(const Character& c) {
     detail::putStr(o, "legacy", c.ironLegacy);
     o << "level " << c.level << '\n';
     o << "xp " << c.xp << '\n';
+    o << "bravery " << c.bravery << '\n';
+    o << "narcissism " << c.narcissism << '\n';
+    o << "willtopower " << c.willToPower << '\n';
+    o << "carnality " << c.carnality << '\n';
+    o << "cruelty " << c.cruelty << '\n';
+    o << "sociability " << c.sociability << '\n';
+    o << "skepticism " << c.skepticism << '\n';
+    o << "honor " << c.honor << '\n';
+    o << "piety " << c.piety << '\n';
+    o << "greed " << c.greed << '\n';
+    o << "temper " << c.temper << '\n';
+    o << "diligence " << c.diligence << '\n';
+    o << "compassion " << c.compassion << '\n';
+    o << "curiosity " << c.curiosity << '\n';
     o << "abilities";
     for (int a = 0; a < ABILITY_COUNT; ++a) o << ' ' << c.abilities[a];
     o << '\n';
@@ -439,6 +708,20 @@ inline bool deserialize(const std::string& text, Character& out) {
             else if (key == "portrait")    out.portraitPath = v;
         } else if (key == "level")   { in >> out.level; }
         else if (key == "xp")        { in >> out.xp; }
+        else if (key == "bravery")   { in >> out.bravery; }
+        else if (key == "narcissism"){ in >> out.narcissism; }
+        else if (key == "willtopower"){ in >> out.willToPower; }
+        else if (key == "carnality") { in >> out.carnality; }
+        else if (key == "cruelty")   { in >> out.cruelty; }
+        else if (key == "sociability"){ in >> out.sociability; }
+        else if (key == "skepticism"){ in >> out.skepticism; }
+        else if (key == "honor")     { in >> out.honor; }
+        else if (key == "piety")     { in >> out.piety; }
+        else if (key == "greed")     { in >> out.greed; }
+        else if (key == "temper")    { in >> out.temper; }
+        else if (key == "diligence") { in >> out.diligence; }
+        else if (key == "compassion"){ in >> out.compassion; }
+        else if (key == "curiosity") { in >> out.curiosity; }
         else if (key == "abilities") { for (int a = 0; a < ABILITY_COUNT; ++a) in >> out.abilities[a]; }
         else if (key == "saveprof")  { for (int a = 0; a < ABILITY_COUNT; ++a) { int b; in >> b; out.saveProf[a] = b != 0; } }
         else if (key == "skillprof") { for (int i = 0; i < 18; ++i) { int b; in >> b; out.skillProf[i] = b != 0; } }

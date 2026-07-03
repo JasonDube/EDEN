@@ -665,6 +665,17 @@ private:
     void rollAbilityScores() {
         for (int i = 0; i < 6; ++i) m_rolled[i] = roll4d6DropLowest();
         for (int a = 0; a < 6; ++a) m_assign[a] = -1;   // unassigned; player drags them
+        // Personality scores are rolled as part of the same act (they re-roll with abilities).
+        m_bravery = roll4d6DropLowest();                        // higher = braver (to a fault)
+        m_narcissism = rollDie(6) + rollDie(6) + rollDie(6);    // 3d6 bell; middle is ideal
+        m_willToPower = rollDie(6) + rollDie(6) + rollDie(6);   // 3d6 bell; low=compliant, high=dominant
+        m_carnality = rollDie(6) + rollDie(6) + rollDie(6);     // 3d6; ideal mid-low
+        m_cruelty = rollDie(6) + rollDie(6) + rollDie(6);       // 3d6; ideal middle
+        m_sociability = rollDie(6) + rollDie(6) + rollDie(6);   // 3d6; ideal middle
+        m_skepticism = rollDie(6) + rollDie(6) + rollDie(6);    // 3d6; ideal discerning
+        auto d3 = [&]() { return rollDie(6) + rollDie(6) + rollDie(6); };
+        m_honor = d3(); m_piety = d3(); m_greed = d3(); m_temper = d3();
+        m_diligence = d3(); m_compassion = d3(); m_curiosity = d3();
     }
     bool isAssigned(int rolledIdx) const {
         for (int a = 0; a < 6; ++a) if (m_assign[a] == rolledIdx) return true;
@@ -738,12 +749,24 @@ private:
         auto bi = rpgc::backgroundInfo(m_pc.background);
         m_pc.skillProf[bi.skill1] = true;
         m_pc.skillProf[bi.skill2] = true;
+        // Personality scores (rolled with the abilities, shown in the creator).
+        m_pc.bravery = m_bravery;
+        m_pc.narcissism = m_narcissism;
+        m_pc.willToPower = m_willToPower;
+        m_pc.carnality = m_carnality;
+        m_pc.cruelty = m_cruelty;
+        m_pc.sociability = m_sociability;
+        m_pc.skepticism = m_skepticism;
+        m_pc.honor = m_honor; m_pc.piety = m_piety; m_pc.greed = m_greed; m_pc.temper = m_temper;
+        m_pc.diligence = m_diligence; m_pc.compassion = m_compassion; m_pc.curiosity = m_curiosity;
         if (m_selectedPortrait >= 0 && m_selectedPortrait < (int)m_portraits.size())
             m_pc.portraitPath = m_portraits[m_selectedPortrait].path;
         int pt = playerTokenIndex();
         if (pt >= 0) m_tokens[pt].name = m_pc.name;
         std::cerr << "created: " << m_pc.name << " the " << m_pc.race << " " << m_pc.className
-                  << " (HP " << m_pc.maxHP << ", AC " << m_pc.armorClass << ")\n";
+                  << " (HP " << m_pc.maxHP << ", AC " << m_pc.armorClass
+                  << ", bravery " << m_pc.bravery << "/" << rpgc::braveryTier(m_pc.bravery).name
+                  << ", +13 temperament traits)\n";
         m_screen = Screen::Game;
         stopTitleMusic();
     }
@@ -1231,6 +1254,142 @@ private:
         ImGui::EndChild();
     }
 
+    // Color for an ideal-band stat: green inside the band, amber just outside, red far.
+    static ImU32 idealColor(int v, int lo, int hi) {
+        if (v >= lo && v <= hi) return IM_COL32(96, 200, 116, 255);
+        int d = v < lo ? lo - v : v - hi;
+        return d <= 2 ? IM_COL32(212, 182, 92, 255) : IM_COL32(212, 96, 84, 255);
+    }
+    // A small 3-18 gauge. If idealLo>0 an ideal band is shaded (extremes read red);
+    // otherwise it's a directional meter filled in meterColor.
+    void statGauge(int value, int idealLo, int idealHi, ImU32 meterColor) {
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        ImVec2 p = ImGui::GetCursorScreenPos();
+        const float w = 264.0f, h = 12.0f;
+        float x0 = p.x, y0 = p.y + 2.0f;
+        auto px = [&](float v) { return x0 + (v - 3.0f) / 15.0f * w; };
+        bool banded = (idealLo > 0 && idealHi >= idealLo);
+        ImU32 mark = banded ? idealColor(value, idealLo, idealHi) : meterColor;
+        dl->AddRectFilled(ImVec2(x0, y0), ImVec2(x0 + w, y0 + h), IM_COL32(28, 32, 38, 255), 3.0f);
+        if (banded) {
+            dl->AddRectFilled(ImVec2(px((float)idealLo), y0), ImVec2(px((float)idealHi + 1), y0 + h),
+                              IM_COL32(50, 110, 62, 120), 0.0f);
+        } else {
+            dl->AddRectFilled(ImVec2(x0, y0), ImVec2(px((float)value), y0 + h), mark, 3.0f);
+        }
+        dl->AddRect(ImVec2(x0, y0), ImVec2(x0 + w, y0 + h), IM_COL32(60, 68, 78, 255), 3.0f);
+        float mx = px((float)value);
+        dl->AddCircleFilled(ImVec2(mx, y0 + h * 0.5f), 5.5f, mark);
+        dl->AddCircle(ImVec2(mx, y0 + h * 0.5f), 5.5f, IM_COL32(18, 20, 24, 255), 12, 1.5f);
+        ImGui::Dummy(ImVec2(w, h + 6.0f));
+    }
+
+    // One ideal-band personality row (self-regard, carnality, cruelty, sociability).
+    void tempRow(const char* label, int val, int lo, int hi, const char* tierName,
+                 const char* desc, const char* poles, const char* effect) {
+        ImGui::Text("%s", label); ImGui::SameLine(120.0f);
+        ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(idealColor(val, lo, hi)), "%d  -  %s", val, tierName);
+        if (ImGui::IsItemHovered()) {
+            ImGui::BeginTooltip(); ImGui::PushTextWrapPos(320.0f);
+            ImGui::TextUnformatted(desc);
+            ImGui::Spacing(); ImGui::TextDisabled("%s", poles);
+            ImGui::Spacing(); ImGui::TextUnformatted(effect);
+            ImGui::PopTextWrapPos(); ImGui::EndTooltip();
+        }
+        statGauge(val, lo, hi, 0);
+    }
+
+    // Color for a directional virtue meter: low = warm brown, mid = neutral, high = gold.
+    static ImU32 virtueColor(int v) {
+        if (v <= 8)  return IM_COL32(190, 120, 96, 255);
+        if (v <= 12) return IM_COL32(150, 160, 170, 255);
+        return IM_COL32(200, 165, 90, 255);
+    }
+    // One directional-meter personality row (bravery-style, generic tooltip).
+    void tempMeter(const char* label, int val, const char* tierName,
+                   const char* desc, const char* poles, const char* effect) {
+        ImU32 col = virtueColor(val);
+        ImGui::Text("%s", label); ImGui::SameLine(120.0f);
+        ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(col), "%d  -  %s", val, tierName);
+        if (ImGui::IsItemHovered()) {
+            ImGui::BeginTooltip(); ImGui::PushTextWrapPos(320.0f);
+            ImGui::TextUnformatted(desc);
+            ImGui::Spacing(); ImGui::TextDisabled("%s", poles);
+            ImGui::Spacing(); ImGui::TextUnformatted(effect);
+            ImGui::PopTextWrapPos(); ImGui::EndTooltip();
+        }
+        statGauge(val, 0, 0, col);
+    }
+    void tempGroup(const char* title) {
+        ImGui::Spacing();
+        ImGui::TextColored(ImVec4(0.62f, 0.72f, 0.85f, 1.0f), "%s", title);
+    }
+
+    void renderTemperament() {
+        ImGui::TextUnformatted("Temperament");
+        ImGui::SameLine(); ImGui::TextDisabled("(rolled with your abilities - hover any trait)");
+
+        // ── Nerve & Drive ──
+        tempGroup("Nerve & Drive");
+        auto bt = rpgc::braveryTier(m_bravery);         // Bravery keeps its morale tooltip
+        ImGui::Text("Bravery"); ImGui::SameLine(120.0f);
+        ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(virtueColor(m_bravery)), "%d  -  %s", m_bravery, bt.name);
+        if (ImGui::IsItemHovered()) {
+            std::string tip = std::string(bt.desc) + "\n\n";
+            if (m_bravery >= 18) tip += "Morale: never breaks - but may charge in when retreat is wiser.";
+            else tip += "Morale: when a fight turns grim, roll d20 " +
+                        std::string(rpgc::braveryMod(m_bravery) >= 0 ? "+" : "") +
+                        std::to_string(rpgc::braveryMod(m_bravery)) + " or break and flee.";
+            ImGui::BeginTooltip(); ImGui::PushTextWrapPos(320.0f);
+            ImGui::TextUnformatted(tip.c_str());
+            ImGui::PopTextWrapPos(); ImGui::EndTooltip();
+        }
+        statGauge(m_bravery, 0, 0, virtueColor(m_bravery));
+        tempRow("Temper", m_temper, 8, 12, rpgc::temperTier(m_temper).name, rpgc::temperTier(m_temper).desc,
+                "Cold  <-----  composed  ----->  Wrathful", rpgc::temperEffectNote());
+        tempMeter("Will to Power", m_willToPower, rpgc::willTier(m_willToPower).name,
+                  rpgc::willTier(m_willToPower).desc, "Compliant  <-----  measured  ----->  Dominant",
+                  rpgc::willEffectNote());
+        tempMeter("Diligence", m_diligence, rpgc::diligenceTier(m_diligence).name,
+                  rpgc::diligenceTier(m_diligence).desc, "Slothful  <-----  steady  ----->  Tireless",
+                  rpgc::diligenceEffectNote());
+
+        // ── Heart ──
+        tempGroup("Heart");
+        tempRow("Self-Regard", m_narcissism, 9, 12, rpgc::narcissismTier(m_narcissism).name,
+                rpgc::narcissismTier(m_narcissism).desc,
+                "Inferiority  <-----  balanced  ----->  Narcissism", rpgc::regardEffectNote());
+        tempMeter("Compassion", m_compassion, rpgc::compassionTier(m_compassion).name,
+                  rpgc::compassionTier(m_compassion).desc, "Callous  <-----  kindly  ----->  Tender-Hearted",
+                  rpgc::compassionEffectNote());
+        tempRow("Cruelty", m_cruelty, 9, 12, rpgc::crueltyTier(m_cruelty).name, rpgc::crueltyTier(m_cruelty).desc,
+                "Masochistic  <-----  balanced  ----->  Sadistic", rpgc::crueltyEffectNote());
+        tempRow("Carnality", m_carnality, 5, 9, rpgc::carnalityTier(m_carnality).name,
+                rpgc::carnalityTier(m_carnality).desc, "Chaste  <-----  temperate  ----->  Deviant",
+                rpgc::carnalityEffectNote());
+        tempRow("Sociability", m_sociability, 8, 13, rpgc::sociabilityTier(m_sociability).name,
+                rpgc::sociabilityTier(m_sociability).desc,
+                "Reclusive  <-----  sociable  ----->  Overbearing", rpgc::sociabilityEffectNote());
+
+        // ── Mind & Faith ──
+        tempGroup("Mind & Faith");
+        tempRow("Skepticism", m_skepticism, 9, 13, rpgc::skepticismTier(m_skepticism).name,
+                rpgc::skepticismTier(m_skepticism).desc,
+                "Gullible  <-----  discerning  ----->  Cynical", rpgc::skepticismEffectNote());
+        tempRow("Curiosity", m_curiosity, 8, 13, rpgc::curiosityTier(m_curiosity).name,
+                rpgc::curiosityTier(m_curiosity).desc, "Hidebound  <-----  curious  ----->  Heterodox",
+                rpgc::curiosityEffectNote());
+        tempRow("Piety", m_piety, 9, 14, rpgc::pietyTier(m_piety).name, rpgc::pietyTier(m_piety).desc,
+                "Impious  <-----  faithful  ----->  Zealot", rpgc::pietyEffectNote());
+
+        // ── Honor & Coin ──
+        tempGroup("Honor & Coin");
+        tempMeter("Honor", m_honor, rpgc::honorTier(m_honor).name, rpgc::honorTier(m_honor).desc,
+                  "Treacherous  <-----  honest  ----->  Oathbound", rpgc::honorEffectNote());
+        tempRow("Greed", m_greed, 7, 12, rpgc::greedTier(m_greed).name, rpgc::greedTier(m_greed).desc,
+                "Prodigal  <-----  prudent  ----->  Avaricious", rpgc::greedEffectNote());
+    }
+
     void renderCharCreate() {
         ImVec2 disp = ImGui::GetIO().DisplaySize;
         ImGui::SetNextWindowPos(ImVec2(disp.x * 0.5f, disp.y * 0.5f), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
@@ -1359,6 +1518,9 @@ private:
             }
             ImGui::PopID();
         }
+
+        ImGui::Separator();
+        renderTemperament();
 
         // Skills: choose the class's allotment; the class saves are automatic.
         ImGui::Separator();
@@ -2041,6 +2203,15 @@ private:
     int   m_rolled[6] = {0, 0, 0, 0, 0, 0};
     int   m_assign[6] = {0, 1, 2, 3, 4, 5};// ability a gets score m_rolled[m_assign[a]]
     int   m_rollsUsed = 0;                 // 1 initial + up to 2 re-rolls = 3 total
+    int   m_bravery = 10;                  // rolled personality scores (shown in UI)
+    int   m_narcissism = 10;
+    int   m_willToPower = 10;
+    int   m_carnality = 10;
+    int   m_cruelty = 10;
+    int   m_sociability = 10;
+    int   m_skepticism = 10;
+    int   m_honor = 10, m_piety = 10, m_greed = 10, m_temper = 10;
+    int   m_diligence = 10, m_compassion = 10, m_curiosity = 10;
     std::array<bool, rpgc::ABILITY_COUNT> m_halfElfBonus{};  // Half-Elf: +1 to two of your choice
     std::array<bool, 18> m_skillPick{};    // chosen class skill proficiencies
     int m_bgIdx = 0;                       // chosen background index
