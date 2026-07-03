@@ -846,6 +846,9 @@ private:
                   << " (HP " << m_pc.maxHP << ", AC " << m_pc.armorClass
                   << ", bravery " << m_pc.bravery << "/" << rpgc::braveryTier(m_pc.bravery).name
                   << ", +13 temperament traits)\n";
+        generateStarterQuest();                 // a first House quest to head home
+        m_hint = "A new quest awaits - press J for your Journal.";
+        m_hintTimer = 6.0f;
         m_screen = Screen::Game;
         stopTitleMusic();
     }
@@ -2042,7 +2045,8 @@ private:
     }
 
     void renderPartyBar() {
-        if (m_companions.empty()) buildCompanions();
+        // The hero starts alone; companions are recruited over time (buildCompanions()
+        // is kept for when they join and for the relationship demo).
         auto pty = party();
         if ((int)m_cardBack.size() != (int)pty.size()) m_cardBack.assign(pty.size(), 0);
         ImVec2 disp = ImGui::GetIO().DisplaySize;
@@ -2054,6 +2058,60 @@ private:
                      ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoBringToFrontOnFocus);
         ImGui::TextColored(ImVec4(0.76f, 0.63f, 0.42f, 1.0f), "Party");
         for (int i = 0; i < (int)pty.size(); ++i) { ImGui::PushID(i); renderPartyCard(i, *pty[i]); ImGui::PopID(); }
+        ImGui::End();
+    }
+
+    // ── quests ──
+    // A first House quest, seeded from the hero's house and standing, to teach the
+    // player to gear up and find their way to their home seat.
+    void generateStarterQuest() {
+        m_quests.clear();
+        Quest q; q.category = "House";
+        if (rpgw::isHouseRace(m_pc.race) && m_houseIdx >= 0) {
+            const auto& h = rpgw::houses()[m_houseIdx];
+            std::string dest = std::string(h.seat) + ", in " + h.region;
+            bool youHold = (m_family.seatRelation == "you" || m_family.seatHolder == "you");
+            if (youHold) {
+                q.title = "Take Up Your Seat";
+                q.giver = "the duty of your blood";
+                q.desc = "You are the last of " + m_pc.house + ", and its seat at " + h.seat +
+                         " lies waiting - and imperiled. Provision yourself at Orlen's Wares, then set out to claim it.";
+                q.objective = "Gear up at Orlen's, then travel to " + dest + " and take up your seat.";
+            } else {
+                q.title = "Report Home";
+                q.giver = m_family.seatHolder;
+                q.desc = "Word has reached you: you are summoned home. " + m_family.seatHolder + " (" +
+                         m_family.seatRelation + ") awaits you at " + h.seat +
+                         ". Buy what you need from Orlen, then make for the seat of " + m_pc.house + ".";
+                q.objective = "Gear up at Orlen's, then travel to " + dest + " and report to " + m_family.seatHolder + ".";
+            }
+        } else {
+            q.title = "Find Your Footing";
+            q.giver = "your own resolve";
+            q.desc = "You are newly come to Aldermarch, far from your own people. Gather your gear at Orlen's "
+                     "Wares, then set out to make your way in this human realm.";
+            q.objective = "Buy your starting gear at Orlen's, then set out from Orlens.";
+        }
+        m_quests.push_back(q);
+    }
+
+    void renderJournal() {
+        ImVec2 disp = ImGui::GetIO().DisplaySize;
+        ImGui::SetNextWindowPos(ImVec2(disp.x * 0.5f, disp.y * 0.5f), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+        ImGui::SetNextWindowSize(ImVec2(520, std::min(disp.y - 60.0f, 420.0f)), ImGuiCond_Always);
+        ImGui::Begin("Journal", &m_showJournal, ImGuiWindowFlags_NoCollapse);
+        if (m_quests.empty()) ImGui::TextDisabled("No quests yet.");
+        std::string cat;
+        for (const auto& q : m_quests) {
+            if (cat != q.category) { cat = q.category; ImGui::Spacing(); ImGui::TextColored(ImVec4(0.62f, 0.72f, 0.85f, 1.0f), "%s Quests", cat.c_str()); ImGui::Separator(); }
+            ImGui::TextColored(ImVec4(0.91f, 0.89f, 0.85f, 1.0f), "%s%s", q.complete ? "[done] " : "", q.title.c_str());
+            if (!q.giver.empty()) ImGui::TextDisabled("From: %s", q.giver.c_str());
+            ImGui::PushTextWrapPos(0.0f);
+            ImGui::TextWrapped("%s", q.desc.c_str());
+            ImGui::TextColored(ImVec4(0.76f, 0.63f, 0.42f, 1.0f), "Objective: %s", q.objective.c_str());
+            ImGui::PopTextWrapPos();
+            ImGui::Spacing();
+        }
         ImGui::End();
     }
     static ImU32 dynamicColor(const std::string& d, bool toxic) {
@@ -2473,7 +2531,7 @@ private:
     // Left-click a token: drag your own piece to move it, or interact with an NPC
     // (right/middle stay camera). Interaction requires being adjacent.
     void handleTokenDrag(bool overUI) {
-        if (m_dialogActive || m_shopOpen || m_sheetOpen) return;   // an overlay owns input
+        if (m_dialogActive || m_shopOpen || m_sheetOpen || m_showJournal) return;   // an overlay owns input
         if (Input::isMouseButtonPressed(Input::MOUSE_LEFT) && !overUI) {
             int picked = pickToken();
             if (picked >= 0) {
@@ -2484,13 +2542,23 @@ private:
         if (m_dragToken >= 0 && Input::isMouseButtonDown(Input::MOUSE_LEFT)) {
             glm::vec2 floorPt;
             if (mouseOnBoard(floorPt)) {
-                Token& t = m_tokens[m_dragToken];
-                t.cx = cellFromWorld(floorPt.x, m_levelMin.x, m_levelMax.x);
-                t.cy = cellFromWorld(floorPt.y, m_levelMin.y, m_levelMax.y);
+                int nx = cellFromWorld(floorPt.x, m_levelMin.x, m_levelMax.x);
+                int ny = cellFromWorld(floorPt.y, m_levelMin.y, m_levelMax.y);
+                if (!cellOccupied(nx, ny, m_dragToken)) {   // two tokens can't share a cell
+                    m_tokens[m_dragToken].cx = nx;
+                    m_tokens[m_dragToken].cy = ny;
+                }
             }
         } else {
             m_dragToken = -1;
         }
+    }
+
+    // Is any token other than `exceptIdx` standing on cell (cx,cy)?
+    bool cellOccupied(int cx, int cy, int exceptIdx) const {
+        for (int i = 0; i < (int)m_tokens.size(); ++i)
+            if (i != exceptIdx && m_tokens[i].cx == cx && m_tokens[i].cy == cy) return true;
+        return false;
     }
 
     // Move-adjacent-then-click interaction: Hostile -> attack (combat comes
@@ -2978,19 +3046,22 @@ private:
             ImGui::TextDisabled("Move next to an NPC, click to talk");
             ImGui::TextDisabled("Right-drag orbit  \xc2\xb7  Middle-drag pan");
             ImGui::TextDisabled("Scroll zoom  \xc2\xb7  T = top-down tactical");
-            ImGui::TextDisabled("C = character sheet");
+            ImGui::TextDisabled("C = character sheet   -   J = journal");
             ImGui::Separator();
             if (ImGui::Button("Character (C)")) m_sheetOpen = !m_sheetOpen;
             ImGui::SameLine();
-            if (ImGui::Button(m_showRelations ? "Hide Party" : "Party")) m_showRelations = !m_showRelations;
+            if (ImGui::Button("Journal (J)")) m_showJournal = !m_showJournal;
             ImGui::End();
 
-            // C toggles the character sheet (unless a text field is focused).
-            if (ImGui::IsKeyPressed(ImGuiKey_C) && !ImGui::GetIO().WantTextInput) m_sheetOpen = !m_sheetOpen;
+            // C / J toggle the sheet / journal (unless a text field is focused).
+            if (!ImGui::GetIO().WantTextInput) {
+                if (ImGui::IsKeyPressed(ImGuiKey_C)) m_sheetOpen = !m_sheetOpen;
+                if (ImGui::IsKeyPressed(ImGuiKey_J)) m_showJournal = !m_showJournal;
+            }
 
             if (m_showParty) renderPartyBar();
-            if (m_showRelations) renderRelationsPanel();
             if (m_sheetOpen) renderCharacterSheet();
+            if (m_showJournal) renderJournal();
 
             // Transient hint (e.g. "move closer").
             if (m_hintTimer > 0.0f && !m_hint.empty()) {
@@ -3266,6 +3337,10 @@ private:
     bool m_dialogMerchant = false;   // the current NPC runs a shop
     bool m_shopOpen = false;         // Orlen's trade overlay is up
     bool m_sheetOpen = false;        // the character sheet is up
+    // Quests, grouped by category (House, Personal, Faith, Guild, ...).
+    struct Quest { std::string title, category, giver, desc, objective; bool complete = false; };
+    std::vector<Quest> m_quests;
+    bool m_showJournal = false;
     std::string m_dialogName, m_dialogText;
     std::string m_hint;
     float m_hintTimer = 0.0f;
