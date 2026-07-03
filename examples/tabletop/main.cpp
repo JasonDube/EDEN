@@ -661,7 +661,7 @@ private:
         m_skillPick.fill(false);
         m_selectedPortrait = -1;
         m_previewPortrait = -1;
-        m_classIdx = 0; m_bgIdx = 0;         // player chooses (or hits "Roll a Random Hero")
+        m_classIdx = 0; m_bgIdx = 0; m_alignIdx = 4;   // player chooses (or hits "Roll a Random Hero")
         scanPortraits();
         rollAbilityScores();
         assignHouse();
@@ -738,6 +738,7 @@ private:
         m_pc.race = rpgc::raceOptions()[m_raceIdx];
         m_pc.className = rpgc::classOptions()[m_classIdx];
         m_pc.background = rpgc::backgroundOptions()[m_bgIdx];
+        m_pc.alignment = rpgc::alignmentOptions()[m_alignIdx];
         m_pc.gender = m_female ? "Female" : "Male";
         if (rpgw::isHouseRace(m_pc.race)) {
             if (m_houseIdx < 0) assignHouse();
@@ -1419,6 +1420,10 @@ private:
             int n = 0; for (int a : ord) { if (a == rpgc::CHA) continue; m_halfElfBonus[a] = true; if (++n == 2) break; }
         }
         assignHouse();                     // race + background -> house/lineage/clan + family
+        // alignment derived from temperament: honor -> lawful axis, cruelty/compassion -> moral axis
+        int lawAxis   = (m_honor >= 13) ? 0 : (m_honor <= 8) ? 2 : 1;         // 0 lawful,1 neutral,2 chaotic
+        int moralAxis = (m_cruelty >= 13) ? 2 : (m_compassion >= 13) ? 0 : 1; // 0 good,1 neutral,2 evil
+        m_alignIdx = moralAxis * 3 + lawAxis;
         // random class skills
         m_skillPick.fill(false);
         auto cp = rpgc::classProficiencies(rpgc::classOptions()[m_classIdx]);
@@ -2033,6 +2038,7 @@ private:
             auto bi = rpgc::backgroundInfo(rpgc::backgroundOptions()[m_bgIdx]);
             ImGui::TextDisabled("Background skills: %s & %s", rpgc::skills()[bi.skill1].name, rpgc::skills()[bi.skill2].name);
         }
+        combo("Alignment", m_alignIdx, rpgc::alignmentOptions());
 
         // Half-Elf uniquely gets +1 to two abilities of the player's choice.
         if (isHalfElf()) {
@@ -2955,6 +2961,7 @@ private:
     std::array<bool, rpgc::ABILITY_COUNT> m_halfElfBonus{};  // Half-Elf: +1 to two of your choice
     std::array<bool, 18> m_skillPick{};    // chosen class skill proficiencies
     int m_bgIdx = 0;                       // chosen background index
+    int m_alignIdx = 4;                    // chosen alignment (4 = True Neutral)
     int m_houseIdx = -1;                   // assigned house (index into rpgw::houses())
     std::string m_houseStanding;           // rung within the house, from background
     rpgw::Family m_family;                  // generated family tree
