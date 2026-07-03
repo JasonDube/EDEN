@@ -816,6 +816,8 @@ private:
             m_pc.startingWealthGp = sum * sw.mult;
             m_pc.gold += m_pc.startingWealthGp;
             m_pc.startingWealthTaken = true;
+            std::cerr << "starting wealth: " << m_pc.className << " " << sw.d4count << "d4x"
+                      << sw.mult << " = " << m_pc.startingWealthGp << " gp\n";
         }
         // Personality scores (rolled with the abilities, shown in the creator).
         m_pc.bravery = m_bravery;
