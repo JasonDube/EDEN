@@ -29,6 +29,7 @@
 #include "dragonhouses.hpp"
 #include "feyhouses.hpp"
 #include "infernalhouses.hpp"
+#include "shop.hpp"
 #include "family.hpp"
 #include "relations.hpp"
 #include "classfit.hpp"
@@ -625,6 +626,7 @@ private:
         glm::vec2 centerXZ{0.0f};      // local XZ center (to center on the cell)
         int cx = 0, cy = 0;            // grid cell
         Attitude attitude = Attitude::Neutral;
+        bool merchant = false;        // opens a shop when talked to
         std::string dialog;           // greeting line (Neutral/Ally NPCs)
         float faceYaw = 0.0f;         // current facing (radians, world)
         float defaultYaw = 0.0f;      // facing when not engaged
@@ -805,6 +807,14 @@ private:
         auto bi = rpgc::backgroundInfo(m_pc.background);
         m_pc.skillProf[bi.skill1] = true;
         m_pc.skillProf[bi.skill2] = true;
+        // One-time starting wealth by class (rolled), so there's coin to spend at Orlen.
+        auto sw = rpgc::startingWealthForClass(m_pc.className);
+        if (sw.known && !m_pc.startingWealthTaken) {
+            int sum = 0; for (int i = 0; i < sw.d4count; ++i) sum += rollDie(4);
+            m_pc.startingWealthGp = sum * sw.mult;
+            m_pc.gold += m_pc.startingWealthGp;
+            m_pc.startingWealthTaken = true;
+        }
         // Personality scores (rolled with the abilities, shown in the creator).
         m_pc.bravery = m_bravery;
         m_pc.narcissism = m_narcissism;
@@ -2140,12 +2150,12 @@ private:
     // XZ centered on a grid cell.
     void loadCharacters() {
         struct Spawn { const char* path; const char* name; int cx, cy; float heightFt;
-                       Attitude attitude; const char* dialog; };
+                       Attitude attitude; bool merchant; const char* dialog; };
         const Spawn spawns[] = {
             {"assets/characters/percy_the_knight.glb",   "Percy", 2, 2, 6.0f,
-             Attitude::Player, ""},
+             Attitude::Player, false, ""},
             {"assets/characters/orlen_the_merchant.glb", "Orlen", 7, 7, 5.8f,
-             Attitude::Neutral, "Welcome to Orlens Wares, traveler. Have a look at my goods."},
+             Attitude::Neutral, true, "Welcome to Orlens Wares, traveler. Have a look at my goods."},
         };
         for (const auto& sp : spawns) {
             eden::LoadResult r = eden::GLBLoader::load(sp.path);
@@ -2157,7 +2167,7 @@ private:
             for (const auto& m : r.meshes) { mn = glm::min(mn, m.bounds.min); mx = glm::max(mx, m.bounds.max); }
             Token t;
             t.name = sp.name; t.cx = sp.cx; t.cy = sp.cy;
-            t.attitude = sp.attitude; t.dialog = sp.dialog;
+            t.attitude = sp.attitude; t.merchant = sp.merchant; t.dialog = sp.dialog;
             t.scale = sp.heightFt / std::max(mx.y - mn.y, 0.001f);
             t.minY = mn.y;
             t.centerXZ = { (mn.x + mx.x) * 0.5f, (mn.z + mx.z) * 0.5f };
@@ -2247,7 +2257,7 @@ private:
     // Left-click a token: drag your own piece to move it, or interact with an NPC
     // (right/middle stay camera). Interaction requires being adjacent.
     void handleTokenDrag(bool overUI) {
-        if (m_dialogActive) return;   // dialog owns input while it's open
+        if (m_dialogActive || m_shopOpen) return;   // dialog/shop owns input while open
         if (Input::isMouseButtonPressed(Input::MOUSE_LEFT) && !overUI) {
             int picked = pickToken();
             if (picked >= 0) {
@@ -2283,7 +2293,107 @@ private:
             m_dialogActive = true;
             m_dialogName = target.name;
             m_dialogText = target.dialog.empty() ? "..." : target.dialog;
+            m_dialogMerchant = target.merchant;
         }
+    }
+
+    // ── shop / trade ──
+    static long totalCp(const rpgc::Character& c) {
+        return c.platinum * 1000L + c.gold * 100L + c.silver * 10L + c.copper;
+    }
+    static void setCp(rpgc::Character& c, long cp) {
+        if (cp < 0) cp = 0;
+        c.platinum = (int)(cp / 1000); cp %= 1000;
+        c.gold     = (int)(cp / 100);  cp %= 100;
+        c.silver   = (int)(cp / 10);   cp %= 10;
+        c.copper   = (int)cp;
+    }
+    // House Halewyn's "Merchant Ties" gift makes buying cheaper and selling dearer.
+    bool merchantTies() const {
+        int i = rpgw::houseIndexByName(m_pc.house);
+        return i >= 0 && std::string(rpgw::houses()[i].trait) == "Merchant Ties";
+    }
+    long buyPriceCp(int listCp) const { return merchantTies() ? (long)listCp * 85 / 100 : listCp; }
+    long sellGainCp(const std::string& name) const {
+        int base = rpgs::sellPriceCp(name);
+        return merchantTies() ? (long)base * 120 / 100 : base;
+    }
+    void buyWare(const rpgs::Ware& w) {
+        long price = buyPriceCp(w.priceCp);
+        if (totalCp(m_pc) < price) return;
+        setCp(m_pc, totalCp(m_pc) - price);
+        for (auto& it : m_pc.items) if (it.name == w.name) { it.qty++; return; }
+        rpgc::Item it; it.name = w.name; it.qty = 1; it.weight = w.weight;
+        m_pc.items.push_back(it);
+    }
+    void sellItem(int idx) {
+        if (idx < 0 || idx >= (int)m_pc.items.size()) return;
+        long gain = sellGainCp(m_pc.items[idx].name);
+        if (gain <= 0) return;
+        setCp(m_pc, totalCp(m_pc) + gain);
+        if (--m_pc.items[idx].qty <= 0) m_pc.items.erase(m_pc.items.begin() + idx);
+    }
+    float packWeight() const {
+        float w = 0.0f; for (const auto& it : m_pc.items) w += it.weight * it.qty; return w;
+    }
+
+    // Orlen's Wares (left, buy) beside Your Pack (right, sell).
+    void renderShop() {
+        ImVec2 disp = ImGui::GetIO().DisplaySize;
+        ImGui::SetNextWindowPos(ImVec2(disp.x * 0.5f, disp.y * 0.5f), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+        ImGui::SetNextWindowSize(ImVec2(760, 476), ImGuiCond_Always);
+        ImGui::Begin("Orlens Wares", nullptr,
+                     ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoMove);
+        ImGui::TextColored(ImVec4(0.76f, 0.63f, 0.42f, 1.0f), "Coin:  %s", rpgs::priceStr(totalCp(m_pc)).c_str());
+        if (merchantTies()) { ImGui::SameLine(); ImGui::TextColored(ImVec4(0.5f, 0.8f, 1.0f, 1.0f), "(Merchant Ties: better prices)"); }
+        float encMax = m_pc.abilities[rpgc::STR] * 15.0f;   // 5e carrying capacity
+        ImGui::SameLine(); ImGui::TextDisabled("     Load %.0f / %.0f lb", packWeight(), encMax);
+        ImGui::Separator();
+
+        // Left: buy
+        ImGui::BeginChild("##wares", ImVec2(372, 366), true);
+        ImGui::TextColored(ImVec4(0.9f, 0.85f, 0.7f, 1.0f), "Orlen's Wares");
+        ImGui::Separator();
+        std::string cat;
+        for (const auto& w : rpgs::orlensWares()) {
+            if (cat != w.cat) { cat = w.cat; ImGui::Spacing(); ImGui::TextDisabled("%s", cat.c_str()); }
+            long price = buyPriceCp(w.priceCp);
+            ImGui::PushID(w.name);
+            ImGui::BeginDisabled(totalCp(m_pc) < price);
+            if (ImGui::SmallButton("Buy")) buyWare(w);
+            ImGui::EndDisabled();
+            ImGui::SameLine(); ImGui::Text("%-21s %s", w.name, rpgs::priceStr(price).c_str());
+            ImGui::PopID();
+        }
+        ImGui::EndChild();
+        ImGui::SameLine();
+
+        // Right: sell
+        ImGui::BeginChild("##pack", ImVec2(0, 366), true);
+        ImGui::TextColored(ImVec4(0.9f, 0.85f, 0.7f, 1.0f), "Your Pack");
+        ImGui::Separator();
+        if (m_pc.items.empty()) ImGui::TextDisabled("(empty - buy some gear!)");
+        int sellIdx = -1;
+        for (int i = 0; i < (int)m_pc.items.size(); ++i) {
+            const auto& it = m_pc.items[i];
+            long gain = sellGainCp(it.name);
+            ImGui::PushID(i);
+            ImGui::BeginDisabled(gain <= 0);
+            if (ImGui::SmallButton("Sell")) sellIdx = i;
+            ImGui::EndDisabled();
+            ImGui::SameLine();
+            if (it.qty > 1) ImGui::Text("%s  x%d", it.name.c_str(), it.qty);
+            else            ImGui::Text("%s", it.name.c_str());
+            if (gain > 0) { ImGui::SameLine(); ImGui::TextDisabled("(%s)", rpgs::priceStr(gain).c_str()); }
+            ImGui::PopID();
+        }
+        if (sellIdx >= 0) sellItem(sellIdx);
+        ImGui::EndChild();
+
+        ImGui::Separator();
+        if (ImGui::Button("Done", ImVec2(120, 0))) m_shopOpen = false;
+        ImGui::SameLine(); ImGui::TextDisabled("Orlen buys back his own goods at half the list price.");
+        ImGui::End();
     }
 
     // The reachable region for a mover at (ax,ay) with `cells` of movement is a
@@ -2539,11 +2649,17 @@ private:
                 ImGui::TextWrapped("%s", m_dialogText.c_str());
                 ImGui::Spacing();
                 ImGui::Separator();
+                if (m_dialogMerchant) {
+                    if (ImGui::Button("Show me your wares", ImVec2(200, 0))) {
+                        m_shopOpen = true; m_dialogActive = false;
+                    }
+                    ImGui::SameLine();
+                }
                 if (ImGui::Button("Close", ImVec2(120, 0))) m_dialogActive = false;
-                ImGui::SameLine();
-                ImGui::TextDisabled("(trade & more coming)");
                 ImGui::End();
             }
+
+            if (m_shopOpen) renderShop();
 
             ImGui::Render();
             return;
@@ -2778,6 +2894,8 @@ private:
     std::vector<rpgc::Character> m_companions;   // demo party for the relationships panel
     bool m_showRelations = false;
     bool m_dialogActive = false;
+    bool m_dialogMerchant = false;   // the current NPC runs a shop
+    bool m_shopOpen = false;         // Orlen's trade overlay is up
     std::string m_dialogName, m_dialogText;
     std::string m_hint;
     float m_hintTimer = 0.0f;
