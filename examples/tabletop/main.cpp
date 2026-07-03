@@ -27,6 +27,8 @@
 #include "elfhouses.hpp"
 #include "dwarfhouses.hpp"
 #include "dragonhouses.hpp"
+#include "feyhouses.hpp"
+#include "infernalhouses.hpp"
 #include "family.hpp"
 #include "relations.hpp"
 #include "classfit.hpp"
@@ -763,6 +765,24 @@ private:
             m_pc.standing = std::string(dc.ancestry) + " dragon-blood (" + dc.breath + " breath)";
             m_pc.surname.clear(); m_pc.ironLegacy.clear();
             m_pc.origin = "Of Vharok, the ember-clans";
+        } else if (rpgw::isFey(m_pc.race)) {       // gnomes/halflings: an Evermere house
+            if (m_feyIdx < 0) assignFeyHouse();
+            m_pc.house = rpgw::feyHouses()[m_feyIdx].name;
+            m_pc.standing = "of Evermere, the Bright Court";
+            m_pc.surname.clear(); m_pc.ironLegacy.clear();
+            m_pc.origin = "Of Evermere, the fey Bright Court (not of this world)";
+        } else if (rpgw::isTiefling(m_pc.race)) {   // tieflings: infernal house, or a mortal-line scandal
+            m_pc.surname.clear(); m_pc.ironLegacy.clear();
+            if (m_houseIdx >= 0) {
+                m_pc.house = rpgw::houses()[m_houseIdx].name;
+                m_pc.standing = m_houseStanding;
+                m_pc.origin = "Infernal blood - a scandal to a mortal line";
+            } else {
+                if (m_infernalIdx < 0) assignInfernalHouse();
+                m_pc.house = rpgw::infernalHouses()[m_infernalIdx].name;
+                m_pc.standing = rpgw::infernalTierName(rpgw::infernalHouses()[m_infernalIdx].tier);
+                m_pc.origin = "Of the Brass Reach, the Iron Hells";
+            }
         } else {                                   // other outsiders: an Origin, no house
             if (m_origin.homeland.empty()) assignHouse();
             m_pc.house.clear(); m_pc.standing.clear(); m_pc.surname.clear(); m_pc.ironLegacy.clear();
@@ -1132,6 +1152,31 @@ private:
             polyf({P(0.0f,-0.72f),P(0.6f,-0.45f),P(0.6f,0.1f),P(0.0f,0.78f),P(-0.6f,0.1f),P(-0.6f,-0.45f)});
         } else if (name == "coin") {
             disc(0.0f,0.0f,0.6f);
+        } else if (name == "lion") {                                  // fey
+            disc(0.0f,0.1f,0.34f);
+            tri(P(-0.5f,-0.5f),P(-0.05f,-0.1f),P(-0.55f,0.0f));
+            tri(P(0.5f,-0.5f),P(0.05f,-0.1f),P(0.55f,0.0f));
+            tri(P(-0.3f,0.45f),P(0.0f,0.7f),P(0.3f,0.45f));
+        } else if (name == "unicorn") {
+            pl({P(-0.35f,0.72f),P(-0.15f,0.1f),P(0.1f,-0.15f),P(0.28f,-0.4f)});
+            pl({P(0.28f,-0.4f),P(0.62f,-0.82f)});
+            disc(0.14f,-0.28f,0.07f);
+        } else if (name == "cog") {
+            dl->AddCircle(c, s * 0.32f, col, 24, s * 0.16f);
+            for (int k = 0; k < 8; ++k) {
+                float a = k * 45.0f * 3.14159265f / 180.0f;
+                pl({ImVec2(c.x + cosf(a)*s*0.42f, c.y + sinf(a)*s*0.42f),
+                     ImVec2(c.x + cosf(a)*s*0.66f, c.y + sinf(a)*s*0.66f)});
+            }
+        } else if (name == "mushroom") {
+            polyf({P(-0.66f,0.0f),P(-0.4f,-0.4f),P(0.0f,-0.52f),P(0.4f,-0.4f),P(0.66f,0.0f)});
+            quad(P(-0.2f,0.0f),P(0.2f,0.0f),P(0.14f,0.6f),P(-0.14f,0.6f));
+        } else if (name == "crown") {                                 // infernal
+            polyf({P(-0.62f,0.4f),P(-0.62f,-0.2f),P(-0.28f,0.12f),P(0.0f,-0.5f),P(0.28f,0.12f),P(0.62f,-0.2f),P(0.62f,0.4f)});
+        } else if (name == "chain") {
+            pl({P(-0.55f,0.55f),P(-0.2f,0.2f)}); pl({P(0.2f,-0.2f),P(0.55f,-0.55f)});
+            dl->AddCircle(ImVec2(c.x - 0.12f*s, c.y + 0.12f*s), s * 0.24f, col, 20, s * 0.12f);
+            dl->AddCircle(ImVec2(c.x + 0.12f*s, c.y - 0.12f*s), s * 0.24f, col, 20, s * 0.12f);
         } else {
             disc(0.0f,0.0f,0.40f);
         }
@@ -1174,6 +1219,29 @@ private:
         dl->AddConvexPolyFilled(pts, 4, IM_COL32(20, 14, 13, 255));
         dl->AddPolyline(pts, 4, col, ImDrawFlags_Closed, 2.2f);
         drawCharge(dl, c, halfW * 0.5f, sigil, col);
+    }
+    // Fey emblems bloom bright on vellum, ringed with radiant gold.
+    void drawBloom(ImDrawList* dl, ImVec2 c, float r, const std::string& sigil, rpgw::RGB rgb) {
+        for (int i = 0; i < 16; ++i) {
+            float a = i * 22.5f * 3.14159265f / 180.0f;
+            dl->AddLine(ImVec2(c.x + cosf(a) * r, c.y + sinf(a) * r),
+                        ImVec2(c.x + cosf(a) * (r + 5.0f), c.y + sinf(a) * (r + 5.0f)),
+                        IM_COL32(200, 153, 47, 255), 1.4f);
+        }
+        dl->AddCircleFilled(c, r, IM_COL32(248, 242, 214, 255), 40);   // bright vellum
+        dl->AddCircle(c, r, IM_COL32(156, 118, 32, 255), 40, 1.8f);
+        drawCharge(dl, c, r * 0.60f, sigil, IM_COL32(rgb.r, rgb.g, rgb.b, 255));
+    }
+    // Infernal marks sit in a horned seal, branded in brass and blood.
+    void drawHornedSeal(ImDrawList* dl, ImVec2 c, float r, const std::string& sigil, rpgw::RGB rgb) {
+        ImU32 col = IM_COL32(rgb.r, rgb.g, rgb.b, 255);
+        dl->AddBezierQuadratic(ImVec2(c.x - r * 0.55f, c.y - r * 0.6f), ImVec2(c.x - r * 1.0f, c.y - r * 1.35f),
+                               ImVec2(c.x - r * 0.5f, c.y - r * 1.15f), col, 2.6f);
+        dl->AddBezierQuadratic(ImVec2(c.x + r * 0.55f, c.y - r * 0.6f), ImVec2(c.x + r * 1.0f, c.y - r * 1.35f),
+                               ImVec2(c.x + r * 0.5f, c.y - r * 1.15f), col, 2.6f);
+        dl->AddCircleFilled(c, r, IM_COL32(18, 13, 22, 255), 40);
+        dl->AddCircle(c, r, col, 40, 1.8f);
+        drawCharge(dl, c, r * 0.56f, sigil, col);
     }
 
     // Your rung within the house, flavored by background.
@@ -1228,34 +1296,50 @@ private:
         std::uniform_int_distribution<int> d(0, static_cast<int>(pool.size()) - 1);
         m_dragonIdx = pool[d(m_rng)];
     }
-    // Assign the character's origin: a House for humans/half-bloods, an Aelvarin
-    // lineage for elves (Sundered for drow), a Kadmurn clan for dwarves, a Vharok
-    // clan for dragonborn, else a generic Origin.
+    // Fey house for gnomes/halflings; infernal house for tieflings.
+    void assignFeyHouse() {
+        std::string race = rpgc::raceOptions()[m_raceIdx];
+        auto pool = rpgw::feyHousesForRace(race.find("Gnome") != std::string::npos,
+                                           race.find("Halfling") != std::string::npos);
+        if (pool.empty()) { m_feyIdx = 0; return; }
+        std::uniform_int_distribution<int> d(0, static_cast<int>(pool.size()) - 1);
+        m_feyIdx = pool[d(m_rng)];
+    }
+    void assignInfernalHouse() {
+        auto pool = rpgw::infernalHousesAll(false);
+        std::uniform_int_distribution<int> d(0, static_cast<int>(pool.size()) - 1);
+        m_infernalIdx = pool[d(m_rng)];
+    }
+
+    // Assign the character's origin by race: an Aldermarch House (humans/half-bloods),
+    // an Aelvarin lineage (elves; Sundered for drow), a Kadmurn clan (dwarves), a
+    // Vharok clan (dragonborn), an Evermere house (gnomes/halflings), an infernal
+    // house or a mortal-line scandal (tieflings), else a generic Origin.
     void assignHouse() {
         std::string race = rpgc::raceOptions()[m_raceIdx];
-        if (rpgw::isElf(race)) {
-            m_houseIdx = -1; m_dwarfIdx = -1; m_dragonIdx = -1; m_houseStanding.clear(); m_family = rpgw::Family{};
-            assignElfLineage();
+        m_houseIdx = -1; m_elfIdx = -1; m_dwarfIdx = -1; m_dragonIdx = -1; m_feyIdx = -1; m_infernalIdx = -1;
+        m_houseStanding.clear(); m_family = rpgw::Family{};
+
+        if (rpgw::isElf(race))       { assignElfLineage();  return; }
+        if (rpgw::isDwarf(race))     { assignDwarfClan();   return; }
+        if (rpgw::isDragonborn(race)){ assignDragonClan();  return; }
+        if (rpgw::isFey(race))       { assignFeyHouse();    return; }
+        if (rpgw::isTiefling(race)) {
+            std::uniform_int_distribution<int> coin(0, 1);
+            if (coin(m_rng) == 0) {                          // born to a mortal line - a scandal
+                auto pool = rpgw::lesserHouseIndices();
+                std::uniform_int_distribution<int> d(0, static_cast<int>(pool.size()) - 1);
+                m_houseIdx = pool[d(m_rng)];
+                m_houseStanding = "an infernal-blooded scandal to";
+            } else {                                          // claimed by an infernal house
+                assignInfernalHouse();
+            }
             return;
         }
-        if (rpgw::isDwarf(race)) {
-            m_houseIdx = -1; m_elfIdx = -1; m_dragonIdx = -1; m_houseStanding.clear(); m_family = rpgw::Family{};
-            assignDwarfClan();
-            return;
-        }
-        if (rpgw::isDragonborn(race)) {
-            m_houseIdx = -1; m_elfIdx = -1; m_dwarfIdx = -1; m_houseStanding.clear(); m_family = rpgw::Family{};
-            assignDragonClan();
-            return;
-        }
-        if (!rpgw::isHouseRace(race)) {
-            m_houseIdx = -1; m_elfIdx = -1; m_dwarfIdx = -1; m_dragonIdx = -1;
-            m_houseStanding.clear();
-            m_family = rpgw::Family{};                          // outsiders have no house family
+        if (!rpgw::isHouseRace(race)) {                       // other outsiders -> Origin
             m_origin = rpgw::originFor(race, m_rng);
             return;
         }
-        m_elfIdx = -1; m_dwarfIdx = -1; m_dragonIdx = -1;
         bool noble = (rpgc::backgroundOptions()[m_bgIdx] == std::string("Noble"));
         auto pool = noble ? rpgw::greatHouseIndices() : rpgw::lesserHouseIndices();
         if (pool.empty()) { m_houseIdx = 0; }
@@ -1423,6 +1507,62 @@ private:
         ImGui::EndChild();
         ImGui::TextDisabled("The Ember: %s", c.ember);
         ImGui::TextDisabled("No crown, no birthright - leadership is earned by deed; women and men stand equal.");
+    }
+
+    // Gnomes & halflings belong to a fey house of Evermere (a bright bloom emblem).
+    void renderFeyHouseCard() {
+        if (m_feyIdx < 0) assignFeyHouse();
+        const auto& h = rpgw::feyHouses()[m_feyIdx];
+        ImU32 col = IM_COL32(h.color.r, h.color.g, h.color.b, 255);
+        ImGui::TextUnformatted("Your Fey House");
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Cast lots again##fey")) assignFeyHouse();
+
+        ImGui::BeginChild("##feycard", ImVec2(0, 176), true);
+        ImVec2 p0 = ImGui::GetCursorScreenPos();
+        const float R = 46.0f;
+        drawBloom(ImGui::GetWindowDrawList(), ImVec2(p0.x + 8.0f + R, p0.y + 8.0f + R), R, h.sigil, h.color);
+        ImGui::Dummy(ImVec2(2.0f * R + 26.0f, 2.0f * R + 12.0f));
+        ImGui::SameLine();
+        ImGui::BeginGroup();
+        ImGui::TextColored(ImVec4(0.55f, 0.78f, 0.60f, 1.0f), "%s", h.name);
+        ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(col), "\"%s\"", h.words);
+        ImGui::TextDisabled("Evermere, the Bright Court  -  %s", h.seat[0] ? h.seat : "of the fairy-roads");
+        ImGui::Spacing();
+        ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(col), "The Court: %s", h.art);
+        ImGui::TextWrapped("%s", h.gift);
+        ImGui::EndGroup();
+        ImGui::EndChild();
+        ImGui::TextDisabled("Against the Long Dusk: %s", h.stance);
+        ImGui::TextDisabled("A subject of the Dawn-Lion Aurelior - a fey realm not of this world.");
+    }
+
+    // Tieflings claimed by an infernal house of the Brass Reach (a horned seal).
+    void renderInfernalCard() {
+        if (m_infernalIdx < 0) assignInfernalHouse();
+        const auto& h = rpgw::infernalHouses()[m_infernalIdx];
+        ImU32 col = IM_COL32(h.color.r, h.color.g, h.color.b, 255);
+        ImGui::TextUnformatted("Your Infernal House");
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Cast lots again##inf")) assignInfernalHouse();
+
+        ImGui::BeginChild("##infcard", ImVec2(0, 182), true);
+        ImVec2 p0 = ImGui::GetCursorScreenPos();
+        const float R = 48.0f;
+        drawHornedSeal(ImGui::GetWindowDrawList(), ImVec2(p0.x + 8.0f + R, p0.y + 14.0f + R), R, h.sigil, h.color);
+        ImGui::Dummy(ImVec2(2.0f * R + 26.0f, 2.0f * R + 18.0f));
+        ImGui::SameLine();
+        ImGui::BeginGroup();
+        ImGui::TextColored(ImVec4(0.85f, 0.81f, 0.84f, 1.0f), "%s", h.name);
+        ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(col), "%s", h.portfolio);
+        ImGui::TextDisabled("\"%s\"", h.words);
+        ImGui::Spacing();
+        ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(col), "The Portfolio: %s", h.art);
+        ImGui::TextWrapped("%s", h.gift);
+        ImGui::EndGroup();
+        ImGui::EndChild();
+        ImGui::TextDisabled("In the Reach: %s", h.stance);
+        ImGui::TextDisabled("Your blood is bound to the Brass Reach - an infernal plane of pact and ledger.");
     }
 
     // Drow are the Sundered: exiles of Aelvarin, of no lineage.
@@ -1919,6 +2059,16 @@ private:
                 renderDwarfClanCard();
             } else if (rpgw::isDragonborn(race)) {
                 renderDragonClanCard();
+            } else if (rpgw::isFey(race)) {
+                renderFeyHouseCard();
+            } else if (rpgw::isTiefling(race)) {
+                if (m_houseIdx >= 0) {   // born to a mortal line; infernal blood a scandal
+                    renderHouseCard();
+                    ImGui::TextColored(ImVec4(0.72f, 0.42f, 0.52f, 1.0f),
+                                       "Your infernal blood is a scandal to this house - hushed, never quite forgotten.");
+                } else {
+                    renderInfernalCard();
+                }
             } else {
                 renderOriginCard();
             }
@@ -2600,6 +2750,8 @@ private:
     int m_elfIdx = -1;                       // elven lineage (index into rpgw::elfHouses())
     int m_dwarfIdx = -1;                      // dwarven clan (index into rpgw::dwarfClans())
     int m_dragonIdx = -1;                     // dragonborn clan (index into rpgw::dragonClans())
+    int m_feyIdx = -1;                        // fey house (gnomes/halflings; rpgw::feyHouses())
+    int m_infernalIdx = -1;                   // infernal house (tieflings; rpgw::infernalHouses())
     bool m_female = false;                  // succession favors men in Aldermarch
     std::vector<rpgcf::ClassScore> m_classRanked;   // class fit for the rolled scores
 
