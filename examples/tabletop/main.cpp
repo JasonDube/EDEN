@@ -2403,9 +2403,9 @@ private:
     }
     static void setCp(rpgc::Character& c, long cp) {
         if (cp < 0) cp = 0;
-        c.platinum = (int)(cp / 1000); cp %= 1000;
-        c.gold     = (int)(cp / 100);  cp %= 100;
-        c.silver   = (int)(cp / 10);   cp %= 10;
+        c.platinum = 0;                       // gold is the working coin; don't hoard platinum
+        c.gold     = (int)(cp / 100); cp %= 100;
+        c.silver   = (int)(cp / 10);  cp %= 10;
         c.copper   = (int)cp;
     }
     // House Halewyn's "Merchant Ties" gift makes buying cheaper and selling dearer.

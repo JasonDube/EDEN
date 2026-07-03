@@ -70,16 +70,16 @@ inline int sellPriceCp(const std::string& name) {
     return 0;
 }
 
-// Format a copper amount as "12 gp 5 sp" (only the non-zero coin ranks).
+// Format a copper amount gold-first, e.g. "12 gp 5 sp" or "2 sp". Gold is the coin
+// players reckon in, so platinum is folded into gp rather than shown separately.
 inline std::string priceStr(long cp) {
-    if (cp <= 0) return "0 cp";
-    long pp = cp / 1000; cp %= 1000;
-    long gp = cp / 100;  cp %= 100;
-    long sp = cp / 10;   cp %= 10;
+    if (cp <= 0) return "0 gp";
+    long gp = cp / 100; cp %= 100;
+    long sp = cp / 10;  cp %= 10;
     std::string s;
     auto add = [&](long n, const char* u) { if (n) { if (!s.empty()) s += " "; s += std::to_string(n); s += " "; s += u; } };
-    add(pp, "pp"); add(gp, "gp"); add(sp, "sp"); add(cp, "cp");
-    return s.empty() ? "0 cp" : s;
+    add(gp, "gp"); add(sp, "sp"); add(cp, "cp");
+    return s.empty() ? "0 gp" : s;
 }
 
 }  // namespace rpgs
