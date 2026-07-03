@@ -1069,7 +1069,14 @@ private:
         ImGui::TextColored(ImVec4(0.76f, 0.63f, 0.42f, 1.0f), "\"%s\"", h.words);
         ImGui::TextWrapped("You are %s %s, of %s in %s.", m_houseStanding.c_str(), h.name, h.seat, h.region);
         ImGui::Spacing();
-        ImGui::TextColored(ImVec4(0.76f, 0.63f, 0.42f, 1.0f), "House Gift: %s", h.trait);
+        ImGui::TextColored(ImVec4(0.76f, 0.63f, 0.42f, 1.0f), "House Gift: %s  (?)", h.trait);
+        if (ImGui::IsItemHovered()) {
+            ImGui::BeginTooltip();
+            ImGui::PushTextWrapPos(340.0f);
+            ImGui::TextUnformatted(rpgw::giftEffect(h.trait));
+            ImGui::PopTextWrapPos();
+            ImGui::EndTooltip();
+        }
         ImGui::TextWrapped("%s", h.traitDesc);
         ImGui::EndGroup();
         ImGui::EndChild();

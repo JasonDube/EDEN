@@ -70,6 +70,50 @@ inline std::string blazon(const House& h) {
     return std::string(tinctureName(h.field)) + ", a " + h.charge + " " + tinctureName(h.chargeColor);
 }
 
+// What a House Gift actually does, in game terms. Keyed by trait name.
+// Honest about scope: "In play" = active now; "Planned" = waiting on a subsystem
+// (house management / mass combat / intrigue) that isn't built yet.
+inline const char* giftEffect(const std::string& trait) {
+    if (trait == "Iron-Sworn")
+        return "In play: advantage on social checks that invoke law, oath, or the Crown's name; "
+               "the Iron-Sworn and crown-loyal defer to you.\n"
+               "Planned: command authority as the intrigue system grows.";
+    if (trait == "Martial Tradition")
+        return "Planned (mass combat): your levies are cheaper to raise and hit harder, and you "
+               "gain a bonus when commanding troops in the field.";
+    if (trait == "Merchant Ties")
+        return "In play: better prices buying and selling (Orlen and other merchants), and steadier "
+               "income for your House.";
+    if (trait == "Seafarers")
+        return "Planned: free passage aboard sailing ships, naval levies, and trade contacts in "
+               "foreign ports.";
+    if (trait == "Warden Blood")
+        return "In play: advantage on Survival in the wilds and resilience against cold and "
+               "exhaustion.\nPlanned: hardy frontier levies and rangers.";
+    if (trait == "Old Blood")
+        return "Planned (intrigue): nobles receive you as a peer; extra weight in council and at "
+               "court.";
+    if (trait == "Ironwrights")
+        return "In play: discounts on weapons and armor, and access to master-forged (superior) "
+               "gear.\nPlanned: repair and upgrade your equipment.";
+    if (trait == "Dutiful Garrison")
+        return "In play: a small, loyal garrison to rebuild - and your restoration questline, "
+               "retaking Greywatch.\nPlanned: hold and improve the holding.";
+    if (trait == "Cunning")
+        return "Planned (intrigue): a network of informants; you learn plots, rumors, and secrets "
+               "before they surface.";
+    if (trait == "Old Debts")
+        return "Planned (intrigue): leverage over those who owe you - coin, favors, and blackmail - "
+               "offset by a distrusted name.";
+    if (trait == "Wreckers")
+        return "Planned: smuggling and salvage income, and access to black-market goods others "
+               "cannot buy.";
+    if (trait == "Arcane Lineage")
+        return "In play: access to arcane tutors and Temple lore.\nPlanned: a boon for spellcasters "
+               "and rare scrolls and rituals.";
+    return "The gift's game effects are still being designed.";
+}
+
 // ── The realm ─────────────────────────────────────────────────────────────
 struct Kingdom {
     const char* name;
