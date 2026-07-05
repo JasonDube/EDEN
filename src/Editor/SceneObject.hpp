@@ -81,7 +81,8 @@ enum class PrimitiveType {
     Cylinder = 2,
     SpawnMarker = 3,
     Door = 4,       // Level transition trigger zone
-    Wedge = 5       // Sloped wall/roof piece (one end lower than the other)
+    Wedge = 5,      // Sloped wall/roof piece (one end lower than the other)
+    NPC = 6         // NPC placement marker (carries an npcId in its description)
 };
 
 // Axis-aligned bounding box for picking
@@ -151,6 +152,13 @@ public:
 
     void setSlopeRatio(float r) { m_slopeRatio = r; }
     float getSlopeRatio() const { return m_slopeRatio; }
+
+    // NPC marker (an authored spot where a named NPC stands). The npcId that
+    // resolves to a definition file is stored in the object's description, so no
+    // new serialized field is needed.
+    bool isNPC() const { return m_primitiveType == PrimitiveType::NPC; }
+    void setNpcId(const std::string& id) { m_description = id; }
+    const std::string& getNpcId() const { return m_description; }
 
     // Door properties (for level transitions)
     bool isDoor() const { return m_primitiveType == PrimitiveType::Door; }

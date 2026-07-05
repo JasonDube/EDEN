@@ -377,7 +377,8 @@ bool LevelSerializer::save(const std::string& filepath,
                            bool isTestLevel,
                            bool isSpaceLevel,
                            int physicsBackend,
-                           const std::string& gameModuleName) {
+                           const std::string& gameModuleName,
+                           bool noOutdoorTerrain) {
     try {
         json root;
 
@@ -394,6 +395,7 @@ bool LevelSerializer::save(const std::string& filepath,
         root["settings"]["editorCameraPitch"] = editorCameraPitch;
         root["settings"]["isTestLevel"] = isTestLevel;
         root["settings"]["isSpaceLevel"] = isSpaceLevel;
+        root["settings"]["noOutdoorTerrain"] = noOutdoorTerrain;
         root["settings"]["physicsBackend"] = static_cast<int>(physicsBackend);
         root["settings"]["gameModuleName"] = gameModuleName;
 
@@ -424,6 +426,22 @@ bool LevelSerializer::save(const std::string& filepath,
         skyJson["starRedPercent"] = skyParams.starRedPercent;
         skyJson["horizonHeight"] = skyParams.horizonHeight;
         root["settings"]["sky"] = skyJson;
+
+        // Terrain config — the world scale + bounds, so the terrain reloads at the
+        // exact size it was authored (the .terrain binary only holds height/splat
+        // pixels, not the scale). Restored by both the editor and the game.
+        {
+            const TerrainConfig& tcfg = terrain.getConfig();
+            json tj;
+            tj["tileSize"]        = tcfg.tileSize;
+            tj["chunkResolution"] = tcfg.chunkResolution;
+            tj["heightScale"]     = tcfg.heightScale;
+            tj["useFixedBounds"]  = tcfg.useFixedBounds;
+            tj["minChunk"]        = { tcfg.minChunk.x, tcfg.minChunk.y };
+            tj["maxChunk"]        = { tcfg.maxChunk.x, tcfg.maxChunk.y };
+            tj["wrapWorld"]       = tcfg.wrapWorld;
+            root["settings"]["terrainConfig"] = tj;
+        }
 
         // Save terrain to separate binary file for fast loading
         std::filesystem::path basePath(filepath);
@@ -726,8 +744,26 @@ bool LevelSerializer::load(const std::string& filepath, LevelData& outData) {
             outData.editorCameraPitch = settings.value("editorCameraPitch", 0.0f);
             outData.isTestLevel = settings.value("isTestLevel", false);
             outData.isSpaceLevel = settings.value("isSpaceLevel", false);
+            outData.noOutdoorTerrain = settings.value("noOutdoorTerrain", false);
             outData.physicsBackend = settings.value("physicsBackend", 0);
             outData.gameModuleName = settings.value("gameModuleName", "");
+
+            // Terrain config (world scale + bounds). Absent in levels saved before
+            // this field — hasTerrainConfig stays false and callers keep their
+            // current terrain, preserving old behavior.
+            if (settings.contains("terrainConfig")) {
+                const auto& tj = settings["terrainConfig"];
+                outData.hasTerrainConfig = true;
+                outData.terrainTileSize = tj.value("tileSize", 2.0f);
+                outData.terrainChunkResolution = tj.value("chunkResolution", 64);
+                outData.terrainHeightScale = tj.value("heightScale", 200.0f);
+                outData.terrainUseFixedBounds = tj.value("useFixedBounds", false);
+                if (tj.contains("minChunk") && tj["minChunk"].size() == 2)
+                    outData.terrainMinChunk = { tj["minChunk"][0], tj["minChunk"][1] };
+                if (tj.contains("maxChunk") && tj["maxChunk"].size() == 2)
+                    outData.terrainMaxChunk = { tj["maxChunk"][0], tj["maxChunk"][1] };
+                outData.terrainWrapWorld = tj.value("wrapWorld", false);
+            }
 
             // Sky parameters
             if (settings.contains("sky")) {

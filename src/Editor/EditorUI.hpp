@@ -63,6 +63,7 @@ using AddSpawnCallback = std::function<void()>;
 using AddCylinderCallback = std::function<void()>;
 using AddCubeCallback = std::function<void(float size)>;
 using AddDoorCallback = std::function<void()>;
+using AddNPCCallback = std::function<void()>;
 using RunGameCallback = std::function<void()>;
 
 // Behavior script loading callbacks
@@ -234,6 +235,7 @@ public:
     void setAddCylinderCallback(AddCylinderCallback callback) { m_onAddCylinder = callback; }
     void setAddCubeCallback(AddCubeCallback callback) { m_onAddCube = callback; }
     void setAddDoorCallback(AddDoorCallback callback) { m_onAddDoor = callback; }
+    void setAddNPCCallback(AddNPCCallback callback) { m_onAddNPC = callback; }
     void setRunGameCallback(RunGameCallback callback) { m_onRunGame = callback; }
 
     // AI Node callbacks
@@ -400,6 +402,12 @@ public:
     // Physics backend
     void setPhysicsBackend(PhysicsBackend backend) { m_physicsBackend = backend; }
     PhysicsBackend getPhysicsBackend() const { return m_physicsBackend; }
+    // Interior flag: when set, the game skips outdoor terrain for this level.
+    bool getNoOutdoorTerrain() const { return m_noOutdoorTerrain; }
+    void setNoOutdoorTerrain(bool v) { m_noOutdoorTerrain = v; }
+    // Build (floors/walls) panel visibility, toggled from the Window menu.
+    bool getShowBuild() const { return m_showBuild; }
+    void setShowBuild(bool v) { m_showBuild = v; }
 
     // Character controller settings
     CameraMode getCameraMode() const { return m_cameraMode; }
@@ -590,6 +598,7 @@ private:
     AddCylinderCallback m_onAddCylinder;
     AddCubeCallback m_onAddCube;
     AddDoorCallback m_onAddDoor;
+    AddNPCCallback m_onAddNPC;
     RunGameCallback m_onRunGame;
 
     // AI Node callbacks
@@ -645,6 +654,8 @@ private:
     // Window visibility
     bool m_showCharacterController = false;
     bool m_showLevelSettings = false;
+    bool m_showBuild = true;           // Build (floors/walls) panel — on by default
+    bool m_noOutdoorTerrain = false;   // interior levels skip terrain in-game
     bool m_showTerrainEditor = true;
     bool m_showSkySettings = true;
     bool m_showWaterSettings = true;

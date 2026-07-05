@@ -17,10 +17,18 @@
 #include "Editor/PrimitiveMeshBuilder.hpp"
 #include "Editor/BinaryLevelReader.hpp"
 #include "Editor/GLBLoader.hpp"
+#include "Renderer/TerrainPipeline.hpp"
+#include "Renderer/TextureManager.hpp"
+#include "Renderer/Buffer.hpp"        // BufferManager (terrain chunk GPU buffers)
+#include "Editor/ChunkManager.hpp"
+#include <eden/Terrain.hpp>
+#include <eden/LevelSerializer.hpp>
 
 #include <eden/Audio.hpp>
 
 #include "encounter.hpp"
+#include "bestiary.hpp"
+#include "alchemy.hpp"
 #include "character.hpp"
 #include "houses.hpp"
 #include "origins.hpp"
@@ -37,6 +45,8 @@
 #include <eden/Camera.hpp>
 #include <eden/Input.hpp>
 #include <eden/Window.hpp>
+
+#include <nlohmann/json.hpp>   // NPC definition files (assets/npcs/<id>.json)
 
 #include <imgui.h>
 #include <imgui_impl_glfw.h>
@@ -66,16 +76,35 @@
 
 using namespace eden;
 
+// Matches the terrain shader's push-constant block (and the editor's identical
+// struct). The terrain pipeline pushes this to VERTEX|FRAGMENT.
+struct TerrainPushConstants {
+    glm::mat4 mvp;
+    glm::vec4 fogColor;
+    float fogStart;
+    float fogEnd;
+    float sunY;
+    float ambientLevel;
+    glm::vec4 cameraPos;
+};
+
 namespace {
 constexpr float kBoardHalf = 16.0f;   // table extends [-16,16] in X and Z
 constexpr float kGridStep  = 2.0f;    // one grid cell = 2 world units (~a 5ft square)
 constexpr float kMiniR     = 0.7f;    // mini base radius
 constexpr int   kGridN     = static_cast<int>((2 * kBoardHalf) / kGridStep);  // cells per axis (16)
+// LIME authors models in METERS; the tabletop world is in FEET (1 unit = 1 ft,
+// 5-ft cells). So placed models are scaled by this to convert their meter
+// dimensions to feet — a 1.8 m human becomes ~5.9 ft.
+constexpr float kMetersToFeet = 3.28084f;
 
 // Beats between a foe's AI phases, so its turn is watchable rather than instant.
 constexpr float kAIMoveDelay   = 0.45f;
 constexpr float kAIStrikeDelay = 0.55f;
 constexpr float kAIEndDelay    = 0.55f;
+constexpr float kLungeDur      = 0.28f;   // attack-lunge duration (seconds)
+constexpr float kLungeMax      = 2.2f;    // peak forward bump, in feet
+constexpr float kSwingDur      = 0.36f;   // player attack-swing flipbook duration (seconds)
 
 // World<->cell mapping. Cells are indexed [0, kGridN); cell centers sit on the
 // grid squares, cell edges on the grid lines.
@@ -123,6 +152,10 @@ protected:
         // and everything renders dark. Bright, mostly-flat top-down lighting.
         m_modelRenderer->setLights({});
         m_modelRenderer->setDayNight(/*sunY*/0.8f, /*ambientLevel*/0.55f);
+        // Terrain subsystem is created lazily (ensureTerrainSubsystem) the first
+        // time a level actually needs terrain — never for interiors, and never at
+        // all for terrain-free play. Building it up front for every level was
+        // causing a periodic UI flicker.
 
         // Top-down orthographic camera. Set the zoom (ortho half-height) first;
         // the Top preset positions the camera above the target and switches to
@@ -192,6 +225,14 @@ protected:
         if (m_modelRenderer)
             m_modelRenderer->recreatePipeline(getSwapchain().getRenderPass(),
                                               getSwapchain().getExtent());
+        // The terrain pipeline bakes a STATIC viewport at creation (unlike the
+        // model renderer's dynamic one), so it must be rebuilt at the new size or
+        // the terrain renders squished into a stale, smaller viewport. No in-place
+        // recreate exists, so reconstruct it. TextureManager/descriptors persist.
+        if (m_terrainPipeline && m_textureManager)
+            m_terrainPipeline = std::make_unique<TerrainPipeline>(
+                getContext(), getSwapchain().getRenderPass(), getSwapchain().getExtent(),
+                m_textureManager->getDescriptorSetLayout());
     }
 
     void update(float dt) override {
@@ -199,10 +240,20 @@ protected:
         ImGui_ImplGlfw_NewFrame();
 
         if (!m_pendingLevel.empty()) doTransition();   // a door was used last frame
+        if (m_pendEnterCellX >= 0) {                   // deferred wilderness entry (GPU work)
+            int cx = m_pendEnterCellX, cy = m_pendEnterCellY;
+            m_pendEnterCellX = m_pendEnterCellY = -1;
+            enterWildernessCell(cx, cy);
+            if (m_pendStartCombat) { m_pendStartCombat = false; startEncounterCombat(m_pendingEncounter); }
+        }
+        if (m_pendEndCombat) { m_pendEndCombat = false; endEncounterCombat(); }
         handleCameraAndPieces();
         stepAI(dt);
+        if (m_lungeT > 0.0f) m_lungeT -= dt;   // advance the attack-lunge animation
+        if (m_swingT > 0.0f) m_swingT -= dt;   // advance the player attack-swing flipbook
+        m_effectTime += dt;                     // free-running clock for pulsing FX
         if (m_screen == Screen::Title) m_titlePulse += dt;
-        if (m_hasLevel && m_screen == Screen::Game) updateFacing();
+        if (m_hasLevel && m_screen == Screen::Game && !m_inCombat) updateFacing();
         if (m_hintTimer > 0.0f) m_hintTimer -= dt;
 
         // Fire the dev screenshot once the countdown elapses.
@@ -246,6 +297,10 @@ protected:
         }
 
         if (m_hasLevel) {
+            // Sculpted terrain first (it's the ground everything else sits on),
+            // via the same engine pipeline + splatmap textures as the editor.
+            renderTerrain(cmd, viewProj);
+
             // Level preview: render the loaded meshes (textured) + the 5-ft grid.
             // Force opaque — floor/wall textures can carry an alpha channel that
             // the editor treats as "frosted glass", which would let the dark
@@ -255,8 +310,14 @@ protected:
                                         0.0f, 1.0f, 1.0f, /*twoSided*/false, /*indoor*/false,
                                         /*transparent*/false);
             m_modelRenderer->renderLines(cmd, viewProj, m_grid, glm::vec3(0.28f, 0.46f, 0.34f));
+            if (m_inCombat) {
+                // A fight in this cell: draw the combatants on the world grid,
+                // among the geometry, in place of the exploration tokens.
+                renderCombatActors(cmd, viewProj);
+            } else {
             // Character tokens (Percy, Orlen) standing on the grid.
             for (const auto& t : m_tokens) {
+                if (!tokenActive(t)) continue;   // NPC not in its home level
                 glm::mat4 M = tokenMatrix(t);
                 for (uint32_t h : t.meshHandles)
                     m_modelRenderer->render(cmd, viewProj, h, M, 0.0f, 1.0f, 1.0f,
@@ -287,11 +348,20 @@ protected:
                     m_modelRenderer->renderLines(cmd, viewProj, ring, glm::vec3(0.93f, 0.80f, 0.36f));
                 }
             }
+            if (m_raging) {   // pulsing red rage aura in town/field too
+                if (int p = playerTokenIndex(); p >= 0) {
+                    const Token& t = m_tokens[p];
+                    float pl = 0.6f + 0.4f * std::sin(m_effectTime * 6.0f);
+                    auto ring = buildRing(t.cx * 5.0f + 2.5f, t.cy * 5.0f + 2.5f, 3.0f + 0.3f * pl, 0.12f);
+                    m_modelRenderer->renderLines(cmd, viewProj, ring, glm::vec3(0.55f + 0.4f * pl, 0.10f, 0.06f));
+                }
+            }
             // Interaction affordance: ring under NPCs/foes adjacent to your piece
             // (green = talk, red = hostile), so you can see who you can act on.
             if (int p = playerTokenIndex(); p >= 0) {
                 for (int i = 0; i < static_cast<int>(m_tokens.size()); ++i) {
                     const Token& t = m_tokens[i];
+                    if (!tokenActive(t)) continue;
                     if (t.attitude == Attitude::Player || !tokensAdjacent(m_tokens[p], t)) continue;
                     glm::vec3 col = (t.attitude == Attitude::Hostile)
                                         ? glm::vec3(0.92f, 0.25f, 0.20f) : glm::vec3(0.30f, 0.85f, 0.42f);
@@ -299,6 +369,7 @@ protected:
                     m_modelRenderer->renderLines(cmd, viewProj, ring, col);
                 }
             }
+            }   // end else: exploration actors
             renderUI();
             ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), cmd);
             vkCmdEndRenderPass(cmd);
@@ -307,47 +378,10 @@ protected:
             return;
         }
 
+        // ── no level: the --combat sandbox on the abstract board ──
         m_modelRenderer->render(cmd, viewProj, m_tableHandle, glm::mat4(1.0f));
         m_modelRenderer->renderLines(cmd, viewProj, m_grid, glm::vec3(0.42f, 0.40f, 0.34f));
-
-        // Reachable squares for the active mover, drawn as a green sub-grid.
-        if (m_enc.hasActive()) {
-            const auto& a = m_enc.active();
-            auto reach = buildReach(a.cx, a.cy, m_enc.cellsLeft());
-            m_modelRenderer->renderLines(cmd, viewProj, reach, glm::vec3(0.30f, 0.80f, 0.42f));
-        }
-
-        // Minis. The active mini follows the cursor (snapped to a cell) while
-        // being dragged; a ring marks whose turn it is — yellow if the hovered
-        // cell is a legal move, red if it's out of range.
-        for (int i = 0; i < static_cast<int>(m_enc.combatants().size()); ++i) {
-            const auto& c = m_enc.combatants()[i];
-            bool isActive = m_enc.hasActive() && i == m_enc.activeId();
-            int px = c.cx, py = c.cy;
-            if (isActive && m_dragging) { px = m_hoverCx; py = m_hoverCy; }
-            float wx = cellCenter(px), wz = cellCenter(py);
-            glm::mat4 mm = glm::translate(glm::mat4(1.0f), glm::vec3(wx, 0.0f, wz));
-            if (c.isDown())  // fallen: flatten the token to the tabletop
-                mm = glm::scale(mm, glm::vec3(1.25f, 0.10f, 1.25f));
-            m_modelRenderer->render(cmd, viewProj, m_miniHandles[i], mm);
-
-            if (isActive && !c.isDown()) {
-                bool ok = !m_dragging || m_enc.canActiveReach(m_hoverCx, m_hoverCy, kGridN);
-                glm::vec3 ringCol = ok ? glm::vec3(0.96f, 0.86f, 0.22f)
-                                       : glm::vec3(0.90f, 0.26f, 0.20f);
-                auto ring = buildRing(wx, wz, kMiniR * 1.35f, 0.06f);
-                m_modelRenderer->renderLines(cmd, viewProj, ring, ringCol);
-            } else if (!c.isDown() && m_hoverCx == c.cx && m_hoverCy == c.cy &&
-                       m_enc.canAttack(i)) {
-                // Hovering a foe the active mover can strike: red target ring,
-                // gold if the strike would be flanked (advantage).
-                glm::vec3 col = m_enc.isFlanking(m_enc.activeId(), i)
-                                    ? glm::vec3(0.98f, 0.80f, 0.20f)
-                                    : glm::vec3(0.92f, 0.22f, 0.18f);
-                auto ring = buildRing(wx, wz, kMiniR * 1.35f, 0.06f);
-                m_modelRenderer->renderLines(cmd, viewProj, ring, col);
-            }
-        }
+        renderCombatActors(cmd, viewProj);
 
         renderUI();
         ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), cmd);
@@ -372,6 +406,47 @@ private:
         glm::mat4 proj = m_camera.getProjectionMatrix(aspect(), 0.5f, 2000.0f);
         proj[1][1] *= -1.0f;
         return proj * m_camera.getViewMatrix();
+    }
+
+    // Draw the sculpted terrain chunks with the engine's terrain pipeline — same
+    // sequence the editor and terrain_flyover use: bind pipeline + texture-array
+    // descriptor, then per visible chunk push its MVP and draw.
+    void renderTerrain(VkCommandBuffer cmd, const glm::mat4& viewProj) {
+        if (!m_hasTerrain || !m_terrain || !m_terrainPipeline) return;
+        m_terrain->update(m_camera.getPosition());   // populate visible chunks
+
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_terrainPipeline->getHandle());
+        VkDescriptorSet texSet = m_textureManager->getDescriptorSet();
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                m_terrainPipeline->getLayout(), 0, 1, &texSet, 0, nullptr);
+
+        TerrainPushConstants pc{};
+        pc.fogColor = glm::vec4(0.0f, 0.0f, 0.0f, 1.0f);
+        pc.fogStart = 1.0e6f;   // effectively no fog in the top-down tabletop view
+        pc.fogEnd   = 1.0e6f;
+        pc.sunY = 0.8f;
+        pc.ambientLevel = 0.6f;
+        pc.cameraPos = glm::vec4(m_camera.getPosition(), 1.0f);
+
+        for (const auto& vc : m_terrain->getVisibleChunks()) {
+            auto* buffers = getBufferManager().getMeshBuffers(vc.chunk->getBufferHandle());
+            if (!buffers || !buffers->vertexBuffer) continue;
+
+            VkBuffer vb[] = { buffers->vertexBuffer->getHandle() };
+            VkDeviceSize off[] = { 0 };
+            vkCmdBindVertexBuffers(cmd, 0, 1, vb, off);
+            if (buffers->indexBuffer)
+                vkCmdBindIndexBuffer(cmd, buffers->indexBuffer->getHandle(), 0, VK_INDEX_TYPE_UINT32);
+
+            glm::mat4 model = glm::translate(glm::mat4(1.0f), vc.renderOffset);
+            pc.mvp = viewProj * model;
+            vkCmdPushConstants(cmd, m_terrainPipeline->getLayout(),
+                               VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                               0, sizeof(TerrainPushConstants), &pc);
+
+            if (buffers->indexBuffer) vkCmdDrawIndexed(cmd, buffers->indexCount, 1, 0, 0, 0);
+            else                      vkCmdDraw(cmd, buffers->vertexCount, 1, 0, 0);
+        }
     }
 
     // Unproject the mouse onto the y=0 board plane. Correct for orthographic
@@ -433,7 +508,13 @@ private:
             return;
         }
         if (m_hasLevel && m_screen == Screen::CharCreate) return;   // ImGui-driven wizard
-        if (m_hasLevel) { handleTokenDrag(overUI); handleLevelCamera(overUI); return; }
+        if (m_hasLevel && m_screen == Screen::WorldMap) return;      // overland map: no piece/camera input
+        if (m_hasLevel && !m_inCombat) { handleTokenDrag(overUI); handleLevelCamera(overUI); return; }
+        if (m_hasLevel && m_inCombat) {   // fight in the cell: move/attack on the world grid, still orbit the view
+            handleCombatMoveAttack(overUI);
+            handleLevelCamera(overUI);
+            return;
+        }
 
         // Zoom (scroll): smaller ortho size = closer.
         float scroll = Input::getScrollDelta();
@@ -549,15 +630,23 @@ private:
         // Door primitives and spawn markers are authoring markers: collect the doors
         // (to derive their cells below) and render neither.
         constexpr int PRIM_SPAWN = 3;  // PrimitiveType::SpawnMarker
+        constexpr int PRIM_NPC   = 6;  // PrimitiveType::NPC (authored character spot)
         struct RawDoor { glm::vec3 pos; std::string id, dest, target; };
         std::vector<RawDoor> rawDoors;
-        glm::vec2 mn(1e9f), mx(-1e9f);
+        std::vector<RawNPC> rawNPCs;   // one per NPC marker; resolved to tokens below
+        glm::vec2 mn(1e9f), mx(-1e9f);        // union of all meshes (fallback extent)
+        glm::vec2 slabMn(0), slabMx(0);       // footprint of the LARGEST floor slab
+        float bestSlabArea = -1.0f;
         for (const auto& o : data.objects) {
             if (o.isDoor) {
                 rawDoors.push_back({o.position, o.doorId, doorDestBasename(o.targetLevel), o.targetDoorId});
                 continue;                                  // marker: not drawn, not in bounds
             }
             if (o.isPrimitive && o.primitiveType == PRIM_SPAWN) continue;   // marker: not drawn
+            if (o.isPrimitive && o.primitiveType == PRIM_NPC) {
+                rawNPCs.push_back({o.position, o.description});             // npcId lives in description
+                continue;                                  // marker: not drawn, not in bounds
+            }
             if (!o.visible || o.meshId < 0 ||
                 o.meshId >= static_cast<int>(m_levelMeshHandles.size())) continue;
             glm::mat4 m = glm::translate(glm::mat4(1.0f), o.position);
@@ -566,13 +655,35 @@ private:
             m = glm::rotate(m, glm::radians(o.rotation.z), glm::vec3(0, 0, 1));
             m = glm::scale(m, o.scale);
             m_levelDraws.push_back({o.meshId, m, o.transparent});
-            glm::vec2 c(o.position.x, o.position.z);
-            glm::vec2 half(std::abs(o.scale.x) * 0.5f, std::abs(o.scale.z) * 0.5f);
-            mn = glm::min(mn, c - half);
-            mx = glm::max(mx, c + half);
+            // Floor-plan bounds from the object's REAL mesh AABB (transformed to
+            // world), not a scale*0.5 unit-cube guess. A building GLB is nowhere
+            // near a unit cube, so the guess made the grid the wrong size and
+            // offset it from the actual geometry.
+            const AABB& lb = data.meshes[o.meshId].bounds;
+            glm::vec2 objMn(1e9f), objMx(-1e9f);
+            for (int i = 0; i < 8; ++i) {
+                glm::vec3 corner((i & 1) ? lb.max.x : lb.min.x,
+                                 (i & 2) ? lb.max.y : lb.min.y,
+                                 (i & 4) ? lb.max.z : lb.min.z);
+                glm::vec3 w = glm::vec3(m * glm::vec4(corner, 1.0f));
+                objMn = glm::min(objMn, glm::vec2(w.x, w.z));
+                objMx = glm::max(objMx, glm::vec2(w.x, w.z));
+            }
+            mn = glm::min(mn, objMn); mx = glm::max(mx, objMx);
+            // The grid extent is driven by the LARGEST floor slab (a level can have
+            // several) — overhanging models/walls don't stretch it.
+            if (o.buildingType == "platform_slab") {
+                float area = (objMx.x - objMn.x) * (objMx.y - objMn.y);
+                if (area > bestSlabArea) { bestSlabArea = area; slabMn = objMn; slabMx = objMx; }
+            }
         }
         if (m_levelDraws.empty()) return;
-        m_levelMin = mn; m_levelMax = mx;
+        // Grid = largest floor slab if there is one; otherwise fall back to all meshes.
+        if (bestSlabArea >= 0.0f) { m_levelMin = slabMn; m_levelMax = slabMx; }
+        else                      { m_levelMin = mn;     m_levelMax = mx;    }
+        std::cerr << "level bounds: X[" << mn.x << "," << mx.x << "] Z["
+                  << mn.y << "," << mx.y << "]  (" << (mx.x - mn.x) << " x "
+                  << (mx.y - mn.y) << " ft)\n";
 
         // Now that the floor bounds are known, snap each door marker to its grid cell.
         for (const auto& r : rawDoors) {
@@ -587,6 +698,90 @@ private:
         m_levelName = (slash == std::string::npos) ? path : path.substr(slash + 1);
         m_levelPath = path;
         m_hasLevel = true;
+        m_inWilderness = false;   // a real authored level, not a generated cell
+
+        // Spawn the cast this level authored. m_levelName is set first so the
+        // NPCs' homeLevel matches the level they were placed in.
+        spawnLevelNPCs(rawNPCs, m_levelMin, m_levelMax);
+
+        loadTerrainForLevel(path);
+    }
+
+    // Load the level's sculpted terrain (the sibling .terrain file) into a Terrain
+    // configured like the editor's default, so its chunks land where the placed
+    // meshes expect them. Levels without a .terrain simply render mesh-only.
+    // Create the terrain rendering subsystem on first use only. Building it up
+    // front for every level (even interiors) caused a periodic UI flicker; most
+    // scenes never need it, so we defer until a level actually has terrain.
+    void ensureTerrainSubsystem() {
+        if (m_terrainPipeline) return;   // already built
+        m_textureManager = std::make_unique<TextureManager>(getContext());
+        m_textureManager->loadTerrainTexturesFromFolder("terrain_textures/");
+        m_terrainPipeline = std::make_unique<TerrainPipeline>(
+            getContext(), getSwapchain().getRenderPass(), getSwapchain().getExtent(),
+            m_textureManager->getDescriptorSetLayout());
+        m_chunkManager = std::make_unique<ChunkManager>(getBufferManager());
+    }
+
+    void loadTerrainForLevel(const std::string& edenbinPath) {
+        m_hasTerrain = false;
+
+        // The terrain lives in a .terrain sibling, referenced by the level's .eden.
+        // LevelSerializer::load(.eden) reads both (its .terrain loader is private),
+        // so go through the .eden here — we only keep the chunks it fills in.
+        std::string edenPath = edenbinPath;
+        auto dot = edenPath.find_last_of('.');
+        if (dot != std::string::npos) edenPath = edenPath.substr(0, dot);
+        edenPath += ".eden";
+
+        LevelData td;
+        if (!LevelSerializer::load(edenPath, td) || td.chunks.empty()) {
+            std::cerr << "no terrain for level (" << edenPath << ")\n";
+            return;
+        }
+        if (td.noOutdoorTerrain) {   // interior: the floor slab is the ground
+            std::cerr << "level flagged interior — skipping outdoor terrain\n";
+            return;
+        }
+
+        // This level really has terrain — build the subsystem now if we haven't.
+        ensureTerrainSubsystem();
+        if (!m_terrainPipeline || !m_chunkManager) return;
+
+        glm::ivec2 mn(td.chunks[0].coord), mx(td.chunks[0].coord);
+        for (const auto& c : td.chunks) { mn = glm::min(mn, c.coord); mx = glm::max(mx, c.coord); }
+
+        TerrainConfig cfg;
+        cfg.viewDistance = 16;
+        if (td.hasTerrainConfig) {
+            // Exact scale/bounds the level was saved with — aligns with the meshes.
+            cfg.tileSize        = td.terrainTileSize;
+            cfg.chunkResolution = td.terrainChunkResolution;
+            cfg.heightScale     = td.terrainHeightScale;
+            cfg.useFixedBounds  = true;
+            cfg.minChunk        = td.terrainMinChunk;
+            cfg.maxChunk        = td.terrainMaxChunk;
+            cfg.wrapWorld       = td.terrainWrapWorld;
+        } else {
+            // Old level with no saved terrain scale — fall back to a guess (the
+            // editor's default) sized to the loaded chunks. May be offset.
+            cfg.chunkResolution = 64;
+            cfg.tileSize        = 2.0f;
+            cfg.heightScale     = 200.0f;
+            cfg.useFixedBounds  = true;
+            cfg.minChunk        = mn;
+            cfg.maxChunk        = mx;
+            cfg.wrapWorld       = false;
+        }
+
+        m_terrain = std::make_unique<Terrain>(cfg);
+        m_chunkManager->preloadAllChunks(*m_terrain, nullptr);          // create chunks
+        LevelSerializer::applyToTerrain(td, *m_terrain);               // fill height/splat
+        for (const auto& [coord, chunk] : m_terrain->getAllChunks())
+            if (chunk->needsUpload()) m_chunkManager->uploadChunk(*chunk);
+
+        m_hasTerrain = true;
+        std::cerr << "terrain loaded: " << td.chunks.size() << " chunk(s) from " << edenPath << "\n";
     }
 
     // Deferred level change: swap the loaded level and drop the hero at the entry.
@@ -605,6 +800,9 @@ private:
         test.close();
         vkDeviceWaitIdle(getContext().getDevice());
         loadLevel(path);                       // clears+rebuilds draws and the new doors
+        m_grid = buildLevelGrid();             // rebuild the grid for the NEW level's
+                                               // bounds — else it stays the previous
+                                               // level's grid, floating off to the side.
         // Emerge at the paired door: the one whose id matches this transition's target.
         int p = playerTokenIndex();
         if (p >= 0 && !m_doors.empty()) {
@@ -614,6 +812,26 @@ private:
                     if (d.id == m_pendingTargetDoorId) { arrive = &d; break; }
             if (!arrive) arrive = &m_doors[0];   // no/unknown target: first door in the level
             m_tokens[p].cx = arrive->cx; m_tokens[p].cy = arrive->cy;
+
+            // Bring any other tokens (NPCs/companions) that are now outside the new
+            // level's footprint in near the arrival door — otherwise they're left
+            // stranded at their old level's cell, floating in empty space.
+            int loX = static_cast<int>(std::floor(m_levelMin.x / 5.0f));
+            int loY = static_cast<int>(std::floor(m_levelMin.y / 5.0f));
+            int hiX = static_cast<int>(std::floor((m_levelMax.x - 0.01f) / 5.0f));
+            int hiY = static_cast<int>(std::floor((m_levelMax.y - 0.01f) / 5.0f));
+            int off = 1;
+            for (int i = 0; i < static_cast<int>(m_tokens.size()); ++i) {
+                if (i == p) continue;
+                Token& t = m_tokens[i];
+                if (!tokenActive(t)) continue;     // NPC not in this level — leave it be
+                bool inside = t.cx >= loX && t.cx <= hiX && t.cy >= loY && t.cy <= hiY;
+                if (!inside) {                     // drop it beside the player, clamped
+                    t.cx = std::clamp(arrive->cx + off, loX, hiX);
+                    t.cy = std::clamp(arrive->cy,        loY, hiY);
+                    ++off;
+                }
+            }
         }
         m_haveLastMouse = false;
         frameCameraOnLevel();
@@ -717,6 +935,9 @@ private:
     struct Token {
         std::string name;
         std::vector<uint32_t> meshHandles;
+        // Optional attack-swing frames (swapped in during an attack, e.g. the
+        // barbarian's axe swing: rest = meshHandles, then these in succession).
+        std::vector<std::vector<uint32_t>> swingFrames;
         float scale = 1.0f;            // uniform, to fit target height
         float minY = 0.0f;             // local bounds min.y (to set feet on floor)
         glm::vec2 centerXZ{0.0f};      // local XZ center (to center on the cell)
@@ -726,7 +947,34 @@ private:
         std::string dialog;           // greeting line (Neutral/Ally NPCs)
         float faceYaw = 0.0f;         // current facing (radians, world)
         float defaultYaw = 0.0f;      // facing when not engaged
+        std::string homeLevel;        // level basename this NPC belongs to; empty =
+                                      // follows everywhere (the player). An NPC is
+                                      // only shown/interactable in its home level.
     };
+
+    // NPC markers: authored spots (PrimitiveType::NPC) where a named NPC stands.
+    // Each carries only an npcId; the definition (model, role, script) is resolved
+    // from assets/npcs/<npcId>.json at spawn time. Not rendered — the character is.
+    struct RawNPC { glm::vec3 pos; std::string npcId; };
+
+    // A journal quest, grouped by category (House, Personal, Faith, Guild, ...).
+    struct Quest { std::string title, category, giver, desc, objective; bool complete = false; };
+
+    // Current level basename without extension (e.g. "orlen_shop"), for matching
+    // against a token's homeLevel. m_levelName is like "orlen_shop.edenbin".
+    std::string currentLevelBase() const {
+        std::string s = m_levelName;
+        auto slash = s.find_last_of("/\\");
+        if (slash != std::string::npos) s = s.substr(slash + 1);
+        auto dot = s.find_last_of('.');
+        if (dot != std::string::npos) s = s.substr(0, dot);
+        return s;
+    }
+    // A token is present in the current level if it has no home (the player/party)
+    // or its home matches the loaded level.
+    bool tokenActive(const Token& t) const {
+        return t.homeLevel.empty() || t.homeLevel == currentLevelBase();
+    }
 
     // Offset for the GLB's local "front" so faceYaw points that front at a
     // target. 0 = model faces +Z; adjust by pi / +-pi/2 if it faces away/sideways.
@@ -895,7 +1143,7 @@ private:
         m_pc.hitDiceTotal = 1;
         m_pc.maxHP = m_pc.curHP = m_pc.hitDieSize + m_pc.mod(rpgc::CON);   // level-1 max hit die + CON
         m_pc.speed = 30;
-        m_pc.armorClass = 10 + m_pc.mod(rpgc::DEX);
+        recomputeAC(m_pc);   // sets AC incl. Barbarian Unarmored Defense (unarmored at creation)
         // Class proficiencies: fixed saving throws + chosen skills.
         auto cp = rpgc::classProficiencies(m_pc.className);
         m_pc.saveProf[cp.save1] = true;
@@ -936,6 +1184,11 @@ private:
         generateStarterQuest();                 // a first House quest to head home
         m_hint = "A new quest awaits - press J for your Journal.";
         m_hintTimer = 6.0f;
+        loadCharacters();                        // swap in the chosen hero's model (race/class/sex now known)
+        m_ragesLeft = isBarbarian() ? ragesPerRest() : 0;   // barbarian starts with a full set of rages
+        m_raging = false;
+        m_knownRecipes.clear();                              // start knowing the base recipes (Healing)
+        for (const auto& r : rpga::recipes()) if (r.knownAtStart) m_knownRecipes.push_back(r.output);
         m_screen = Screen::Game;
         stopTitleMusic();
     }
@@ -2126,9 +2379,10 @@ private:
         ImGui::EndChild();
         ImGui::PopStyleVar();
         ImGui::PopStyleColor();
-        // a small flip toggle under the card
+        // a small flip toggle under the card, plus the PC's Rage button
         if (ImGui::SmallButton((std::string(m_cardBack[idx] ? "Front##" : "Flip##") + std::to_string(idx)).c_str()))
             m_cardBack[idx] = !m_cardBack[idx];
+        if (idx == 0 && isBarbarian()) { ImGui::SameLine(); renderRageButton(); }
     }
 
     void renderPartyBar() {
@@ -2148,35 +2402,104 @@ private:
         ImGui::End();
     }
 
-    // ── quests ──
+    // ── quests (data-driven, authored per-house) ──────────────────────────
+    // A quest's TEXT lives in assets/quests/, not in code:
+    //   assets/quests/houses/<house>.json   — that house's opening quest (override)
+    //   assets/quests/houses/_house.json     — shared base for any house
+    //   assets/quests/houses/_default.json   — hero of no house (foreign newcomer)
+    // Authored text uses {placeholders} that the game fills from this hero, so
+    // one file still speaks to a specific character with no string-building here.
+
+    // Slug a house name into a file key: "House Corvane" -> "corvane".
+    static std::string houseSlug(const std::string& name) {
+        std::string s = name;
+        const std::string pre = "House ";
+        if (s.rfind(pre, 0) == 0) s = s.substr(pre.size());
+        std::string out;
+        for (char c : s) {
+            if (c == ' ') out += '_';
+            else if (c >= 'A' && c <= 'Z') out += static_cast<char>(c - 'A' + 'a');
+            else out += c;
+        }
+        return out;
+    }
+
+    // Replace every {key} in `s` with its value.
+    static std::string fillTemplate(std::string s,
+                                    const std::vector<std::pair<std::string, std::string>>& vars) {
+        for (const auto& [k, v] : vars) {
+            std::string token = "{" + k + "}";
+            size_t pos = 0;
+            while ((pos = s.find(token, pos)) != std::string::npos) {
+                s.replace(pos, token.size(), v);
+                pos += v.size();
+            }
+        }
+        return s;
+    }
+
+    // Load one situation variant from a quest file into `out`. false = missing/bad
+    // (the caller falls back). This is the quest analogue of loadNpcDef.
+    bool loadQuestDef(const std::string& file, const std::string& situation, Quest& out) const {
+        std::ifstream f(file);
+        if (!f) { std::cerr << "quest def MISSING: " << file << "\n"; return false; }
+        try {
+            nlohmann::json j; f >> j;
+            if (!j.contains(situation)) {
+                std::cerr << "quest def '" << file << "' has no '" << situation << "' variant\n";
+                return false;
+            }
+            const auto& q = j[situation];
+            out.title     = q.value("title", std::string());
+            out.category  = q.value("category", std::string("House"));
+            out.giver     = q.value("giver", std::string());
+            out.desc      = q.value("desc", std::string());
+            out.objective = q.value("objective", std::string());
+            return !out.title.empty();
+        } catch (const std::exception& e) {
+            std::cerr << "quest def PARSE FAILED: " << file << " (" << e.what() << ")\n";
+            return false;
+        }
+    }
+
     // A first House quest, seeded from the hero's house and standing, to teach the
     // player to gear up and find their way to their home seat.
     void generateStarterQuest() {
         m_quests.clear();
-        Quest q; q.category = "House";
+        Quest q;
+        std::string file, situation;
+        std::vector<std::pair<std::string, std::string>> vars;
+
         if (rpgw::isHouseRace(m_pc.race) && m_houseIdx >= 0) {
             const auto& h = rpgw::houses()[m_houseIdx];
             std::string dest = std::string(h.seat) + ", in " + h.region;
             bool youHold = (m_family.seatRelation == "you" || m_family.seatHolder == "you");
-            if (youHold) {
-                q.title = "Take Up Your Seat";
-                q.giver = "the duty of your blood";
-                q.desc = "You are the last of " + m_pc.house + ", and its seat at " + h.seat +
-                         " lies waiting - and imperiled. Provision yourself at Orlen's Wares, then set out to claim it.";
-                q.objective = "Gear up at Orlen's, then travel to " + dest + " and take up your seat.";
-            } else {
-                q.title = "Report Home";
-                q.giver = m_family.seatHolder;
-                q.desc = "Word has reached you: you are summoned home. " + m_family.seatHolder + " (" +
-                         m_family.seatRelation + ") awaits you at " + h.seat +
-                         ". Buy what you need from Orlen, then make for the seat of " + m_pc.house + ".";
-                q.objective = "Gear up at Orlen's, then travel to " + dest + " and report to " + m_family.seatHolder + ".";
-            }
+            situation = youHold ? "hold_seat" : "summoned";
+            vars = {
+                {"house", m_pc.house}, {"seat", h.seat}, {"region", h.region},
+                {"dest", dest}, {"seatHolder", m_family.seatHolder},
+                {"seatRelation", m_family.seatRelation},
+            };
+            // Prefer a house-specific file; fall back to the shared house base.
+            std::string specific = "assets/quests/houses/" + houseSlug(m_pc.house) + ".json";
+            std::ifstream test(specific);
+            file = test ? specific : "assets/quests/houses/_house.json";
         } else {
+            situation = "default";
+            file = "assets/quests/houses/_default.json";
+        }
+
+        if (loadQuestDef(file, situation, q)) {
+            q.title     = fillTemplate(q.title, vars);
+            q.giver     = fillTemplate(q.giver, vars);
+            q.desc      = fillTemplate(q.desc, vars);
+            q.objective = fillTemplate(q.objective, vars);
+        } else {
+            // Safety net so the journal is never empty if a file goes missing.
+            q.category = "House";
             q.title = "Find Your Footing";
             q.giver = "your own resolve";
-            q.desc = "You are newly come to Aldermarch, far from your own people. Gather your gear at Orlen's "
-                     "Wares, then set out to make your way in this human realm.";
+            q.desc = "Gather your gear at Orlen's Wares, then set out to make your way.";
             q.objective = "Buy your starting gear at Orlen's, then set out from Orlens.";
         }
         m_quests.push_back(q);
@@ -2509,27 +2832,68 @@ private:
     // Load the character GLBs as movable tokens: one model per mesh (textured),
     // uniformly scaled to a target height in feet with feet on the floor and the
     // XZ centered on a grid cell.
+    // The player's own piece. NPCs are no longer hardcoded here — they're
+    // authored per-level as NPC markers and spawned by spawnLevelNPCs(). Only
+    // Percy (the player) is created once and persists across every level.
+    // The player's token model: the barbarian frames for a male human barbarian,
+    // else the Percy placeholder. Fills `frames` with the swing-frame GLB paths.
+    std::string playerModel(std::vector<std::string>& frames) const {
+        frames.clear();
+        if (m_pc.gender == "Male" && m_pc.race == "Human" && m_pc.className == "Barbarian") {
+            frames = { "assets/characters/player/barbarian_2.glb",
+                       "assets/characters/player/barbarian_3.glb" };
+            return "assets/characters/player/barbarian_1.glb";
+        }
+        return "assets/characters/player/percy_the_knight.glb";
+    }
+
     void loadCharacters() {
+        // Drop any existing player token first — this runs again after character
+        // creation to swap in the chosen hero's model — freeing its GPU meshes.
+        for (auto it = m_tokens.begin(); it != m_tokens.end();) {
+            if (it->attitude == Attitude::Player) {
+                for (uint32_t h : it->meshHandles) if (h) m_modelRenderer->destroyModel(h);
+                for (auto& fr : it->swingFrames) for (uint32_t h : fr) if (h) m_modelRenderer->destroyModel(h);
+                it = m_tokens.erase(it);
+            } else ++it;
+        }
         struct Spawn { const char* path; const char* name; int cx, cy; float heightFt;
-                       Attitude attitude; bool merchant; const char* dialog; };
+                       Attitude attitude; bool merchant; const char* dialog;
+                       const char* homeLevel; };
         const Spawn spawns[] = {
             {"assets/characters/percy_the_knight.glb",   "Percy", 2, 2, 6.0f,
-             Attitude::Player, false, ""},
-            {"assets/characters/orlen_the_merchant.glb", "Orlen", 7, 7, 5.8f,
-             Attitude::Neutral, true, "Welcome to Orlens Wares, traveler. Have a look at my goods."},
+             Attitude::Player, false, "", ""},
         };
+        // The spawn cx/cy above are a RELATIVE layout (a small cluster near a
+        // corner). Anchor them to the loaded level's actual cell range so the
+        // party lands ON the level's floor, not at absolute cells near the world
+        // origin (which is empty for levels placed far out, like trade_street).
+        int baseCx = static_cast<int>(std::floor(m_levelMin.x / 5.0f));
+        int baseCy = static_cast<int>(std::floor(m_levelMin.y / 5.0f));
+        int maxCx  = static_cast<int>(std::floor((m_levelMax.x - 0.01f) / 5.0f));
+        int maxCy  = static_cast<int>(std::floor((m_levelMax.y - 0.01f) / 5.0f));
         for (const auto& sp : spawns) {
-            eden::LoadResult r = eden::GLBLoader::load(sp.path);
+            std::vector<std::string> frameFiles;
+            std::string path = sp.path;
+            std::string dispName = sp.name;
+            if (sp.attitude == Attitude::Player) {          // pick the hero's model by character
+                path = playerModel(frameFiles);
+                if (!m_pc.name.empty()) dispName = m_pc.name;
+            }
+            eden::LoadResult r = eden::GLBLoader::load(path);
             if (!r.success || r.meshes.empty()) {
-                std::cerr << "character load FAILED: " << sp.path << "  (" << r.error << ")\n";
+                std::cerr << "character load FAILED: " << path << "  (" << r.error << ")\n";
                 continue;
             }
             glm::vec3 mn(1e9f), mx(-1e9f);
             for (const auto& m : r.meshes) { mn = glm::min(mn, m.bounds.min); mx = glm::max(mx, m.bounds.max); }
             Token t;
-            t.name = sp.name; t.cx = sp.cx; t.cy = sp.cy;
+            t.name = dispName;
+            t.cx = std::clamp(baseCx + sp.cx, baseCx, maxCx);
+            t.cy = std::clamp(baseCy + sp.cy, baseCy, maxCy);
             t.attitude = sp.attitude; t.merchant = sp.merchant; t.dialog = sp.dialog;
-            t.scale = sp.heightFt / std::max(mx.y - mn.y, 0.001f);
+            t.homeLevel = sp.homeLevel;
+            t.scale = kMetersToFeet;   // convert LIME's meters to the tabletop's feet
             t.minY = mn.y;
             t.centerXZ = { (mn.x + mx.x) * 0.5f, (mn.z + mx.z) * 0.5f };
             for (const auto& m : r.meshes) {
@@ -2537,8 +2901,120 @@ private:
                 int w = m.hasTexture ? m.texture.width : 0, h = m.hasTexture ? m.texture.height : 0;
                 t.meshHandles.push_back(m_modelRenderer->createModel(m.vertices, m.indices, px, w, h));
             }
-            std::cerr << "character loaded: " << sp.name << " — " << r.meshes.size()
-                      << " meshes, scale " << t.scale << "\n";
+            // Attack-swing frames (e.g. the barbarian's axe swing), reusing the
+            // base pose's transform so the character stays anchored between frames.
+            for (const auto& ff : frameFiles) {
+                eden::LoadResult fr = eden::GLBLoader::load(ff);
+                if (!fr.success || fr.meshes.empty()) { std::cerr << "swing frame FAILED: " << ff << "\n"; continue; }
+                std::vector<uint32_t> handles;
+                for (const auto& m : fr.meshes) {
+                    const unsigned char* px = m.hasTexture ? m.texture.data.data() : nullptr;
+                    int w = m.hasTexture ? m.texture.width : 0, h = m.hasTexture ? m.texture.height : 0;
+                    handles.push_back(m_modelRenderer->createModel(m.vertices, m.indices, px, w, h));
+                }
+                t.swingFrames.push_back(std::move(handles));
+            }
+            std::cerr << "character loaded: " << dispName << " — " << r.meshes.size()
+                      << " meshes, " << t.swingFrames.size() << " swing frames, scale " << t.scale << "\n";
+            m_tokens.push_back(std::move(t));
+        }
+    }
+
+    // ---- NPC system (data-driven, authored per-level) ----------------------
+    // A level places NPC markers (npcId only). The rest lives in loose data:
+    //   Layer 2  assets/npcs/<id>.json      — who he is (name, model, role)
+    //   Layer 3  assets/npc_scripts/<id>/   — what he says (the dialogue provider)
+    // so dialogue can grow to trees/LLMs later without touching the level or the
+    // definition.
+
+    struct NpcDef {
+        std::string name;
+        std::string model;               // GLB path under assets/
+        std::string role;                // e.g. "shopkeeper"
+        std::string script;              // script folder id (defaults to the npcId)
+        float       heightFt = 6.0f;
+        bool        ok = false;
+    };
+
+    // Resolve an npcId to its definition file. Missing file / bad JSON -> !ok.
+    NpcDef loadNpcDef(const std::string& npcId) const {
+        NpcDef d;
+        if (npcId.empty()) return d;
+        std::string path = "assets/npcs/" + npcId + ".json";
+        std::ifstream f(path);
+        if (!f) { std::cerr << "npc def MISSING: " << path << "\n"; return d; }
+        try {
+            nlohmann::json j; f >> j;
+            d.name     = j.value("name", npcId);
+            d.model    = j.value("model", std::string());
+            d.role     = j.value("role", std::string());
+            d.script   = j.value("script", npcId);
+            d.heightFt = j.value("heightFt", 6.0f);
+            d.ok       = !d.model.empty();
+        } catch (const std::exception& e) {
+            std::cerr << "npc def PARSE FAILED: " << path << "  (" << e.what() << ")\n";
+        }
+        return d;
+    }
+
+    // The dialogue provider (Layer 3). For now it returns the greeting line from
+    // the script folder. Swap this body for a tree walker or an LLM call later;
+    // callers never change.
+    std::string npcGreeting(const std::string& scriptId) const {
+        std::string path = "assets/npc_scripts/" + scriptId + "/greeting.txt";
+        std::ifstream f(path);
+        if (!f) return "";
+        std::stringstream ss; ss << f.rdbuf();
+        std::string s = ss.str();
+        while (!s.empty() && (s.back() == '\n' || s.back() == '\r' || s.back() == ' ')) s.pop_back();
+        return s;
+    }
+
+    // Rebuild this level's cast from its NPC markers. Percy (the player) is left
+    // alone; every other token is torn down (freeing its GPU meshes) and the
+    // current level's NPCs are spawned in its place — so each level owns its cast.
+    void spawnLevelNPCs(const std::vector<RawNPC>& markers, glm::vec2 lo, glm::vec2 hi) {
+        // Drop the previous level's NPC tokens, releasing their GPU models.
+        for (auto it = m_tokens.begin(); it != m_tokens.end();) {
+            if (it->attitude == Attitude::Player) { ++it; continue; }
+            for (uint32_t h : it->meshHandles) if (h) m_modelRenderer->destroyModel(h);
+            it = m_tokens.erase(it);
+        }
+
+        std::string home = currentLevelBase();
+        for (const auto& mk : markers) {
+            NpcDef def = loadNpcDef(mk.npcId);
+            if (!def.ok) {
+                std::cerr << "NPC marker '" << mk.npcId << "' has no usable definition — skipped\n";
+                continue;
+            }
+            std::string modelPath = "assets/" + def.model;
+            eden::LoadResult r = eden::GLBLoader::load(modelPath);
+            if (!r.success || r.meshes.empty()) {
+                std::cerr << "NPC model load FAILED: " << modelPath << "  (" << r.error << ")\n";
+                continue;
+            }
+            glm::vec3 mn(1e9f), mx(-1e9f);
+            for (const auto& m : r.meshes) { mn = glm::min(mn, m.bounds.min); mx = glm::max(mx, m.bounds.max); }
+
+            Token t;
+            t.name      = def.name;
+            t.cx        = cellFromWorld(mk.pos.x, lo.x, hi.x);
+            t.cy        = cellFromWorld(mk.pos.z, lo.y, hi.y);
+            t.attitude  = Attitude::Neutral;
+            t.merchant  = (def.role == "shopkeeper");
+            t.dialog    = npcGreeting(def.script);
+            t.homeLevel = home;
+            t.scale     = kMetersToFeet;   // convert LIME's meters to the tabletop's feet
+            t.minY      = mn.y;
+            t.centerXZ  = { (mn.x + mx.x) * 0.5f, (mn.z + mx.z) * 0.5f };
+            for (const auto& m : r.meshes) {
+                const unsigned char* px = m.hasTexture ? m.texture.data.data() : nullptr;
+                int w = m.hasTexture ? m.texture.width : 0, h = m.hasTexture ? m.texture.height : 0;
+                t.meshHandles.push_back(m_modelRenderer->createModel(m.vertices, m.indices, px, w, h));
+            }
+            std::cerr << "NPC spawned: " << def.name << " (" << mk.npcId << ", role="
+                      << def.role << ") at cell " << t.cx << "," << t.cy << "\n";
             m_tokens.push_back(std::move(t));
         }
     }
@@ -2569,6 +3045,7 @@ private:
         for (int i = 0; i < static_cast<int>(m_tokens.size()); ++i) {
             if (i == p) continue;
             Token& t = m_tokens[i];
+            if (!tokenActive(t)) continue;   // NPC not in this level
             if (p >= 0 && tokensAdjacent(m_tokens[p], t)) {
                 t.faceYaw = yawToFace(t.cx, t.cy, m_tokens[p].cx, m_tokens[p].cy);
                 if (!playerEngaged) {
@@ -2611,6 +3088,7 @@ private:
         int best = -1;
         float bestT = 1e30f;
         for (int i = 0; i < static_cast<int>(m_tokens.size()); ++i) {
+            if (!tokenActive(m_tokens[i])) continue;   // can't click a token not in this level
             float wx = m_tokens[i].cx * 5.0f, wz = m_tokens[i].cy * 5.0f;
             glm::vec3 bmin(wx, 0.0f, wz), bmax(wx + 5.0f, 7.0f, wz + 5.0f);
             float t;
@@ -2657,7 +3135,8 @@ private:
     // Is any token other than `exceptIdx` standing on cell (cx,cy)?
     bool cellOccupied(int cx, int cy, int exceptIdx) const {
         for (int i = 0; i < (int)m_tokens.size(); ++i)
-            if (i != exceptIdx && m_tokens[i].cx == cx && m_tokens[i].cy == cy) return true;
+            if (i != exceptIdx && tokenActive(m_tokens[i]) &&
+                m_tokens[i].cx == cx && m_tokens[i].cy == cy) return true;
         return false;
     }
 
@@ -2792,9 +3271,17 @@ private:
     }
     static void recomputeAC(rpgc::Character& c) {
         int dex = c.mod(rpgc::DEX);
-        int ac = 10 + dex;                                        // unarmored
         int ai = equippedIdx(c, rpgs::ARMOR);
-        if (ai >= 0) { auto d = rpgs::itemDef(c.items[ai].name); ac = d.baseAC + std::min(dex, d.dexCap); }
+        int ac;
+        if (ai >= 0) {                                            // wearing armor: normal armor AC
+            auto d = rpgs::itemDef(c.items[ai].name);
+            ac = d.baseAC + std::min(dex, d.dexCap);
+        } else if (c.className == "Barbarian") {                  // Barbarian Unarmored Defense
+            ac = 10 + dex + c.mod(rpgc::CON);
+        } else {
+            ac = 10 + dex;                                        // default unarmored
+        }
+        // A shield still adds its bonus — with armor OR Unarmored Defense.
         int si = equippedIdx(c, rpgs::SHIELD);
         if (si >= 0) ac += rpgs::itemDef(c.items[si].name).shieldBonus;
         c.armorClass = ac;
@@ -2802,14 +3289,19 @@ private:
     void equipItem(int idx) {
         auto d = rpgs::itemDef(m_pc.items[idx].name);
         if (d.kind == rpgs::GEAR) return;
+        // A shield can't be held alongside a two-handed weapon — refuse it.
+        if (d.kind == rpgs::SHIELD) {
+            int w = equippedIdx(m_pc, rpgs::WEAPON);
+            if (w >= 0 && rpgs::itemDef(m_pc.items[w].name).twoHanded) {
+                m_hint = "No shield while a two-handed weapon is equipped - unequip it first.";
+                m_hintTimer = 4.0f;
+                return;
+            }
+        }
         for (auto& it : m_pc.items) if (rpgs::itemDef(it.name).kind == d.kind) it.equipped = false;   // one per slot
         m_pc.items[idx].equipped = true;
-        if (d.kind == rpgs::WEAPON && d.twoHanded)                // a two-hander frees the off-hand
+        if (d.kind == rpgs::WEAPON && d.twoHanded)                // equipping a two-hander drops the shield
             for (auto& it : m_pc.items) if (rpgs::itemDef(it.name).kind == rpgs::SHIELD) it.equipped = false;
-        if (d.kind == rpgs::SHIELD) {                             // ...and a shield drops a two-hander
-            int w = equippedIdx(m_pc, rpgs::WEAPON);
-            if (w >= 0 && rpgs::itemDef(m_pc.items[w].name).twoHanded) m_pc.items[w].equipped = false;
-        }
         recomputeAC(m_pc);
     }
     void unequipItem(int idx) { m_pc.items[idx].equipped = false; recomputeAC(m_pc); }
@@ -2837,6 +3329,59 @@ private:
         return buf;
     }
 
+    // The hero's active conditions: computed (hunger) plus any applied by effects.
+    // Extend by pushing to m_conditions (poisoned, frightened, ...) or adding a
+    // computed rule here.
+    // ── barbarian Rage ────────────────────────────────────────────────────
+    bool isBarbarian() const { return m_pc.className == "Barbarian"; }
+    // Rages per long rest by level (SRD): 2 at 1-2, 3 at 3-5, 4 at 6-11, 5 at 12-16, 6 at 17+.
+    int  ragesPerRest() const {
+        int L = m_pc.level;
+        return L >= 17 ? 6 : L >= 12 ? 5 : L >= 6 ? 4 : L >= 3 ? 3 : 2;
+    }
+    void startRage() { if (isBarbarian() && !m_raging && m_ragesLeft > 0) { m_raging = true; --m_ragesLeft; } }
+    void endRage()   { m_raging = false; }
+
+    // Rage button, for the character sheet and the party quick-card. Barbarian only.
+    void renderRageButton() {
+        if (!isBarbarian()) return;
+        if (m_raging) {
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.55f, 0.12f, 0.10f, 1.0f));
+            ImGui::PushStyleColor(ImGuiCol_Text,   ImVec4(1.0f, 0.85f, 0.80f, 1.0f));
+            if (ImGui::SmallButton("RAGING - end")) endRage();
+            ImGui::PopStyleColor(2);
+        } else {
+            ImGui::BeginDisabled(m_ragesLeft <= 0);
+            if (ImGui::SmallButton("Rage")) startRage();
+            ImGui::EndDisabled();
+            ImGui::SameLine(); ImGui::TextDisabled("(%d left)", m_ragesLeft);
+        }
+    }
+
+    std::vector<std::string> activeConditions() const {
+        std::vector<std::string> c;
+        if (m_raging) c.push_back("Raging");
+        if (m_daysWithoutFood >= kStarveAfterDays)      c.push_back("Starving");
+        else if (m_daysWithoutFood >= kHungryAfterDays) c.push_back("Hungry");
+        for (const auto& s : m_conditions) c.push_back(s);
+        return c;
+    }
+    // Short tooltip text for a condition (dynamic for hunger). "" = no tooltip.
+    std::string conditionDesc(const std::string& name) const {
+        if (name == "Raging")
+            return "Barbarian Rage: +2 melee damage, resistance to bludgeoning/piercing/slashing "
+                   "(half damage taken), and advantage on Strength checks and saves.";
+        if (name == "Hungry") {
+            int p = hungerPenalty();
+            return "Day " + std::to_string(m_daysWithoutFood) + " without food.  -" +
+                   std::to_string(p) + " STR and -" + std::to_string(p) + " CON (max -4). " +
+                   "You can endure to about 40 days before starvation sets in. Eat to recover.";
+        }
+        if (name == "Starving")
+            return "Over 40 days without food. Losing 2 HP each day - find food or die.";
+        return "";
+    }
+
     void renderCharacterSheet() {
         const ImVec4 gold(0.76f, 0.63f, 0.42f, 1.0f);
         ImVec2 disp = ImGui::GetIO().DisplaySize;
@@ -2858,6 +3403,29 @@ private:
         ImGui::TextDisabled("%s", seat.c_str());
         ImGui::EndGroup();
         ImGui::Separator();
+
+        // Conditions currently afflicting the hero (hunger, and later poison,
+        // exhaustion, frightened, ...). Red = active; hover for what it means.
+        ImGui::TextColored(gold, "Conditions:");
+        {
+            auto conds = activeConditions();
+            if (conds.empty()) {
+                ImGui::SameLine();
+                ImGui::TextDisabled("None");
+            } else {
+                for (const auto& name : conds) {
+                    ImGui::SameLine();
+                    ImGui::TextColored(ImVec4(0.90f, 0.45f, 0.35f, 1.0f), "%s", name.c_str());
+                    std::string d = conditionDesc(name);
+                    if (!d.empty() && ImGui::IsItemHovered()) ImGui::SetTooltip("%s", d.c_str());
+                }
+            }
+        }
+        ImGui::Separator();
+        if (isBarbarian()) {
+            ImGui::TextColored(gold, "Rage:"); ImGui::SameLine(); renderRageButton();
+            ImGui::Separator();
+        }
 
         // Left: abilities, combat, saves
         ImGui::BeginChild("##sheetL", ImVec2(300, 296), true);
@@ -2937,6 +3505,148 @@ private:
         return lines;
     }
 
+    // ── mode-aware combat coordinates ────────────────────────────────────────
+    // On a level, combat plays on the WORLD's 5-ft grid (cx*5+2.5, cells 0..199)
+    // so the fight happens in the real 3D cell among its rocks and trees. In the
+    // --combat sandbox there is no level, so it falls back to the abstract board.
+    float cCellCtr(int c)  const { return m_hasLevel ? (c * 5.0f + 2.5f) : cellCenter(c); }
+    float cCellEdge(int i) const { return m_hasLevel ? (i * 5.0f)        : cellEdge(i);  }
+    int   cGridN()         const { return m_hasLevel ? 200 : kGridN; }
+    int   cWorldToCell(float w) const {
+        return m_hasLevel ? std::clamp(static_cast<int>(std::floor(w / 5.0f)), 0, cGridN() - 1)
+                          : worldToCell(w);
+    }
+    float cMiniR() const { return m_hasLevel ? 2.2f : kMiniR; }   // ft in-world, board units in sandbox
+
+    // Reachable-squares outline in the active coordinate space.
+    std::vector<glm::vec3> buildReachC(int ax, int ay, int cells) const {
+        std::vector<glm::vec3> lines;
+        const float y = 0.06f;
+        int n = cGridN();
+        int c0 = std::max(0, ax - cells), c1 = std::min(n - 1, ax + cells);
+        int r0 = std::max(0, ay - cells), r1 = std::min(n - 1, ay + cells);
+        for (int c = c0; c <= c1 + 1; ++c) {
+            lines.push_back({cCellEdge(c), y, cCellEdge(r0)});
+            lines.push_back({cCellEdge(c), y, cCellEdge(r1 + 1)});
+        }
+        for (int r = r0; r <= r1 + 1; ++r) {
+            lines.push_back({cCellEdge(c0), y, cCellEdge(r)});
+            lines.push_back({cCellEdge(c1 + 1), y, cCellEdge(r)});
+        }
+        return lines;
+    }
+
+    // Beast foes lunge forward when they bite/gore; humanoids (bandit/cultist) don't.
+    static bool lungesOnAttack(const std::string& name) {
+        return name == "Giant Rat" || name == "Goblin" || name == "Wolf" ||
+               name == "Jackal" || name == "Boar";
+    }
+    void startLunge(int id, const rpgtt::Combatant& a, const rpgtt::Combatant& t) {
+        m_lungeId = id; m_lungeT = kLungeDur;
+        glm::vec2 d(cCellCtr(t.cx) - cCellCtr(a.cx), cCellCtr(t.cy) - cCellCtr(a.cy));
+        float len = std::sqrt(d.x * d.x + d.y * d.y);
+        m_lungeDir = len > 1e-4f ? d / len : glm::vec2(0.0f, 1.0f);
+    }
+
+    // Yaw facing the nearest living opponent (opposite team).
+    float faceNearestEnemy(const rpgtt::Combatant& c) const {
+        float yaw = 0.0f; int best = 1 << 30;
+        for (const auto& o : m_enc.combatants())
+            if (o.foe != c.foe && !o.isDown()) {
+                int dd = std::abs(o.cx - c.cx) + std::abs(o.cy - c.cy);
+                if (dd < best) { best = dd; yaw = yawToFace(c.cx, c.cy, o.cx, o.cy); }
+            }
+        return yaw;
+    }
+
+    // Draw the fighters + reach/turn/target rings, in whichever coordinate space
+    // is active. Used by both wilderness combat and the sandbox.
+    void renderCombatActors(VkCommandBuffer cmd, const glm::mat4& viewProj) {
+        if (m_enc.hasActive()) {
+            const auto& a = m_enc.active();
+            auto reach = buildReachC(a.cx, a.cy, m_enc.cellsLeft());
+            m_modelRenderer->renderLines(cmd, viewProj, reach, glm::vec3(0.30f, 0.80f, 0.42f));
+        }
+        float rr = cMiniR() * 1.35f;
+        for (int i = 0; i < static_cast<int>(m_enc.combatants().size()); ++i) {
+            const auto& c = m_enc.combatants()[i];
+            bool isActive = m_enc.hasActive() && i == m_enc.activeId();
+            int px = c.cx, py = c.cy;
+            if (isActive && m_dragging) { px = m_hoverCx; py = m_hoverCy; }
+            float wx = cCellCtr(px), wz = cCellCtr(py);
+            if (i == m_lungeId && m_lungeT > 0.0f) {   // attack lunge: a quick forward-and-back
+                float bump = std::sin((1.0f - m_lungeT / kLungeDur) * 3.14159265f) * kLungeMax;
+                wx += m_lungeDir.x * bump; wz += m_lungeDir.y * bump;
+            }
+            // The hero shows as his real token model (on a level, facing the
+            // nearest foe); everyone else is a colored mini until enemy tokens exist.
+            int pt = playerTokenIndex();
+            bool heroTok = m_hasLevel && !c.foe && pt >= 0 && !m_tokens[pt].meshHandles.empty();
+            bool foeTok  = c.foe && i < static_cast<int>(m_foeVis.size()) && !m_foeVis[i].handles.empty();
+            if (heroTok || foeTok) {
+                const std::vector<uint32_t>* hs; float sc, my; glm::vec2 ctr;
+                if (heroTok) {
+                    const Token& tk = m_tokens[pt];
+                    hs = &tk.meshHandles;   // rest pose = frame 1
+                    if (m_swingT > 0.0f && tk.swingFrames.size() >= 2) {   // swinging: frame 2 then 3, back to 1
+                        float phase = 1.0f - m_swingT / kSwingDur;         // 0..1
+                        hs = (phase < 0.5f) ? &tk.swingFrames[0] : &tk.swingFrames[1];
+                    }
+                    sc = tk.scale; my = tk.minY; ctr = tk.centerXZ;
+                }
+                else         { const FoeVis& fv = m_foeVis[i]; hs = &fv.handles;    sc = fv.scale; my = fv.minY; ctr = fv.centerXZ; }
+                float yaw = faceNearestEnemy(c);
+                glm::mat4 M = glm::translate(glm::mat4(1.0f), glm::vec3(wx, 0.12f, wz));
+                M = glm::rotate(M, yaw + kModelFrontYaw, glm::vec3(0, 1, 0));
+                if (c.isDown()) M = glm::rotate(M, glm::radians(90.0f), glm::vec3(0, 0, 1));   // dead: topple onto its side
+                M = glm::scale(M, glm::vec3(sc));
+                M = glm::translate(M, glm::vec3(-ctr.x, -my, -ctr.y));
+                for (uint32_t h : *hs) m_modelRenderer->render(cmd, viewProj, h, M, 0.0f, 1.0f, 1.0f, false, false, false);
+            } else {
+                glm::mat4 mm = glm::translate(glm::mat4(1.0f), glm::vec3(wx, 0.0f, wz));
+                if (c.isDown()) mm = glm::scale(mm, glm::vec3(1.25f, 0.10f, 1.25f));   // fallen: flatten
+                m_modelRenderer->render(cmd, viewProj, m_miniHandles[i], mm);
+            }
+            if (m_raging && !c.foe && !c.isDown()) {   // pulsing red rage aura under the hero
+                float p = 0.6f + 0.4f * std::sin(m_effectTime * 6.0f);
+                m_modelRenderer->renderLines(cmd, viewProj, buildRing(wx, wz, rr * (1.2f + 0.12f * p), 0.10f),
+                                             glm::vec3(0.55f + 0.4f * p, 0.10f, 0.06f));
+            }
+            if (isActive && !c.isDown()) {
+                bool ok = !m_dragging || m_enc.canActiveReach(m_hoverCx, m_hoverCy, cGridN());
+                glm::vec3 ringCol = ok ? glm::vec3(0.96f, 0.86f, 0.22f) : glm::vec3(0.90f, 0.26f, 0.20f);
+                m_modelRenderer->renderLines(cmd, viewProj, buildRing(wx, wz, rr, 0.06f), ringCol);
+            } else if (!c.isDown() && m_hoverCx == c.cx && m_hoverCy == c.cy && m_enc.canAttack(i)) {
+                glm::vec3 col = m_enc.isFlanking(m_enc.activeId(), i)
+                                    ? glm::vec3(0.98f, 0.80f, 0.20f) : glm::vec3(0.92f, 0.22f, 0.18f);
+                m_modelRenderer->renderLines(cmd, viewProj, buildRing(wx, wz, rr, 0.06f), col);
+            }
+        }
+    }
+
+    // Combat move/attack on the world grid (wilderness combat). Camera orbit/zoom
+    // is left to handleLevelCamera so the player can still look around the fight.
+    void handleCombatMoveAttack(bool overUI) {
+        glm::vec2 ground;
+        if (!mouseOnBoard(ground)) return;
+        m_hoverCx = cWorldToCell(ground.x);
+        m_hoverCy = cWorldToCell(ground.y);
+        if (Input::isMouseButtonPressed(Input::MOUSE_LEFT) && !overUI &&
+            m_enc.hasActive() && !m_enc.active().foe) {
+            const auto& a = m_enc.active();
+            if (m_hoverCx == a.cx && m_hoverCy == a.cy) {
+                m_dragging = true;
+            } else {
+                int tid = combatantAt(m_hoverCx, m_hoverCy);
+                if (tid >= 0 && m_enc.canAttack(tid)) doAttack(tid);
+            }
+        }
+        if (m_dragging && !Input::isMouseButtonDown(Input::MOUSE_LEFT)) {
+            commitMove(m_hoverCx, m_hoverCy);
+            m_dragging = false;
+        }
+    }
+
     std::vector<glm::vec3> buildRing(float cx, float cz, float radius, float y) const {
         std::vector<glm::vec3> pts;
         const int seg = 28;
@@ -2953,6 +3663,158 @@ private:
     int rollDie(int sides) { std::uniform_int_distribution<int> d(1, sides); return d(m_rng); }
     int rollD20() { return rollDie(20); }
 
+    // ── overland encounter -> tactical combat ────────────────────────────────
+    // Parse a "XdY" damage string into dice/sides (defaults 1d4 on garbage).
+    static void parseDice(const std::string& s, int& dice, int& sides) {
+        dice = 1; sides = 4;
+        auto d = s.find('d');
+        if (d == std::string::npos) return;
+        try { dice = std::stoi(s.substr(0, d)); sides = std::stoi(s.substr(d + 1)); } catch (...) {}
+    }
+
+    // Build the hero's Combatant from the character sheet: HP/AC/speed straight
+    // across, attack + damage from the equipped weapon (versatile if two-handed).
+    rpgtt::Combatant combatantFromCharacter(const rpgc::Character& pc, int cx, int cy,
+                                            std::mt19937& rng) {
+        rpgtt::Combatant c;
+        c.name = pc.name.empty() ? "Hero" : pc.name;
+        c.foe = false; c.cx = cx; c.cy = cy;
+        c.cr = 0.28f; c.cg = 0.48f; c.cb = 0.86f;              // hero blue
+        c.speedFeet = pc.speed;
+        c.maxHp = pc.maxHP; c.hp = pc.curHP > 0 ? pc.curHP : pc.maxHP;
+        c.ac = pc.armorClass;
+        int prof = rpgc::proficiencyBonus(pc.level);
+        int str = pc.mod(rpgc::STR), dex = pc.mod(rpgc::DEX);
+        c.initiative = std::uniform_int_distribution<int>(1, 20)(rng) + dex;
+        int wi = equippedIdx(pc, rpgs::WEAPON);
+        if (wi >= 0) {
+            auto d = rpgs::itemDef(pc.items[wi].name);
+            int abil = d.ranged ? dex : (d.finesse ? std::max(str, dex) : str);
+            c.attackBonus = abil + prof;
+            std::string dmg = d.dmg;
+            if (d.versatile[0] && equippedIdx(pc, rpgs::SHIELD) < 0) dmg = d.versatile;
+            parseDice(dmg, c.dmgDice, c.dmgSides);
+            c.dmgBonus = abil;
+        } else {                                               // unarmed: 1 + STR
+            c.attackBonus = str + prof;
+            c.dmgDice = 1; c.dmgSides = 1; c.dmgBonus = std::max(0, str);
+        }
+        return c;
+    }
+
+    rpgtt::Combatant combatantFromMonster(const rpgb::MonsterDef& m, int cx, int cy,
+                                          std::mt19937& rng) {
+        rpgtt::Combatant c;
+        c.name = m.name; c.foe = true; c.cx = cx; c.cy = cy;
+        c.cr = 0.82f; c.cg = 0.24f; c.cb = 0.20f;              // foe red
+        c.speedFeet = m.speedFeet;
+        c.maxHp = c.hp = m.maxHp; c.ac = m.ac;
+        c.attackBonus = m.attackBonus;
+        c.dmgDice = m.dmgDice; c.dmgSides = m.dmgSides; c.dmgBonus = m.dmgBonus;
+        c.initiative = std::uniform_int_distribution<int>(1, 20)(rng);
+        return c;
+    }
+
+    // Set up the tactical board from a rolled encounter and enter combat: hero on
+    // the near edge, foes spread along the far edge. The wilderness level stays
+    // loaded underneath; endEncounterCombat() returns to it.
+    void startEncounterCombat(const rpgb::EncounterGroup& group) {
+        for (uint32_t h : m_miniHandles) if (h) m_modelRenderer->destroyModel(h);
+        m_miniHandles.clear();
+        for (auto& fv : m_foeVis) for (uint32_t h : fv.handles) if (h) m_modelRenderer->destroyModel(h);
+        m_foeVis.clear();
+        m_enc.clear();
+        m_log.clear();
+
+        // Minis sized to the space: ~2.2 ft radius / 6 ft tall figures in the
+        // world; small tokens on the abstract sandbox board.
+        float mr = cMiniR(), mh = m_hasLevel ? 6.0f : 1.8f;
+        auto addMini = [&](const rpgtt::Combatant& c, const rpgb::MonsterDef* md) {
+            m_enc.add(c);
+            // Cylinder mini: the fallback visual, kept for every combatant.
+            auto mesh = PrimitiveMeshBuilder::createCylinder(mr, mh, 28,
+                                                             glm::vec4(c.cr, c.cg, c.cb, 1.0f));
+            m_miniHandles.push_back(m_modelRenderer->createModel(mesh.vertices, mesh.indices));
+            // A foe's real token model, if the file exists (else stays a cylinder).
+            FoeVis fv;
+            if (md) {
+                eden::LoadResult r = eden::GLBLoader::load(rpgb::monsterModelPath(md->name));
+                if (r.success && !r.meshes.empty()) {
+                    glm::vec3 mn(1e9f), mx(-1e9f);
+                    for (const auto& m : r.meshes) { mn = glm::min(mn, m.bounds.min); mx = glm::max(mx, m.bounds.max); }
+                    fv.scale = kMetersToFeet;   // convert LIME's meters to the tabletop's feet
+                    fv.minY = mn.y; fv.centerXZ = { (mn.x + mx.x) * 0.5f, (mn.z + mx.z) * 0.5f };
+                    for (const auto& m : r.meshes) {
+                        const unsigned char* px = m.hasTexture ? m.texture.data.data() : nullptr;
+                        int w = m.hasTexture ? m.texture.width : 0, h = m.hasTexture ? m.texture.height : 0;
+                        fv.handles.push_back(m_modelRenderer->createModel(m.vertices, m.indices, px, w, h));
+                    }
+                    std::cerr << "foe token loaded: " << rpgb::monsterModelPath(md->name) << "\n";
+                }
+            }
+            m_foeVis.push_back(fv);
+        };
+
+        int N = cGridN();
+        if (m_hasLevel) {
+            // Wilderness: fight ON the cell. Hero at his square, foes a few cells
+            // off (they close in). Camera + grid are already the wilderness cell's.
+            int hx = 100, hy = 100;
+            if (int p = playerTokenIndex(); p >= 0) { hx = m_tokens[p].cx; hy = m_tokens[p].cy; }
+            addMini(combatantFromCharacter(m_pc, hx, hy, m_rng), nullptr);
+            int n = static_cast<int>(group.monsters.size());
+            int fx0 = hx - n / 2;
+            for (int i = 0; i < n; ++i)
+                addMini(combatantFromMonster(*group.monsters[i],
+                        std::clamp(fx0 + i, 0, N - 1), std::clamp(hy - 5, 0, N - 1), m_rng),
+                        group.monsters[i]);
+        } else {
+            // Sandbox: the abstract board.
+            int mid = N / 2;
+            addMini(combatantFromCharacter(m_pc, mid, N - 3, m_rng), nullptr);
+            int n = static_cast<int>(group.monsters.size());
+            int startX = std::clamp(mid - n / 2, 0, N - 1);
+            for (int i = 0; i < n; ++i)
+                addMini(combatantFromMonster(*group.monsters[i], std::clamp(startX + i, 0, N - 1), 2, m_rng),
+                        group.monsters[i]);
+            m_grid = buildGrid();
+            m_camTarget = glm::vec3(0.0f, 0.0f, 0.0f);
+            m_camYaw = -90.0f; m_camPitch = -55.0f;
+            m_camDist = kBoardHalf * 2.6f; m_orthoSize = kBoardHalf * 1.1f; m_levelOrtho = false;
+            applyOrbitCamera();
+        }
+
+        m_spawn = m_enc.combatants();
+        m_enc.start();
+        m_lastActiveId = -1; m_dragging = false; m_deathTurnActive = false;
+        m_lungeId = -1; m_lungeT = 0.0f; m_swingT = 0.0f;
+
+        m_inCombat = true;
+    }
+
+    // Leave the fight and return to the wilderness cell, carrying the hero's HP
+    // back to the character and restoring the level's grid + a hero-centered view.
+    void endEncounterCombat() {
+        for (const auto& c : m_enc.combatants())
+            if (!c.foe) { m_pc.curHP = std::max(0, c.hp); break; }
+        for (uint32_t h : m_miniHandles) if (h) m_modelRenderer->destroyModel(h);
+        m_miniHandles.clear();
+        for (auto& fv : m_foeVis) for (uint32_t h : fv.handles) if (h) m_modelRenderer->destroyModel(h);
+        m_foeVis.clear();
+        m_enc.clear();
+        m_inCombat = false;
+
+        m_grid = buildLevelGrid();
+        if (int p = playerTokenIndex(); p >= 0) {
+            glm::vec3 pc(m_tokens[p].cx * 5 + 2.5f, 2.0f, m_tokens[p].cy * 5 + 2.5f);
+            m_camTarget = pc; m_camYaw = -90.0f; m_camPitch = -45.0f;
+            m_camDist = 90.0f; m_orthoSize = 40.0f; m_levelOrtho = false;
+            applyOrbitCamera();
+        }
+        m_raging = false;              // rage ends when the fight is over
+        m_screen = Screen::WorldMap;   // the fight's over: straight back to the overland map
+    }
+
     // Index of a living combatant standing on a cell, or -1.
     int combatantAt(int cx, int cy) const {
         const auto& cs = m_enc.combatants();
@@ -2967,6 +3829,8 @@ private:
     void doAttack(int targetId) {
         const rpgtt::Combatant& a = m_enc.active();
         const rpgtt::Combatant& t = m_enc.combatants()[targetId];
+        if (lungesOnAttack(a.name)) startLunge(m_enc.activeId(), a, t);   // beast lunge
+        if (!a.foe) m_swingT = kSwingDur;                                 // hero attack-swing flipbook
         bool adv = m_enc.isFlanking(m_enc.activeId(), targetId);   // house-rule flanking
         bool dis = t.dodging;                                      // target is Dodging
         // Advantage and disadvantage cancel to one straight roll, no matter how
@@ -2981,6 +3845,8 @@ private:
         int dice = 0;
         for (int s = 0; s < sets; ++s)
             for (int i = 0; i < a.dmgDice; ++i) dice += rollDie(a.dmgSides);
+        if (m_raging && !a.foe) dice += 2;                      // Rage: +2 melee damage (the hero swings)
+        if (m_raging && !t.foe) dice = std::max(1, dice / 2);   // Rage: resistance - the hero takes half
         rpgtt::AttackOutcome o = m_enc.attack(targetId, d20, dice);
         if (o.valid) logAttack(o, m_enc.combatants()[targetId], mode);
     }
@@ -3003,7 +3869,8 @@ private:
     // attacks provoked by leaving a foe's reach. Used by both the player (drag
     // release) and the AI. If an OA drops the mover, it falls where it stood.
     void commitMove(int toX, int toY) {
-        if (!m_enc.hasActive() || !m_enc.canActiveReach(toX, toY, kGridN)) return;
+        if (!m_enc.hasActive() || !m_enc.canActiveReach(toX, toY, cGridN())) return;
+        if (combatantAt(toX, toY) >= 0) return;   // a living token stands there — no sharing a cell
         int me = m_enc.activeId();
         int fromX = m_enc.active().cx, fromY = m_enc.active().cy;
         if (toX == fromX && toY == fromY) return;
@@ -3019,7 +3886,7 @@ private:
             if (o.valid) logAttack(o, m_enc.combatants()[me], "  (opportunity)");
             if (m_enc.combatants()[me].isDown()) break;   // dropped mid-move
         }
-        if (!m_enc.active().isDown()) m_enc.moveActiveTo(toX, toY, kGridN);
+        if (!m_enc.active().isDown()) m_enc.moveActiveTo(toX, toY, cGridN());
     }
 
     // ----- enemy AI driver -----
@@ -3114,6 +3981,529 @@ private:
         if (tid >= 0 && m_enc.canAttack(tid)) doAttack(tid);
     }
 
+    // ── calendar ────────────────────────────────────────────────────────────
+    static const char* monthName(int m) {
+        static const char* names[12] = {
+            "Deepwinter", "Thawmoon", "Seedmoon", "Blossomtide", "Highsun", "Longday",
+            "Harvestmoon", "Emberfall", "Mistmoon", "Duskmoon", "Frostmoon", "Yearsend"
+        };
+        return names[((m % 12) + 12) % 12];
+    }
+    std::string dateString() const {
+        return std::string(monthName(m_month)) + " " + std::to_string(m_day) +
+               ", " + std::to_string(m_year);
+    }
+    void advanceDay() {
+        ++m_totalDays;
+        if (++m_day > 30) { m_day = 1; if (++m_month > 11) { m_month = 0; ++m_year; } }
+    }
+
+    // A long rest — the night's camp on each travel-day. Per 5e a long rest
+    // restores ALL hit points (and half your max Hit Dice; HP is the ask here),
+    // so a wounded hero is whole again by morning. Returns HP recovered.
+    int longRest() {
+        if (m_pc.maxHP <= 0) return 0;
+        int before = m_pc.curHP;
+        m_pc.curHP = m_pc.maxHP;
+        if (isBarbarian()) m_ragesLeft = ragesPerRest();   // rages recharge on a long rest
+        m_raging = false;                                   // and any rage ends
+        return std::max(0, m_pc.curHP - before);
+    }
+
+    // Rations = the quantity of "Rations (1 day)" in the pack (bought at a shop).
+    int rationCount() const {
+        for (const auto& it : m_pc.items) if (it.name == kRationItem) return it.qty;
+        return 0;
+    }
+    // Eat one day's ration, removing the stack when it hits zero.
+    void consumeRation() {
+        for (int i = 0; i < static_cast<int>(m_pc.items.size()); ++i) {
+            if (m_pc.items[i].name == kRationItem) {
+                if (--m_pc.items[i].qty <= 0) m_pc.items.erase(m_pc.items.begin() + i);
+                return;
+            }
+        }
+    }
+
+    // STR/CON lost to hunger right now: 1 per hungry day, capped at 4.
+    int hungerPenalty() const {
+        return std::min(kMaxHungerPenalty, std::max(0, m_daysWithoutFood - 1));
+    }
+    // Apply this day's hunger toll: drain STR/CON toward the current penalty
+    // (this also RESTORES them once the hero has eaten and the penalty drops),
+    // and bleed 2 HP once starving past 40 days.
+    void applyHungerEffects() {
+        int target = hungerPenalty();
+        m_pc.abilities[rpgc::STR] -= (target - m_hungerStrApplied); m_hungerStrApplied = target;
+        m_pc.abilities[rpgc::CON] -= (target - m_hungerConApplied); m_hungerConApplied = target;
+        if (m_daysWithoutFood >= kStarveAfterDays) m_pc.curHP = std::max(0, m_pc.curHP - 2);
+    }
+
+    // Persistent date + rations bar, pinned top-center. Shown in every gameplay
+    // view (town and overland), so time is always visible.
+    void renderCalendarBar() {
+        ImVec2 disp = ImGui::GetIO().DisplaySize;
+        ImGui::SetNextWindowPos(ImVec2(disp.x * 0.5f, 6.0f), ImGuiCond_Always, ImVec2(0.5f, 0.0f));
+        ImGui::Begin("##calendar", nullptr,
+                     ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+                     ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoMove |
+                     ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoFocusOnAppearing);
+        ImGui::Text("%s        Rations: %d", dateString().c_str(), rationCount());
+        ImGui::End();
+    }
+
+    // ── overland world map ───────────────────────────────────────────────────
+    void openWorldMap() { m_screen = Screen::WorldMap; }
+
+    // Each cell's terrain — deterministic and coherent (a coarse hash makes
+    // ~2-cell patches, weighted toward common terrain), so the map, cell
+    // generation, and (later) foraging all key off the same biome.
+    rpgb::Biome cellBiome(int cx, int cy) const {
+        static const rpgb::Biome pal[] = {
+            rpgb::Grassland, rpgb::Grassland, rpgb::Grassland,
+            rpgb::Forest, rpgb::Forest, rpgb::Hill, rpgb::Hill,
+            rpgb::Mountain, rpgb::Desert, rpgb::Swamp, rpgb::Coastal, rpgb::Arctic,
+        };
+        uint32_t h = static_cast<uint32_t>((cx >> 1) * 73856093) ^
+                     static_cast<uint32_t>((cy >> 1) * 19349663);
+        h ^= h >> 13; h *= 0x5bd1e995u; h ^= h >> 15;
+        return pal[h % (sizeof(pal) / sizeof(pal[0]))];
+    }
+    static ImU32 biomeColor(rpgb::Biome b) {          // for the overland map
+        switch (b) {
+            case rpgb::Grassland: return IM_COL32(150, 182, 104, 255);
+            case rpgb::Forest:    return IM_COL32( 86, 130,  74, 255);
+            case rpgb::Hill:      return IM_COL32(166, 168, 108, 255);
+            case rpgb::Mountain:  return IM_COL32(150, 148, 152, 255);
+            case rpgb::Desert:    return IM_COL32(226, 204, 150, 255);
+            case rpgb::Swamp:     return IM_COL32(104, 120,  88, 255);
+            case rpgb::Coastal:   return IM_COL32(208, 200, 150, 255);
+            case rpgb::Arctic:    return IM_COL32(226, 234, 242, 255);
+            default:              return IM_COL32(180, 180, 180, 255);
+        }
+    }
+    static glm::vec4 biomeGroundColor(rpgb::Biome b) {  // for the 3D cell's ground slab
+        switch (b) {
+            case rpgb::Grassland: return {0.36f, 0.52f, 0.28f, 1};
+            case rpgb::Forest:    return {0.24f, 0.40f, 0.22f, 1};
+            case rpgb::Hill:      return {0.44f, 0.48f, 0.28f, 1};
+            case rpgb::Mountain:  return {0.46f, 0.46f, 0.48f, 1};
+            case rpgb::Desert:    return {0.78f, 0.68f, 0.44f, 1};
+            case rpgb::Swamp:     return {0.30f, 0.36f, 0.26f, 1};
+            case rpgb::Coastal:   return {0.72f, 0.68f, 0.48f, 1};
+            case rpgb::Arctic:    return {0.82f, 0.86f, 0.90f, 1};
+            default:              return {0.5f, 0.5f, 0.5f, 1};
+        }
+    }
+    static void biomeScatter(rpgb::Biome b, float& treeF, float& rockF) {  // relative density
+        switch (b) {
+            case rpgb::Forest:   treeF = 3.0f; rockF = 0.6f; break;
+            case rpgb::Hill:     treeF = 0.6f; rockF = 2.0f; break;
+            case rpgb::Mountain: treeF = 0.2f; rockF = 3.0f; break;
+            case rpgb::Desert:   treeF = 0.1f; rockF = 1.5f; break;
+            case rpgb::Swamp:    treeF = 1.5f; rockF = 0.4f; break;
+            case rpgb::Coastal:  treeF = 0.4f; rockF = 1.2f; break;
+            case rpgb::Arctic:   treeF = 0.3f; rockF = 1.0f; break;
+            default:             treeF = 1.0f; rockF = 1.0f; break;   // Grassland
+        }
+    }
+
+    // Add an item (ingredient, gear, ...) to the pack, stacking by name.
+    void addToPack(const std::string& name, int qty, float weight) {
+        for (auto& it : m_pc.items) if (it.name == name) { it.qty += qty; return; }
+        rpgc::Item it; it.name = name; it.qty = qty; it.weight = weight;
+        m_pc.items.push_back(it);
+    }
+    int packCount(const std::string& name) const {
+        for (const auto& it : m_pc.items) if (it.name == name) return it.qty;
+        return 0;
+    }
+    bool removeFromPack(const std::string& name, int qty) {
+        for (auto it = m_pc.items.begin(); it != m_pc.items.end(); ++it)
+            if (it->name == name) {
+                if (it->qty < qty) return false;
+                it->qty -= qty;
+                if (it->qty <= 0) m_pc.items.erase(it);
+                return true;
+            }
+        return false;
+    }
+
+    // ── brewing (alchemy) ────────────────────────────────────────────────────
+    bool knowsRecipe(const std::string& output) const {
+        for (const auto& r : m_knownRecipes) if (r == output) return true;
+        return false;
+    }
+    bool hasAlchemistSupplies() const { return packCount("Alchemist's Supplies") > 0; }
+    bool hasIngredients(const rpga::Recipe& r) const {
+        for (const auto& p : r.parts) if (packCount(p.name) < p.qty) return false;
+        return true;
+    }
+    // Brew a known recipe: spend the ingredients, roll INT (Alchemist's Supplies)
+    // vs the recipe DC. Success -> the potion; failure -> the brew is spoiled.
+    void brewRecipe(const rpga::Recipe& r) {
+        if (!hasAlchemistSupplies()) { m_travelMsg = "You need Alchemist's Supplies to brew."; m_travelMsgTimer = 5.0f; return; }
+        if (!hasIngredients(r))      { m_travelMsg = "You lack the ingredients."; m_travelMsgTimer = 5.0f; return; }
+        for (const auto& p : r.parts) removeFromPack(p.name, p.qty);
+        int roll = rollD20() + m_pc.mod(rpgc::INT) + rpgc::proficiencyBonus(m_pc.level);
+        if (roll >= r.dc) {
+            addToPack(r.output, 1, 0.5f);
+            m_travelMsg = "Brewed " + std::string(r.output) + "!  (check " + std::to_string(roll) +
+                          " vs DC " + std::to_string(r.dc) + ")";
+        } else {
+            m_travelMsg = "The brew curdles - ingredients wasted.  (check " + std::to_string(roll) +
+                          " vs DC " + std::to_string(r.dc) + ")";
+        }
+        m_travelMsgTimer = 7.0f;
+    }
+    void renderBrewPanel() {
+        ImVec2 disp = ImGui::GetIO().DisplaySize;
+        ImGui::SetNextWindowPos(ImVec2(disp.x * 0.5f, disp.y * 0.5f), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+        ImGui::SetNextWindowSize(ImVec2(470, 0), ImGuiCond_Appearing);
+        ImGui::Begin("Brew - Alchemist's Supplies", &m_brewOpen, ImGuiWindowFlags_NoCollapse);
+        if (!hasAlchemistSupplies())
+            ImGui::TextColored(ImVec4(0.95f, 0.55f, 0.4f, 1.0f), "You need Alchemist's Supplies (buy from Orlen).");
+        ImGui::TextDisabled("Brew a known recipe from foraged ingredients. An INT check vs the\nrecipe's DC decides it; a failure spoils the ingredients.");
+        ImGui::Separator();
+        bool any = false;
+        for (const auto& r : rpga::recipes()) {
+            if (!knowsRecipe(r.output)) continue;
+            any = true;
+            ImGui::PushID(r.output);
+            bool have = hasIngredients(r) && hasAlchemistSupplies();
+            ImGui::BeginDisabled(!have);
+            if (ImGui::Button("Brew")) brewRecipe(r);
+            ImGui::EndDisabled();
+            ImGui::SameLine();
+            ImGui::TextColored(ImVec4(0.9f, 0.85f, 0.7f, 1.0f), "%s", r.output);
+            ImGui::SameLine(); ImGui::TextDisabled("(DC %d)", r.dc);
+            for (const auto& p : r.parts) {
+                int hv = packCount(p.name);
+                ImVec4 col = hv >= p.qty ? ImVec4(0.55f, 0.85f, 0.55f, 1) : ImVec4(0.85f, 0.55f, 0.5f, 1);
+                ImGui::TextColored(col, "      %d / %d   %s", hv, p.qty, p.name);
+            }
+            ImGui::Separator();
+            ImGui::PopID();
+        }
+        if (!any) ImGui::TextDisabled("You know no recipes yet.");
+        ImGui::End();
+    }
+
+    // Forage the current square's terrain: a DAY spent (advances the calendar,
+    // eats a ration, camps that night) on a Wisdom (Survival) check. A poor roll
+    // wastes the day; a good one yields ingredients from THIS biome, weighted so
+    // common ones turn up far more than rare. Rangers find double (Natural Explorer).
+    void forageAction() {
+        advanceDay();
+        longRest();
+        bool ate = rationCount() > 0;
+        consumeRation();
+        m_daysWithoutFood = ate ? 0 : m_daysWithoutFood + 1;
+        applyHungerEffects();
+
+        rpgb::Biome biome = cellBiome(m_mapX, m_mapY);
+        auto pool = rpga::ingredientsInBiome(biome);
+        if (pool.empty()) {
+            m_travelMsg = "The land here offers nothing to gather.";
+            m_travelMsgTimer = 5.0f; return;
+        }
+
+        constexpr int SURVIVAL = 17;   // index in rpgc::skills()
+        int prof = rpgc::proficiencyBonus(m_pc.level);
+        int survival = m_pc.mod(rpgc::WIS) + (m_pc.skillProf[SURVIVAL] ? prof : 0)
+                                           + (m_pc.skillExpert[SURVIVAL] ? prof : 0);
+        int roll = rollD20() + survival;
+        int finds = roll >= 10 ? 1 + (roll - 10) / 6 : 0;
+        if (m_pc.className == "Ranger") finds *= 2;   // Natural Explorer: double foraged
+        finds = std::min(finds, 5);
+
+        if (finds <= 0) {
+            m_travelMsg = "You forage all day (Survival " + std::to_string(roll) + ") but come up empty-handed.";
+            m_travelMsgTimer = 6.0f; return;
+        }
+
+        // Weighted bag: Common x4, Uncommon x3, Rare x2, Very Rare x1.
+        std::vector<const rpga::Ingredient*> bag;
+        for (auto* ig : pool) { int w = std::max(1, 4 - ig->rarity); for (int k = 0; k < w; ++k) bag.push_back(ig); }
+        std::uniform_int_distribution<int> pick(0, static_cast<int>(bag.size()) - 1);
+
+        std::vector<std::pair<std::string, int>> got;
+        for (int i = 0; i < finds; ++i) {
+            const rpga::Ingredient* ig = bag[pick(m_rng)];
+            addToPack(ig->name, 1, 0.2f);
+            bool f = false;
+            for (auto& g : got) if (g.first == ig->name) { g.second++; f = true; break; }
+            if (!f) got.push_back({ig->name, 1});
+        }
+        std::string msg = "Foraged (" + std::string(rpgb::biomeName(biome)) + "):";
+        for (size_t i = 0; i < got.size(); ++i)
+            msg += (i ? "," : "") + std::string(" ") +
+                   (got[i].second > 1 ? std::to_string(got[i].second) + "x " : "") + got[i].first;
+        m_travelMsg = msg;
+        m_travelMsgTimer = 7.0f;
+    }
+
+    // What one day on the road brings: a wilderness encounter roll (1-in-6),
+    // and arrival at Greywatch. The date + ration were already spent by the move.
+    // Returns true if this day's travel triggered an encounter (so the caller
+    // can mark the square with an X).
+    bool travelDayEvents() {
+        std::string msg;
+        std::uniform_int_distribution<int> d6(1, 6);
+        bool encounter = (d6(m_rng) == 1);
+        if (encounter)
+            msg = "You are beset on the road! (an encounter - overland combat is coming)";
+        if (rationCount() <= 0)
+            msg = "Your rations are gone - you march on an empty stomach. (Buy more at a shop.)";
+        if (m_daysWithoutFood >= kStarveAfterDays)
+            msg = m_pc.curHP <= 0 ? "You have starved to death."
+                                  : "You are starving - your body is failing (-2 HP/day).";
+        if (m_mapX == kGreywatchCol && m_mapY == kGreywatchRow)
+            msg = "The walls of Greywatch rise before you. You have arrived.";
+        if (!msg.empty()) { m_travelMsg = msg; m_travelMsgTimer = 6.0f; }
+        return encounter;
+    }
+
+    // Arrow keys move one square = one day (advance date, spend a ration, roll
+    // events). Esc returns to town. Called from renderWorldMap (after NewFrame,
+    // where ImGui key state is valid).
+    void updateTravelInput() {
+        if (m_travelMsgTimer > 0.0f) m_travelMsgTimer -= ImGui::GetIO().DeltaTime;
+        if (ImGui::GetIO().WantTextInput) return;
+        if (ImGui::IsKeyPressed(ImGuiKey_F, false)) { forageAction(); return; }   // spend the day foraging
+        if (ImGui::IsKeyPressed(ImGuiKey_B, false)) m_brewOpen = !m_brewOpen;     // open the Brew panel
+        if (ImGui::IsKeyPressed(ImGuiKey_Escape, false)) {   // step into the current square (deferred)
+            m_pendEnterCellX = m_mapX; m_pendEnterCellY = m_mapY; m_pendStartCombat = false; return;
+        }
+        int dx = 0, dy = 0;
+        if (ImGui::IsKeyPressed(ImGuiKey_A, false)) dx = -1;   // WASD travel
+        if (ImGui::IsKeyPressed(ImGuiKey_D, false)) dx =  1;
+        if (ImGui::IsKeyPressed(ImGuiKey_W, false)) dy = -1;
+        if (ImGui::IsKeyPressed(ImGuiKey_S, false)) dy =  1;
+        if (dx == 0 && dy == 0) return;
+        int nx = m_mapX + dx, ny = m_mapY + dy;
+        if (nx < 0 || nx >= kMapCols || ny < 0 || ny >= kMapRows) return;   // off the map
+        m_mapX = nx; m_mapY = ny;
+        advanceDay();
+        int healed = longRest();   // camp that night: recover the previous day's wounds
+        if (healed > 0) {
+            m_travelMsg = "You make camp for the night and recover " + std::to_string(healed) + " HP.";
+            m_travelMsgTimer = 5.0f;
+        }
+        bool ate = rationCount() > 0;
+        consumeRation();       // eat one day's food (from the pack you bought)
+        m_daysWithoutFood = ate ? 0 : m_daysWithoutFood + 1;   // 2+ days -> Hungry
+        applyHungerEffects();  // drain STR/CON, or restore them once fed; starvation HP loss
+        bool encounter = travelDayEvents();
+        // Leave a breadcrumb: X if ambushed here, otherwise a dot. Each visit
+        // stamps a fresh timestamp so the mark fades by age (recent = bright).
+        m_trail[ny][nx] = encounter ? kTrailX : kTrailDot;
+        m_trailDay[ny][nx] = m_totalDays;
+
+        // An encounter drops you straight into the wilds where it happened, with a
+        // biome-appropriate, level-appropriate foe group rolled for the fight.
+        if (encounter) {
+            m_pendingEncounter = rpgb::buildEncounter(rpgb::Grassland, m_pc.level, 1, m_rng);
+            m_hint = "Ambushed! " + rpgb::describeGroup(m_pendingEncounter) + " bar your way.";
+            m_hintTimer = 6.0f;
+            m_pendEnterCellX = m_mapX; m_pendEnterCellY = m_mapY;   // deferred: enter the field...
+            m_pendStartCombat = true;                              // ...then straight into the fight
+        }
+    }
+
+    // Generate the walkable wilderness for one overland square. DETERMINISTIC:
+    // the same (cx,cy) always rebuilds the identical layout (seed = spatial hash),
+    // so revisiting a cell shows the same place - no files needed. Basic version:
+    // a grassland slab with scattered placeholder rocks and trees (swap for real
+    // LIME models + a grass texture later). 1000 x 1000 ft = 200 x 200 five-ft cells.
+    void generateWildernessCell(int cx, int cy) {
+        uint32_t seed = static_cast<uint32_t>(cx) * 73856093u ^
+                        static_cast<uint32_t>(cy) * 19349663u ^ 0x9E3779B9u;
+        std::mt19937 rng(seed);
+
+        // Tear down the resident level (town or a prior cell), freeing its meshes.
+        for (uint32_t h : m_levelMeshHandles) if (h) m_modelRenderer->destroyModel(h);
+        m_levelMeshHandles.clear();
+        m_levelDraws.clear();
+        m_doors.clear();
+        m_hasTerrain = false;
+
+        const float SIZE = 1000.0f;   // 200 cells x 5 ft
+        rpgb::Biome biome = cellBiome(cx, cy);              // this square's terrain
+        float treeF, rockF; biomeScatter(biome, treeF, rockF);
+
+        // Template meshes, reused across many draws via per-instance matrices.
+        auto slabM  = PrimitiveMeshBuilder::createFoundation({0.0f, 0.0f}, {SIZE, SIZE},
+                          -1.0f, 1.0f, biomeGroundColor(biome));   // ground tinted by terrain
+        auto rockM  = PrimitiveMeshBuilder::createCube(1.0f, glm::vec4(0.55f, 0.55f, 0.57f, 1.0f));
+        auto trunkM = PrimitiveMeshBuilder::createCylinder(0.5f, 1.0f, 8,  glm::vec4(0.40f, 0.27f, 0.15f, 1.0f));
+        auto leafM  = PrimitiveMeshBuilder::createCylinder(0.5f, 1.0f, 10, glm::vec4(0.20f, 0.42f, 0.20f, 1.0f));
+        m_levelMeshHandles = {
+            m_modelRenderer->createModel(slabM.vertices,  slabM.indices),
+            m_modelRenderer->createModel(rockM.vertices,  rockM.indices),
+            m_modelRenderer->createModel(trunkM.vertices, trunkM.indices),
+            m_modelRenderer->createModel(leafM.vertices,  leafM.indices),
+        };
+        enum { M_SLAB = 0, M_ROCK = 1, M_TRUNK = 2, M_LEAF = 3 };
+
+        m_levelDraws.push_back({ M_SLAB, glm::mat4(1.0f), false });   // the ground
+
+        std::uniform_real_distribution<float> posD(25.0f, SIZE - 25.0f);
+        std::uniform_real_distribution<float> rotD(0.0f, 6.2831853f);
+        std::uniform_real_distribution<float> rockSz(2.0f, 8.0f);
+        std::uniform_real_distribution<float> treeHt(14.0f, 26.0f);
+
+        int nRocks = static_cast<int>(std::uniform_int_distribution<int>(12, 28)(rng) * rockF);
+        for (int i = 0; i < nRocks; ++i) {
+            float x = posD(rng), z = posD(rng), s = rockSz(rng);
+            glm::mat4 M = glm::translate(glm::mat4(1.0f), glm::vec3(x, 0.0f, z));
+            M = glm::rotate(M, rotD(rng), glm::vec3(0, 1, 0));
+            M = glm::scale(M, glm::vec3(s, s * 0.7f, s));
+            m_levelDraws.push_back({ M_ROCK, M, false });
+        }
+        int nTrees = static_cast<int>(std::uniform_int_distribution<int>(18, 40)(rng) * treeF);
+        for (int i = 0; i < nTrees; ++i) {
+            float x = posD(rng), z = posD(rng), h = treeHt(rng);
+            float r = h * 0.05f;
+            glm::mat4 T = glm::translate(glm::mat4(1.0f), glm::vec3(x, 0.0f, z));
+            T = glm::scale(T, glm::vec3(r * 2.0f, h, r * 2.0f));          // trunk
+            m_levelDraws.push_back({ M_TRUNK, T, false });
+            float cr = h * 0.32f;
+            glm::mat4 C = glm::translate(glm::mat4(1.0f), glm::vec3(x, h * 0.7f, z));
+            C = glm::scale(C, glm::vec3(cr * 2.0f, h * 0.5f, cr * 2.0f)); // canopy
+            m_levelDraws.push_back({ M_LEAF, C, false });
+        }
+
+        m_levelMin = glm::vec2(0.0f, 0.0f);
+        m_levelMax = glm::vec2(SIZE, SIZE);
+        m_levelName = "Wilderness (" + std::to_string(cx) + ", " + std::to_string(cy) + ")";
+        m_grid = buildLevelGrid();
+
+        // Clear any town NPCs; drop the hero in the middle of the field (cell 100,100).
+        for (auto it = m_tokens.begin(); it != m_tokens.end();) {
+            if (it->attitude == Attitude::Player) { ++it; continue; }
+            for (uint32_t h : it->meshHandles) if (h) m_modelRenderer->destroyModel(h);
+            it = m_tokens.erase(it);
+        }
+        if (int p = playerTokenIndex(); p >= 0) { m_tokens[p].cx = 100; m_tokens[p].cy = 100; }
+
+        // Camera near the hero - framing the whole 1000 ft field would shrink him
+        // to a speck. Start on the usual 3/4 angle; player can pan/dolly/T freely.
+        glm::vec3 pc(100 * 5 + 2.5f, 2.0f, 100 * 5 + 2.5f);
+        m_camTarget = pc; m_camYaw = -90.0f; m_camPitch = -45.0f;
+        m_camDist = 90.0f; m_orthoSize = 40.0f; m_levelOrtho = false;
+        applyOrbitCamera();
+    }
+
+    // Leave the overland map and step into the current square as a real level.
+    void enterWildernessCell(int cx, int cy) {
+        vkDeviceWaitIdle(getContext().getDevice());   // safe to swap GPU resources
+        generateWildernessCell(cx, cy);
+        m_inWilderness = true;
+        m_hasLevel = true;
+        m_screen = Screen::Game;
+        m_haveLastMouse = false;
+    }
+
+    // A trail mark's opacity, faded by age: fresh = full, older = dimmer, down to
+    // a faint floor (kept visible so the sense of history never fully vanishes).
+    float trailAlpha(long markDay) const {
+        long age = std::max(0L, m_totalDays - markDay);
+        float t = std::min(1.0f, static_cast<float>(age) / static_cast<float>(kTrailFadeDays));
+        return 1.0f - t * (1.0f - kTrailMinAlpha);
+    }
+
+    void renderWorldMap() {
+        ImGuiIO& io = ImGui::GetIO();
+        ImVec2 disp = io.DisplaySize;
+        ImDrawList* bg = ImGui::GetBackgroundDrawList();
+
+        // Beige backdrop (placeholder for the real map art).
+        bg->AddRectFilled(ImVec2(0, 0), disp, IM_COL32(224, 208, 174, 255));
+
+        // A square map region centered on screen; 24x24 grid of 25-mile cells.
+        float margin = 70.0f;
+        float side = std::min(disp.x, disp.y) - 2.0f * margin;
+        if (side < 200.0f) side = std::min(disp.x, disp.y) * 0.9f;
+        ImVec2 origin((disp.x - side) * 0.5f, (disp.y - side) * 0.5f);
+        float cell = side / static_cast<float>(kMapCols);
+
+        // Paint each cell by its terrain, so the map reads as a real landscape.
+        for (int y = 0; y < kMapRows; ++y)
+            for (int x = 0; x < kMapCols; ++x) {
+                ImVec2 tl(origin.x + x * cell, origin.y + y * cell);
+                bg->AddRectFilled(tl, ImVec2(tl.x + cell, tl.y + cell), biomeColor(cellBiome(x, y)));
+            }
+
+        ImU32 gridCol = IM_COL32(150, 134, 100, 160);
+        for (int i = 0; i <= kMapCols; ++i) {
+            float x = origin.x + i * cell;
+            bg->AddLine(ImVec2(x, origin.y), ImVec2(x, origin.y + side), gridCol);
+        }
+        for (int j = 0; j <= kMapRows; ++j) {
+            float y = origin.y + j * cell;
+            bg->AddLine(ImVec2(origin.x, y), ImVec2(origin.x + side, y), gridCol);
+        }
+
+        auto squareCenter = [&](int cx, int cy) {
+            return ImVec2(origin.x + (cx + 0.5f) * cell, origin.y + (cy + 0.5f) * cell);
+        };
+
+        // Travel trail: a dot on each square we passed through, an X where an
+        // encounter struck. Drawn under the cities and hero.
+        for (int y = 0; y < kMapRows; ++y)
+            for (int x = 0; x < kMapCols; ++x) {
+                if (m_trail[y][x] == kTrailNone) continue;
+                int a = static_cast<int>(trailAlpha(m_trailDay[y][x]) * 255.0f);
+                ImVec2 c = squareCenter(x, y);
+                if (m_trail[y][x] == kTrailDot) {
+                    bg->AddCircleFilled(c, cell * 0.11f, IM_COL32(90, 70, 45, a));
+                } else {   // kTrailX
+                    float r = cell * 0.20f;
+                    ImU32 xc = IM_COL32(155, 40, 30, a);
+                    bg->AddLine(ImVec2(c.x - r, c.y - r), ImVec2(c.x + r, c.y + r), xc, 2.5f);
+                    bg->AddLine(ImVec2(c.x - r, c.y + r), ImVec2(c.x + r, c.y - r), xc, 2.5f);
+                }
+            }
+
+        auto city = [&](int cx, int cy, ImU32 col, const char* label) {
+            ImVec2 c = squareCenter(cx, cy);
+            bg->AddCircleFilled(c, cell * 0.28f, col);
+            bg->AddText(ImVec2(c.x + cell * 0.35f, c.y - cell * 0.55f), IM_COL32(45, 34, 22, 255), label);
+        };
+        city(kFerroholdCol, kFerroholdRow, IM_COL32(70, 90, 165, 255),  "Ferrohold");
+        city(kGreywatchCol, kGreywatchRow, IM_COL32(155, 60, 50, 255),  "Greywatch");
+
+        // Hero marker, drawn last (on top).
+        ImVec2 h = squareCenter(m_mapX, m_mapY);
+        bg->AddCircleFilled(h, cell * 0.32f, IM_COL32(240, 220, 60, 255));
+        bg->AddCircle(h, cell * 0.32f, IM_COL32(45, 34, 22, 255), 0, 2.0f);
+
+        updateTravelInput();     // arrow keys / Esc
+        renderCalendarBar();     // persistent date + rations
+
+        ImGui::SetNextWindowPos(ImVec2(disp.x * 0.5f, disp.y - 12.0f), ImGuiCond_Always, ImVec2(0.5f, 1.0f));
+        ImGui::Begin("##traveltip", nullptr,
+                     ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+                     ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoMove |
+                     ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoFocusOnAppearing);
+        ImGui::Text("Terrain here: %s", rpgb::biomeName(cellBiome(m_mapX, m_mapY)));
+        ImGui::TextUnformatted("WASD: travel     F: forage     B: brew     Esc: back to town");
+        if (m_brewOpen) renderBrewPanel();
+        ImGui::TextDisabled("Bound for Greywatch, 600 miles east. Each square is 25 miles.");
+        ImGui::End();
+
+        if (m_travelMsgTimer > 0.0f && !m_travelMsg.empty()) {
+            ImGui::SetNextWindowPos(ImVec2(disp.x * 0.5f, disp.y * 0.16f), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+            ImGui::Begin("##travelmsg", nullptr,
+                         ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+                         ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoMove |
+                         ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoFocusOnAppearing);
+            ImGui::TextUnformatted(m_travelMsg.c_str());
+            ImGui::End();
+        }
+    }
+
     void renderUI() {
         ImGui::NewFrame();
 
@@ -3127,8 +4517,15 @@ private:
             ImGui::Render();
             return;
         }
+        if (m_hasLevel && m_screen == Screen::WorldMap) {
+            renderWorldMap();
+            ImGui::Render();
+            return;
+        }
 
-        if (m_hasLevel) {
+        if (m_hasLevel && !m_inCombat) {
+            renderCalendarBar();   // persistent date + rations (top-center)
+
             // Pinned HUD: no move/resize so it can't wander over the viewport or
             // flash resize cursors that fight the camera for the mouse.
             ImGui::SetNextWindowPos(ImVec2(10, 10), ImGuiCond_Always);
@@ -3151,12 +4548,17 @@ private:
             if (ImGui::Button("Character (C)")) m_sheetOpen = !m_sheetOpen;
             ImGui::SameLine();
             if (ImGui::Button("Journal (J)")) m_showJournal = !m_showJournal;
+            if (m_inWilderness) {
+                ImGui::Separator();
+                ImGui::TextDisabled("Wilderness - press M to resume overland travel");
+            }
             ImGui::End();
 
             // C / J toggle the sheet / journal (unless a text field is focused).
             if (!ImGui::GetIO().WantTextInput) {
                 if (ImGui::IsKeyPressed(ImGuiKey_C)) m_sheetOpen = !m_sheetOpen;
                 if (ImGui::IsKeyPressed(ImGuiKey_J)) m_showJournal = !m_showJournal;
+                if (ImGui::IsKeyPressed(ImGuiKey_M)) openWorldMap();   // M = open the overland map (the PRIMARY way players travel; permanent, not scaffolding)
             }
 
             if (m_showParty) renderPartyBar();
@@ -3185,7 +4587,17 @@ private:
                     ImGui::Begin("##door", nullptr,
                                  ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
                                  ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoMove);
-                    if (ImGui::Button("Leave through the door", ImVec2(240, 0))) {
+                    if (d.dest == "overland") {
+                        // A city-edge door: offer the travel choice instead of a plain
+                        // transition. (Author it by setting the door's Target level to
+                        // "overland".) Option 1 (King's Road) is stubbed for now.
+                        ImGui::TextUnformatted("You reach the edge of the city. Which way?");
+                        ImGui::Separator();
+                        ImGui::BeginDisabled();
+                        ImGui::Button("Take the King's Road (not yet built)", ImVec2(280, 0));
+                        ImGui::EndDisabled();
+                        if (ImGui::Button("Travel overland", ImVec2(280, 0))) openWorldMap();
+                    } else if (ImGui::Button("Leave through the door", ImVec2(240, 0))) {
                         m_pendingLevel = d.dest; m_pendingTargetDoorId = d.target;
                     }
                     ImGui::End();
@@ -3285,10 +4697,15 @@ private:
 
         // Victory when the foes are wiped; defeat only once no hero can act or
         // recover (a dying hero might still nat-20 back up).
+        bool over = (m_enc.living(true) == 0) || partyDefeated();
         if (m_enc.living(true) == 0)
             ImGui::TextColored(ImVec4(0.4f, 0.9f, 0.45f, 1.0f), "Foes defeated - victory!");
         else if (partyDefeated())
             ImGui::TextColored(ImVec4(0.95f, 0.4f, 0.35f, 1.0f), "The party has fallen.");
+        // Overland fight: once it's decided, return to the wilderness cell.
+        if (m_hasLevel && over) {
+            if (ImGui::Button("Leave the field")) m_pendEndCombat = true;   // deferred (GPU work)
+        }
 
         ImGui::Spacing();
         if (ImGui::Button("End Turn")) m_enc.endTurn();
@@ -3315,6 +4732,19 @@ private:
         ImGui::TextDisabled("Leaving melee provokes; Disengage avoids");
         ImGui::TextDisabled("Middle-drag pan  \xc2\xb7  Scroll zoom");
         ImGui::End();
+
+        // In a wilderness fight, keep the party quick-cards and the character
+        // sheet reachable (the Rage button lives on both), plus the C/J hotkeys.
+        if (m_hasLevel) {
+            if (m_showParty) renderPartyBar();
+            if (!ImGui::GetIO().WantTextInput) {
+                if (ImGui::IsKeyPressed(ImGuiKey_C)) m_sheetOpen = !m_sheetOpen;
+                if (ImGui::IsKeyPressed(ImGuiKey_J)) m_showJournal = !m_showJournal;
+            }
+            if (m_sheetOpen) renderCharacterSheet();
+            if (m_showJournal) renderJournal();
+        }
+
         ImGui::Render();
     }
 
@@ -3382,16 +4812,81 @@ private:
 
     std::unique_ptr<ModelRenderer> m_modelRenderer;
     ImGuiManager m_imgui;
+
+    // Terrain: the same engine pipeline the editor uses, so a level's sculpted
+    // ground renders in-game with its real splatmap textures. Config mirrors the
+    // editor's default (res 64, tileSize 2 ft) so chunks land where the editor
+    // puts them. m_hasTerrain gates it — levels with no .terrain just skip it.
+    std::unique_ptr<TextureManager> m_textureManager;
+    std::unique_ptr<TerrainPipeline> m_terrainPipeline;
+    std::unique_ptr<ChunkManager> m_chunkManager;
+    std::unique_ptr<Terrain> m_terrain;
+    bool m_hasTerrain = false;
     Camera m_camera;
 
     uint32_t m_tableHandle = 0;
     std::vector<uint32_t> m_miniHandles;   // one per combatant, indexed by combatant id
+    // Loaded token model per combatant (foes only for now; empty handles = use
+    // the cylinder mini). Lets each foe show its real GLB once the file exists.
+    struct FoeVis { std::vector<uint32_t> handles; float scale = 1.0f, minY = 0.0f; glm::vec2 centerXZ{0.0f}; };
+    std::vector<FoeVis> m_foeVis;          // parallel to m_enc.combatants()
     std::vector<glm::vec3> m_grid;
 
     // Title -> character creation -> game flow (game/level mode only).
-    enum class Screen { Title, CharCreate, Game };
+    enum class Screen { Title, CharCreate, Game, WorldMap };
     Screen m_screen = Screen::Game;   // set to Title when a level is loaded
     int    m_musicLoop = -1;          // title-music loop id (-1 = none)
+
+    // ── overland travel + persistent calendar ──────────────────────────────
+    // In-world date: 12 months x 30 days (a 360-day year). Month names are
+    // placeholders — rename freely in monthName().
+    int m_year = 1247, m_month = 0, m_day = 1;   // month 0-11, day 1-30
+    long m_totalDays = 0;                         // monotonic day count (for trail-fade age)
+    // Rations aren't a freebie counter — they ARE the "Rations (1 day)" items in
+    // the pack, bought from Orlen (or any shop that stocks them). Travel spends
+    // them. See rationCount()/consumeRation().
+    static constexpr const char* kRationItem = "Rations (1 day)";
+    // World map: a 24x24 grid of 25-mile squares (600 x 600 miles). Ferrohold
+    // (start) sits on the west edge, Greywatch (destination) on the east edge.
+    static constexpr int kMapCols = 24, kMapRows = 24, kMilesPerSquare = 25;
+    static constexpr int kFerroholdCol = 0,  kFerroholdRow = 12;
+    static constexpr int kGreywatchCol = 23, kGreywatchRow = 12;
+    int m_mapX = kFerroholdCol, m_mapY = kFerroholdRow;   // hero's square
+    std::string m_travelMsg;              // transient overland notice
+    float m_travelMsgTimer = 0.0f;
+    // Breadcrumb trail: what happened on each visited square. Dot = passed
+    // through quietly, X = had an encounter there (sticky once set).
+    static constexpr uint8_t kTrailNone = 0, kTrailDot = 1, kTrailX = 2;
+    uint8_t m_trail[kMapRows][kMapCols] = {};
+    long m_trailDay[kMapRows][kMapCols] = {};        // day each mark was made (for fade)
+    static constexpr int   kTrailFadeDays = 40;      // fades to faint over this many days
+    static constexpr float kTrailMinAlpha = 0.15f;   // floor: never fully gone (history stays)
+    // Hunger: consecutive travel-days with no food. 2+ = the "Hungry" condition.
+    // Eating (a ration available on a travel-day) resets it to 0.
+    int m_daysWithoutFood = 0;
+    static constexpr int kHungryAfterDays = 2;
+    // Hunger toll: -1 STR & CON per hungry day (cap 4), then past 40 days
+    // starvation costs 2 HP/day toward death. Track how much STR/CON we've
+    // already subtracted so eating restores it cleanly. maxHP is intentionally
+    // NOT recomputed from the CON drain (kept simple); only starvation cuts HP.
+    static constexpr int kStarveAfterDays = 40, kMaxHungerPenalty = 4;
+    int m_hungerStrApplied = 0, m_hungerConApplied = 0;
+    // Conditions applied by effects (poisoned, frightened, ...). Hunger is
+    // computed in activeConditions(); this holds the manually-applied ones.
+    std::vector<std::string> m_conditions;
+    bool m_raging = false;         // barbarian Rage active
+    int  m_ragesLeft = 0;          // rages remaining until a long rest
+    std::vector<std::string> m_knownRecipes;   // alchemy recipes the hero has learned
+    bool m_brewOpen = false;                    // the Brew panel is open (on the map)
+    bool m_inWilderness = false;   // current level is a generated overland cell
+    rpgb::EncounterGroup m_pendingEncounter;   // foes rolled by the last overland encounter
+    bool m_inCombat = false;       // a fight is underway; the tactical board takes over
+    // Deferred scene transitions: heavy GPU work (create/destroy models,
+    // vkDeviceWaitIdle) must run in update(), NOT during command recording where
+    // updateTravelInput / the combat HUD fire. Same reason doTransition is deferred.
+    int  m_pendEnterCellX = -1, m_pendEnterCellY = -1;   // >=0 = enter this wilderness cell
+    bool m_pendStartCombat = false;                       // ...then start the fight
+    bool m_pendEndCombat   = false;                       // leave combat -> wilderness
     float  m_titlePulse = 0.0f;       // for the "press to begin" pulse
 
     // Character creation state.
@@ -3464,9 +4959,7 @@ private:
     bool m_dialogMerchant = false;   // the current NPC runs a shop
     bool m_shopOpen = false;         // Orlen's trade overlay is up
     bool m_sheetOpen = false;        // the character sheet is up
-    // Quests, grouped by category (House, Personal, Faith, Guild, ...).
-    struct Quest { std::string title, category, giver, desc, objective; bool complete = false; };
-    std::vector<Quest> m_quests;
+    std::vector<Quest> m_quests;     // Quest struct declared up by Token/RawNPC
     bool m_showJournal = false;
     std::string m_dialogName, m_dialogText;
     std::string m_hint;
@@ -3489,6 +4982,13 @@ private:
     int   m_lastActiveId = -1;             // detect turn changes to (re)start the AI
     int   m_aiPhase = 0;                   // 0 = move, 1 = strike, 2 = end turn
     float m_aiTimer = 0.0f;                // seconds until the next AI beat
+    // Attack-lunge animation: which combatant is lunging, time left, and the
+    // world-XZ direction toward its target (beast foes only).
+    int   m_lungeId = -1;
+    float m_lungeT = 0.0f;
+    glm::vec2 m_lungeDir{0.0f, 1.0f};
+    float m_swingT = 0.0f;                 // player attack-swing flipbook time left
+    float m_effectTime = 0.0f;             // free-running clock for pulsing FX (rage aura, ...)
     bool  m_deathTurnActive = false;       // active hero is auto-rolling a death save
 
     bool      m_dragging = false;          // dragging the active mini

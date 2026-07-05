@@ -17,7 +17,17 @@ add_custom_command(TARGET tabletop POST_BUILD
         ${CMAKE_BINARY_DIR}/shaders/wireframe.frag.spv
         ${CMAKE_BINARY_DIR}/shaders/selection.vert.spv
         ${CMAKE_BINARY_DIR}/shaders/selection.frag.spv
+        ${CMAKE_BINARY_DIR}/shaders/terrain.vert.spv
+        ${CMAKE_BINARY_DIR}/shaders/terrain.frag.spv
         $<TARGET_FILE_DIR:tabletop>/shaders/
+)
+
+# Symlink the terrain splatmap textures next to the binary so the game loads the
+# SAME texture set (and slot order) the levels were painted with in the editor.
+add_custom_command(TARGET tabletop POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E create_symlink
+        ${CMAKE_SOURCE_DIR}/examples/terrain_editor/assets/textures
+        $<TARGET_FILE_DIR:tabletop>/terrain_textures
 )
 
 # Symlink the source assets/ next to the binary so it resolves "assets/..." at

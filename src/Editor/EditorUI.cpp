@@ -177,6 +177,9 @@ void EditorUI::renderMenuBar() {
             if (ImGui::MenuItem("Door (Level Transition)")) {
                 if (m_onAddDoor) m_onAddDoor();
             }
+            if (ImGui::MenuItem("NPC (Character Marker)")) {
+                if (m_onAddNPC) m_onAddNPC();
+            }
             ImGui::EndMenu();
         }
 
@@ -193,6 +196,7 @@ void EditorUI::renderMenuBar() {
             ImGui::MenuItem("Sky Settings", nullptr, &m_showSkySettings);
             ImGui::MenuItem("Water Settings", nullptr, &m_showWaterSettings);
             ImGui::MenuItem("Level Settings", nullptr, &m_showLevelSettings);
+            ImGui::MenuItem("Build (floors/walls)", nullptr, &m_showBuild);
             ImGui::MenuItem("Character Controller", nullptr, &m_showCharacterController);
             ImGui::MenuItem("Models", nullptr, &m_showModels);
             ImGui::MenuItem("AI Nodes", nullptr, &m_showAINodes);
@@ -2120,6 +2124,13 @@ void EditorUI::renderLevelSettings() {
     ImGui::Separator();
     ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), "Physics backend is used");
     ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), "when entering play mode.");
+
+    ImGui::Separator();
+    ImGui::TextUnformatted("Terrain");
+    ImGui::Checkbox("No terrain (slab is the ground)", &m_noOutdoorTerrain);
+    ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), "On = the game draws no terrain");
+    ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), "here; the floor slab is the ground.");
+    ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), "Save to apply.");
 
     ImGui::End();
 }

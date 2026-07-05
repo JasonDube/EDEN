@@ -1,0 +1,19 @@
+{
+  "_comment": "Shared starter quest for any noble house. Drop in houses/<house>.json (e.g. corvane.json) to override for a specific house. Placeholders {house} {seat} {region} {dest} {seatHolder} {seatRelation} are filled from the hero at character creation.",
+
+  "hold_seat": {
+    "title": "Take Up Your Seat",
+    "category": "House",
+    "giver": "the duty of your blood",
+    "desc": "You are the last of {house}, and its seat at {seat} lies waiting - and imperiled. Provision yourself at Orlen's Wares, then set out to claim it.",
+    "objective": "Gear up at Orlen's, then travel to {dest} and take up your seat."
+  },
+
+  "summoned": {
+    "title": "Report Home",
+    "category": "House",
+    "giver": "{seatHolder}",
+    "desc": "Word has reached you: you are summoned home. {seatHolder} ({seatRelation}) awaits you at {seat}. Buy what you need from Orlen, then make for the seat of {house}.",
+    "objective": "Gear up at Orlen's, then travel to {dest} and report to {seatHolder}."
+  }
+}

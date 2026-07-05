@@ -179,6 +179,8 @@ struct LevelData {
     float spawnYaw = -90.0f;  // Camera facing direction
     bool isTestLevel = false;  // Test level mode (no terrain/sky)
     bool isSpaceLevel = false; // Space level mode (no terrain, full-sphere stars)
+    bool noOutdoorTerrain = false; // Interior: skip terrain rendering in-game (the
+                                   // floor slab is the ground; no outdoor terrain)
     int physicsBackend = 0;   // PhysicsBackend enum (0 = Jolt, 1 = Homebrew)
 
     // Game module to load for play mode
@@ -191,6 +193,21 @@ struct LevelData {
 
     // Sky settings
     SkyParameters skyParams;
+
+    // Terrain config — the world SCALE and bounds of the terrain, so a level
+    // restores its ground at the exact size it was authored. Without this, only
+    // the height pixels are saved and reload drops them into whatever terrain is
+    // currently loaded (which is why a small level could reopen with a giant
+    // default terrain, and why the game had to guess the scale). hasTerrainConfig
+    // stays false for levels saved before this field existed.
+    bool hasTerrainConfig = false;
+    float terrainTileSize = 2.0f;
+    int terrainChunkResolution = 64;
+    float terrainHeightScale = 200.0f;
+    bool terrainUseFixedBounds = false;
+    glm::ivec2 terrainMinChunk{0, 0};
+    glm::ivec2 terrainMaxChunk{0, 0};
+    bool terrainWrapWorld = false;
 };
 
 // Binary terrain file format header
@@ -229,7 +246,8 @@ public:
                      bool isTestLevel = false,
                      bool isSpaceLevel = false,
                      int physicsBackend = 0,
-                     const std::string& gameModuleName = "");
+                     const std::string& gameModuleName = "",
+                     bool noOutdoorTerrain = false);
 
     // Load level from .eden file
     static bool load(const std::string& filepath,

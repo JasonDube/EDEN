@@ -33,6 +33,34 @@ inline const std::vector<Ware>& orlensWares() {
         {"Light Crossbow",   2500, 5.0f, "Weapon"},
         {"Longbow",          5000, 2.0f, "Weapon"},
         {"Arrows (20)",       100, 1.0f, "Weapon"},
+        // simple melee
+        {"Club",               10, 2.0f, "Weapon"},
+        {"Greatclub",          20,10.0f, "Weapon"},
+        {"Javelin",            50, 2.0f, "Weapon"},
+        {"Light Hammer",      200, 2.0f, "Weapon"},
+        {"Sickle",            100, 2.0f, "Weapon"},
+        {"Dart",                5, 0.25f,"Weapon"},
+        {"Sling",              10, 0.0f, "Weapon"},
+        // martial melee
+        {"Flail",            1000, 2.0f, "Weapon"},
+        {"Glaive",           2000, 6.0f, "Weapon"},
+        {"Greataxe",         3000, 7.0f, "Weapon"},
+        {"Greatsword",       5000, 6.0f, "Weapon"},
+        {"Halberd",          2000, 6.0f, "Weapon"},
+        {"Lance",            1000, 6.0f, "Weapon"},
+        {"Maul",             1000,10.0f, "Weapon"},
+        {"Morningstar",      1500, 4.0f, "Weapon"},
+        {"Pike",              500,18.0f, "Weapon"},
+        {"Rapier",           2500, 2.0f, "Weapon"},
+        {"Scimitar",         2500, 3.0f, "Weapon"},
+        {"Trident",           500, 4.0f, "Weapon"},
+        {"War Pick",          500, 2.0f, "Weapon"},
+        {"Whip",              200, 3.0f, "Weapon"},
+        // martial ranged
+        {"Blowgun",          1000, 1.0f, "Weapon"},
+        {"Hand Crossbow",    7500, 3.0f, "Weapon"},
+        {"Heavy Crossbow",   5000,18.0f, "Weapon"},
+        {"Net",               100, 3.0f, "Weapon"},
 
         // ── Armor ──
         {"Padded Armor",      500,  8.0f, "Armor"},
@@ -42,6 +70,12 @@ inline const std::vector<Ware>& orlensWares() {
         {"Chain Shirt",      5000, 20.0f, "Armor"},
         {"Scale Mail",       5000, 45.0f, "Armor"},
         {"Chain Mail",       7500, 55.0f, "Armor"},
+        {"Hide Armor",       1000, 12.0f, "Armor"},
+        {"Breastplate",     40000, 20.0f, "Armor"},
+        {"Half Plate",      75000, 40.0f, "Armor"},
+        {"Ring Mail",        3000, 40.0f, "Armor"},
+        {"Splint Armor",    20000, 60.0f, "Armor"},
+        {"Plate Armor",    150000, 65.0f, "Armor"},
 
         // ── Adventuring Gear ──
         {"Torch",               1, 1.0f, "Gear"},
@@ -57,6 +91,7 @@ inline const std::vector<Ware>& orlensWares() {
         {"Hooded Lantern",    500, 2.0f, "Gear"},
         {"Healer's Kit",      500, 3.0f, "Gear"},
         {"Holy Symbol",       500, 1.0f, "Gear"},
+        {"Alchemist's Supplies", 5000, 8.0f, "Gear"},
         {"Thieves' Tools",   2500, 1.0f, "Gear"},
         {"Component Pouch",  2500, 2.0f, "Gear"},
         {"Potion of Healing",5000, 0.5f, "Gear"},
@@ -136,6 +171,35 @@ inline ItemDef itemDef(const std::string& n) {
     if (n == "Shortbow")      { d = W("1d6","piercing"); d.ranged = d.twoHanded = true; return d; }
     if (n == "Light Crossbow"){ d = W("1d8","piercing"); d.ranged = d.twoHanded = true; return d; }
     if (n == "Longbow")       { d = W("1d8","piercing"); d.ranged = d.twoHanded = true; return d; }
+    // simple melee
+    if (n == "Club")          { d = W("1d4","bludgeoning"); d.light = true; return d; }
+    if (n == "Greatclub")     { d = W("1d8","bludgeoning"); d.twoHanded = true; return d; }
+    if (n == "Javelin")       { d = W("1d6","piercing"); d.thrown = true; return d; }
+    if (n == "Light Hammer")  { d = W("1d4","bludgeoning"); d.light = d.thrown = true; return d; }
+    if (n == "Sickle")        { d = W("1d4","slashing"); d.light = true; return d; }
+    // simple ranged
+    if (n == "Dart")          { d = W("1d4","piercing"); d.finesse = d.thrown = true; return d; }
+    if (n == "Sling")         { d = W("1d4","bludgeoning"); d.ranged = true; return d; }
+    // martial melee
+    if (n == "Flail")         { return W("1d8","bludgeoning"); }
+    if (n == "Glaive")        { d = W("1d10","slashing"); d.twoHanded = true; return d; }   // heavy, reach
+    if (n == "Greataxe")      { d = W("1d12","slashing"); d.twoHanded = true; return d; }   // heavy
+    if (n == "Greatsword")    { d = W("2d6","slashing"); d.twoHanded = true; return d; }    // heavy
+    if (n == "Halberd")       { d = W("1d10","slashing"); d.twoHanded = true; return d; }   // heavy, reach
+    if (n == "Lance")         { return W("1d12","piercing"); }                              // reach, special
+    if (n == "Maul")          { d = W("2d6","bludgeoning"); d.twoHanded = true; return d; } // heavy
+    if (n == "Morningstar")   { return W("1d8","piercing"); }
+    if (n == "Pike")          { d = W("1d10","piercing"); d.twoHanded = true; return d; }   // heavy, reach
+    if (n == "Rapier")        { d = W("1d8","piercing"); d.finesse = true; return d; }
+    if (n == "Scimitar")      { d = W("1d6","slashing"); d.finesse = d.light = true; return d; }
+    if (n == "Trident")       { d = W("1d6","piercing"); d.thrown = true; d.versatile = "1d8"; return d; }
+    if (n == "War Pick")      { return W("1d8","piercing"); }
+    if (n == "Whip")          { d = W("1d4","slashing"); d.finesse = true; return d; }      // reach
+    // martial ranged
+    if (n == "Blowgun")       { d = W("1","piercing"); d.ranged = true; return d; }
+    if (n == "Hand Crossbow") { d = W("1d6","piercing"); d.ranged = d.light = true; return d; }
+    if (n == "Heavy Crossbow"){ d = W("1d10","piercing"); d.ranged = d.twoHanded = true; return d; } // heavy
+    if (n == "Net")           { d = W("-","special"); d.thrown = true; return d; }
 
     auto A = [&](int ac, int cap, bool st, int str) { d.kind = ARMOR; d.baseAC = ac; d.dexCap = cap; d.stealthDis = st; d.strReq = str; return d; };
     if (n == "Padded Armor")   { return A(11, 10, true,  0); }
@@ -144,6 +208,12 @@ inline ItemDef itemDef(const std::string& n) {
     if (n == "Chain Shirt")    { return A(13, 2,  false, 0); }
     if (n == "Scale Mail")     { return A(14, 2,  true,  0); }
     if (n == "Chain Mail")     { return A(16, 0,  true, 13); }
+    if (n == "Hide Armor")     { return A(12, 2,  false, 0); }
+    if (n == "Breastplate")    { return A(14, 2,  false, 0); }
+    if (n == "Half Plate")     { return A(15, 2,  true,  0); }
+    if (n == "Ring Mail")      { return A(14, 0,  true,  0); }
+    if (n == "Splint Armor")   { return A(17, 0,  true, 15); }
+    if (n == "Plate Armor")    { return A(18, 0,  true, 15); }
     if (n == "Shield")         { d.kind = SHIELD; d.shieldBonus = 2; return d; }
     return d;   // GEAR
 }

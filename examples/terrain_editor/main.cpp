@@ -1824,7 +1824,9 @@ protected:
                     std::string destDir = std::string(CMAKE_SOURCE_DIR) + "/examples/terrain_editor/textures/building";
                     if (!fs::exists(destDir)) fs::create_directories(destDir);
                     fs::path dest1 = fs::path(destDir) / srcPath.filename();
-                    if (fs::canonical(srcPath) != fs::canonical(dest1)) {
+                    // weakly_canonical handles a not-yet-existing dest (canonical
+                    // throws on it — which silently killed imports of NEW textures).
+                    if (fs::weakly_canonical(srcPath) != fs::weakly_canonical(dest1)) {
                         if (fs::exists(dest1)) fs::remove(dest1);
                         fs::copy_file(srcPath, dest1);
                         std::cout << "[Import] Copied to: " << dest1 << std::endl;
@@ -1908,6 +1910,7 @@ protected:
             m_editorUI.render();
             renderModulePanel();
             renderDoorInspector();
+            renderNPCInspector();
             renderZoneOverlay();
 
             // Terminal emulator window (lazy-init on first show)
@@ -2083,8 +2086,10 @@ protected:
             // HP bars over battle-test units (play mode only)
             if (m_isPlayMode) renderBattleHpBars();
 
-            // 5-ft (5-unit) grid around the working focus (off by default, toggled by G)
-            if (m_showTerrainGrid) renderTerrainGrid();
+            // 5-ft grid overlay (toggled by U). On terrain levels it follows the
+            // terrain via the ImGui overlay; on a flat foundation it's drawn as
+            // real depth-tested 3D lines below (so geometry occludes it).
+            if (m_showTerrainGrid && !m_isTestLevel) renderTerrainGrid();
 
             // Debug: render facing direction arrow for AI NPCs (Xenk + Eve)
             // Use unflipped projection for glm::project (it expects OpenGL convention)
@@ -2282,6 +2287,20 @@ protected:
                     vkCmdDraw(cmd, buffers->vertexCount, 1, 0, 0);
                 }
             }
+        }
+
+        // Flat foundation grid: real depth-tested 3D lines (occluded by geometry),
+        // one corner at the origin, 5-ft cells, capped at 500x500.
+        if (m_showTerrainGrid && m_isTestLevel) {
+            const float CELL = 5.0f, SIZE = 500.0f, gy = 0.05f;
+            std::vector<glm::vec3> gridLines;
+            for (float x = 0.0f; x <= SIZE + 0.01f; x += CELL) {
+                gridLines.push_back({x, gy, 0.0f}); gridLines.push_back({x, gy, SIZE});
+            }
+            for (float z = 0.0f; z <= SIZE + 0.01f; z += CELL) {
+                gridLines.push_back({0.0f, gy, z}); gridLines.push_back({SIZE, gy, z});
+            }
+            m_modelRenderer->renderLines(cmd, vp, gridLines, glm::vec3(0.12f, 0.35f, 0.51f));
         }
 
         // Upload terminal texture to GPU before rendering objects
@@ -3112,8 +3131,9 @@ protected:
             }
         }
 
-        // Game-mode grid overlay on platform_slab floors and platform_wall walls
-        if ((m_hSlabBrushMode || m_wallBrushMode || m_roomBrushMode || m_framePlacementMode || buildActive()) && !m_filesystemBrowser.isActive() && (m_isPlayMode || m_editBuildMode)) {
+        // Per-piece 1-ft grid overlay on selected platform_slab floors / walls.
+        // Toggleable from the Build panel ("Grid on selected pieces").
+        if (m_showPieceGrid && (m_hSlabBrushMode || m_wallBrushMode || m_roomBrushMode || m_framePlacementMode || buildActive()) && !m_filesystemBrowser.isActive() && (m_isPlayMode || m_editBuildMode)) {
             std::vector<glm::vec3> gameGridLines;
             std::vector<glm::vec3> selectedGridLines;
 
@@ -4069,6 +4089,9 @@ private:
         });
         m_editorUI.setAddDoorCallback([this]() {
             addDoor();
+        });
+        m_editorUI.setAddNPCCallback([this]() {
+            addNPC();
         });
         m_editorUI.setRunGameCallback([this]() {
             runGame();
@@ -6994,6 +7017,31 @@ private:
             // Editor mode: LIME-style orbit/pan/zoom navigation
             bool mouseOverImGui = ImGui::IsWindowHovered(ImGuiHoveredFlags_AnyWindow) || ImGui::GetIO().WantCaptureMouse;
 
+            // WASD: move the camera on the ground plane relative to where you're
+            // looking — W forward, S back, A left, D right. Hold Shift to go faster.
+            // Speed scales with height so it feels right whether low or high.
+            if (!ImGui::GetIO().WantTextInput) {
+                glm::vec3 fwd = m_camera.getFront();   // full look direction (W goes where you look)
+                glm::vec3 rgt = m_camera.getRight();   // strafe left/right
+                glm::vec3 move(0.0f);
+                if (Input::isKeyDown(Input::KEY_W)) move += fwd;
+                if (Input::isKeyDown(Input::KEY_S)) move -= fwd;
+                if (Input::isKeyDown(Input::KEY_D)) move += rgt;
+                if (Input::isKeyDown(Input::KEY_A)) move -= rgt;
+                // Minecraft-creative vertical: Space = straight up, Shift = straight down.
+                if (Input::isKeyDown(Input::KEY_SPACE)) move += glm::vec3(0, 1, 0);
+                if (Input::isKeyDown(Input::KEY_LEFT_SHIFT) ||
+                    Input::isKeyDown(Input::KEY_RIGHT_SHIFT)) move -= glm::vec3(0, 1, 0);
+                if (glm::length(move) > 0.001f) {
+                    move = glm::normalize(move);
+                    float height = std::max(std::abs(m_camera.getPosition().y), 5.0f);
+                    float speed = std::clamp(height * 1.5f, 20.0f, 800.0f);
+                    glm::vec3 step = move * speed * deltaTime;
+                    m_camera.setPosition(m_camera.getPosition() + step);
+                    m_orbitTarget += step;   // keep pan/dolly pivot moving with you
+                }
+            }
+
             // F key: frame selected object (move orbit target to object, reposition camera)
             if (!ImGui::GetIO().WantCaptureKeyboard && Input::isKeyPressed(Input::KEY_F)) {
                 if (m_selectedObjectIndex >= 0 && m_selectedObjectIndex < static_cast<int>(m_sceneObjects.size())) {
@@ -7057,54 +7105,18 @@ private:
             float orbitDistance = glm::length(m_camera.getPosition() - m_orbitTarget);
             if (orbitDistance < 0.01f) orbitDistance = 5.0f;
 
-            // RMB Tumble: orbit camera around m_orbitTarget
+            // RMB = LOOK AROUND IN PLACE (turn your head): rotate the camera's
+            // view without moving its position. (This used to orbit around
+            // m_orbitTarget, which swung the camera on a huge arc when the target
+            // was far away — e.g. 120 ft below on the foundation.)
             if (m_isTumbling) {
-                if (!m_wasTumbling) {
-                    // First frame of tumble: set up state but don't move camera
-                    // This avoids orientation snap when camera isn't pointing at orbit target
-
-                    // Orbit around a point along the camera's look direction at the
-                    // same distance as the orbit target.  This prevents the camera
-                    // from snapping its orientation to face m_orbitTarget when the
-                    // user isn't already looking at it (e.g. after a gizmo move).
-                    {
-                        float dist = glm::length(m_camera.getPosition() - m_orbitTarget);
-                        if (dist < 0.5f) dist = 10.0f;
-                        glm::vec3 camFront = m_camera.getFront();
-                        m_orbitTarget = m_camera.getPosition() + camFront * dist;
-                    }
-                    m_tumbleOrbitTarget = m_orbitTarget;
-                    m_tumbleOrbitDistance = glm::length(m_camera.getPosition() - m_tumbleOrbitTarget);
-                    if (m_tumbleOrbitDistance < 0.5f) m_tumbleOrbitDistance = 5.0f;
-
-                    // Derive orbit angles from camera position relative to target
-                    glm::vec3 offset = m_camera.getPosition() - m_tumbleOrbitTarget;
-                    m_orbitYaw = glm::degrees(atan2(offset.z, offset.x));
-                    m_orbitPitch = glm::degrees(asin(glm::clamp(offset.y / m_tumbleOrbitDistance, -1.0f, 1.0f)));
-                } else {
-                    // Subsequent frames: apply mouse delta and reposition camera
-                    glm::vec2 mouseDelta2 = Input::getMouseDelta();
-                    float sensitivity = 0.25f;
-                    m_orbitYaw += mouseDelta2.x * sensitivity;
-                    m_orbitPitch += mouseDelta2.y * sensitivity;
-                    m_orbitPitch = std::clamp(m_orbitPitch, -89.0f, 89.0f);
-
-                    float yawRad = glm::radians(m_orbitYaw);
-                    float pitchRad = glm::radians(m_orbitPitch);
-
-                    glm::vec3 offset;
-                    offset.x = m_tumbleOrbitDistance * cos(pitchRad) * cos(yawRad);
-                    offset.y = m_tumbleOrbitDistance * sin(pitchRad);
-                    offset.z = m_tumbleOrbitDistance * cos(pitchRad) * sin(yawRad);
-
-                    m_camera.setPosition(m_tumbleOrbitTarget + offset);
-
-                    // Make camera look at target
-                    glm::vec3 lookDir = glm::normalize(m_tumbleOrbitTarget - m_camera.getPosition());
-                    float camYaw = glm::degrees(atan2(lookDir.z, lookDir.x));
-                    float camPitch = glm::degrees(asin(glm::clamp(lookDir.y, -1.0f, 1.0f)));
-                    m_camera.setYaw(camYaw);
-                    m_camera.setPitch(camPitch);
+                if (m_wasTumbling) {   // skip the first frame to avoid a delta jump
+                    const float sensitivity = 0.15f;
+                    float yaw   = m_camera.getYaw()   + mouseDelta.x * sensitivity;
+                    float pitch = std::clamp(m_camera.getPitch() - mouseDelta.y * sensitivity,
+                                             -89.0f, 89.0f);
+                    m_camera.setYaw(yaw);
+                    m_camera.setPitch(pitch);
                 }
             }
 
@@ -8180,12 +8192,12 @@ private:
             wasF10 = f10;
         }
 
-        // G — toggle the 5-ft terrain grid overlay
+        // U — toggle the 5-ft grid overlay (G is now the move gizmo)
         if (!ImGui::GetIO().WantCaptureKeyboard) {
-            static bool wasG = false;
-            bool g = Input::isKeyDown(71); // GLFW_KEY_G
-            if (g && !wasG) m_showTerrainGrid = !m_showTerrainGrid;
-            wasG = g;
+            static bool wasU = false;
+            bool u = Input::isKeyDown(85); // GLFW_KEY_U
+            if (u && !wasU) m_showTerrainGrid = !m_showTerrainGrid;
+            wasU = u;
         }
 
         // B — spawn battle test (only in play mode / F5)
@@ -8573,6 +8585,11 @@ private:
             }
             if (ctrlDown && oKeyDown && !wasOKeyDown && !ImGui::GetIO().WantTextInput) {
                 showLoadDialog();
+            }
+            // '.' frames the camera on the selected object — recovery hotkey for
+            // when the camera gets teleported far from the scene.
+            if (Input::isKeyPressed(Input::KEY_PERIOD) && !ImGui::GetIO().WantTextInput) {
+                focusCameraOnSelectedObject();
             }
         }
         wasNKeyDown = nKeyDown;
@@ -10532,8 +10549,8 @@ private:
                     m_editorUI.setBrushMode(m_prevBrushMode);
                 }
             }
-            if (Input::isKeyPressed(Input::KEY_W) || Input::isKeyPressed(Input::KEY_E) || Input::isKeyPressed(Input::KEY_R)) {
-                if (Input::isKeyPressed(Input::KEY_W)) m_transformMode = TransformMode::Move;
+            if (Input::isKeyPressed(Input::KEY_G) || Input::isKeyPressed(Input::KEY_E) || Input::isKeyPressed(Input::KEY_R)) {
+                if (Input::isKeyPressed(Input::KEY_G)) m_transformMode = TransformMode::Move;  // G = move (W is camera forward)
                 if (Input::isKeyPressed(Input::KEY_E)) m_transformMode = TransformMode::Rotate;
                 if (Input::isKeyPressed(Input::KEY_R)) m_transformMode = TransformMode::Scale;
                 if (m_editorUI.getBrushMode() != BrushMode::MoveObject) {
@@ -11310,7 +11327,7 @@ private:
         bool leftPressed = Input::isMouseButtonPressed(Input::MOUSE_LEFT);
         // Floor brush mode — click+drag on terrain to draw rectangular floor slabs (game mode)
         m_hSlabPreviewValid = false;
-        if (m_hSlabBrushMode && buildActive() && !m_filesystemBrowser.isActive() && !ImGui::GetIO().WantCaptureMouse) {
+        if ((m_hSlabBrushMode || m_terrainBrushMode) && buildActive() && !m_filesystemBrowser.isActive() && !ImGui::GetIO().WantCaptureMouse) {
             float aspect = static_cast<float>(getWindow().getWidth()) / getWindow().getHeight();
             glm::mat4 proj = m_camera.getProjectionMatrix(aspect, 0.1f, 5000.0f);
             glm::mat4 view = m_camera.getViewMatrix();
@@ -11417,12 +11434,15 @@ private:
                     float cz = minZ + floorD * 0.5f;
                     float avgY = (m_hSlabStart.y + m_hSlabEnd.y) * 0.5f;
 
-                    glm::vec4 floorColor = {0.6f, 0.6f, 0.6f, 1.0f};
+                    // Terrain tool -> earthy grass-green ground; H-slab -> gray floor.
+                    bool isTerrain = m_terrainBrushMode;
+                    glm::vec4 floorColor = isTerrain ? glm::vec4(0.34f, 0.50f, 0.26f, 1.0f)
+                                                     : glm::vec4(0.42f, 0.60f, 0.85f, 1.0f);  // blue floor
                     auto mesh = PrimitiveMeshBuilder::createCube(1.0f, floorColor);
                     uint32_t handle = m_modelRenderer->createModel(mesh.vertices, mesh.indices);
 
                     auto obj = std::make_unique<SceneObject>(
-                        "Floor_" + std::to_string(m_sceneObjects.size()));
+                        (isTerrain ? "Terrain_" : "Floor_") + std::to_string(m_sceneObjects.size()));
                     obj->setBufferHandle(handle);
                     obj->setIndexCount(static_cast<uint32_t>(mesh.indices.size()));
                     obj->setVertexCount(static_cast<uint32_t>(mesh.vertices.size()));
@@ -11582,7 +11602,7 @@ private:
                         wallScale = {wallThick, wallHeight, wallLen};
                     }
 
-                    glm::vec4 wallColor = {0.7f, 0.7f, 0.7f, 1.0f};
+                    glm::vec4 wallColor = {0.82f, 0.62f, 0.40f, 1.0f};  // tan wall
                     auto mesh = PrimitiveMeshBuilder::createCube(1.0f, wallColor);
                     uint32_t handle = m_modelRenderer->createModel(mesh.vertices, mesh.indices);
 
@@ -11715,7 +11735,7 @@ private:
                     };
 
                     for (int i = 0; i < 4; i++) {
-                        glm::vec4 wallColor = {0.7f, 0.7f, 0.7f, 1.0f};
+                        glm::vec4 wallColor = {0.82f, 0.62f, 0.40f, 1.0f};  // tan wall
                         auto mesh = PrimitiveMeshBuilder::createCube(1.0f, wallColor);
                         uint32_t handle = m_modelRenderer->createModel(mesh.vertices, mesh.indices);
 
@@ -18747,7 +18767,7 @@ private:
                     placePos.z = std::round(placePos.z);
                     placePos.y = std::round(placePos.y);
 
-                    glm::vec4 wallColor = {0.7f, 0.7f, 0.7f, 1.0f};
+                    glm::vec4 wallColor = {0.82f, 0.62f, 0.40f, 1.0f};  // tan wall
                     auto mesh = PrimitiveMeshBuilder::createCube(1.0f, wallColor);
                     uint32_t handle = m_modelRenderer->createModel(mesh.vertices, mesh.indices);
                     auto obj = std::make_unique<SceneObject>("Wall_" + std::to_string(m_sceneObjects.size()));
@@ -21847,7 +21867,12 @@ private:
             const auto& bt = (*it)->getBuildingType();
             bool isFS = (bt == "filesystem" || bt == "filesystem_wall" || bt == "image_desc" || bt == "wall_widget");
             bool isAvatar = (it->get() == m_playerAvatar);
-            if (isFS || isAvatar) {
+            // Worktable helpers (the foundation, its reference pillars, the scale
+            // figure) are authoring aids only — never save them into a level.
+            const std::string& nm = (*it)->getName();
+            bool isWorktable = (nm == "Foundation" || nm.rfind("Pillar_", 0) == 0 ||
+                                nm.rfind("ScaleRef", 0) == 0);
+            if (isFS || isAvatar || isWorktable) {
                 if (isAvatar) m_playerAvatar = nullptr;
                 tempFS.push_back(std::move(*it));
                 it = m_sceneObjects.erase(it);
@@ -21878,7 +21903,8 @@ private:
             m_isTestLevel,
             m_isSpaceLevel,
             static_cast<int>(m_editorUI.getPhysicsBackend()),
-            m_gameModule ? m_gameModule->getName() : ""
+            m_gameModule ? m_gameModule->getName() : "",
+            m_editorUI.getNoOutdoorTerrain()
         );
 
         if (success) {
@@ -22141,6 +22167,9 @@ private:
                     case PrimitiveType::Door:
                         meshData = PrimitiveMeshBuilder::createCube(binObj.primitiveSize, binObj.primitiveColor);
                         break;
+                    case PrimitiveType::NPC:
+                        meshData = PrimitiveMeshBuilder::createCube(binObj.primitiveSize, binObj.primitiveColor);
+                        break;
                     default:
                         std::cerr << "Unknown primitive type in binary: " << binObj.primitiveType << std::endl;
                         continue;
@@ -22360,6 +22389,25 @@ private:
                 std::cerr << "Failed to load level: " << LevelSerializer::getLastError() << std::endl;
                 return;
             }
+        }
+
+        // Restore the terrain's world scale + bounds so the level reloads at the
+        // size it was authored — instead of dropping its height pixels into
+        // whatever (possibly giant default) terrain is currently active. Only
+        // levels saved with this field reconfigure; older levels keep old behavior.
+        if (levelData.hasTerrainConfig) {
+            TerrainConfig tcfg = m_terrain.getConfig();
+            tcfg.tileSize        = levelData.terrainTileSize;
+            tcfg.chunkResolution = levelData.terrainChunkResolution;
+            tcfg.heightScale     = levelData.terrainHeightScale;
+            tcfg.useFixedBounds  = levelData.terrainUseFixedBounds;
+            tcfg.minChunk        = levelData.terrainMinChunk;
+            tcfg.maxChunk        = levelData.terrainMaxChunk;
+            tcfg.wrapWorld       = levelData.terrainWrapWorld;
+            getContext().waitIdle();
+            m_chunkManager->releaseAllChunkBuffers(m_terrain);
+            m_terrain.reconfigure(tcfg);
+            m_chunkManager->preloadAllChunks(m_terrain, nullptr);
         }
 
         LevelSerializer::applyToTerrain(levelData, m_terrain);
@@ -22649,6 +22697,7 @@ private:
         // Restore space level mode
         m_isSpaceLevel = levelData.isSpaceLevel;
         m_editorUI.setSpaceLevelMode(levelData.isSpaceLevel);
+        m_editorUI.setNoOutdoorTerrain(levelData.noOutdoorTerrain);
 
         // Restore game module
         if (!levelData.gameModuleName.empty()) {
@@ -23114,11 +23163,13 @@ private:
     // A placement brush is armed — suppress the editor's own click tools so a
     // placement click doesn't also sculpt terrain or grab the gizmo.
     bool buildBrushActive() const {
-        return m_hSlabBrushMode || m_wallBrushMode || m_roomBrushMode || m_framePlacementMode;
+        return m_hSlabBrushMode || m_wallBrushMode || m_roomBrushMode ||
+               m_framePlacementMode || m_terrainBrushMode;
     }
     // Arm exactly one build placement tool (or none), disarming the others.
     void armBuildTool(bool* tool) {
-        m_hSlabBrushMode = m_wallBrushMode = m_roomBrushMode = m_framePlacementMode = false;
+        m_hSlabBrushMode = m_wallBrushMode = m_roomBrushMode =
+            m_framePlacementMode = m_terrainBrushMode = false;
         if (tool) *tool = true;
     }
     // Snap a world coordinate to the 5-ft grid, so build pieces land on the same
@@ -23129,8 +23180,15 @@ private:
     // mode). Rendered every frame; only shows in edit mode.
     void renderEditBuildPanel() {
         if (m_isPlayMode) return;   // play mode uses F5+Tab building
+        if (!m_editorUI.getShowBuild()) return;   // toggled from the Window menu
         ImGui::SetNextWindowSize(ImVec2(230, 0), ImGuiCond_FirstUseEver);
+        // Clear default spot (right of the Models panel). Re-applied each time the
+        // panel is toggled on from the Window menu, so it can't get lost off-screen.
+        ImGui::SetNextWindowPos(ImVec2(270, 60), ImGuiCond_Appearing);
         if (ImGui::Begin("Build")) {
+            ImGui::Checkbox("Show 5-ft grid (U)", &m_showTerrainGrid);
+            ImGui::Checkbox("Grid on selected pieces", &m_showPieceGrid);
+            ImGui::Separator();
             bool prev = m_editBuildMode;
             ImGui::Checkbox("Build mode", &m_editBuildMode);
             if (!prev && m_editBuildMode) {
@@ -23149,6 +23207,7 @@ private:
                     m_editorUI.setBrushMode(BrushMode::MoveObject);
                 }
                 if (ImGui::RadioButton("H-Slab (floor)", m_hSlabBrushMode)) armBuildTool(&m_hSlabBrushMode);
+                if (ImGui::RadioButton("Terrain (ground)", m_terrainBrushMode)) armBuildTool(&m_terrainBrushMode);
                 if (ImGui::RadioButton("V-Slab (wall)",  m_wallBrushMode))  armBuildTool(&m_wallBrushMode);
                 if (ImGui::RadioButton("Room (4 walls)", m_roomBrushMode))  armBuildTool(&m_roomBrushMode);
                 ImGui::Separator();
@@ -23170,36 +23229,87 @@ private:
         }
         if (ImGui::BeginPopupModal("New Level##NewLevelSize", nullptr,
                                    ImGuiWindowFlags_AlwaysAutoResize)) {
-            ImGui::TextUnformatted("New map size  (1 unit = 1 foot)");
-            ImGui::SliderInt("##nlsize", &m_newLevelSizeFeet, 10, 200, "%d ft");
-            ImGui::InputInt("feet##nlsizein", &m_newLevelSizeFeet);
-            m_newLevelSizeFeet = std::clamp(m_newLevelSizeFeet, 10, 200);
-            ImGui::TextDisabled("%d x %d ft  (%d grid squares per side)",
-                                m_newLevelSizeFeet, m_newLevelSizeFeet, m_newLevelSizeFeet / 5);
+            ImGui::TextUnformatted("Map size  (1 unit = 1 foot)");
+            ImGui::TextDisabled("Width and Depth can differ (e.g. 30 x 100).");
+            ImGui::SetNextItemWidth(140);
+            ImGui::InputInt("Width (ft)##nlw", &m_newLevelWidthFeet, 5, 25);
+            ImGui::SetNextItemWidth(140);
+            ImGui::InputInt("Depth (ft)##nld", &m_newLevelDepthFeet, 5, 25);
+            m_newLevelWidthFeet = std::clamp(m_newLevelWidthFeet, 5, 1000);
+            m_newLevelDepthFeet = std::clamp(m_newLevelDepthFeet, 5, 1000);
+            ImGui::TextDisabled("%d x %d ft  (%d x %d grid squares)",
+                                m_newLevelWidthFeet, m_newLevelDepthFeet,
+                                m_newLevelWidthFeet / 5, m_newLevelDepthFeet / 5);
             ImGui::Separator();
-            if (ImGui::Button("Create", ImVec2(120, 0))) {
-                rebuildTerrainAndNewLevel(m_newLevelSizeFeet);
+            if (ImGui::Button("Create new (wipes scene)", ImVec2(220, 0))) {
+                rebuildTerrainAndNewLevel(m_newLevelWidthFeet, m_newLevelDepthFeet);
                 ImGui::CloseCurrentPopup();
             }
-            ImGui::SameLine();
-            if (ImGui::Button("Cancel", ImVec2(120, 0))) {
+            ImGui::Spacing();
+            ImGui::TextDisabled("Or a stable, terrain-free base:");
+            if (ImGui::Button("Foundation (1 mi flat floor)", ImVec2(220, 0))) {
+                newFoundationLevel();
+                ImGui::CloseCurrentPopup();
+            }
+            // NOTE: "Resize terrain (keep objects)" was removed — it regenerated the
+            // ground plane in a way that corrupted saved levels (blink/flicker in
+            // game). Do not reintroduce without fixing resizeTerrainKeepObjects.
+            if (ImGui::Button("Cancel", ImVec2(220, 0))) {
                 ImGui::CloseCurrentPopup();
             }
             ImGui::EndPopup();
         }
     }
 
-    // Resize the terrain to a `feet` x `feet` map (1 world unit = 1 foot) and
-    // start a fresh level on it. Keeps the default 64-vertex chunk density and
-    // scales tileSize so a single chunk spans exactly `feet` units.
-    void rebuildTerrainAndNewLevel(int feet) {
-        feet = std::clamp(feet, 10, 200);
-
+    // Resize the CURRENT level's terrain to feet x feet, KEEPING all placed
+    // objects (unlike rebuildTerrainAndNewLevel, which wipes the scene). Then Save
+    // to persist the new terrain config so it round-trips in the editor and game.
+    void resizeTerrainKeepObjects(int feet) {
+        feet = std::clamp(feet, 10, 400);
         TerrainConfig cfg = m_terrain.getConfig();
-        cfg.tileSize = static_cast<float>(feet) / (cfg.chunkResolution - 1);  // (res-1)*tile = feet
+        cfg.tileSize = static_cast<float>(feet) / (cfg.chunkResolution - 1);
         cfg.useFixedBounds = true;
         cfg.minChunk = {0, 0};
-        cfg.maxChunk = {0, 0};   // a single square chunk
+        cfg.maxChunk = {0, 0};   // single square chunk spanning `feet`
+        cfg.wrapWorld = false;
+
+        getContext().waitIdle();
+        m_chunkManager->releaseAllChunkBuffers(m_terrain);
+        m_terrain.reconfigure(cfg);
+        m_chunkManager->preloadAllChunks(m_terrain, nullptr);
+        for (auto& [coord, chunk] : m_terrain.getAllChunks())
+            if (chunk->needsUpload()) m_chunkManager->uploadChunk(*chunk);
+        m_terrain.update(m_camera.getPosition());
+        std::cout << "Terrain resized to " << feet << " ft (tileSize " << cfg.tileSize
+                  << "), objects kept. Save to persist." << std::endl;
+    }
+
+    // Start a fresh level on a widthFeet x depthFeet map (1 world unit = 1 foot).
+    // The terrain is built from SQUARE chunks tiled into a rectangle, so the map
+    // can be non-square (e.g. 30 x 100). The chunk span is the largest size that
+    // divides both dimensions (fewest chunks, exact size), capped so the count
+    // stays sane.
+    void rebuildTerrainAndNewLevel(int widthFeet, int depthFeet) {
+        widthFeet = std::clamp(widthFeet, 5, 1000);
+        depthFeet = std::clamp(depthFeet, 5, 1000);
+
+        // Largest chunk span (ft) dividing both dims → fewest square chunks.
+        auto gcd = [](int a, int b) { while (b) { int t = a % b; a = b; b = t; } return a; };
+        int span = gcd(widthFeet, depthFeet);
+        if (span < 1) span = 1;
+        // Cap total chunks: coarsen the span (rounding dims up) if there'd be too many.
+        auto chunksFor = [&](int s) {
+            return ((widthFeet + s - 1) / s) * ((depthFeet + s - 1) / s);
+        };
+        while (chunksFor(span) > 512) span *= 2;
+        int chunksX = (widthFeet + span - 1) / span;
+        int chunksZ = (depthFeet + span - 1) / span;
+
+        TerrainConfig cfg = m_terrain.getConfig();
+        cfg.tileSize = static_cast<float>(span) / (cfg.chunkResolution - 1);  // one chunk spans `span` ft
+        cfg.useFixedBounds = true;
+        cfg.minChunk = {0, 0};
+        cfg.maxChunk = {chunksX - 1, chunksZ - 1};
         cfg.wrapWorld = false;
 
         // Swap the terrain out: free old GPU buffers, reconfigure, re-preload.
@@ -23213,13 +23323,201 @@ private:
 
         // Reset the rest of the scene, then frame the new map from above.
         newLevel();
-        float c = feet * 0.5f;
-        m_camera.setPosition({c, feet * 1.2f, c});
-        m_camera.setPitch(-55.0f);   // look down at the small map
+        float cx = widthFeet * 0.5f, cz = depthFeet * 0.5f;
+        m_camera.setPosition({cx, std::max(widthFeet, depthFeet) * 1.2f, cz});
+        m_camera.setPitch(-55.0f);   // look down at the new map
+        // Anchor the orbit/pan pivot on the new terrain's center so the first
+        // orbit doesn't measure a stale far target and fling the camera away.
+        m_orbitTarget = glm::vec3(cx, 0.0f, cz);
         m_terrain.update(m_camera.getPosition());
 
-        std::cout << "New " << feet << "x" << feet << " ft map created (tileSize "
+        std::cout << "New " << (chunksX * span) << "x" << (chunksZ * span) << " ft map ("
+                  << chunksX << "x" << chunksZ << " chunks of " << span << " ft, tileSize "
                   << cfg.tileSize << ")" << std::endl;
+    }
+
+    // Jump the edit-mode camera so the currently selected object fills the view.
+    // A recovery tool for when something teleports the camera far from the scene:
+    // select the object in the list, press '.', and the camera snaps back to it.
+    // Keeps the current look direction and just backs off far enough to frame the
+    // object's world-space bounding box.
+    void focusCameraOnSelectedObject() {
+        if (m_isPlayMode) return;
+        if (m_selectedObjectIndex < 0 ||
+            m_selectedObjectIndex >= static_cast<int>(m_sceneObjects.size())) {
+            std::cout << "[Focus] No object selected — nothing to focus on." << std::endl;
+            return;
+        }
+        SceneObject* obj = m_sceneObjects[m_selectedObjectIndex].get();
+        if (!obj) return;
+
+        // Build a world-space AABB from the local bounds (falls back to the
+        // transform origin for objects with degenerate/empty bounds, e.g. some
+        // primitives or point markers).
+        const glm::mat4 m = obj->getTransform().getMatrix();
+        const AABB& lb = obj->getLocalBounds();
+        glm::vec3 center;
+        float radius;
+        if (lb.getSize().x > 0.001f || lb.getSize().y > 0.001f || lb.getSize().z > 0.001f) {
+            glm::vec3 wmin(std::numeric_limits<float>::max());
+            glm::vec3 wmax(-std::numeric_limits<float>::max());
+            const glm::vec3 mn = lb.min, mx = lb.max;
+            for (int i = 0; i < 8; ++i) {
+                glm::vec3 corner((i & 1) ? mx.x : mn.x,
+                                 (i & 2) ? mx.y : mn.y,
+                                 (i & 4) ? mx.z : mn.z);
+                glm::vec3 w = glm::vec3(m * glm::vec4(corner, 1.0f));
+                wmin = glm::min(wmin, w);
+                wmax = glm::max(wmax, w);
+            }
+            center = (wmin + wmax) * 0.5f;
+            radius = glm::length(wmax - wmin) * 0.5f;
+        } else {
+            center = glm::vec3(m[3]);   // translation column
+            radius = 1.0f;
+        }
+        radius = std::max(radius, 1.0f);
+
+        // Distance needed so the bounding sphere fits in the vertical FOV, plus a
+        // little padding so the object isn't jammed against the frame edge.
+        float halfFovRad = glm::radians(m_camera.getFov() * 0.5f);
+        float dist = (radius / std::max(std::tan(halfFovRad), 0.05f)) * 1.4f;
+        dist = std::max(dist, radius + 2.0f);
+
+        // Place the camera ABOVE and BEHIND the object, looking down at a fixed
+        // 35° angle. This is a recovery tool, so it must always end with a sane,
+        // right-way-up view: keeping the old orientation could park us under the
+        // (single-sided) terrain looking up, where the ground is invisible.
+        // Keep the current heading (yaw) so the user doesn't lose their bearings.
+        float yaw = m_camera.getYaw();
+        float pitch = -35.0f;
+        float yawRad = glm::radians(yaw), pitchRad = glm::radians(pitch);
+        glm::vec3 dir(std::cos(yawRad) * std::cos(pitchRad),
+                      std::sin(pitchRad),
+                      std::sin(yawRad) * std::cos(pitchRad));
+        m_camera.setPosition(center - dir * dist);
+        m_camera.setYaw(yaw);
+        m_camera.setPitch(pitch);
+
+        // Re-anchor the orbit target on the object so the next right-click tumble
+        // orbits it, instead of flinging around a stale far point.
+        m_orbitTarget = center;
+
+        m_terrain.update(m_camera.getPosition());
+        std::cout << "[Focus] Camera framed on '" << obj->getName() << "' at ("
+                  << center.x << ", " << center.y << ", " << center.z << ")" << std::endl;
+    }
+
+    // A rock-solid starting point: a huge flat floor slab (1 mile x 1 mile, 50 ft
+    // thick) with its top surface at Y=0 and NO terrain (terrain rendering is
+    // skipped in test-level mode). A stable foundation to build on — place slabs,
+    // models, walls, doors on it without fighting the terrain system. Start at
+    // (0,0), 30 ft above the floor, looking down.
+    void newFoundationLevel() {
+        newLevel();
+        m_isTestLevel = true;                    // skip terrain/sky — the slab is the ground
+        m_editorUI.setTestLevelMode(true);
+
+        // Shrink the terrain to a single tiny chunk. It's a test level so terrain
+        // isn't rendered here — but without this, saving a level built on the
+        // worktable bakes the giant default terrain (hundreds of MB) into the file.
+        {
+            TerrainConfig tcfg = m_terrain.getConfig();
+            tcfg.useFixedBounds = true;
+            tcfg.minChunk = {0, 0};
+            tcfg.maxChunk = {0, 0};
+            tcfg.wrapWorld = false;
+            getContext().waitIdle();
+            m_chunkManager->releaseAllChunkBuffers(m_terrain);
+            m_terrain.reconfigure(tcfg);
+            m_chunkManager->preloadAllChunks(m_terrain, nullptr);
+        }
+
+        const float MILE  = 1000.0f;             // 1000 ft worktable (was a mile; smaller = fast load)
+        const float THICK = 50.0f;
+        glm::vec4 color(0.45f, 0.45f, 0.5f, 1.0f);
+        auto mesh = PrimitiveMeshBuilder::createCube(1.0f, color);
+
+        auto obj = std::make_unique<SceneObject>("Foundation");
+        uint32_t handle = m_modelRenderer->createModel(mesh.vertices, mesh.indices);
+        obj->setBufferHandle(handle);
+        obj->setIndexCount(static_cast<uint32_t>(mesh.indices.size()));
+        obj->setVertexCount(static_cast<uint32_t>(mesh.vertices.size()));
+        obj->setLocalBounds(mesh.bounds);
+        obj->setMeshData(mesh.vertices, mesh.indices);
+        obj->setPrimitiveType(PrimitiveType::Cube);
+        obj->setPrimitiveSize(1.0f);
+        obj->setPrimitiveColor(color);
+        obj->setBuildingType("platform_slab");
+        obj->setAABBCollision(true);
+        obj->getTransform().setScale({MILE, THICK, MILE});
+        // The cube's base is at local Y=0 (it rises to Y=size), so to put the TOP
+        // surface at world Y=0 we drop it by its full thickness.
+        obj->getTransform().setPosition({0.0f, -THICK, 0.0f});   // top surface at Y=0
+        m_sceneObjects.push_back(std::move(obj));
+
+        // Red reference pillars: 1 x 1 x 20 ft, base on the floor (Y=0), one at the
+        // origin and every 500 ft in every direction across the foundation. They
+        // all share ONE mesh/GPU buffer so the whole grid stays cheap to draw.
+        glm::vec4 red(0.85f, 0.10f, 0.10f, 1.0f);
+        auto pmesh = PrimitiveMeshBuilder::createCube(1.0f, red);
+        uint32_t phandle = m_modelRenderer->createModel(pmesh.vertices, pmesh.indices);
+        const float SPACING = 500.0f;
+        const int   N       = 1;   // +/- 500 ft: pillars at -500, 0, +500 across the 1000 ft table
+        int pillarN = 0;
+        for (int ix = -N; ix <= N; ++ix) {
+            for (int iz = -N; iz <= N; ++iz) {
+                float x = ix * SPACING;   // integer multiples -> a pillar sits exactly at (0,0)
+                float z = iz * SPACING;
+                auto p = std::make_unique<SceneObject>("Pillar_" + std::to_string(pillarN++));
+                p->setBufferHandle(phandle);                      // shared buffer (instanced)
+                p->setIndexCount(static_cast<uint32_t>(pmesh.indices.size()));
+                p->setVertexCount(static_cast<uint32_t>(pmesh.vertices.size()));
+                p->setLocalBounds(pmesh.bounds);
+                p->setMeshData(pmesh.vertices, pmesh.indices);
+                p->setPrimitiveType(PrimitiveType::Cube);
+                p->setPrimitiveSize(1.0f);
+                p->setPrimitiveColor(red);
+                p->setAABBCollision(true);
+                p->getTransform().setScale({1.0f, 20.0f, 1.0f});  // 1 x 1 footprint, 20 tall
+                p->getTransform().setPosition({x, 0.0f, z});      // base on the foundation top (Y=0)
+                m_sceneObjects.push_back(std::move(p));
+            }
+        }
+        std::cout << "Placed " << pillarN << " red pillars (every " << SPACING << " ft)." << std::endl;
+
+        // Scale reference: a 6-ft "person" (green) standing at the origin so you can
+        // eyeball how big to scale imported models. 1.5 x 6 x 1 ft, base on Y=0.
+        {
+            glm::vec4 green(0.20f, 0.80f, 0.30f, 1.0f);
+            auto rmesh = PrimitiveMeshBuilder::createCube(1.0f, green);
+            auto ref = std::make_unique<SceneObject>("ScaleRef_6ft");
+            ref->setBufferHandle(m_modelRenderer->createModel(rmesh.vertices, rmesh.indices));
+            ref->setIndexCount(static_cast<uint32_t>(rmesh.indices.size()));
+            ref->setVertexCount(static_cast<uint32_t>(rmesh.vertices.size()));
+            ref->setLocalBounds(rmesh.bounds);
+            ref->setMeshData(rmesh.vertices, rmesh.indices);
+            ref->setPrimitiveType(PrimitiveType::Cube);
+            ref->setPrimitiveSize(1.0f);
+            ref->setPrimitiveColor(green);
+            ref->getTransform().setScale({1.5f, 6.0f, 1.0f});   // ~person: 1.5 wide, 6 tall
+            ref->getTransform().setPosition({4.0f, 0.0f, 0.0f}); // 4 ft off origin, base on Y=0
+            m_sceneObjects.push_back(std::move(ref));
+        }
+
+        updateSceneObjectsList();
+
+        // Editor view: directly OVER the origin, 30 ft up, looking down at it.
+        m_camera.setPosition({0.0f, 30.0f, 0.0f});
+        m_camera.setYaw(-90.0f);
+        m_camera.setPitch(-80.0f);
+        m_orbitTarget = glm::vec3(0.0f, 0.0f, 0.0f);
+        // Play-mode spawn: at (0,0), 30 ft above the floor as requested.
+        m_hasSpawnPoint = true;
+        m_spawnPosition = glm::vec3(0.0f, 30.0f, 0.0f);
+
+        std::cout << "Foundation level: 1 mi x 1 mi x 50 ft floor, top at Y=0, start at (0,30,0)."
+                  << std::endl;
     }
 
     void newTestLevel() {
@@ -25065,15 +25363,33 @@ private:
         }
     }
 
-    void transitionToLevel(const std::string& levelPath, const std::string& targetDoorId) {
-        // Resolve level path (relative to current level's directory)
-        std::string fullPath = levelPath;
-        if (!m_currentLevelPath.empty() && levelPath.find('/') == std::string::npos) {
+    // Resolve a door's targetLevel to a loadable file path. targetLevel is
+    // usually a bare basename ("trade_street"); this puts it in the current
+    // level's folder AND appends ".eden". The extension matters: LevelSerializer
+    // ::load() opens the path verbatim, so without it the load fails and the
+    // door transition silently aborts — leaving you standing in the level you
+    // were already in.
+    std::string resolveLevelPath(const std::string& targetLevel) const {
+        std::string fullPath = targetLevel;
+        if (!m_currentLevelPath.empty() && targetLevel.find('/') == std::string::npos) {
             size_t lastSlash = m_currentLevelPath.find_last_of("/\\");
             if (lastSlash != std::string::npos) {
-                fullPath = m_currentLevelPath.substr(0, lastSlash + 1) + levelPath;
+                fullPath = m_currentLevelPath.substr(0, lastSlash + 1) + targetLevel;
             }
         }
+        auto endsWith = [](const std::string& s, const std::string& suf) {
+            return s.size() >= suf.size() &&
+                   s.compare(s.size() - suf.size(), suf.size(), suf) == 0;
+        };
+        if (!endsWith(fullPath, ".eden") && !endsWith(fullPath, ".edenbin")) {
+            fullPath += ".eden";
+        }
+        return fullPath;
+    }
+
+    void transitionToLevel(const std::string& levelPath, const std::string& targetDoorId) {
+        // Resolve level path (relative to current level's directory, + .eden)
+        std::string fullPath = resolveLevelPath(levelPath);
 
         // Store pending transition and start fade out
         m_pendingLevelPath = fullPath;
@@ -25571,14 +25887,9 @@ private:
             if (obj && obj->isDoor()) {
                 std::string targetLevel = obj->getTargetLevel();
                 if (!targetLevel.empty()) {
-                    // Resolve relative path
-                    std::string fullPath = targetLevel;
-                    if (!m_currentLevelPath.empty() && targetLevel.find('/') == std::string::npos) {
-                        size_t lastSlash = m_currentLevelPath.find_last_of("/\\");
-                        if (lastSlash != std::string::npos) {
-                            fullPath = m_currentLevelPath.substr(0, lastSlash + 1) + targetLevel;
-                        }
-                    }
+                    // Resolve relative path (+ .eden) — same rule the actual
+                    // transition uses, so the cache key matches on lookup.
+                    std::string fullPath = resolveLevelPath(targetLevel);
 
                     // Only preload if not already cached
                     if (m_levelCache.find(fullPath) == m_levelCache.end()) {
@@ -26565,7 +26876,7 @@ private:
         const float SEG  = 10.0f;          // sample terrain height every 10 units along a line
         const float yOff = 0.05f;          // lift to avoid z-fighting
         const float lineW = 1.5f;
-        const ImU32 white = IM_COL32(255, 255, 255, 170);
+        const ImU32 white = IM_COL32(30, 90, 130, 210);  // dark teal — shows on the light foundation
 
         // Decide the region to grid. A full 5-ft grid over a multi-km terrain would
         // be tens of thousands of lines and a white blob, so:
@@ -26576,6 +26887,12 @@ private:
         // Lines are snapped to world 5-unit lines so cells line up with the board.
         // Use the terrain's ACTUAL world corners (it is not necessarily centered on
         // the origin) so the grid lands where the terrain really is.
+        auto snapLo = [&](float v) { return std::ceil(v / CELL) * CELL; };
+        auto snapHi = [&](float v) { return std::floor(v / CELL) * CELL; };
+
+        // Grid centered on the ORIGIN, capped at 500 x 500 ft. Lines snap to world
+        // 5-ft lines, so a line always falls exactly on 0 — the shared anchor with
+        // the tabletop grid. On a small bounded terrain, don't extend past it.
         const auto& cfg = m_terrain.getConfig();
         bool bounded = cfg.useFixedBounds;
         float chunkWorldSize = (cfg.chunkResolution - 1) * cfg.tileSize;
@@ -26583,32 +26900,17 @@ private:
         float wMaxX = (cfg.maxChunk.x + 1) * chunkWorldSize;
         float wMinZ = cfg.minChunk.y * chunkWorldSize;
         float wMaxZ = (cfg.maxChunk.y + 1) * chunkWorldSize;
-        float spanX = wMaxX - wMinX, spanZ = wMaxZ - wMinZ;
-
-        const float MAXSPAN = 400.0f;      // largest terrain we grid end to end (80 cells/axis)
-        const float HALF    = 150.0f;      // window half-extent for huge/unbounded terrain
-
-        auto snapLo = [&](float v) { return std::ceil(v / CELL) * CELL; };
-        auto snapHi = [&](float v) { return std::floor(v / CELL) * CELL; };
-
-        float minX, maxX, minZ, maxZ;
-        if (bounded && spanX <= MAXSPAN && spanZ <= MAXSPAN) {
-            minX = snapLo(wMinX); maxX = snapHi(wMaxX);
-            minZ = snapLo(wMinZ); maxZ = snapHi(wMaxZ);
-        } else {
-            // Center on where the camera looks: forward ray hit on the y=0 plane.
-            glm::vec3 cp = m_camera.getPosition();
-            glm::vec3 cf = m_camera.getFront();
-            glm::vec2 c(cp.x, cp.z);
-            if (cf.y < -0.02f) { float t = -cp.y / cf.y; c = glm::vec2(cp.x + cf.x * t, cp.z + cf.z * t); }
-            float loX = c.x - HALF, hiX = c.x + HALF, loZ = c.y - HALF, hiZ = c.y + HALF;
-            if (bounded) {
-                loX = std::max(loX, wMinX); hiX = std::min(hiX, wMaxX);
-                loZ = std::max(loZ, wMinZ); hiZ = std::min(hiZ, wMaxZ);
-            }
-            minX = snapLo(loX); maxX = snapHi(hiX);
-            minZ = snapLo(loZ); maxZ = snapHi(hiZ);
+        // On a foundation (test level) there's no terrain to follow — draw a flat
+        // grid on the Y=0 top surface instead of sampling terrain height.
+        bool flatGrid = m_isTestLevel;
+        const float SIZE = 500.0f;         // 500 x 500 ft, one CORNER at the origin
+        float loX = 0.0f, hiX = SIZE, loZ = 0.0f, hiZ = SIZE;
+        if (bounded && !flatGrid) {
+            loX = std::max(loX, wMinX); hiX = std::min(hiX, wMaxX);
+            loZ = std::max(loZ, wMinZ); hiZ = std::min(hiZ, wMaxZ);
         }
+        float minX = snapLo(loX), maxX = snapHi(hiX);
+        float minZ = snapLo(loZ), maxZ = snapHi(hiZ);
 
 
         ImDrawList* dl = ImGui::GetForegroundDrawList();
@@ -26629,11 +26931,12 @@ private:
                 // sentinel. Nudge the height sample just inside the last real chunk (the
                 // edge is flat, so the height matches) while drawing the line where it is.
                 float sx = x, sz = z;
-                if (bounded) {
+                if (bounded && !flatGrid) {
                     sx = std::clamp(x, wMinX, wMaxX - 0.05f);
                     sz = std::clamp(z, wMinZ, wMaxZ - 0.05f);
                 }
-                float h = m_terrain.getHeightAt(sx, sz);
+                // Flat Y=0 on the foundation; follow terrain height otherwise.
+                float h = flatGrid ? 0.0f : m_terrain.getHeightAt(sx, sz);
                 // getHeightAt still returns the sentinel (-100000) for genuine holes and
                 // for cells outside the loaded chunks. Skip those so the grid stops
                 // cleanly at the terrain edge instead of plunging off-screen.
@@ -26807,6 +27110,85 @@ private:
         ImGui::End();
     }
 
+    void renderNPCInspector() {
+        if (m_isPlayMode) return;
+        if (m_selectedObjectIndex < 0 || m_selectedObjectIndex >= static_cast<int>(m_sceneObjects.size())) return;
+        SceneObject* obj = m_sceneObjects[m_selectedObjectIndex].get();
+        if (!obj || !obj->isNPC()) return;
+
+        ImGui::SetNextWindowSize(ImVec2(330, 0), ImGuiCond_FirstUseEver);
+        ImGui::Begin("NPC");
+        ImGui::TextUnformatted("NPC placement marker");
+        ImGui::TextDisabled("Sits on one 5-ft cell. Not drawn in game -\nthe character spawns here instead.");
+        ImGui::Separator();
+
+        char buf[256];
+        std::snprintf(buf, sizeof(buf), "%s", obj->getNpcId().c_str());
+        if (ImGui::InputText("NPC id", buf, sizeof(buf))) obj->setNpcId(std::string(buf));
+
+        ImGui::Spacing();
+        ImGui::TextDisabled("NPC id names a definition file the game reads:\n  assets/npcs/<id>.json  (name, model, role, script)\ne.g. \"orlen\" -> assets/npcs/orlen.json.");
+        ImGui::End();
+    }
+
+    // "Fit to grid": standardize a model's scale by REAL-WORLD size instead of
+    // eyeballing it. Meshy exports come in arbitrary units; type a true measurement
+    // for any axis (1 world unit = 1 ft, 5 ft = one grid cell) and it sets the exact
+    // uniform scale so the model lands on the tabletop's 5-ft grid.
+    void renderScaleInspector() {
+        if (m_isPlayMode) return;
+        if (m_selectedObjectIndex < 0 ||
+            m_selectedObjectIndex >= static_cast<int>(m_sceneObjects.size())) return;
+        SceneObject* obj = m_sceneObjects[m_selectedObjectIndex].get();
+        if (!obj || obj->isDoor() || obj->isNPC()) return;
+
+        const AABB& lb = obj->getLocalBounds();
+        glm::vec3 ls = lb.getSize();                 // unscaled model size
+        if (ls.x < 1e-5f && ls.y < 1e-5f && ls.z < 1e-5f) return;   // no real mesh
+        glm::vec3 sc = obj->getTransform().getScale();
+        glm::vec3 ws(ls.x * sc.x, ls.y * sc.y, ls.z * sc.z);        // current world size (ft)
+
+        ImGui::SetNextWindowSize(ImVec2(300, 0), ImGuiCond_FirstUseEver);
+        ImGui::Begin("Fit to grid");
+        ImGui::Text("Current size:  %.1f W  x  %.1f D  x  %.1f H ft", ws.x, ws.z, ws.y);
+        ImGui::TextDisabled("= %.1f x %.1f cells, %.1f cells tall  (5 ft grid)",
+                            ws.x / 5.0f, ws.z / 5.0f, ws.y / 5.0f);
+        ImGui::Separator();
+
+        // Uniform scale so a chosen local axis measures `feet` in world.
+        auto fitAxis = [&](float localDim, float feet) {
+            if (localDim < 1e-5f || feet <= 0.0f) return;
+            obj->getTransform().setScale(glm::vec3(feet / localDim));
+        };
+
+        static float targetFt = 5.0f;
+        ImGui::TextUnformatted("Type the real size, then pick the axis it applies to:");
+        ImGui::SetNextItemWidth(120);
+        ImGui::InputFloat("ft##fitgrid", &targetFt);
+        targetFt = std::clamp(targetFt, 0.1f, 5000.0f);
+        if (ImGui::Button("= Width"))  fitAxis(ls.x, targetFt);
+        ImGui::SameLine();
+        if (ImGui::Button("= Depth"))  fitAxis(ls.z, targetFt);
+        ImGui::SameLine();
+        if (ImGui::Button("= Height")) fitAxis(ls.y, targetFt);
+        ImGui::TextDisabled("(uniform scale — keeps the model's proportions)");
+
+        ImGui::Spacing();
+        ImGui::TextUnformatted("Or snap the footprint to whole 5-ft cells:");
+        auto snapFootprint = [&]() {
+            float largest = std::max(ws.x, ws.z);
+            if (largest < 1e-5f) return;
+            float cells = std::max(1.0f, std::round(largest / 5.0f));
+            float feet  = cells * 5.0f;
+            // scale so the LARGEST footprint axis becomes `feet`
+            float localLargest = (ws.x >= ws.z) ? ls.x : ls.z;
+            fitAxis(localLargest, feet);
+        };
+        if (ImGui::Button("Snap footprint to nearest 5 ft")) snapFootprint();
+        ImGui::TextDisabled("Handy for characters: Width/Depth ~5 ft = one cell,\nHeight ~6 ft for a human.");
+        ImGui::End();
+    }
+
     void addDoor(float size = 2.0f) {
         // Semi-transparent blue for door trigger zones
         glm::vec4 doorColor(0.3f, 0.5f, 1.0f, 0.4f);
@@ -26839,6 +27221,38 @@ private:
         selectObject(static_cast<int>(m_sceneObjects.size()) - 1);
 
         std::cout << "Created door trigger zone (" << size << "m)" << std::endl;
+    }
+
+    // An NPC placement marker: designates WHERE a named NPC stands. It carries
+    // only an npcId (in the description); the game resolves that id to a
+    // definition file (model, role, script). Not drawn in the game — like a door.
+    void addNPC(float size = 2.0f) {
+        glm::vec4 npcColor(0.7f, 0.3f, 0.9f, 0.45f);   // translucent purple marker
+        auto meshData = PrimitiveMeshBuilder::createCube(size, npcColor);
+
+        auto obj = std::make_unique<SceneObject>(generateUniqueName("NPC"));
+
+        uint32_t handle = m_modelRenderer->createModel(meshData.vertices, meshData.indices);
+        obj->setBufferHandle(handle);
+        obj->setIndexCount(static_cast<uint32_t>(meshData.indices.size()));
+        obj->setVertexCount(static_cast<uint32_t>(meshData.vertices.size()));
+        obj->setLocalBounds(meshData.bounds);
+        obj->setModelPath("");
+        obj->setMeshData(meshData.vertices, meshData.indices);
+
+        obj->setPrimitiveType(PrimitiveType::NPC);
+        obj->setPrimitiveSize(size);
+        obj->setPrimitiveColor(npcColor);
+        obj->setNpcId("");   // author fills this in via the NPC inspector
+
+        glm::vec3 spawnPos = m_camera.getPosition() + m_camera.getFront() * 10.0f;
+        spawnPos.y = getPlacementFloorHeight(spawnPos.x, spawnPos.z);
+        obj->getTransform().setPosition(spawnPos);
+
+        m_sceneObjects.push_back(std::move(obj));
+        selectObject(static_cast<int>(m_sceneObjects.size()) - 1);
+
+        std::cout << "Created NPC marker" << std::endl;
     }
 
     std::unique_ptr<SceneObject> createSpawnMarkerObject() {
@@ -26921,9 +27335,55 @@ private:
                 }
                 if (uniqueName != baseName) obj->setName(uniqueName);
 
-                glm::vec3 spawnPos = m_camera.getPosition() + m_camera.getFront() * 10.0f;
-                spawnPos.y = getPlacementFloorHeight(spawnPos.x, spawnPos.z) + mesh.bounds.getSize().y * 0.5f;
+                // --- Import diagnostics: catch the "import → void with only skybox"
+                // problem. Almost always a model authored at the wrong scale (e.g.
+                // centimeters, so 100x too big) that spawns on top of the camera:
+                // from inside a giant mesh the faces backface-cull and you see
+                // straight through to the sky. Log size + spawn, warn on trouble.
+                glm::vec3 msize = mesh.bounds.getSize();
+                bool finiteBounds = std::isfinite(msize.x) && std::isfinite(msize.y) &&
+                                    std::isfinite(msize.z);
+                std::cout << "  Model bounds size: " << msize.x << " x " << msize.y
+                          << " x " << msize.z << " ft" << std::endl;
+                if (!finiteBounds) {
+                    std::cerr << "  !!! WARNING: model has non-finite (NaN/inf) bounds — "
+                                 "this can throw the object/camera into the void." << std::endl;
+                }
+                float maxDim = std::max({msize.x, msize.y, msize.z});
+                if (finiteBounds && maxDim > 300.0f) {
+                    std::cerr << "  !!! WARNING: model is HUGE (" << maxDim << " ft across). "
+                                 "It likely spawned around the camera — press '.' with it "
+                                 "selected to frame it, or rescale it. Wrong-unit export "
+                                 "(cm instead of ft) is the usual cause." << std::endl;
+                }
+
+                float halfH = finiteBounds ? msize.y * 0.5f : 0.0f;
+                // Land the model on the Foundation "table" at the CENTER (origin, by
+                // the reference pillar) so it always sits on the table and is easy to
+                // find — never lost in the void. No foundation -> in front of camera.
+                glm::vec3 spawnPos;
+                // Center the model's FOOTPRINT on the origin (its pivot may be
+                // off-center) and sit its BOTTOM flush on the surface.
+                float cx = finiteBounds ? (mesh.bounds.min.x + mesh.bounds.max.x) * 0.5f : 0.0f;
+                float cz = finiteBounds ? (mesh.bounds.min.z + mesh.bounds.max.z) * 0.5f : 0.0f;
+                float bottomOffset = finiteBounds ? mesh.bounds.min.y : 0.0f;
+                if (m_isTestLevel) {
+                    // Foundation/flat level: land the model at the ORIGIN, on Y=0.
+                    spawnPos = glm::vec3(-cx, 0.0f - bottomOffset, -cz);
+                } else {
+                    spawnPos = m_camera.getPosition() + m_camera.getFront() * 10.0f;
+                    spawnPos.y = getPlacementFloorHeight(spawnPos.x, spawnPos.z) + halfH;
+                }
+                std::cerr << "[import] isTestLevel=" << m_isTestLevel << " spawn=("
+                          << spawnPos.x << "," << spawnPos.y << "," << spawnPos.z << ")\n";
+                if (!std::isfinite(spawnPos.x) || !std::isfinite(spawnPos.y) ||
+                    !std::isfinite(spawnPos.z)) {
+                    spawnPos = m_camera.getPosition() + m_camera.getFront() * 10.0f;
+                    spawnPos.y = m_camera.getPosition().y;
+                }
                 obj->getTransform().setPosition(spawnPos);
+                std::cout << "  Spawned at (" << spawnPos.x << ", " << spawnPos.y
+                          << ", " << spawnPos.z << ")" << std::endl;
                 obj->setModelPath(path);  // Store the model path for save/load
                 obj->setBeingType(BeingType::INTERACTION);
 
@@ -26933,6 +27393,7 @@ private:
 
                 m_sceneObjects.push_back(std::move(obj));
                 selectObject(static_cast<int>(m_sceneObjects.size()) - 1);
+                focusCameraOnSelectedObject();   // snap the camera onto it
             }
         }
     }
@@ -28542,7 +29003,8 @@ private:
 
     // "New Level" size dialog state (1 world unit = 1 foot).
     bool m_newLevelPopup = false;
-    int  m_newLevelSizeFeet = 50;
+    int  m_newLevelWidthFeet = 50;   // X extent of a new map (feet)
+    int  m_newLevelDepthFeet = 50;   // Z extent of a new map (feet) — can differ (non-square)
 
     // Edit-mode building: the play-mode build tools (hslab/vslab/...) surfaced in
     // the edit-mode editor too, so there's one editor. Toggled via the Build panel.
@@ -29020,6 +29482,8 @@ private:
 
     // Horizontal slab brush mode (drag out rectangular floor/ceiling slabs)
     bool m_hSlabBrushMode = false;
+    bool m_terrainBrushMode = false;   // drag-out ground/terrain slab (like H-slab, earthy)
+    bool m_showPieceGrid = true;       // 1-ft grid overlay on selected slabs/walls
     bool m_hSlabDrawing = false;
     glm::vec3 m_hSlabStart{0.0f};
     glm::vec3 m_hSlabEnd{0.0f};

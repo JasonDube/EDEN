@@ -1,0 +1,11 @@
+{
+  "_comment": "Starter quest for a hero of no noble house (non-house races, newcomers to Aldermarch).",
+
+  "default": {
+    "title": "Find Your Footing",
+    "category": "House",
+    "giver": "your own resolve",
+    "desc": "You are newly come to Aldermarch, far from your own people. Gather your gear at Orlen's Wares, then set out to make your way in this human realm.",
+    "objective": "Buy your starting gear at Orlen's, then set out from Orlens."
+  }
+}
