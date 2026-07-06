@@ -440,6 +440,7 @@ bool LevelSerializer::save(const std::string& filepath,
             tj["minChunk"]        = { tcfg.minChunk.x, tcfg.minChunk.y };
             tj["maxChunk"]        = { tcfg.maxChunk.x, tcfg.maxChunk.y };
             tj["wrapWorld"]       = tcfg.wrapWorld;
+            tj["stretchTexToBounds"] = tcfg.stretchTexToBounds;
             root["settings"]["terrainConfig"] = tj;
         }
 
@@ -763,6 +764,7 @@ bool LevelSerializer::load(const std::string& filepath, LevelData& outData) {
                 if (tj.contains("maxChunk") && tj["maxChunk"].size() == 2)
                     outData.terrainMaxChunk = { tj["maxChunk"][0], tj["maxChunk"][1] };
                 outData.terrainWrapWorld = tj.value("wrapWorld", false);
+                outData.terrainStretchTex = tj.value("stretchTexToBounds", false);
             }
 
             // Sky parameters

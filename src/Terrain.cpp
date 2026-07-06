@@ -12,6 +12,9 @@ TerrainChunk::TerrainChunk(glm::ivec2 coord, const TerrainConfig& config)
     , m_resolution(config.chunkResolution)
     , m_tileSize(config.tileSize)
     , m_heightScale(config.heightScale)
+    , m_stretchTex(config.stretchTexToBounds)
+    , m_minChunk(config.minChunk)
+    , m_maxChunk(config.maxChunk)
 {
     m_chunkWorldSize = (config.chunkResolution - 1) * config.tileSize;
     generate(config);
@@ -136,10 +139,24 @@ void TerrainChunk::rebuildVerticesFromHeightmap() {
             }
             vertex.normal = calculateNormal(x, z);
 
-            // UV coordinates based on world position (1 UV unit = 10 world units for tiling)
+            // UV coordinates based on world position.
             float worldX = worldOffsetX + x * m_tileSize;
             float worldZ = worldOffsetZ + z * m_tileSize;
-            vertex.uv = glm::vec2(worldX / 10.0f, worldZ / 10.0f);
+            if (m_stretchTex) {
+                // STRETCH mode: normalize 0..1 across the WHOLE terrain bounds so a single
+                // texture fills the entire terrain exactly once (no tiling). Origin/extent
+                // come from the full chunk range, not this chunk, so multi-chunk terrains
+                // stretch as one continuous image.
+                float step    = (m_resolution - 1) * m_tileSize;          // world span of one chunk
+                float originX = m_minChunk.x * step;
+                float originZ = m_minChunk.y * step;
+                float extentX = std::max(1.0f, (m_maxChunk.x - m_minChunk.x + 1) * step);
+                float extentZ = std::max(1.0f, (m_maxChunk.y - m_minChunk.y + 1) * step);
+                vertex.uv = glm::vec2((worldX - originX) / extentX, (worldZ - originZ) / extentZ);
+            } else {
+                // TILE mode: 1 UV unit = 10 world units, so the texture repeats every 10 ft.
+                vertex.uv = glm::vec2(worldX / 10.0f, worldZ / 10.0f);
+            }
 
             // Splatmap weights (smoothly interpolated, no flat)
             vertex.texSplat0 = m_splatmap0[idx];

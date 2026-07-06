@@ -44,6 +44,7 @@ add_custom_command(TARGET terrain_editor POST_BUILD
         ${CMAKE_BINARY_DIR}/shaders/model.vert.spv
         ${CMAKE_BINARY_DIR}/shaders/model.frag.spv
         ${CMAKE_BINARY_DIR}/shaders/model_instanced.vert.spv
+        ${CMAKE_BINARY_DIR}/shaders/grass.frag.spv
         ${CMAKE_BINARY_DIR}/shaders/water.vert.spv
         ${CMAKE_BINARY_DIR}/shaders/water.frag.spv
         ${CMAKE_BINARY_DIR}/shaders/wireframe.vert.spv

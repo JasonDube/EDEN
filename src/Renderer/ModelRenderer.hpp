@@ -118,10 +118,13 @@ public:
                 float hueShift = 0.0f, float saturation = 1.0f, float brightness = 1.0f,
                 bool twoSided = false, bool indoor = false, bool transparent = false);
 
-    // Render multiple instances of the same model in a single draw call
+    // Render multiple instances of the same model in a single draw call.
+    // alphaTest=true routes through the grass pipeline (alpha-cutout, double-sided) for
+    // foliage; false uses the normal opaque instanced pipeline.
     void renderInstanced(VkCommandBuffer commandBuffer, const glm::mat4& viewProj,
                          uint32_t modelHandle,
-                         const InstanceData* instances, uint32_t instanceCount);
+                         const InstanceData* instances, uint32_t instanceCount,
+                         bool alphaTest = false);
 
     // Render model wireframe with solid color
     void renderWireframe(VkCommandBuffer commandBuffer, const glm::mat4& viewProj,
@@ -163,6 +166,7 @@ public:
 private:
     void createPipeline(VkRenderPass renderPass, VkExtent2D extent);
     void createInstancedPipeline(VkRenderPass renderPass, VkExtent2D extent);
+    void createGrassPipeline(VkRenderPass renderPass, VkExtent2D extent);
     void createWireframePipeline(VkRenderPass renderPass, VkExtent2D extent);
     void createSelectionPipeline(VkRenderPass renderPass, VkExtent2D extent);
     void createDescriptorSetLayout();
@@ -189,6 +193,9 @@ private:
     // Instanced rendering pipeline
     VkPipelineLayout m_instancedPipelineLayout = VK_NULL_HANDLE;
     VkPipeline m_instancedPipeline = VK_NULL_HANDLE;
+    // Grass/foliage instanced pipeline: same layout + vertex shader as m_instancedPipeline,
+    // but grass.frag (alpha cutout) and no backface culling (double-sided blades).
+    VkPipeline m_grassPipeline = VK_NULL_HANDLE;
 
     // Instance data buffer (persistently mapped, host-coherent)
     static constexpr size_t MAX_INSTANCES = 4096;

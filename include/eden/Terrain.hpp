@@ -80,6 +80,12 @@ struct TerrainConfig {
     glm::ivec2 minChunk{-16, -16};  // Minimum chunk coordinate
     glm::ivec2 maxChunk{15, 15};    // Maximum chunk coordinate (32x32 = 1024 chunks)
     bool wrapWorld = false;         // If true, world wraps at edges (planet mode)
+
+    // If true, terrain UVs are normalized 0..1 across the WHOLE terrain bounds so a
+    // single texture STRETCHES to fit the entire terrain once, instead of tiling every
+    // 10 world units. Used by the 500x500 "Terrain Cell" template (one painted ground
+    // image per cell). Only sensible on a fixed-bounds terrain.
+    bool stretchTexToBounds = false;
 };
 
 // Progress callback for pre-loading: (chunksLoaded, totalChunks)
@@ -162,6 +168,12 @@ private:
     float m_tileSize;
     float m_chunkWorldSize;
     float m_heightScale;
+    // Stretch-UV mode (a single texture fills the whole terrain). m_minChunk/m_maxChunk
+    // carry the full terrain bounds so a per-chunk vertex can normalize its world XZ to
+    // 0..1 across the entire terrain (not just its own chunk).
+    bool m_stretchTex = false;
+    glm::ivec2 m_minChunk{0, 0};
+    glm::ivec2 m_maxChunk{0, 0};
     std::vector<float> m_heightmap;
     std::vector<glm::vec3> m_colormap;  // Per-vertex color override (-1 = use height-based)
     std::vector<float> m_paintAlphamap;  // Per-vertex paint intensity (0-1)
@@ -223,6 +235,11 @@ public:
     void reconfigure(const TerrainConfig& config) {
         m_config = config;
         m_chunks.clear();
+        m_visibleChunks.clear();
+        // The chunk set just changed completely; force the next update() to rebuild the
+        // visible-chunk list instead of early-returning on "camera still in same chunk"
+        // (which left a fresh terrain invisible when the prior level shared chunk 0,0).
+        m_lastCameraChunk = {INT_MAX, INT_MAX};
         m_fullyLoaded = false;
     }
 

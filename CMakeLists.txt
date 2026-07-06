@@ -276,6 +276,7 @@ compile_shaders(eden
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/model.vert
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/model.frag
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/model_instanced.vert
+    ${CMAKE_CURRENT_SOURCE_DIR}/shaders/grass.frag
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/wireframe.vert
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/wireframe.frag
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/selection.vert
@@ -307,6 +308,7 @@ add_custom_command(TARGET eden POST_BUILD
         ${CMAKE_CURRENT_BINARY_DIR}/shaders/model.vert.spv
         ${CMAKE_CURRENT_BINARY_DIR}/shaders/model.frag.spv
         ${CMAKE_CURRENT_BINARY_DIR}/shaders/model_instanced.vert.spv
+        ${CMAKE_CURRENT_BINARY_DIR}/shaders/grass.frag.spv
         ${CMAKE_CURRENT_BINARY_DIR}/shaders/wireframe.vert.spv
         ${CMAKE_CURRENT_BINARY_DIR}/shaders/wireframe.frag.spv
         ${CMAKE_CURRENT_BINARY_DIR}/shaders/selection.vert.spv

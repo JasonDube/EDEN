@@ -53,6 +53,7 @@ ModelRenderer::ModelRenderer(VulkanContext& context, VkRenderPass renderPass, Vk
     createDescriptorPool();
     createPipeline(renderPass, extent);
     createInstancedPipeline(renderPass, extent);
+    createGrassPipeline(renderPass, extent);   // reuses the instanced layout; call AFTER it
     createWireframePipeline(renderPass, extent);
     createSelectionPipeline(renderPass, extent);
     createDefaultTexture();
@@ -163,6 +164,7 @@ ModelRenderer::~ModelRenderer() {
     if (m_pipeline) vkDestroyPipeline(device, m_pipeline, nullptr);
     if (m_twoSidedPipeline) vkDestroyPipeline(device, m_twoSidedPipeline, nullptr);
     if (m_pipelineLayout) vkDestroyPipelineLayout(device, m_pipelineLayout, nullptr);
+    if (m_grassPipeline) vkDestroyPipeline(device, m_grassPipeline, nullptr);
     if (m_instancedPipeline) vkDestroyPipeline(device, m_instancedPipeline, nullptr);
     if (m_instancedPipelineLayout) vkDestroyPipelineLayout(device, m_instancedPipelineLayout, nullptr);
     if (m_instanceMapped) vkUnmapMemory(device, m_instanceMemory);
@@ -552,6 +554,143 @@ void ModelRenderer::createInstancedPipeline(VkRenderPass renderPass, VkExtent2D 
 
     if (vkCreateGraphicsPipelines(m_context.getDevice(), VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &m_instancedPipeline) != VK_SUCCESS) {
         throw std::runtime_error("Failed to create instanced pipeline");
+    }
+
+    vkDestroyShaderModule(m_context.getDevice(), vertModule, nullptr);
+    vkDestroyShaderModule(m_context.getDevice(), fragModule, nullptr);
+}
+
+// Grass/foliage pipeline: identical to the instanced pipeline (same layout, same
+// per-vertex + per-instance vertex inputs, same model_instanced.vert) EXCEPT it uses
+// grass.frag (alpha-cutout discard) and disables backface culling so both sides of the
+// thin cross-quad blades draw. Must be called AFTER createInstancedPipeline so the
+// shared m_instancedPipelineLayout already exists.
+void ModelRenderer::createGrassPipeline(VkRenderPass renderPass, VkExtent2D extent) {
+    auto vertCode = m_context.readFile("shaders/model_instanced.vert.spv");
+    auto fragCode = m_context.readFile("shaders/grass.frag.spv");
+
+    VkShaderModule vertModule = m_context.createShaderModule(vertCode);
+    VkShaderModule fragModule = m_context.createShaderModule(fragCode);
+
+    VkPipelineShaderStageCreateInfo vertStage{};
+    vertStage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    vertStage.stage = VK_SHADER_STAGE_VERTEX_BIT;
+    vertStage.module = vertModule;
+    vertStage.pName = "main";
+
+    VkPipelineShaderStageCreateInfo fragStage{};
+    fragStage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    fragStage.stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+    fragStage.module = fragModule;
+    fragStage.pName = "main";
+
+    VkPipelineShaderStageCreateInfo stages[] = {vertStage, fragStage};
+
+    // Same two bindings (per-vertex + per-instance) and attributes as the instanced pipeline.
+    VkVertexInputBindingDescription bindings[2]{};
+    bindings[0] = ModelVertex::getBindingDescription();
+    bindings[1].binding = 1;
+    bindings[1].stride = sizeof(InstanceData);
+    bindings[1].inputRate = VK_VERTEX_INPUT_RATE_INSTANCE;
+
+    auto vertexAttrs = ModelVertex::getAttributeDescriptions();
+    std::vector<VkVertexInputAttributeDescription> allAttrs(vertexAttrs.begin(), vertexAttrs.end());
+    for (uint32_t i = 0; i < 4; i++) {
+        VkVertexInputAttributeDescription attr{};
+        attr.binding = 1;
+        attr.location = 4 + i;
+        attr.format = VK_FORMAT_R32G32B32A32_SFLOAT;
+        attr.offset = static_cast<uint32_t>(i * sizeof(glm::vec4));
+        allAttrs.push_back(attr);
+    }
+    {
+        VkVertexInputAttributeDescription attr{};
+        attr.binding = 1;
+        attr.location = 8;
+        attr.format = VK_FORMAT_R32G32B32A32_SFLOAT;
+        attr.offset = static_cast<uint32_t>(offsetof(InstanceData, colorAdjust));
+        allAttrs.push_back(attr);
+    }
+
+    VkPipelineVertexInputStateCreateInfo vertexInput{};
+    vertexInput.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+    vertexInput.vertexBindingDescriptionCount = 2;
+    vertexInput.pVertexBindingDescriptions = bindings;
+    vertexInput.vertexAttributeDescriptionCount = static_cast<uint32_t>(allAttrs.size());
+    vertexInput.pVertexAttributeDescriptions = allAttrs.data();
+
+    VkPipelineInputAssemblyStateCreateInfo inputAssembly{};
+    inputAssembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+    inputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+
+    VkViewport viewport{};
+    viewport.width = static_cast<float>(extent.width);
+    viewport.height = static_cast<float>(extent.height);
+    viewport.maxDepth = 1.0f;
+
+    VkRect2D scissor{};
+    scissor.extent = extent;
+
+    VkPipelineViewportStateCreateInfo viewportState{};
+    viewportState.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
+    viewportState.viewportCount = 1;
+    viewportState.pViewports = &viewport;
+    viewportState.scissorCount = 1;
+    viewportState.pScissors = &scissor;
+
+    VkPipelineRasterizationStateCreateInfo rasterizer{};
+    rasterizer.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+    rasterizer.polygonMode = VK_POLYGON_MODE_FILL;
+    rasterizer.lineWidth = 1.0f;
+    rasterizer.cullMode = VK_CULL_MODE_NONE;   // double-sided: both faces of each blade draw
+    rasterizer.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+
+    VkPipelineMultisampleStateCreateInfo multisampling{};
+    multisampling.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
+    multisampling.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+
+    VkPipelineDepthStencilStateCreateInfo depthStencil{};
+    depthStencil.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
+    depthStencil.depthTestEnable = VK_TRUE;
+    depthStencil.depthWriteEnable = VK_TRUE;   // cutout writes depth normally (no blending)
+    depthStencil.depthCompareOp = VK_COMPARE_OP_LESS;
+
+    VkPipelineColorBlendAttachmentState colorBlend{};
+    colorBlend.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+                                VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+    colorBlend.blendEnable = VK_FALSE;
+
+    VkPipelineColorBlendStateCreateInfo colorBlending{};
+    colorBlending.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+    colorBlending.attachmentCount = 1;
+    colorBlending.pAttachments = &colorBlend;
+
+    std::vector<VkDynamicState> dynamicStates = {
+        VK_DYNAMIC_STATE_VIEWPORT,
+        VK_DYNAMIC_STATE_SCISSOR
+    };
+    VkPipelineDynamicStateCreateInfo dynamicState{};
+    dynamicState.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
+    dynamicState.dynamicStateCount = static_cast<uint32_t>(dynamicStates.size());
+    dynamicState.pDynamicStates = dynamicStates.data();
+
+    VkGraphicsPipelineCreateInfo pipelineInfo{};
+    pipelineInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+    pipelineInfo.stageCount = 2;
+    pipelineInfo.pStages = stages;
+    pipelineInfo.pVertexInputState = &vertexInput;
+    pipelineInfo.pInputAssemblyState = &inputAssembly;
+    pipelineInfo.pViewportState = &viewportState;
+    pipelineInfo.pRasterizationState = &rasterizer;
+    pipelineInfo.pMultisampleState = &multisampling;
+    pipelineInfo.pDepthStencilState = &depthStencil;
+    pipelineInfo.pColorBlendState = &colorBlending;
+    pipelineInfo.pDynamicState = &dynamicState;
+    pipelineInfo.layout = m_instancedPipelineLayout;   // reuse the instanced layout
+    pipelineInfo.renderPass = renderPass;
+
+    if (vkCreateGraphicsPipelines(m_context.getDevice(), VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &m_grassPipeline) != VK_SUCCESS) {
+        throw std::runtime_error("Failed to create grass pipeline");
     }
 
     vkDestroyShaderModule(m_context.getDevice(), vertModule, nullptr);
@@ -1190,7 +1329,8 @@ void ModelRenderer::render(VkCommandBuffer commandBuffer, const glm::mat4& viewP
 
 void ModelRenderer::renderInstanced(VkCommandBuffer commandBuffer, const glm::mat4& viewProj,
                                      uint32_t modelHandle,
-                                     const InstanceData* instances, uint32_t instanceCount) {
+                                     const InstanceData* instances, uint32_t instanceCount,
+                                     bool alphaTest) {
     auto it = m_models.find(modelHandle);
     if (it == m_models.end() || instanceCount == 0) return;
 
@@ -1202,8 +1342,9 @@ void ModelRenderer::renderInstanced(VkCommandBuffer commandBuffer, const glm::ma
     // Upload instance data to persistently mapped buffer
     memcpy(m_instanceMapped, instances, count * sizeof(InstanceData));
 
-    // Bind instanced pipeline
-    vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_instancedPipeline);
+    // Bind instanced pipeline (grass variant = alpha-cutout + double-sided)
+    VkPipeline pipe = (alphaTest && m_grassPipeline) ? m_grassPipeline : m_instancedPipeline;
+    vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
 
     // Bind descriptor sets: set 0 = texture, set 1 = light UBO
     VkDescriptorSet descSet = data.hasTexture ? data.descriptorSet : m_defaultDescriptorSet;
@@ -1739,6 +1880,10 @@ void ModelRenderer::recreatePipeline(VkRenderPass renderPass, VkExtent2D extent)
     }
 
     // Destroy old instanced pipeline and layout
+    if (m_grassPipeline) {
+        vkDestroyPipeline(device, m_grassPipeline, nullptr);
+        m_grassPipeline = VK_NULL_HANDLE;
+    }
     if (m_instancedPipeline) {
         vkDestroyPipeline(device, m_instancedPipeline, nullptr);
         m_instancedPipeline = VK_NULL_HANDLE;
@@ -1779,6 +1924,7 @@ void ModelRenderer::recreatePipeline(VkRenderPass renderPass, VkExtent2D extent)
     // Create new pipelines with new extent
     createPipeline(renderPass, extent);
     createInstancedPipeline(renderPass, extent);
+    createGrassPipeline(renderPass, extent);   // reuses the instanced layout; call AFTER it
     createWireframePipeline(renderPass, extent);
     createSelectionPipeline(renderPass, extent);
 }

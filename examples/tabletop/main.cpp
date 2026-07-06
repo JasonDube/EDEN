@@ -3518,7 +3518,14 @@ private:
     // --combat sandbox there is no level, so it falls back to the abstract board.
     float cCellCtr(int c)  const { return m_hasLevel ? (c * 5.0f + 2.5f) : cellCenter(c); }
     float cCellEdge(int i) const { return m_hasLevel ? (i * 5.0f)        : cellEdge(i);  }
-    int   cGridN()         const { return m_hasLevel ? 200 : kGridN; }
+    // Grid dimension DERIVED from the level's actual extent (5-ft squares), so it's
+    // correct for any cell size — a 250-ft cell is 50, a 1000-ft cell is 200 — and a
+    // custom cell of any size bounds movement/combat to its real edges.
+    int   cGridN()         const {
+        if (!m_hasLevel) return kGridN;
+        int n = static_cast<int>(std::lround((m_levelMax.x - m_levelMin.x) / 5.0f));
+        return std::max(1, n);
+    }
     int   cWorldToCell(float w) const {
         return m_hasLevel ? std::clamp(static_cast<int>(std::floor(w / 5.0f)), 0, cGridN() - 1)
                           : worldToCell(w);
@@ -4149,6 +4156,13 @@ private:
     // ── overland world map ───────────────────────────────────────────────────
     void openWorldMap() { m_screen = Screen::WorldMap; }
 
+    // Every overland cell's stable ID, from its coordinates: cell (7,12) ->
+    // "cell_7_12". This is what a hand-authored level for that square will be
+    // named/looked up by, so custom cells can replace the procedural one.
+    static std::string cellId(int cx, int cy) {
+        return "cell_" + std::to_string(cx) + "_" + std::to_string(cy);
+    }
+
     // Each cell's terrain — deterministic and coherent (a coarse hash makes
     // ~2-cell patches, weighted toward common terrain), so the map, cell
     // generation, and (later) foraging all key off the same biome.
@@ -4480,7 +4494,8 @@ private:
     // the same (cx,cy) always rebuilds the identical layout (seed = spatial hash),
     // so revisiting a cell shows the same place - no files needed. Basic version:
     // a grassland slab with scattered placeholder rocks and trees (swap for real
-    // LIME models + a grass texture later). 1000 x 1000 ft = 200 x 200 five-ft cells.
+    // LIME models + a grass texture later). 250 x 250 ft = 50 x 50 five-ft cells
+    // (matches the editor's Terrain Cell so custom cells line up on the same grid).
     void generateWildernessCell(int cx, int cy) {
         uint32_t seed = static_cast<uint32_t>(cx) * 73856093u ^
                         static_cast<uint32_t>(cy) * 19349663u ^ 0x9E3779B9u;
@@ -4493,7 +4508,7 @@ private:
         m_doors.clear();
         m_hasTerrain = false;
 
-        const float SIZE = 1000.0f;   // 200 cells x 5 ft
+        const float SIZE = 250.0f;   // 50 cells x 5 ft (matches the editor's Terrain Cell)
         rpgb::Biome biome = cellBiome(cx, cy);              // this square's terrain
         float treeF, rockF; biomeScatter(biome, treeF, rockF);
 
@@ -4544,26 +4559,57 @@ private:
         m_levelName = "Wilderness (" + std::to_string(cx) + ", " + std::to_string(cy) + ")";
         m_grid = buildLevelGrid();
 
-        // Clear any town NPCs; drop the hero in the middle of the field (cell 100,100).
+        // Clear any town NPCs; drop the hero in the middle of the field (cell 25,25 of 50).
         for (auto it = m_tokens.begin(); it != m_tokens.end();) {
             if (it->attitude == Attitude::Player) { ++it; continue; }
             for (uint32_t h : it->meshHandles) if (h) m_modelRenderer->destroyModel(h);
             it = m_tokens.erase(it);
         }
-        if (int p = playerTokenIndex(); p >= 0) { m_tokens[p].cx = 100; m_tokens[p].cy = 100; }
+        int midC = static_cast<int>(SIZE / 5.0f) / 2;   // center cell of the field
+        if (int p = playerTokenIndex(); p >= 0) { m_tokens[p].cx = midC; m_tokens[p].cy = midC; }
 
-        // Camera near the hero - framing the whole 1000 ft field would shrink him
-        // to a speck. Start on the usual 3/4 angle; player can pan/dolly/T freely.
-        glm::vec3 pc(100 * 5 + 2.5f, 2.0f, 100 * 5 + 2.5f);
+        // Camera near the hero - framing the whole field would shrink him to a speck.
+        // Start on the usual 3/4 angle; player can pan/dolly/T freely.
+        glm::vec3 pc(midC * 5 + 2.5f, 2.0f, midC * 5 + 2.5f);
         m_camTarget = pc; m_camYaw = -90.0f; m_camPitch = -45.0f;
         m_camDist = 90.0f; m_orthoSize = 40.0f; m_levelOrtho = false;
         applyOrbitCamera();
     }
 
     // Leave the overland map and step into the current square as a real level.
+    // Path to a hand-authored level for this cell, if any: the levels folder
+    // (same dir as the loaded level) + the cell's ID + ".edenbin".
+    std::string customCellPath(int cx, int cy) const {
+        std::string dir;
+        auto slash = m_levelPath.find_last_of("/\\");
+        if (slash != std::string::npos) dir = m_levelPath.substr(0, slash + 1);
+        return dir + cellId(cx, cy) + ".edenbin";
+    }
+
+    // Drop the hero in the middle of a freshly-loaded custom cell and frame the camera.
+    void placePlayerInLevel() {
+        int midX = static_cast<int>((m_levelMin.x + m_levelMax.x) * 0.5f / 5.0f);
+        int midY = static_cast<int>((m_levelMin.y + m_levelMax.y) * 0.5f / 5.0f);
+        if (int p = playerTokenIndex(); p >= 0) { m_tokens[p].cx = midX; m_tokens[p].cy = midY; }
+        glm::vec3 pc(midX * 5 + 2.5f, 2.0f, midY * 5 + 2.5f);
+        m_camTarget = pc; m_camYaw = -90.0f; m_camPitch = -45.0f;
+        m_camDist = 90.0f; m_orthoSize = 40.0f; m_levelOrtho = false;
+        applyOrbitCamera();
+    }
+
     void enterWildernessCell(int cx, int cy) {
         vkDeviceWaitIdle(getContext().getDevice());   // safe to swap GPU resources
-        generateWildernessCell(cx, cy);
+        std::string custom = customCellPath(cx, cy);
+        std::ifstream test(custom);
+        if (test.good()) {                       // a hand-authored cell exists -> load it
+            test.close();
+            loadLevel(custom);                   // meshes, doors, NPCs, terrain
+            m_grid = buildLevelGrid();
+            placePlayerInLevel();
+            std::cerr << "custom cell loaded: " << custom << "\n";
+        } else {
+            generateWildernessCell(cx, cy);      // procedural (builds grid + places hero + camera)
+        }
         m_inWilderness = true;
         m_hasLevel = true;
         m_screen = Screen::Game;
@@ -4652,7 +4698,8 @@ private:
                      ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
                      ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoMove |
                      ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoFocusOnAppearing);
-        ImGui::Text("Terrain here: %s", rpgb::biomeName(cellBiome(m_mapX, m_mapY)));
+        ImGui::Text("Cell %s   -   Terrain: %s", cellId(m_mapX, m_mapY).c_str(),
+                    rpgb::biomeName(cellBiome(m_mapX, m_mapY)));
         ImGui::TextUnformatted("WASD: travel     F: forage     B: brew     Esc: back to town");
         if (m_brewOpen) renderBrewPanel();
         ImGui::TextDisabled("Bound for Greywatch, 600 miles east. Each square is 25 miles.");

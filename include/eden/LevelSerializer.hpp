@@ -208,6 +208,7 @@ struct LevelData {
     glm::ivec2 terrainMinChunk{0, 0};
     glm::ivec2 terrainMaxChunk{0, 0};
     bool terrainWrapWorld = false;
+    bool terrainStretchTex = false;   // single texture stretched across the whole terrain
 };
 
 // Binary terrain file format header

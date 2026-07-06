@@ -1249,6 +1249,14 @@ protected:
         // Tick the standalone clip editor (no-op when no video loaded).
         if (m_videoEditor) m_videoEditor->update(deltaTime);
 
+        // Phase 1 grass: build assets once and (re)scatter blades when marked dirty.
+        // Done here (not during command recording) so the GPU buffer/texture creation is
+        // safe. The scatter samples terrain height, so it must run after the terrain loads.
+        if (m_grassEnabled) {
+            ensureGrassAssets();
+            if (m_grassDirty) regenerateGrassBlades();
+        }
+
         // (Removed) Video-cube per-frame upload. The cube experiment lives
         // in #if 0 above; revive it later if useful.
 
@@ -2287,6 +2295,32 @@ protected:
                     vkCmdDraw(cmd, buffers->vertexCount, 1, 0, 0);
                 }
             }
+        }
+
+        // --- Phase 1 grass: instanced alpha-cutout tufts across the WHOLE cell ---
+        // Deterministic blades were scattered in update(); here we build per-instance
+        // matrices and issue ONE alpha-tested draw call. At 250x250 ft the full-cell
+        // count (~1.7k) fits under the 4096 cap, so there's no camera ring to leave a
+        // visible grass edge from an overhead tactical view. The cap is just a safety
+        // net if grass is toggled onto a much larger terrain.
+        if (m_grassEnabled && m_grassModelHandle != UINT32_MAX && !m_grassBlades.empty()
+            && !m_isTestLevel && !m_isSpaceLevel && !m_isEdenOSLevel) {
+            static std::vector<eden::InstanceData> gInst;
+            gInst.clear();
+            for (const auto& b : m_grassBlades) {
+                glm::mat4 m = glm::translate(glm::mat4(1.0f), b.pos);
+                m = glm::rotate(m, b.yaw, glm::vec3(0, 1, 0));
+                m = glm::scale(m, glm::vec3(b.scale));
+                eden::InstanceData inst;
+                inst.model = m;
+                inst.colorAdjust = glm::vec4(0.0f, 1.0f, b.bright, 0.0f);  // z = per-blade brightness
+                gInst.push_back(inst);
+                if (gInst.size() >= 4096) break;   // instance buffer cap (safety net)
+            }
+            if (!gInst.empty())
+                m_modelRenderer->renderInstanced(cmd, vp, m_grassModelHandle,
+                                                 gInst.data(), static_cast<uint32_t>(gInst.size()),
+                                                 /*alphaTest*/true);
         }
 
         // Flat foundation grid: real depth-tested 3D lines (occluded by geometry),
@@ -8198,6 +8232,12 @@ private:
             bool u = Input::isKeyDown(85); // GLFW_KEY_U
             if (u && !wasU) m_showTerrainGrid = !m_showTerrainGrid;
             wasU = u;
+
+            // J — toggle Phase 1 grass. First enable also triggers a scatter.
+            static bool wasJ = false;
+            bool j = Input::isKeyDown(74); // GLFW_KEY_J
+            if (j && !wasJ) { m_grassEnabled = !m_grassEnabled; if (m_grassEnabled) m_grassDirty = true; }
+            wasJ = j;
         }
 
         // B — spawn battle test (only in play mode / F5)
@@ -22404,6 +22444,7 @@ private:
             tcfg.minChunk        = levelData.terrainMinChunk;
             tcfg.maxChunk        = levelData.terrainMaxChunk;
             tcfg.wrapWorld       = levelData.terrainWrapWorld;
+            tcfg.stretchTexToBounds = levelData.terrainStretchTex;
             getContext().waitIdle();
             m_chunkManager->releaseAllChunkBuffers(m_terrain);
             m_terrain.reconfigure(tcfg);
@@ -23251,6 +23292,12 @@ private:
                 newFoundationLevel();
                 ImGui::CloseCurrentPopup();
             }
+            ImGui::Spacing();
+            ImGui::TextDisabled("Or a sculptable outdoor terrain cell:");
+            if (ImGui::Button("Terrain Cell (500x500 sculptable)", ImVec2(220, 0))) {
+                newTerrainCellLevel();
+                ImGui::CloseCurrentPopup();
+            }
             // NOTE: "Resize terrain (keep objects)" was removed — it regenerated the
             // ground plane in a way that corrupted saved levels (blink/flicker in
             // game). Do not reintroduce without fixing resizeTerrainKeepObjects.
@@ -23289,7 +23336,7 @@ private:
     // can be non-square (e.g. 30 x 100). The chunk span is the largest size that
     // divides both dimensions (fewest chunks, exact size), capped so the count
     // stays sane.
-    void rebuildTerrainAndNewLevel(int widthFeet, int depthFeet) {
+    void rebuildTerrainAndNewLevel(int widthFeet, int depthFeet, bool stretchTex = false) {
         widthFeet = std::clamp(widthFeet, 5, 1000);
         depthFeet = std::clamp(depthFeet, 5, 1000);
 
@@ -23311,6 +23358,7 @@ private:
         cfg.minChunk = {0, 0};
         cfg.maxChunk = {chunksX - 1, chunksZ - 1};
         cfg.wrapWorld = false;
+        cfg.stretchTexToBounds = stretchTex;   // one texture stretched across the whole cell
 
         // Swap the terrain out: free old GPU buffers, reconfigure, re-preload.
         getContext().waitIdle();
@@ -23518,6 +23566,207 @@ private:
 
         std::cout << "Foundation level: 1 mi x 1 mi x 50 ft floor, top at Y=0, start at (0,30,0)."
                   << std::endl;
+    }
+
+    // A sculptable 500 x 500 ft terrain cell for authoring outdoor overland cells
+    // (vs. the Foundation worktable, which is a flat SLAB for interiors/streets).
+    // This is REAL terrain — flat to start, push it around with the terrain tools —
+    // spanning (0,0)..(500,500), with the same red 500-ft pillars + green 6-ft scale
+    // ref for anchoring. The U-key grid DRAPES over whatever you sculpt (renderTerrainGrid
+    // samples terrain height on non-test levels), so the 5-ft gameplay squares stay
+    // readable even over hills. Save it as a cell_X_Y.edenbin the game loads.
+    void newTerrainCellLevel() {
+        // Real, bounded, flat, sculptable 500x500 terrain. This also runs newLevel()
+        // to wipe the scene and frames the edit camera from above the map center.
+        // stretchTex=true → the base texture (slot 0) stretches once across the whole
+        // cell instead of tiling every 10 ft (one painted ground image per cell).
+        // 250 x 250 ft (50 x 50 five-ft squares): small enough that grass covers the
+        // WHOLE cell under the 4096 instance cap (no visible grass ring from overhead).
+        // Must match the tabletop's wilderness/custom cell size.
+        rebuildTerrainAndNewLevel(250, 250, /*stretchTex*/true);
+
+        // NOT a test level: terrain renders + sculpts, and the DRAPING grid (not the
+        // flat Y=0 grid) is the one shown on the U toggle.
+        m_isTestLevel = false;
+        m_editorUI.setTestLevelMode(false);
+
+        auto groundY = [this](float x, float z) {
+            float h = m_terrain.getHeightAt(x, z);
+            return (h < -1000.0f) ? 0.0f : h;   // guard the hole/unloaded sentinel
+        };
+
+        // Red reference pillars at the four corners of the cell (0/500 in X and Z),
+        // seated on the terrain surface. On a flat start they all sit at Y=0.
+        glm::vec4 red(0.85f, 0.10f, 0.10f, 1.0f);
+        auto pmesh = PrimitiveMeshBuilder::createCube(1.0f, red);
+        uint32_t phandle = m_modelRenderer->createModel(pmesh.vertices, pmesh.indices);
+        const float SPAN = 250.0f;
+        int pillarN = 0;
+        for (int ix = 0; ix <= 1; ++ix) {
+            for (int iz = 0; iz <= 1; ++iz) {
+                float x = ix * SPAN, z = iz * SPAN;
+                auto p = std::make_unique<SceneObject>("Pillar_" + std::to_string(pillarN++));
+                p->setBufferHandle(phandle);                      // shared buffer (instanced)
+                p->setIndexCount(static_cast<uint32_t>(pmesh.indices.size()));
+                p->setVertexCount(static_cast<uint32_t>(pmesh.vertices.size()));
+                p->setLocalBounds(pmesh.bounds);
+                p->setMeshData(pmesh.vertices, pmesh.indices);
+                p->setPrimitiveType(PrimitiveType::Cube);
+                p->setPrimitiveSize(1.0f);
+                p->setPrimitiveColor(red);
+                p->setAABBCollision(true);
+                p->getTransform().setScale({1.0f, 20.0f, 1.0f});  // 1 x 1 footprint, 20 tall
+                p->getTransform().setPosition({x, groundY(x, z), z});
+                m_sceneObjects.push_back(std::move(p));
+            }
+        }
+
+        // Green 6-ft scale ref near the origin corner, base on the ground.
+        {
+            glm::vec4 green(0.20f, 0.80f, 0.30f, 1.0f);
+            auto rmesh = PrimitiveMeshBuilder::createCube(1.0f, green);
+            auto ref = std::make_unique<SceneObject>("ScaleRef_6ft");
+            ref->setBufferHandle(m_modelRenderer->createModel(rmesh.vertices, rmesh.indices));
+            ref->setIndexCount(static_cast<uint32_t>(rmesh.indices.size()));
+            ref->setVertexCount(static_cast<uint32_t>(rmesh.vertices.size()));
+            ref->setLocalBounds(rmesh.bounds);
+            ref->setMeshData(rmesh.vertices, rmesh.indices);
+            ref->setPrimitiveType(PrimitiveType::Cube);
+            ref->setPrimitiveSize(1.0f);
+            ref->setPrimitiveColor(green);
+            ref->getTransform().setScale({1.5f, 6.0f, 1.0f});   // ~person: 1.5 wide, 6 tall
+            ref->getTransform().setPosition({4.0f, groundY(4.0f, 4.0f), 4.0f});
+            m_sceneObjects.push_back(std::move(ref));
+        }
+
+        updateSceneObjectsList();
+
+        // The 5-ft gameplay grid is the whole point of this template — show it now.
+        m_showTerrainGrid = true;
+
+        // Phase 1 grass on by default for outdoor cells (J toggles). Blades scatter in
+        // update() once the terrain heights exist.
+        m_grassEnabled = true;
+        m_grassDirty = true;
+
+        // Play-mode spawn: center of the cell, a bit above the ground.
+        float scx = 125.0f, scz = 125.0f;
+        m_hasSpawnPoint = true;
+        m_spawnPosition = glm::vec3(scx, groundY(scx, scz) + 6.0f, scz);
+
+        std::cout << "Terrain Cell: 250 x 250 ft sculptable terrain, 5-ft draping grid, "
+                     "spawn at center." << std::endl;
+    }
+
+    // Build the grass tuft mesh (a few crossed alpha-cut quads) and a PLACEHOLDER grass
+    // sprite once. Swap the sprite for a real grass PNG later — only the look changes.
+    // Safe to call from update() (creates GPU buffers/textures outside command recording).
+    void ensureGrassAssets() {
+        if (m_grassModelHandle != UINT32_MAX || !m_modelRenderer) return;
+
+        // Cross-quad tuft: 3 quads crossed around the vertical axis, ~2 ft wide, ~3 ft
+        // tall, base at y=0. Double-sided pipeline draws both faces, so winding is moot.
+        const float W = 2.0f, H = 3.0f;
+        std::vector<eden::ModelVertex> verts;
+        std::vector<uint32_t> idx;
+        auto addQuad = [&](glm::vec3 right) {
+            glm::vec3 n = glm::normalize(glm::cross(right, glm::vec3(0, 1, 0)));
+            uint32_t base = static_cast<uint32_t>(verts.size());
+            glm::vec3 bl = -right * (W * 0.5f);
+            glm::vec3 br =  right * (W * 0.5f);
+            glm::vec3 up(0, H, 0);
+            verts.push_back({ bl,      n, {0.0f, 1.0f}, {1,1,1,1} });   // bottom-left
+            verts.push_back({ br,      n, {1.0f, 1.0f}, {1,1,1,1} });   // bottom-right
+            verts.push_back({ br + up, n, {1.0f, 0.0f}, {1,1,1,1} });   // top-right
+            verts.push_back({ bl + up, n, {0.0f, 0.0f}, {1,1,1,1} });   // top-left
+            idx.insert(idx.end(), { base+0, base+1, base+2, base+0, base+2, base+3 });
+        };
+        addQuad(glm::vec3(1, 0, 0));
+        addQuad(glm::vec3(0, 0, 1));
+        addQuad(glm::normalize(glm::vec3(1, 0, 1)));
+
+        m_grassModelHandle = m_modelRenderer->createModel(verts, idx);
+
+        // Placeholder sprite: a 64x64 RGBA tuft — a handful of green blades, tapering and
+        // slightly curved, on a fully-transparent background (alpha 0 = cut away).
+        const int S = 64;
+        std::vector<unsigned char> px(S * S * 4, 0);
+        const int NB = 7;                              // blades in the tuft
+        for (int bi = 0; bi < NB; ++bi) {
+            float baseX = (0.15f + 0.70f * (bi + 0.5f) / NB) * S;   // spread across middle
+            float curve = ((bi % 2) ? 1.0f : -1.0f) * (3.0f + (bi % 3));  // lean direction/amount
+            for (int y = 0; y < S; ++y) {
+                float t = static_cast<float>(y) / (S - 1);          // 0 = top (tip), 1 = base
+                float halfW = 0.6f + 2.6f * t;                      // wide at base, thin at tip
+                float cx = baseX + curve * (1.0f - t) * (1.0f - t); // curve toward the tip
+                int x0 = std::max(0, static_cast<int>(cx - halfW));
+                int x1 = std::min(S - 1, static_cast<int>(cx + halfW));
+                // tip brighter/yellower, base darker green
+                unsigned char g = static_cast<unsigned char>(210 - 120 * t);
+                unsigned char r = static_cast<unsigned char>(g * 0.45f);
+                unsigned char b = static_cast<unsigned char>(g * 0.22f);
+                for (int x = x0; x <= x1; ++x) {
+                    int p = (y * S + x) * 4;
+                    px[p+0] = r; px[p+1] = g; px[p+2] = b; px[p+3] = 255;
+                }
+            }
+        }
+        m_modelRenderer->updateTexture(m_grassModelHandle, px.data(), S, S);
+        std::cout << "[grass] built cross-quad tuft + placeholder sprite (handle "
+                  << m_grassModelHandle << ")." << std::endl;
+    }
+
+    // Scatter grass blades across the whole terrain (deterministic, so they don't jitter
+    // frame to frame), sampling terrain height so each tuft sits on the ground. The draw
+    // path culls to a radius of the camera, so the full-cell count here can be large.
+    void regenerateGrassBlades() {
+        m_grassBlades.clear();
+        m_grassDirty = false;
+        if (!m_grassEnabled) return;
+
+        TerrainConfig cfg = m_terrain.getConfig();
+        float span = (cfg.chunkResolution - 1) * cfg.tileSize;     // world span of one chunk
+        float ox = cfg.minChunk.x * span, oz = cfg.minChunk.y * span;
+        float ex = std::max(span, (cfg.maxChunk.x - cfg.minChunk.x + 1) * span);
+        float ez = std::max(span, (cfg.maxChunk.y - cfg.minChunk.y + 1) * span);
+
+        const float STEP = 6.0f;   // ~one tuft per 6 ft, jittered
+        // Cheap deterministic hash -> [0,1), stable per grid cell so blades don't dance.
+        auto h01 = [](int a, int b) {
+            uint32_t h = static_cast<uint32_t>(a * 73856093) ^ static_cast<uint32_t>(b * 19349663);
+            h ^= h >> 13; h *= 2654435761u; h ^= h >> 16;
+            return (h & 0xFFFFFFu) / static_cast<float>(0x1000000);
+        };
+        // Keep grass OFF the marker props — a tuft perched on a corner pillar (or the
+        // scale-ref) looks silly. Exclude a small radius around each corner + the ref.
+        const float cxs[4] = { ox, ox + ex, ox,      ox + ex };
+        const float czs[4] = { oz, oz,      oz + ez, oz + ez };
+        auto nearMarker = [&](float x, float z) {
+            for (int k = 0; k < 4; ++k) {
+                float dx = x - cxs[k], dz = z - czs[k];
+                if (dx * dx + dz * dz < 6.0f * 6.0f) return true;   // 6 ft around each pillar
+            }
+            float rx = x - (ox + 4.0f), rz = z - (oz + 4.0f);
+            return (rx * rx + rz * rz < 3.0f * 3.0f);               // 3 ft around the scale-ref
+        };
+        for (float z = oz; z < oz + ez; z += STEP) {
+            for (float x = ox; x < ox + ex; x += STEP) {
+                int ix = static_cast<int>((x - ox) / STEP), iz = static_cast<int>((z - oz) / STEP);
+                float wx = x + (h01(ix, iz) - 0.5f) * STEP * 0.8f;
+                float wz = z + (h01(ix + 7, iz - 3) - 0.5f) * STEP * 0.8f;
+                if (nearMarker(wx, wz)) continue;   // don't grow grass on the marker props
+                float wy = m_terrain.getHeightAt(wx, wz);
+                if (wy < -1000.0f) continue;   // hole/unloaded sentinel
+                GrassBlade blade;
+                blade.pos    = glm::vec3(wx, wy, wz);
+                blade.yaw    = h01(ix - 11, iz + 5) * 6.2831853f;
+                blade.scale  = 0.75f + h01(ix + 3, iz + 9) * 0.85f;
+                blade.bright = 0.80f + h01(ix - 4, iz - 8) * 0.50f;
+                m_grassBlades.push_back(blade);
+            }
+        }
+        std::cout << "[grass] scattered " << m_grassBlades.size() << " tufts over "
+                  << ex << "x" << ez << " ft." << std::endl;
     }
 
     void newTestLevel() {
@@ -29834,6 +30083,15 @@ private:
     };
     std::vector<BattleUnit> m_battleUnits;
     bool m_showTerrainGrid = false;  // off by default; toggled with G (5-ft squares)
+
+    // --- Phase 1 grass (foliage) ---
+    // Instanced alpha-cutout cross-quad tufts scattered over the terrain and drawn only
+    // within a radius of the camera. Auto-enabled on Terrain Cell levels; J toggles it.
+    uint32_t m_grassModelHandle = UINT32_MAX;   // cross-quad mesh + placeholder sprite
+    bool m_grassEnabled = false;
+    bool m_grassDirty = true;                   // re-scatter blades next update()
+    struct GrassBlade { glm::vec3 pos; float yaw; float scale; float bright; };
+    std::vector<GrassBlade> m_grassBlades;
 
     // RTS-style unit selection (LMB click + LMB-drag box)
     std::set<int> m_selectedUnits;       // indices into m_battleUnits
