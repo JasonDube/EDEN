@@ -3464,6 +3464,7 @@ private:
                             rpgs::priceStr(totalCp(m_pc)).c_str(), packWeight(), m_pc.abilities[rpgc::STR] * 15.0f);
         ImGui::BeginChild("##sheetInv", ImVec2(0, 0), true);
         if (m_pc.items.empty()) ImGui::TextDisabled("(empty - buy gear at Orlen's Wares)");
+        std::string drinkName;   // deferred: drinking may erase the item mid-loop
         for (int i = 0; i < (int)m_pc.items.size(); ++i) {
             auto& it = m_pc.items[i];
             auto d = rpgs::itemDef(it.name);
@@ -3471,6 +3472,8 @@ private:
             if (d.kind != rpgs::GEAR) {
                 if (it.equipped) { if (ImGui::SmallButton("Unequip")) unequipItem(i); }
                 else             { if (ImGui::SmallButton("Equip  ")) equipItem(i); }
+            } else if (isPotion(it.name)) {
+                if (ImGui::SmallButton("Drink ")) drinkName = it.name;
             } else {
                 ImGui::Dummy(ImVec2(56.0f, 1.0f));
             }
@@ -3482,6 +3485,7 @@ private:
             if (*st && ImGui::IsItemHovered()) ImGui::SetTooltip("%s", st);
             ImGui::PopID();
         }
+        if (!drinkName.empty()) drinkPotion(drinkName);
         ImGui::EndChild();
         ImGui::End();
     }
@@ -3662,6 +3666,7 @@ private:
     // ----- combat helpers -----
     int rollDie(int sides) { std::uniform_int_distribution<int> d(1, sides); return d(m_rng); }
     int rollD20() { return rollDie(20); }
+    int rollDice(int n, int sides) { int t = 0; for (int i = 0; i < n; ++i) t += rollDie(sides); return t; }
 
     // ── overland encounter -> tactical combat ────────────────────────────────
     // Parse a "XdY" damage string into dice/sides (defaults 1d4 on garbage).
@@ -4156,6 +4161,53 @@ private:
         }
         m_travelMsgTimer = 7.0f;
     }
+    // Experiment on an unknown-but-craftable recipe: harder than a known brew
+    // (DC +3), and a failure still spoils the ingredients — but SUCCESS learns it.
+    void experimentRecipe(const rpga::Recipe& r) {
+        if (!hasAlchemistSupplies()) { m_travelMsg = "You need Alchemist's Supplies to experiment."; m_travelMsgTimer = 5.0f; return; }
+        if (!hasIngredients(r))      { m_travelMsg = "You lack the ingredients."; m_travelMsgTimer = 5.0f; return; }
+        for (const auto& p : r.parts) removeFromPack(p.name, p.qty);
+        int dc = r.dc + 3;   // brewing blind is harder than following a known recipe
+        int roll = rollD20() + m_pc.mod(rpgc::INT) + rpgc::proficiencyBonus(m_pc.level);
+        if (roll >= dc) {
+            m_knownRecipes.push_back(r.output);
+            addToPack(r.output, 1, 0.5f);
+            m_travelMsg = "Discovery! You've learned to brew " + std::string(r.output) +
+                          ".  (check " + std::to_string(roll) + " vs DC " + std::to_string(dc) + ")";
+        } else {
+            m_travelMsg = "The experiment fizzles - ingredients wasted.  (check " + std::to_string(roll) +
+                          " vs DC " + std::to_string(dc) + ")";
+        }
+        m_travelMsgTimer = 8.0f;
+    }
+
+    // ── drinking potions ─────────────────────────────────────────────────────
+    static bool isPotion(const std::string& n) { return n.rfind("Potion of ", 0) == 0; }
+    // Quaff a potion from the pack: heal (the healing line) or a flavor sip for
+    // others, then consume it. Heals the live combatant in a fight, else the sheet HP.
+    void drinkPotion(const std::string& name) {
+        int healAmt = 0;
+        if      (name == "Potion of Healing")          healAmt = rollDice(2, 4) + 2;
+        else if (name == "Potion of Greater Healing")  healAmt = rollDice(4, 4) + 4;
+        else if (name == "Potion of Superior Healing") healAmt = rollDice(8, 4) + 8;
+        else if (name == "Potion of Supreme Healing")  healAmt = rollDice(10, 4) + 20;
+
+        int gained = 0;
+        if (healAmt > 0) {
+            if (m_inCombat) {   // in a fight the live HP lives on the combatant, not m_pc
+                for (auto& c : m_enc.combatants())
+                    if (!c.foe) { int b = c.hp; c.hp = std::min(c.maxHp, c.hp + healAmt); gained = c.hp - b; break; }
+            } else {
+                int b = m_pc.curHP; m_pc.curHP = std::min(m_pc.maxHP, m_pc.curHP + healAmt); gained = m_pc.curHP - b;
+            }
+        }
+        removeFromPack(name, 1);
+        std::string msg = healAmt > 0 ? ("Drank " + name + "  (+" + std::to_string(gained) + " HP)")
+                                      : ("Drank " + name + ".");
+        if (m_inCombat) { m_log.push_back(msg); if (m_log.size() > 5) m_log.erase(m_log.begin()); }
+        else            { m_hint = msg; m_hintTimer = 4.0f; }
+    }
+
     void renderBrewPanel() {
         ImVec2 disp = ImGui::GetIO().DisplaySize;
         ImGui::SetNextWindowPos(ImVec2(disp.x * 0.5f, disp.y * 0.5f), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
@@ -4186,6 +4238,30 @@ private:
             ImGui::PopID();
         }
         if (!any) ImGui::TextDisabled("You know no recipes yet.");
+
+        // Experiment: unknown formulas you happen to have the ingredients for.
+        // You see what it would consume, but not what it makes — until you crack it.
+        ImGui::Spacing();
+        ImGui::TextColored(ImVec4(0.72f, 0.66f, 0.90f, 1.0f), "Experiment");
+        ImGui::TextDisabled("Attempt an unknown formula (harder, DC +3; a failure spoils the ingredients).");
+        ImGui::Separator();
+        bool anyExp = false;
+        for (const auto& r : rpga::recipes()) {
+            if (knowsRecipe(r.output) || !hasIngredients(r)) continue;   // only ones you could attempt now
+            anyExp = true;
+            ImGui::PushID((std::string("exp_") + r.output).c_str());
+            ImGui::BeginDisabled(!hasAlchemistSupplies());
+            if (ImGui::Button("Experiment")) experimentRecipe(r);
+            ImGui::EndDisabled();
+            ImGui::SameLine();
+            ImGui::TextColored(ImVec4(0.72f, 0.66f, 0.90f, 1.0f), "Unknown formula");
+            ImGui::SameLine(); ImGui::TextDisabled("(DC %d)", r.dc + 3);
+            for (const auto& p : r.parts)
+                ImGui::TextColored(ImVec4(0.60f, 0.75f, 0.60f, 1), "      %d / %d   %s", packCount(p.name), p.qty, p.name);
+            ImGui::Separator();
+            ImGui::PopID();
+        }
+        if (!anyExp) ImGui::TextDisabled("   (gather more varied ingredients to sense new formulas)");
         ImGui::End();
     }
 
