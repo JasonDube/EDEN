@@ -105,6 +105,7 @@ constexpr float kAIEndDelay    = 0.55f;
 constexpr float kLungeDur      = 0.28f;   // attack-lunge duration (seconds)
 constexpr float kLungeMax      = 2.2f;    // peak forward bump, in feet
 constexpr float kSwingDur      = 0.36f;   // player attack-swing flipbook duration (seconds)
+constexpr float kFloatDur      = 1.10f;   // rising HIT/MISS combat text lifetime (seconds)
 
 // World<->cell mapping. Cells are indexed [0, kGridN); cell centers sit on the
 // grid squares, cell edges on the grid lines.
@@ -252,6 +253,8 @@ protected:
         if (m_lungeT > 0.0f) m_lungeT -= dt;   // advance the attack-lunge animation
         if (m_swingT > 0.0f) m_swingT -= dt;   // advance the player attack-swing flipbook
         m_effectTime += dt;                     // free-running clock for pulsing FX
+        for (auto it = m_floatTexts.begin(); it != m_floatTexts.end();)   // rising HIT/MISS text
+            { it->t += dt; if (it->t >= kFloatDur) it = m_floatTexts.erase(it); else ++it; }
         if (m_screen == Screen::Title) m_titlePulse += dt;
         if (m_hasLevel && m_screen == Screen::Game && !m_inCombat) updateFacing();
         if (m_hintTimer > 0.0f) m_hintTimer -= dt;
@@ -3552,6 +3555,52 @@ private:
         m_lungeDir = len > 1e-4f ? d / len : glm::vec2(0.0f, 1.0f);
     }
 
+    // Project a world point to screen pixels (viewProj already flips clip-Y for
+    // Vulkan). Returns false if the point is behind the camera.
+    bool projectToScreen(const glm::vec3& world, const glm::mat4& vp, ImVec2& out) const {
+        glm::vec4 clip = vp * glm::vec4(world, 1.0f);
+        if (clip.w <= 1e-4f) return false;
+        glm::vec3 ndc = glm::vec3(clip) / clip.w;
+        ImVec2 disp = ImGui::GetIO().DisplaySize;
+        out = ImVec2((ndc.x * 0.5f + 0.5f) * disp.x, (ndc.y * 0.5f + 0.5f) * disp.y);
+        return true;
+    }
+    // Spawn a big rising word over a combatant (HIT / MISS).
+    void spawnFloatText(int idx, const std::string& text, ImU32 color) {
+        if (idx < 0 || idx >= static_cast<int>(m_enc.combatants().size())) return;
+        const auto& c = m_enc.combatants()[idx];
+        float y = m_hasLevel ? 5.5f : 1.4f;   // head height in the world / on the board
+        m_floatTexts.push_back({glm::vec3(cCellCtr(c.cx), y, cCellCtr(c.cy)), text, color, 0.0f});
+    }
+    // Rising word for an attack outcome: red "HIT -7" / "CRIT -7" (with damage),
+    // or blue "MISS", over the target.
+    void spawnHitFloat(int idx, const rpgtt::AttackOutcome& o) {
+        if (o.hit) spawnFloatText(idx, std::string(o.crit ? "CRIT -" : "HIT -") + std::to_string(o.damage),
+                                  IM_COL32(235, 45, 35, 255));
+        else       spawnFloatText(idx, "MISS", IM_COL32(70, 140, 245, 255));
+    }
+
+    // Draw all floating combat text: big, rising, fading, over the battlefield.
+    void renderFloatTexts() {
+        if (m_floatTexts.empty()) return;
+        glm::mat4 vp = computeViewProj();
+        ImDrawList* dl = ImGui::GetForegroundDrawList();
+        ImFont* font = ImGui::GetFont();
+        for (const auto& f : m_floatTexts) {
+            ImVec2 s;
+            if (!projectToScreen(f.world, vp, s)) continue;
+            float frac = f.t / kFloatDur;
+            float alpha = std::clamp(1.0f - frac, 0.0f, 1.0f);
+            const float sz = 44.0f;
+            ImVec2 ts = font->CalcTextSizeA(sz, 1e9f, 0.0f, f.text.c_str());
+            ImVec2 pos(s.x - ts.x * 0.5f, s.y - frac * 72.0f);
+            ImU32 col = (f.color & 0x00FFFFFFu) | (static_cast<ImU32>(alpha * 255) << 24);
+            ImU32 sh  = IM_COL32(0, 0, 0, static_cast<int>(alpha * 200));
+            dl->AddText(font, sz, ImVec2(pos.x + 2, pos.y + 2), sh, f.text.c_str());   // shadow
+            dl->AddText(font, sz, pos, col, f.text.c_str());
+        }
+    }
+
     // Yaw facing the nearest living opponent (opposite team).
     float faceNearestEnemy(const rpgtt::Combatant& c) const {
         float yaw = 0.0f; int best = 1 << 30;
@@ -3700,9 +3749,13 @@ private:
             if (d.versatile[0] && equippedIdx(pc, rpgs::SHIELD) < 0) dmg = d.versatile;
             parseDice(dmg, c.dmgDice, c.dmgSides);
             c.dmgBonus = abil;
+            c.hasAtkBreakdown = true; c.atkProf = prof; c.atkAbil = abil; c.dmgAbil = abil;
+            c.atkAbilName = (d.ranged || (d.finesse && dex > str)) ? "DEX" : "STR";
         } else {                                               // unarmed: 1 + STR
             c.attackBonus = str + prof;
             c.dmgDice = 1; c.dmgSides = 1; c.dmgBonus = std::max(0, str);
+            c.hasAtkBreakdown = true; c.atkProf = prof; c.atkAbil = str; c.dmgAbil = std::max(0, str);
+            c.atkAbilName = "STR";
         }
         return c;
     }
@@ -3730,6 +3783,7 @@ private:
         m_foeVis.clear();
         m_enc.clear();
         m_log.clear();
+        m_floatTexts.clear();
 
         // Minis sized to the space: ~2.2 ft radius / 6 ft tall figures in the
         // world; small tokens on the abstract sandbox board.
@@ -3847,27 +3901,59 @@ private:
         else            { d20 = std::min(rollD20(), rollD20()); mode = "  (disadvantage)"; }
 
         int sets = (d20 == 20) ? 2 : 1;
-        int dice = 0;
+        int rawDice = 0;
         for (int s = 0; s < sets; ++s)
-            for (int i = 0; i < a.dmgDice; ++i) dice += rollDie(a.dmgSides);
-        if (m_raging && !a.foe) dice += 2;                      // Rage: +2 melee damage (the hero swings)
-        if (m_raging && !t.foe) dice = std::max(1, dice / 2);   // Rage: resistance - the hero takes half
+            for (int i = 0; i < a.dmgDice; ++i) rawDice += rollDie(a.dmgSides);
+        int dice = rawDice;
+        int rageBonus = 0; bool resisted = false;
+        if (m_raging && !a.foe) { rageBonus = 2; dice += 2; }                     // Rage: +2 melee damage
+        if (m_raging && !t.foe) { dice = std::max(1, dice / 2); resisted = true; }// Rage: resistance (half)
         rpgtt::AttackOutcome o = m_enc.attack(targetId, d20, dice);
-        if (o.valid) logAttack(o, m_enc.combatants()[targetId], mode);
+        if (o.valid) {
+            logAttackDetailed(a, m_enc.combatants()[targetId], o, rawDice, sets, rageBonus, resisted, mode);
+            spawnHitFloat(targetId, o);
+        }
     }
 
-    void logAttack(const rpgtt::AttackOutcome& o, const rpgtt::Combatant& t, const char* mode) {
-        char buf[208];
-        if (o.hit)
-            std::snprintf(buf, sizeof buf, "%s %s %s (d20 %d%s)%s - %d dmg  [%s %d/%d]%s",
-                          o.attacker.c_str(), o.crit ? "CRITS" : "hits", o.target.c_str(),
-                          o.d20, o.crit ? "!" : "", mode, o.damage, t.name.c_str(), t.hp,
-                          t.maxHp, o.dropped ? "  DOWN!" : "");
+    // Combat-log line showing the full to-hit and damage math, e.g.
+    //   Percy hits Wolf | to hit: d20 15 + prof 2 + STR 2 = 19 vs AC 13
+    //                    | dmg: 1d8 [5] + STR 2 = 7  [Wolf 4/11]
+    // The hero shows the prof/ability split; monsters show their flat SRD bonus.
+    void logAttackDetailed(const rpgtt::Combatant& a, const rpgtt::Combatant& t,
+                           const rpgtt::AttackOutcome& o, int rawDice, int sets,
+                           int rageBonus, bool resisted, const char* mode) {
+        char hit[140];
+        if (a.hasAtkBreakdown)
+            std::snprintf(hit, sizeof hit, "d20 %d + prof %d + %s %d = %d vs AC %d",
+                          o.d20, a.atkProf, a.atkAbilName, a.atkAbil, o.total, t.ac);
         else
-            std::snprintf(buf, sizeof buf, "%s misses %s (%d vs AC %d)%s",
-                          o.attacker.c_str(), o.target.c_str(), o.total, t.ac, mode);
+            std::snprintf(hit, sizeof hit, "d20 %d + %d = %d vs AC %d",
+                          o.d20, a.attackBonus, o.total, t.ac);
+
+        char buf[360];
+        if (o.hit) {
+            int effDice = a.dmgDice * sets;                  // a crit doubles the dice
+            int shown = resisted ? std::max(1, rawDice / 2) : rawDice;
+            char dmg[200];
+            if (a.hasAtkBreakdown)                           // hero: prof/ability split, maybe rage
+                std::snprintf(dmg, sizeof dmg, "%dd%d [%d] + %s %d%s = %d",
+                              effDice, a.dmgSides, shown, a.atkAbilName, a.dmgAbil,
+                              rageBonus ? " + 2 rage" : "", o.damage);
+            else if (resisted)                               // foe hitting a raging hero (halved dice)
+                std::snprintf(dmg, sizeof dmg, "%dd%d [%d halved to %d] + %d = %d",
+                              effDice, a.dmgSides, rawDice, shown, a.dmgBonus, o.damage);
+            else
+                std::snprintf(dmg, sizeof dmg, "%dd%d [%d] + %d = %d",
+                              effDice, a.dmgSides, rawDice, a.dmgBonus, o.damage);
+            std::snprintf(buf, sizeof buf, "%s %s %s%s  |  to hit: %s  |  dmg: %s  [%s %d/%d]%s",
+                          o.attacker.c_str(), o.crit ? "CRITS" : "hits", o.target.c_str(), mode,
+                          hit, dmg, t.name.c_str(), t.hp, t.maxHp, o.dropped ? "  DOWN!" : "");
+        } else {
+            std::snprintf(buf, sizeof buf, "%s misses %s%s  |  to hit: %s",
+                          o.attacker.c_str(), o.target.c_str(), mode, hit);
+        }
         m_log.emplace_back(buf);
-        if (m_log.size() > 5) m_log.erase(m_log.begin());
+        if (m_log.size() > 6) m_log.erase(m_log.begin());
     }
 
     // Move the active combatant to (toX,toY), first resolving any opportunity
@@ -3888,7 +3974,10 @@ private:
             for (int s = 0; s < sets; ++s)
                 for (int i = 0; i < atk.dmgDice; ++i) dice += rollDie(atk.dmgSides);
             rpgtt::AttackOutcome o = m_enc.opportunityAttack(eid, me, d20, dice);
-            if (o.valid) logAttack(o, m_enc.combatants()[me], "  (opportunity)");
+            if (o.valid) {
+                logAttackDetailed(atk, m_enc.combatants()[me], o, dice, sets, 0, false, "  (opportunity)");
+                spawnHitFloat(me, o);
+            }
             if (m_enc.combatants()[me].isDown()) break;   // dropped mid-move
         }
         if (!m_enc.active().isDown()) m_enc.moveActiveTo(toX, toY, cGridN());
@@ -4707,6 +4796,8 @@ private:
             return;
         }
 
+        renderFloatTexts();   // big rising HIT / MISS words over the fighters
+
         ImGui::SetNextWindowPos(ImVec2(10, 10), ImGuiCond_FirstUseEver);
         ImGui::SetNextWindowSize(ImVec2(280, 0), ImGuiCond_FirstUseEver);
         ImGui::Begin("Encounter");
@@ -4784,7 +4875,11 @@ private:
         }
 
         ImGui::Spacing();
-        if (ImGui::Button("End Turn")) m_enc.endTurn();
+        bool endTurnClicked = ImGui::Button("End Turn");
+        // Spacebar ends the turn too — but only on the hero's turn (never skip AI).
+        bool spaceEnd = m_enc.hasActive() && !m_enc.active().foe &&
+                        !ImGui::GetIO().WantTextInput && ImGui::IsKeyPressed(ImGuiKey_Space, false);
+        if (endTurnClicked || spaceEnd) m_enc.endTurn();
         ImGui::SameLine();
         if (ImGui::Button("Reset")) {
             m_enc.combatants() = m_spawn;
@@ -4798,12 +4893,21 @@ private:
         if (!m_log.empty()) {
             ImGui::Separator();
             ImGui::TextUnformatted("Log");
-            for (const auto& line : m_log) ImGui::TextWrapped("%s", line.c_str());
+            for (const auto& line : m_log) {
+                ImVec4 col(0.85f, 0.85f, 0.85f, 1.0f);
+                if (line.find(" misses ") != std::string::npos)     col = ImVec4(0.45f, 0.66f, 1.0f, 1.0f);   // blue miss
+                else if (line.find(" hits ") != std::string::npos ||
+                         line.find(" CRITS ") != std::string::npos) col = ImVec4(1.0f, 0.38f, 0.32f, 1.0f);   // red hit
+                ImGui::PushStyleColor(ImGuiCol_Text, col);
+                ImGui::TextWrapped("%s", line.c_str());
+                ImGui::PopStyleColor();
+            }
         }
 
         ImGui::Separator();
         ImGui::TextDisabled("Drag the highlighted mini to move");
         ImGui::TextDisabled("Click an adjacent foe to attack");
+        ImGui::TextDisabled("Space = end your turn");
         ImGui::TextDisabled("Flank (ally opposite) = advantage");
         ImGui::TextDisabled("Leaving melee provokes; Disengage avoids");
         ImGui::TextDisabled("Middle-drag pan  \xc2\xb7  Scroll zoom");
@@ -5051,7 +5155,10 @@ private:
 
     rpgtt::Encounter m_enc;                // turn/round/movement state (rules in encounter.hpp)
     std::vector<rpgtt::Combatant> m_spawn; // starting layout, for Reset
-    std::vector<std::string> m_log;        // recent combat-log lines (last 5)
+    std::vector<std::string> m_log;        // recent combat-log lines
+    // Floating combat text: a big "HIT"/"MISS" that rises off a struck combatant.
+    struct FloatText { glm::vec3 world; std::string text; ImU32 color; float t; };
+    std::vector<FloatText> m_floatTexts;
     std::mt19937 m_rng{std::random_device{}()};  // dice RNG
     int  m_hoverCx = 0, m_hoverCy = 0;     // grid cell under the cursor this frame
 

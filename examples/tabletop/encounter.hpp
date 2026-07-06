@@ -43,6 +43,13 @@ struct Combatant {
     int   dmgSides = 6;
     int   dmgBonus = 2;
     int   reachCells = 1;         // melee reach, in cells (1 = adjacent incl. diagonal)
+    // Optional attack-bonus breakdown for the combat log. The hero fills these in
+    // (prof + ability split); monsters carry a flat SRD bonus and leave this off.
+    bool  hasAtkBreakdown = false;
+    int   atkProf = 0;            // proficiency portion of attackBonus
+    int   atkAbil = 0;            // ability-mod portion of attackBonus
+    int   dmgAbil = 0;            // ability-mod portion of dmgBonus
+    const char* atkAbilName = "STR";
 
     // Dying state (heroes only — foes die outright at 0 HP). A creature at 0 HP
     // is unconscious; if not yet dead/stable it is "dying" and makes a death
