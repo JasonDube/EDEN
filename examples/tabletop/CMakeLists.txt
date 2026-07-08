@@ -19,6 +19,7 @@ add_custom_command(TARGET tabletop POST_BUILD
         ${CMAKE_BINARY_DIR}/shaders/selection.frag.spv
         ${CMAKE_BINARY_DIR}/shaders/terrain.vert.spv
         ${CMAKE_BINARY_DIR}/shaders/terrain.frag.spv
+        ${CMAKE_BINARY_DIR}/shaders/grass.frag.spv
         $<TARGET_FILE_DIR:tabletop>/shaders/
 )
 
