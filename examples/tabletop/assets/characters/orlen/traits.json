@@ -1,0 +1,15 @@
+{
+  "_comment": "Secondary/personality traits, 0-100. Authored to match Orlen's persona: a gruff but fair, humble, content shopkeeper of thirty years. Order here is the display order.",
+  "traits": [
+    { "name": "Temper",     "value": 55 },
+    { "name": "Bravery",    "value": 45 },
+    { "name": "Ambition",   "value": 35 },
+    { "name": "Narcissism", "value": 25 },
+    { "name": "Greed",      "value": 55 },
+    { "name": "Honesty",    "value": 78 },
+    { "name": "Loyalty",    "value": 66 },
+    { "name": "Generosity", "value": 38 },
+    { "name": "Patience",   "value": 42 },
+    { "name": "Curiosity",  "value": 52 }
+  ]
+}

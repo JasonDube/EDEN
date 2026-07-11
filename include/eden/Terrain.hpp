@@ -29,7 +29,7 @@ struct Vertex3D {
     float holeMask;        // Terrain hole (0 = solid, 1 = discarded/invisible)
 };
 
-enum class BrushMode { Raise, Lower, Smooth, Flatten, Paint, Crack, Texture, Plateau, LevelMin, Grab, Select, Deselect, MoveObject, Spire, Ridged, Trench, PathMode, Terrace, FlattenToY, WallDraw, Foundation, Furrow, Shovel, SmearTexture };
+enum class BrushMode { Raise, Lower, Smooth, Flatten, Paint, Crack, Texture, Plateau, LevelMin, Grab, Select, Deselect, MoveObject, Spire, Ridged, Trench, PathMode, Terrace, FlattenToY, WallDraw, Foundation, Furrow, Shovel, SmearTexture, GrassPaint, GrassErase };
 
 enum class BrushShape { Circle, Ellipse, Square };
 
@@ -118,6 +118,13 @@ public:
                            const BrushShapeParams& shapeParams = BrushShapeParams{});
     void applySelectionBrush(float worldX, float worldZ, float radius, float strength, float falloff, bool select,
                              const BrushShapeParams& shapeParams = BrushShapeParams{});
+    // Grass density paint (per-vertex 0..1; CPU-only, drives foliage scatter — never
+    // touches the GPU/shader). add=true thickens grass, add=false carves it bare.
+    void applyGrassBrush(float worldX, float worldZ, float radius, float strength, float falloff, bool add,
+                         const BrushShapeParams& shapeParams = BrushShapeParams{});
+    float getGrassAtLocal(int x, int z) const;
+    const std::vector<float>& getGrassmap() const { return m_grassmap; }
+    void setGrassmap(const std::vector<float>& g) { if (g.size() == m_grassmap.size()) m_grassmap = g; }
     void clearSelection();
     void regenerateMesh();
     void setTriangulationMode(TriangulationMode mode);
@@ -186,6 +193,7 @@ private:
     std::vector<glm::vec4> m_splatmap6;  // Splatmap weights for textures 24-27
     std::vector<glm::vec4> m_splatmap7;  // Splatmap weights for textures 28-31
     std::vector<float> m_selectionmap;  // Per-vertex selection weight (0-1)
+    std::vector<float> m_grassmap;      // Per-vertex grass density (0-1, default 1); CPU-only
     std::vector<glm::vec3> m_texHSBmap;  // Per-vertex texture color adjustment (hue, saturation, brightness)
     std::vector<float> m_holemap;  // Per-vertex hole mask (0 = solid, 1 = hole)
     std::vector<Vertex3D> m_vertices;
@@ -263,6 +271,10 @@ public:
                            const BrushShapeParams& shapeParams = BrushShapeParams{});
     void applySelectionBrush(float worldX, float worldZ, float radius, float strength, float falloff, bool select,
                              const BrushShapeParams& shapeParams = BrushShapeParams{});
+    // Grass density paint + query (per-vertex 0..1, drives foliage scatter).
+    void applyGrassBrush(float worldX, float worldZ, float radius, float strength, float falloff, bool add,
+                         const BrushShapeParams& shapeParams = BrushShapeParams{});
+    float getGrassDensityAt(float worldX, float worldZ) const;
 
     // Selection methods
     void clearAllSelection();

@@ -1,0 +1,15 @@
+{
+  "quests": [
+    {
+      "id": "missing_shipment",
+      "title": "Investigate the Missing Shipment",
+      "category": "Personal",
+      "desc": "Orlen's supply wagon out of Greywatch is three days overdue — in twenty years it has never been more than a day behind. He asks you to ride the east road and find out what became of it.",
+      "objective": "Ride the east road and find Orlen's missing supply wagon.",
+      "emotion": "requesting",
+      "accepted_note": "The traveler has taken on the matter of your missing wagon. You don't know if they can handle whatever's out on that road, but we will see.",
+      "target": { "col": 12, "row": 12, "label": "Missing Shipment" },
+      "pitch": "My supply wagon out of Greywatch is three days late. Twenty years I've run this shop and it's never been more than a day behind. Something's wrong on that road. I'd take it as a real kindness — and pay you fairly — if you'd ride east and find out what's become of it."
+    }
+  ]
+}

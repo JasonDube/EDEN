@@ -168,7 +168,7 @@ bool LevelSerializer::saveTerrainBinary(const std::string& filepath, const Terra
 
     // Prepare header (version 2 = splatmap format)
     TerrainFileHeader header;
-    header.version = 3;  // v3: 32-texture splatmap (8 vec4s)
+    header.version = 4;  // v4: adds per-vertex grass density map after texHSB
     header.chunkCount = static_cast<uint32_t>(allChunks.size());
     header.chunkResolution = 64;  // Default resolution
 
@@ -237,6 +237,12 @@ bool LevelSerializer::saveTerrainBinary(const std::string& filepath, const Terra
         file.write(reinterpret_cast<const char*>(splatmap7.data()), count * sizeof(glm::vec4));
         file.write(reinterpret_cast<const char*>(texHSB.data()), count * sizeof(glm::vec3));
 
+        // v4: per-vertex grass density (CPU-only, so it's read from the chunk, not the
+        // vertex data). Default to full density if a chunk somehow lacks the map.
+        std::vector<float> grass = chunk->getGrassmap();
+        if (static_cast<int>(grass.size()) != count) grass.assign(count, 1.0f);
+        file.write(reinterpret_cast<const char*>(grass.data()), count * sizeof(float));
+
         entry.dataSize = static_cast<uint64_t>(file.tellp()) - entry.dataOffset;
         chunkTable.push_back(entry);
         chunkIndex++;
@@ -279,7 +285,7 @@ bool LevelSerializer::loadTerrainBinary(const std::string& filepath, LevelData& 
         return false;
     }
 
-    if (header.version != 1 && header.version != 2 && header.version != 3) {
+    if (header.version != 1 && header.version != 2 && header.version != 3 && header.version != 4) {
         s_lastError = "Unsupported terrain file version: " + std::to_string(header.version);
         return false;
     }
@@ -343,6 +349,12 @@ bool LevelSerializer::loadTerrainBinary(const std::string& filepath, LevelData& 
         }
 
         file.read(reinterpret_cast<char*>(chunk.texHSBmap.data()), count * sizeof(glm::vec3));
+
+        if (header.version >= 4) {
+            // v4: per-vertex grass density. Older files leave it empty -> default 1.0.
+            chunk.grassmap.resize(count);
+            file.read(reinterpret_cast<char*>(chunk.grassmap.data()), count * sizeof(float));
+        }
 
         outData.chunks.push_back(std::move(chunk));
     }
@@ -1194,6 +1206,9 @@ void LevelSerializer::applyToTerrain(const LevelData& data, Terrain& terrain) {
                 chunkData.splatmap7
             );
         }
+        // v4+: restore painted grass density (empty for older files -> chunk keeps its
+        // default full-density map).
+        if (!chunkData.grassmap.empty()) chunk->setGrassmap(chunkData.grassmap);
         appliedCount++;
     }
 

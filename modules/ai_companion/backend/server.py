@@ -177,6 +177,8 @@ class ChatRequest(BaseModel):
     provider: Optional[str] = None  # Override default provider
     perception: Optional[dict] = None  # Spatial awareness data from game engine
     image_path: Optional[str] = None  # Path to image file for vision model analysis
+    relationship: Optional[int] = None  # Current NPC->player relationship score (0-100)
+    allow_actions: bool = True  # False for pure dialogue NPCs (no motor-action block)
 
 
 class ChatResponse(BaseModel):
@@ -186,6 +188,7 @@ class ChatResponse(BaseModel):
     model: str
     action: Optional[dict] = None
     emotion: str = "neutral"
+    relationship_delta: int = 0  # How this exchange changed the NPC's feelings (-5..+5)
 
 
 class NewSessionRequest(BaseModel):
@@ -256,7 +259,8 @@ ACTION: {"type": "follow", "distance": 4.0, "speed": 5.0}
 """
 
 
-def build_system_prompt(npc_name: str, being_type: int, custom_personality: str = "") -> str:
+def build_system_prompt(npc_name: str, being_type: int, custom_personality: str = "",
+                        allow_actions: bool = True) -> str:
     """Build the system prompt based on being type and optional custom personality."""
 
     base_prompt = f"You are {npc_name}, a character in a game world called EDEN.\n\n"
@@ -280,12 +284,16 @@ Do not use contractions. Do not express emotions. State facts only."""
 Keep your responses concise and in-character. You are having a face-to-face conversation.
 Do not use asterisks for actions. Speak naturally as the character would.
 
-Begin every response with your current emotion in brackets. Pick ONE from: [neutral], [happy], [sad], [angry], [surprised], [curious], [afraid], [amused], [annoyed], [flirty], [thoughtful], [excited]
-Example: [amused] Ha, you really thought that would work?"""
+Begin every response with your current emotion in brackets. Pick ONE from: [neutral], [happy], [sad], [angry], [surprised], [curious], [afraid], [amused], [annoyed], [flirty], [thoughtful], [excited], [requesting]
+Use [requesting] when you are asking the player for a favor or pressing them to do something for you.
+Example: [amused] Ha, you really thought that would work?
+
+If this exchange meaningfully changed how you feel about the player, add a second tag right after the emotion: [rel:+N] if you warmed toward them or [rel:-N] if they soured you, where N is 1 to 5. Omit the tag when nothing changed.
+Example: [angry] [rel:-2] You dare insult my prices?"""
 
     # AI-capable being types get action instructions
     # 4=Android, 5=Cyborg, 7=Eve, 8=Xenk, and any being type > 0 (sentient)
-    action_block = ACTION_INSTRUCTIONS if being_type > 0 else ""
+    action_block = ACTION_INSTRUCTIONS if (being_type > 0 and allow_actions) else ""
 
     # Heartbeat behavior (in system prompt so it's said once, not repeated every heartbeat)
     heartbeat_block = """
@@ -307,7 +315,8 @@ def strip_think_tags(text: str) -> str:
 
 
 VALID_EMOTIONS = {"neutral", "happy", "sad", "angry", "surprised", "curious",
-                   "afraid", "amused", "annoyed", "flirty", "thoughtful", "excited"}
+                   "afraid", "amused", "annoyed", "flirty", "thoughtful", "excited",
+                   "requesting"}
 
 
 def _summarize_old_messages(messages: list[dict], keep_recent: int = 10) -> list[dict]:
@@ -357,12 +366,56 @@ def _strip_positions_for_comparison(perception_text: str) -> str:
     text = re.sub(r'\[Player position:.*?\]', '', text)
     return text.strip()
 
+# Common words models emit that aren't in the canonical set — map to the nearest.
+EMOTION_SYNONYMS = {
+    "normal": "neutral", "calm": "neutral", "content": "happy", "joyful": "happy",
+    "pleased": "happy", "worried": "afraid", "scared": "afraid", "nervous": "afraid",
+    "irritated": "annoyed", "frustrated": "annoyed", "shocked": "surprised",
+    "intrigued": "curious", "playful": "amused", "pensive": "thoughtful",
+}
+
+
 def parse_emotion(text: str) -> tuple[str, str]:
-    """Extract [emotion] tag from start of response. Returns (clean_text, emotion)."""
-    m = re.match(r'^\[(\w+)\]\s*', text)
-    if m and m.group(1).lower() in VALID_EMOTIONS:
-        return text[m.end():], m.group(1).lower()
-    return text, "neutral"
+    """Extract a leading [emotion] tag. Returns (clean_text, emotion).
+    Any leading bracket tag is stripped so it never leaks into the reply —
+    including multi-word/hyphenated ones like [half-amused] — mapping to the
+    nearest canonical emotion (default neutral)."""
+    m = re.match(r'^\[([^\]]+)\]\s*', text)
+    if not m:
+        return text, "neutral"
+    tag = m.group(1).lower()
+    rest = text[m.end():]
+    if tag in VALID_EMOTIONS:
+        return rest, tag
+    if tag in EMOTION_SYNONYMS:
+        return rest, EMOTION_SYNONYMS[tag]
+    # Multi-word/compound tag: find any known emotion word inside it.
+    for w in re.findall(r'[a-z]+', tag):
+        if w in VALID_EMOTIONS:   return rest, w
+        if w in EMOTION_SYNONYMS: return rest, EMOTION_SYNONYMS[w]
+    return rest, "neutral"   # unknown: strip anyway, treat as neutral
+
+
+def strip_context_echoes(text: str) -> str:
+    """Some models parrot our own bracketed context format back into the spoken
+    reply (e.g. '[You can see: ...]', '[Your position: ...]'). Strip those known
+    meta-blocks so they never reach the player."""
+    text = re.sub(r'\[(?:You can see|Your position|Player position|Your current relationship)[^\]]*\]',
+                  '', text, flags=re.IGNORECASE)
+    return re.sub(r'\n{3,}', '\n\n', text).strip()
+
+
+def parse_relationship(text: str) -> tuple[str, int]:
+    """Extract a [rel:+N]/[rel:-N] tag from the response (wherever the model put it).
+    Returns (clean_text, delta clamped to -5..+5)."""
+    m = re.search(r'\[rel:\s*([+-]?\d+)\]\s*', text)
+    if not m:
+        return text, 0
+    try:
+        delta = max(-5, min(5, int(m.group(1))))
+    except ValueError:
+        delta = 0
+    return (text[:m.start()] + text[m.end():]).strip(), delta
 
 
 def parse_action_from_response(text: str) -> tuple[str, Optional[dict]]:
@@ -385,6 +438,10 @@ def parse_action_from_response(text: str) -> tuple[str, Optional[dict]]:
                     return clean_text, action
             except json.JSONDecodeError:
                 pass
+        else:
+            # "ACTION: None" / "ACTION:" with no JSON — strip the leftover tag so
+            # it doesn't leak into the spoken reply.
+            return text[:match.start()].strip(), None
     return text.strip(), None
 
 
@@ -827,7 +884,8 @@ async def chat(request: ChatRequest):
         system_prompt = build_system_prompt(
             request.npc_name,
             request.being_type,
-            request.npc_personality
+            request.npc_personality,
+            request.allow_actions
         )
 
         conversations[session_id] = {
@@ -899,6 +957,14 @@ async def chat(request: ChatRequest):
         if context_parts:
             user_content = "\n".join(context_parts) + f"\n\n{request.message}"
 
+    # Relationship context: remind the NPC how it currently feels about the player
+    if request.relationship is not None:
+        rel = max(0, min(100, request.relationship))
+        user_content = (
+            f"[Your current relationship with the player: {rel}/100 — "
+            f"0 is hatred, 50 is neutral, 100 is devoted]\n" + user_content
+        )
+
     # Add user message to history
     session["messages"].append({
         "role": "user",
@@ -921,6 +987,12 @@ async def chat(request: ChatRequest):
         # Parse emotion tag from response
         clean_text, emotion = parse_emotion(clean_text)
 
+        # Parse relationship-change tag from response
+        clean_text, relationship_delta = parse_relationship(clean_text)
+
+        # Strip any echoed context meta-blocks (perception/relationship formats)
+        clean_text = strip_context_echoes(clean_text)
+
         # Add assistant response to history (strip think tags to save context space)
         session["messages"].append({
             "role": "assistant",
@@ -937,7 +1009,8 @@ async def chat(request: ChatRequest):
             provider=session["provider"],
             model=model_used,
             action=action,
-            emotion=emotion
+            emotion=emotion,
+            relationship_delta=relationship_delta
         )
 
     except httpx.TimeoutException:

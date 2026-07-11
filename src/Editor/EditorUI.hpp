@@ -144,6 +144,7 @@ public:
 
     // Terrain tools toggle
     bool isTerrainToolsEnabled() const { return m_terrainToolsEnabled; }
+    void setTerrainToolsEnabled(bool on) { m_terrainToolsEnabled = on; }
 
     // Getters for brush settings
     BrushMode getBrushMode() const { return m_brushMode; }

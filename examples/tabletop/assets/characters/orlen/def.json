@@ -1,6 +1,6 @@
 {
   "name": "Orlen",
-  "model": "characters/npc/orlen_the_merchant.glb",
+  "model": "characters/orlen/model.glb",
   "role": "shopkeeper",
   "heightFt": 5.8,
   "script": "orlen"

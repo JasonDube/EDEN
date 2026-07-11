@@ -1,0 +1,4 @@
+{
+  "_comment": "Per-clip playback options, keyed by clip filename stem. rest_frame = the frame held when the clip plays through (not looping); omit to hold the last frame. loop = force this clip to loop/play-through regardless of the global default.",
+  "requesting": { "rest_frame": 203 }
+}

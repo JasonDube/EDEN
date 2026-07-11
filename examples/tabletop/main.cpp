@@ -46,7 +46,16 @@
 #include <eden/Input.hpp>
 #include <eden/Window.hpp>
 
-#include <nlohmann/json.hpp>   // NPC definition files (assets/npcs/<id>.json)
+#include <nlohmann/json.hpp>   // NPC definition files (assets/characters/<id>/def.json)
+#include <httplib.h>           // AI dialogue backend (ai_companion, localhost:8080)
+#include "VideoPlayer.hpp"     // libmpv-backed dialogue video (ported from Tearsheet)
+#include "GameServers.hpp"     // in-game start/stop of the AI dialogue backend
+#include <atomic>
+#include <mutex>
+#include <thread>
+#include <filesystem>
+#include <sstream>
+#include <cfloat>
 
 #include <imgui.h>
 #include <imgui_impl_glfw.h>
@@ -120,7 +129,8 @@ class TabletopApp : public VulkanApplicationBase {
     // Portrait image + its ImGui texture handle (defined early so method
     // signatures below can reference it).
     struct Portrait {
-        std::string path, race, gender;    // race = subfolder; gender from filename
+        std::string path, race, gender, cls;  // parsed from the character-bundle path
+        std::string modelDir;                 // bundle folder holding this character's .glb models
         int w = 0, h = 0;                  // source pixel size (for aspect-correct display)
         VkImage image = VK_NULL_HANDLE;
         VkDeviceMemory memory = VK_NULL_HANDLE;
@@ -214,9 +224,12 @@ protected:
 
     void onCleanup() override {
         stopTitleMusic();
+        m_dlgVideo.close();     // stop mpv threads before tearing down Vulkan
         eden::Audio::getInstance().shutdown();
         vkDeviceWaitIdle(getContext().getDevice());
         destroyPortraits();     // RemoveTexture needs the ImGui Vulkan backend still alive
+        freeDlgProfile();
+        destroyDlgTex();
         m_modelRenderer.reset();
         m_imgui.cleanup();
     }
@@ -237,6 +250,23 @@ protected:
     }
 
     void update(float dt) override {
+        // Deferred GPU teardown from leaving a conversation: free the profile
+        // texture now (frame start), after waiting for the frame that drew it —
+        // freeing it mid-render (in leaveDialogue) would destroy a texture ImGui
+        // still references in the in-flight draw data.
+        if (m_dlgProfilePendingFree) {
+            vkDeviceWaitIdle(getContext().getDevice());
+            freeDlgProfile();
+            m_dlgProfilePendingFree = false;
+        }
+        // Deferred: after character creation, free the whole portrait grid except
+        // the chosen hero's (only that one is needed for the party bar / sheet).
+        // Same one-frame defer + wait as above — the grid was drawn last frame.
+        if (m_freePortraitsPending) {
+            vkDeviceWaitIdle(getContext().getDevice());
+            freeUnselectedPortraits();
+            m_freePortraitsPending = false;
+        }
         ImGui_ImplVulkan_NewFrame();
         ImGui_ImplGlfw_NewFrame();
 
@@ -257,6 +287,11 @@ protected:
             { it->t += dt; if (it->t >= kFloatDur) it = m_floatTexts.erase(it); else ++it; }
         if (m_screen == Screen::Title) m_titlePulse += dt;
         if (m_hasLevel && m_screen == Screen::Game && !m_inCombat) updateFacing();
+        if (m_screen == Screen::Dialogue) {          // one-on-one NPC conversation
+            updateDialogueVideo();                   // pull mpv frame -> GPU texture
+            pollDialogueReply();                     // apply finished LLM replies
+        }
+        m_servers.poll();                            // advance dialogue-server processes
         if (m_hintTimer > 0.0f) m_hintTimer -= dt;
 
         // Fire the dev screenshot once the countdown elapses.
@@ -512,6 +547,7 @@ private:
         }
         if (m_hasLevel && m_screen == Screen::CharCreate) return;   // ImGui-driven wizard
         if (m_hasLevel && m_screen == Screen::WorldMap) return;      // overland map: no piece/camera input
+        if (m_hasLevel && m_screen == Screen::Dialogue) return;      // dialogue: ImGui owns all input
         if (m_hasLevel && !m_inCombat) { handleTokenDrag(overUI); handleLevelCamera(overUI); return; }
         if (m_hasLevel && m_inCombat) {   // fight in the cell: move/attack on the world grid, still orbit the view
             handleCombatMoveAttack(overUI);
@@ -957,11 +993,42 @@ private:
 
     // NPC markers: authored spots (PrimitiveType::NPC) where a named NPC stands.
     // Each carries only an npcId; the definition (model, role, script) is resolved
-    // from assets/npcs/<npcId>.json at spawn time. Not rendered — the character is.
+    // from assets/characters/<npcId>/def.json at spawn time. Not rendered — the character is.
     struct RawNPC { glm::vec3 pos; std::string npcId; };
 
     // A journal quest, grouped by category (House, Personal, Faith, Guild, ...).
     struct Quest { std::string title, category, giver, desc, objective; bool complete = false; };
+
+    // ── LLM dialogue types (declared here so methods above the member block can
+    //    reference them in their signatures) ──
+    struct DlgLine { bool player; std::string text; };   // one chat line
+    struct DlgReply { std::string text, emotion, session; int relDelta = 0; bool error = false; };
+    // Per-character AI state, loaded from assets/characters/<id>/ on enter.
+    //  persona.txt  — author-written preprompt/personality (game reads only).
+    //  greeting.txt — optional opening line (falls back to the NPC's map dialog).
+    //  memory.json  — game-managed: disposition + memories + history + accepted quests.
+    //                 Authors may seed "memories" here too; the game preserves them.
+    struct NpcMemory {
+        int disposition = 50;                     // 0..100, 50 = neutral
+        std::vector<std::string> memories;        // durable facts (authored + game-added)
+        std::vector<DlgLine> history;             // persisted transcript across visits
+        std::vector<std::string> acceptedQuests;  // quest ids the player has taken
+    };
+    // A quest an NPC can offer, authored in assets/characters/<id>/quests.json.
+    //  pitch       = the NPC's own words telling the player about it (verbatim).
+    //  emotion     = optional state video played while they deliver the pitch.
+    //  targetCol/Row = optional world-map cell of the quest target (a marker).
+    //  acceptedNote  = line folded into the NPC's persona once the quest is taken,
+    //                  so the undone quest stays in their awareness.
+    struct DlgQuest {
+        std::string id, title, category, desc, objective, pitch, emotion;
+        int targetCol = -1, targetRow = -1;
+        std::string targetLabel, acceptedNote;
+    };
+    // A pin shown on the overland map at a quest target.
+    struct QuestMarker { int col, row; std::string label; };
+    // A secondary/personality trait (temper, ambition, ...), 0..100.
+    struct Trait { std::string name; int value; };
 
     // Current level basename without extension (e.g. "orlen_shop"), for matching
     // against a token's homeLevel. m_levelName is like "orlen_shop.edenbin".
@@ -1176,8 +1243,10 @@ private:
         m_pc.skepticism = m_skepticism;
         m_pc.honor = m_honor; m_pc.piety = m_piety; m_pc.greed = m_greed; m_pc.temper = m_temper;
         m_pc.diligence = m_diligence; m_pc.compassion = m_compassion; m_pc.curiosity = m_curiosity;
-        if (m_selectedPortrait >= 0 && m_selectedPortrait < (int)m_portraits.size())
+        if (m_selectedPortrait >= 0 && m_selectedPortrait < (int)m_portraits.size()) {
             m_pc.portraitPath = m_portraits[m_selectedPortrait].path;
+            m_pcModelDir      = m_portraits[m_selectedPortrait].modelDir;  // 1:1 portrait -> model
+        }
         int pt = playerTokenIndex();
         if (pt >= 0) m_tokens[pt].name = m_pc.name;
         std::cerr << "created: " << m_pc.name << " the " << m_pc.race << " " << m_pc.className
@@ -1194,6 +1263,7 @@ private:
         for (const auto& r : rpga::recipes()) if (r.knownAtStart) m_knownRecipes.push_back(r.output);
         m_screen = Screen::Game;
         stopTitleMusic();
+        m_freePortraitsPending = true;   // release the portrait grid (keep the hero's)
     }
 
     // ----- portrait gallery -----
@@ -1276,40 +1346,67 @@ private:
         return true;
     }
 
+    // Portraits are co-located with their models: one character per folder at
+    //   assets/characters/player/<race>/<gender>/<class>/<name>/
+    // holding portrait.<img> plus default.glb (+ optional attack_1/attack_2).
+    // Each portrait therefore knows its own model (the sibling .glb files).
     void scanPortraits() {
         if (m_portraitsScanned) return;
         m_portraitsScanned = true;
         namespace fs = std::filesystem;
         std::error_code ec;
-        fs::path root = "assets/portraits";
+        fs::path root = "assets/characters/player";
         if (!fs::exists(root, ec)) return;
         for (auto it = fs::recursive_directory_iterator(root, ec);
              it != fs::recursive_directory_iterator(); it.increment(ec)) {
             if (ec) break;
             if (!it->is_regular_file(ec)) continue;
+            if (lower(it->path().stem().string()) != "portrait") continue;   // the bundle's portrait
             std::string ext = lower(it->path().extension().string());
             if (ext != ".png" && ext != ".jpg" && ext != ".jpeg" && ext != ".webp" && ext != ".bmp") continue;
             Portrait p; p.path = it->path().string();
+            p.modelDir = it->path().parent_path().string();
+            // Path components under root: <race>/<gender>/<class>/<name>/portrait.*
             fs::path rel = fs::relative(it->path(), root, ec);
-            if (rel.has_parent_path()) p.race = lower(rel.begin()->string());
-            std::string lp = lower(p.path);
-            if (lp.find("female") != std::string::npos) p.gender = "female";
-            else if (lp.find("male") != std::string::npos) p.gender = "male";
+            std::vector<std::string> parts;
+            for (const auto& seg : rel) parts.push_back(lower(seg.string()));
+            if (parts.size() >= 1) p.race   = parts[0];
+            if (parts.size() >= 2) p.gender = parts[1];
+            if (parts.size() >= 3) p.cls    = parts[2];
             if (loadPortraitTexture(p.path, p)) m_portraits.push_back(std::move(p));
         }
-        std::cerr << "portraits: loaded " << m_portraits.size() << " from assets/portraits/\n";
+        std::cerr << "portraits: loaded " << m_portraits.size()
+                  << " character bundles from assets/characters/player/\n";
+    }
+
+    void freeOnePortrait(Portrait& p) {
+        VkDevice device = getContext().getDevice();
+        if (p.descriptor) ImGui_ImplVulkan_RemoveTexture(p.descriptor);
+        if (p.sampler) vkDestroySampler(device, p.sampler, nullptr);
+        if (p.view) vkDestroyImageView(device, p.view, nullptr);
+        if (p.image) vkDestroyImage(device, p.image, nullptr);
+        if (p.memory) vkFreeMemory(device, p.memory, nullptr);
     }
 
     void destroyPortraits() {
-        VkDevice device = getContext().getDevice();
-        for (auto& p : m_portraits) {
-            if (p.descriptor) ImGui_ImplVulkan_RemoveTexture(p.descriptor);
-            if (p.sampler) vkDestroySampler(device, p.sampler, nullptr);
-            if (p.view) vkDestroyImageView(device, p.view, nullptr);
-            if (p.image) vkDestroyImage(device, p.image, nullptr);
-            if (p.memory) vkFreeMemory(device, p.memory, nullptr);
-        }
+        for (auto& p : m_portraits) freeOnePortrait(p);
         m_portraits.clear();
+    }
+
+    // Free the whole scanned portrait grid except the chosen hero's — the grid is
+    // only needed on the character-creation screen; the party bar / sheet keep
+    // just the one. Deferred by one frame after creation (see update()).
+    void freeUnselectedPortraits() {
+        if (m_portraits.empty()) return;
+        const std::string keep = m_pc.portraitPath;
+        std::vector<Portrait> kept;
+        for (auto& p : m_portraits) {
+            if (!keep.empty() && p.path == keep) kept.push_back(p);   // keep handles
+            else freeOnePortrait(p);
+        }
+        m_portraits = std::move(kept);
+        m_selectedPortrait = -1;
+        m_previewPortrait = -1;
     }
 
     // Native file chooser (zenity) -> load as a portrait, return its index or -1.
@@ -1371,8 +1468,10 @@ private:
             ImGui::PopID();
         }
         if (shown == 0)
-            ImGui::TextDisabled("No portraits here yet -\ndrop images in\nassets/portraits/%s/\n(or use Upload).",
-                                wantRace.c_str());
+            ImGui::TextDisabled("No %s characters yet - add a bundle at\n"
+                                "assets/characters/player/%s/<gender>/<class>/<name>/\n"
+                                "with portrait.jpg + default.glb.",
+                                wantRace.c_str(), wantRace.c_str());
         ImGui::EndChild();
 
         // ---- right: large preview + confirm ----
@@ -2506,6 +2605,10 @@ private:
             q.objective = "Buy your starting gear at Orlen's, then set out from Orlens.";
         }
         m_quests.push_back(q);
+
+        // The campaign quest points east to Greywatch — mark it on the map.
+        m_questMarkers.clear();
+        addQuestMarker(kGreywatchCol, kGreywatchRow, q.title);
     }
 
     void renderJournal() {
@@ -2838,16 +2941,39 @@ private:
     // The player's own piece. NPCs are no longer hardcoded here — they're
     // authored per-level as NPC markers and spawned by spawnLevelNPCs(). Only
     // Percy (the player) is created once and persists across every level.
-    // The player's token model: the barbarian frames for a male human barbarian,
-    // else the Percy placeholder. Fills `frames` with the swing-frame GLB paths.
+    // The player's token model. Characters are co-located bundles at
+    //   assets/characters/player/<race>/<gender>/<class>/<name>/
+    // holding default.glb (+ optional attack_1/attack_2). The model comes 1:1
+    // from the chosen portrait's bundle (m_pcModelDir, set at creation). Before a
+    // portrait is picked, we take the first bundle matching race/gender/class so
+    // the game still has a body; failing that, the Percy placeholder.
     std::string playerModel(std::vector<std::string>& frames) const {
+        namespace fs = std::filesystem;
         frames.clear();
-        if (m_pc.gender == "Male" && m_pc.race == "Human" && m_pc.className == "Barbarian") {
-            frames = { "assets/characters/player/barbarian_2.glb",
-                       "assets/characters/player/barbarian_3.glb" };
-            return "assets/characters/player/barbarian_1.glb";
+        auto useBundle = [&](const std::string& dir) -> std::string {
+            std::string def = dir + "/default.glb";
+            if (!fs::exists(def)) return "";
+            std::string a1 = dir + "/attack_1.glb", a2 = dir + "/attack_2.glb";
+            if (fs::exists(a1)) frames.push_back(a1);
+            if (fs::exists(a2)) frames.push_back(a2);
+            return def;
+        };
+        // 1) the character the player chose (portrait -> model, 1:1)
+        if (!m_pcModelDir.empty()) { std::string m = useBundle(m_pcModelDir); if (!m.empty()) return m; }
+        // 2) first available bundle for this race/gender/class (pre-portrait default)
+        auto lc = [](std::string s) { for (auto& c : s) c = (char)std::tolower((unsigned char)c); return s; };
+        std::string base = "assets/characters/player/" + lc(m_pc.race) + "/"
+                         + lc(m_pc.gender) + "/" + lc(m_pc.className);
+        std::error_code ec;
+        if (fs::is_directory(base, ec)) {
+            std::vector<std::string> dirs;
+            for (auto& e : fs::directory_iterator(base, ec)) if (e.is_directory()) dirs.push_back(e.path().string());
+            std::sort(dirs.begin(), dirs.end());
+            for (const auto& d : dirs) { std::string m = useBundle(d); if (!m.empty()) return m; }
         }
-        return "assets/characters/player/percy_the_knight.glb";
+        // 3) placeholder (Percy, the human male paladin)
+        std::string m = useBundle("assets/characters/player/human/male/paladin/percy");
+        return m.empty() ? "" : m;
     }
 
     void loadCharacters() {
@@ -2864,7 +2990,7 @@ private:
                        Attitude attitude; bool merchant; const char* dialog;
                        const char* homeLevel; };
         const Spawn spawns[] = {
-            {"assets/characters/percy_the_knight.glb",   "Percy", 2, 2, 6.0f,
+            {"assets/characters/player/human/male/paladin/percy/default.glb", "Percy", 2, 2, 6.0f,
              Attitude::Player, false, "", ""},
         };
         // The spawn cx/cy above are a RELATIVE layout (a small cluster near a
@@ -2925,8 +3051,8 @@ private:
 
     // ---- NPC system (data-driven, authored per-level) ----------------------
     // A level places NPC markers (npcId only). The rest lives in loose data:
-    //   Layer 2  assets/npcs/<id>.json      — who he is (name, model, role)
-    //   Layer 3  assets/npc_scripts/<id>/   — what he says (the dialogue provider)
+    //   Layer 2  assets/characters/<id>/def.json      — who he is (name, model, role)
+    //   Layer 3  assets/characters/<id>/greeting.txt  — his opening line
     // so dialogue can grow to trees/LLMs later without touching the level or the
     // definition.
 
@@ -2943,7 +3069,7 @@ private:
     NpcDef loadNpcDef(const std::string& npcId) const {
         NpcDef d;
         if (npcId.empty()) return d;
-        std::string path = "assets/npcs/" + npcId + ".json";
+        std::string path = "assets/characters/" + npcId + "/def.json";
         std::ifstream f(path);
         if (!f) { std::cerr << "npc def MISSING: " << path << "\n"; return d; }
         try {
@@ -2964,7 +3090,7 @@ private:
     // the script folder. Swap this body for a tree walker or an LLM call later;
     // callers never change.
     std::string npcGreeting(const std::string& scriptId) const {
-        std::string path = "assets/npc_scripts/" + scriptId + "/greeting.txt";
+        std::string path = "assets/characters/" + scriptId + "/greeting.txt";
         std::ifstream f(path);
         if (!f) return "";
         std::stringstream ss; ss << f.rdbuf();
@@ -3156,10 +3282,10 @@ private:
             m_hint = "Combat in this scene isn't wired up yet.";
             m_hintTimer = 2.5f;
         } else {
-            m_dialogActive = true;
+            // Straight into the conversation — Trade/Quests are buttons in there.
             m_dialogName = target.name;
-            m_dialogText = target.dialog.empty() ? "..." : target.dialog;
             m_dialogMerchant = target.merchant;
+            enterDialogue(target.name, target.dialog);
         }
     }
 
@@ -4685,6 +4811,17 @@ private:
         city(kFerroholdCol, kFerroholdRow, IM_COL32(70, 90, 165, 255),  "Ferrohold");
         city(kGreywatchCol, kGreywatchRow, IM_COL32(155, 60, 50, 255),  "Greywatch");
 
+        // Quest markers: a gold diamond at each active quest target.
+        for (const auto& m : m_questMarkers) {
+            if (m.col < 0 || m.row < 0 || m.col >= kMapCols || m.row >= kMapRows) continue;
+            ImVec2 c = squareCenter(m.col, m.row);
+            float r = cell * 0.26f;
+            ImVec2 pts[4] = { {c.x, c.y - r}, {c.x + r, c.y}, {c.x, c.y + r}, {c.x - r, c.y} };
+            bg->AddConvexPolyFilled(pts, 4, IM_COL32(240, 200, 60, 255));
+            bg->AddPolyline(pts, 4, IM_COL32(60, 44, 18, 255), ImDrawFlags_Closed, 2.0f);
+            bg->AddText(ImVec2(c.x + cell * 0.32f, c.y + cell * 0.10f), IM_COL32(60, 44, 18, 255), m.label.c_str());
+        }
+
         // Hero marker, drawn last (on top).
         ImVec2 h = squareCenter(m_mapX, m_mapY);
         bg->AddCircleFilled(h, cell * 0.32f, IM_COL32(240, 220, 60, 255));
@@ -4716,6 +4853,787 @@ private:
         }
     }
 
+    // ───────────────────────── LLM dialogue screen ─────────────────────────
+
+    std::string dlgCharDir() const { return "assets/characters/" + m_dlgNpcId + "/"; }
+    std::string memoryPath()  const { return dlgCharDir() + "memory.json"; }
+
+    void freeDlgProfile() {
+        if (!m_dlgHasProfile) return;
+        VkDevice device = getContext().getDevice();
+        if (m_dlgProfile.descriptor) ImGui_ImplVulkan_RemoveTexture(m_dlgProfile.descriptor);
+        if (m_dlgProfile.sampler) vkDestroySampler(device, m_dlgProfile.sampler, nullptr);
+        if (m_dlgProfile.view)    vkDestroyImageView(device, m_dlgProfile.view, nullptr);
+        if (m_dlgProfile.image)   vkDestroyImage(device, m_dlgProfile.image, nullptr);
+        if (m_dlgProfile.memory)  vkFreeMemory(device, m_dlgProfile.memory, nullptr);
+        m_dlgProfile = Portrait{};
+        m_dlgHasProfile = false;
+    }
+
+    void loadDlgProfile() {
+        freeDlgProfile();
+        std::string p = dlgCharDir() + "profile.jpg";
+        if (!std::filesystem::exists(p)) p = dlgCharDir() + "profile.png";
+        if (std::filesystem::exists(p) && loadPortraitTexture(p, m_dlgProfile))
+            m_dlgHasProfile = true;
+    }
+
+    static std::string readTextFile(const std::string& path) {
+        std::ifstream f(path);
+        if (!f.is_open()) return "";
+        std::stringstream ss; ss << f.rdbuf();
+        std::string s = ss.str();
+        while (!s.empty() && (s.back() == '\n' || s.back() == '\r' || s.back() == ' ')) s.pop_back();
+        return s;
+    }
+
+    // Author-written personality, or a sensible default if none exists yet.
+    std::string loadPersona() const {
+        std::string p = readTextFile(dlgCharDir() + "persona.txt");
+        if (!p.empty()) return p;
+        return m_dialogMerchant
+            ? "You run the local shop in a fantasy town and are talking face-to-face with an adventurer. "
+              "Stay in your medieval fantasy world; you know nothing of modern things."
+            : "You live in a fantasy town and are talking face-to-face with an adventurer. "
+              "Stay in your medieval fantasy world; you know nothing of modern things.";
+    }
+
+    void loadMemory() {
+        m_dlgMem = NpcMemory{};
+        std::ifstream f(memoryPath());
+        if (!f.is_open()) return;
+        try {
+            nlohmann::json j; f >> j;
+            m_dlgMem.disposition = std::clamp(j.value("disposition", 50), 0, 100);
+            if (j.contains("memories") && j["memories"].is_array())
+                for (auto& m : j["memories"]) if (m.is_string()) m_dlgMem.memories.push_back(m.get<std::string>());
+            if (j.contains("history") && j["history"].is_array())
+                for (auto& h : j["history"])
+                    if (h.is_object())
+                        m_dlgMem.history.push_back({h.value("player", false), h.value("text", std::string())});
+            // NOTE: accepted quests are intentionally NOT loaded — quest state is
+            // session-only for now (no persistence until the serialization/save
+            // work lands), so the Accept button is available again each session.
+        } catch (...) {}
+    }
+
+    void saveMemory() {
+        nlohmann::json j;
+        j["disposition"] = m_dlgMem.disposition;
+        j["memories"] = m_dlgMem.memories;
+        // Keep only the most recent lines so the file doesn't grow without bound.
+        if (m_dlgMem.history.size() > kHistoryKeep)
+            m_dlgMem.history.erase(m_dlgMem.history.begin(),
+                                   m_dlgMem.history.end() - kHistoryKeep);
+        nlohmann::json hist = nlohmann::json::array();
+        for (const auto& l : m_dlgMem.history) hist.push_back({{"player", l.player}, {"text", l.text}});
+        j["history"] = hist;
+        // accepted quests are session-only — not written (see loadMemory note).
+        std::error_code ec;
+        std::filesystem::create_directories(dlgCharDir(), ec);
+        std::ofstream f(memoryPath());
+        if (f.is_open()) f << j.dump(2);
+    }
+
+    // Secondary/personality traits, authored in assets/characters/<id>/traits.json
+    // (an ordered array so they display in the order written).
+    void loadTraits() {
+        m_dlgTraits.clear();
+        std::ifstream f(dlgCharDir() + "traits.json");
+        if (!f.is_open()) return;
+        try {
+            nlohmann::json j; f >> j;
+            if (j.contains("traits") && j["traits"].is_array())
+                for (auto& t : j["traits"])
+                    if (t.is_object() && t.contains("name"))
+                        m_dlgTraits.push_back({t.value("name", std::string()),
+                                               std::clamp(t.value("value", 50), 0, 100)});
+        } catch (...) {}
+    }
+
+    void loadQuests() {
+        m_dlgQuests.clear();
+        std::ifstream f(dlgCharDir() + "quests.json");
+        if (!f.is_open()) return;
+        try {
+            nlohmann::json j; f >> j;
+            if (j.contains("quests") && j["quests"].is_array())
+                for (auto& q : j["quests"]) {
+                    if (!q.is_object()) continue;
+                    DlgQuest dq;
+                    dq.id        = q.value("id", std::string());
+                    dq.title     = q.value("title", std::string());
+                    dq.category  = q.value("category", std::string("Personal"));
+                    dq.desc      = q.value("desc", std::string());
+                    dq.objective = q.value("objective", std::string());
+                    dq.pitch     = q.value("pitch", std::string());
+                    dq.emotion   = q.value("emotion", std::string());
+                    dq.acceptedNote = q.value("accepted_note", std::string());
+                    if (q.contains("target") && q["target"].is_object()) {
+                        auto& t = q["target"];
+                        dq.targetCol   = t.value("col", -1);
+                        dq.targetRow   = t.value("row", -1);
+                        dq.targetLabel = t.value("label", dq.title);
+                    }
+                    if (!dq.id.empty() && !dq.title.empty()) m_dlgQuests.push_back(std::move(dq));
+                }
+        } catch (...) {}
+    }
+
+    bool questAccepted(const std::string& id) const {
+        return std::find(m_dlgMem.acceptedQuests.begin(), m_dlgMem.acceptedQuests.end(), id)
+               != m_dlgMem.acceptedQuests.end();
+    }
+
+    // Add or replace a map marker (dedup by label).
+    void addQuestMarker(int col, int row, const std::string& label) {
+        if (col < 0 || row < 0 || label.empty()) return;
+        for (auto& m : m_questMarkers) if (m.label == label) { m.col = col; m.row = row; return; }
+        m_questMarkers.push_back({col, row, label});
+    }
+
+    // Add a quest to the player's journal (dedup by title). Journal only.
+    void journalQuest(const DlgQuest& dq) {
+        for (const auto& q : m_quests) if (q.title == dq.title) return;
+        Quest q;
+        q.title = dq.title; q.category = dq.category;
+        q.giver = m_dlgNpcName; q.desc = dq.desc; q.objective = dq.objective;
+        m_quests.push_back(q);
+    }
+
+    // "Ask about this": the NPC tells the player about the quest (authored pitch,
+    // spoken with the quest's emotion video). Pure information — no commitment.
+    void askAboutQuest(const DlgQuest& dq) {
+        m_dlgQuestsOpen = false;
+        if (!dq.pitch.empty()) m_dlgLog.push_back({false, dq.pitch});
+        dlgPlayEmotion(dq.emotion.empty() ? "neutral" : dq.emotion);
+        m_dlgScrollDown = true;
+    }
+
+    // "Accept Quest": the player commits. One-time — journals it, +5 disposition,
+    // drops a marker at the target, and folds an awareness note into the NPC's
+    // persona. Guarded by acceptedQuests so it can't be farmed for disposition.
+    void acceptQuest(const DlgQuest& dq) {
+        if (questAccepted(dq.id)) return;
+        journalQuest(dq);
+        m_dlgMem.acceptedQuests.push_back(dq.id);
+        m_dlgMem.disposition = std::clamp(m_dlgMem.disposition + 5, 0, 100);
+        saveMemory();
+        addQuestMarker(dq.targetCol, dq.targetRow, dq.targetLabel);
+    }
+
+    // Persona + remembered facts + recent cross-visit history, folded into the
+    // personality (backend system prompt). Quests are NOT injected — the player
+    // asks about them explicitly via the Quests button.
+    std::string buildPersonality() const {
+        std::string s = m_dlgPersona;
+        if (!m_dlgMem.memories.empty()) {
+            s += "\n\nFacts you remember about this person and your dealings:";
+            for (const auto& m : m_dlgMem.memories) s += "\n- " + m;
+        }
+        // Accepted (not-yet-resolved) quests stay in the NPC's awareness.
+        for (const auto& dq : m_dlgQuests) {
+            if (!questAccepted(dq.id)) continue;
+            s += "\n\n" + (dq.acceptedNote.empty()
+                ? "The traveler has taken on your task (\"" + dq.title + "\"). "
+                  "You are not sure they can handle it, but time will tell."
+                : dq.acceptedNote);
+        }
+        if (!m_dlgMem.history.empty()) {
+            s += "\n\nEarlier moments from your history with this person (older first):";
+            size_t start = m_dlgMem.history.size() > kHistoryInject
+                         ? m_dlgMem.history.size() - kHistoryInject : 0;
+            for (size_t i = start; i < m_dlgMem.history.size(); ++i)
+                s += "\n" + std::string(m_dlgMem.history[i].player ? "Traveler: " : "You: ")
+                   + m_dlgMem.history[i].text;
+        }
+        return s;
+    }
+
+    // Video for an emotion state, with the fallback chain:
+    // <state>.mp4 -> default.mp4 -> "" (placeholder panel).
+    std::string dlgVideoPathFor(const std::string& emotion) const {
+        std::string dir = dlgCharDir();
+        std::string p = dir + emotion + ".mp4";
+        if (std::filesystem::exists(p)) return p;
+        p = dir + "default.mp4";
+        if (std::filesystem::exists(p)) return p;
+        return "";
+    }
+
+    // The clip's stem ("requesting", "default") from a resolved video path.
+    static std::string clipStem(const std::string& path) {
+        return std::filesystem::path(path).stem().string();
+    }
+
+    // Playback options per clip: rest frames + per-clip loop overrides live in the
+    // character's videos.json. Keyed by clip stem so fallback clips (default.mp4)
+    // share one config regardless of which emotion routed to them.
+    void loadVideoConfig() {
+        m_dlgRestFrames.clear();
+        m_dlgLoopOverride.clear();
+        std::ifstream f(dlgCharDir() + "videos.json");
+        if (!f.is_open()) return;
+        try {
+            nlohmann::json j; f >> j;
+            for (auto& [k, v] : j.items()) {
+                if (!v.is_object()) continue;
+                if (v.contains("rest_frame")) m_dlgRestFrames[k] = v["rest_frame"].get<long>();
+                if (v.contains("loop"))       m_dlgLoopOverride[k] = v["loop"].get<bool>();
+            }
+        } catch (...) {}
+    }
+
+    bool clipShouldLoop(const std::string& stem) const {
+        auto it = m_dlgLoopOverride.find(stem);
+        return it != m_dlgLoopOverride.end() ? it->second : m_dlgLoopGlobal;
+    }
+    long clipRestFrame(const std::string& stem) const {
+        auto it = m_dlgRestFrames.find(stem);
+        return it != m_dlgRestFrames.end() ? it->second : -1;   // -1 = last frame
+    }
+
+    // Apply the current loop/rest settings to the already-open clip.
+    void applyClipPlayback() {
+        m_dlgClipLooping = clipShouldLoop(m_dlgClipStem);
+        m_dlgClipRestFrame = clipRestFrame(m_dlgClipStem);
+        m_dlgClipSettled = false;
+        m_dlgVideo.setLoop(m_dlgClipLooping);
+        m_dlgVideo.setMuted(m_dlgMuted);
+        if (m_dlgClipLooping) { m_dlgVideo.restart(); m_dlgVideo.setPaused(false); }
+    }
+
+    void dlgPlayEmotion(const std::string& emotion) {
+        m_dlgEmotion = emotion;
+        std::string path = dlgVideoPathFor(emotion);
+        if (path.empty()) { m_dlgVideo.close(); m_dlgVideoFile.clear(); m_dlgClipStem.clear(); return; }
+        if (path == m_dlgVideoFile && m_dlgVideo.isOpen()) {   // same clip: replay from start
+            m_dlgClipSettled = false;
+            if (!m_dlgClipLooping) { m_dlgVideo.restart(); m_dlgVideo.setPaused(false); }
+            return;
+        }
+        if (m_dlgVideo.open(path)) {
+            m_dlgVideoFile = path;
+            m_dlgClipStem = clipStem(path);
+            applyClipPlayback();     // sets loop/rest for this clip and plays it
+        } else {
+            m_dlgVideoFile.clear();
+            m_dlgClipStem.clear();
+        }
+    }
+
+    // ── playback control actions (used by the on-screen buttons) ──
+    void togglePlayPause() {
+        if (!m_dlgVideo.isOpen()) return;
+        if (m_dlgVideo.paused()) {
+            // Playing a clip that already rested replays it from the top.
+            if (!m_dlgClipLooping && m_dlgClipSettled) { m_dlgClipSettled = false; m_dlgVideo.restart(); }
+            m_dlgVideo.setPaused(false);
+        } else {
+            m_dlgVideo.setPaused(true);
+        }
+    }
+    void toggleMute()      { m_dlgMuted = !m_dlgMuted; if (m_dlgVideo.isOpen()) m_dlgVideo.setMuted(m_dlgMuted); }
+    // Toggle loop for just the current clip (overrides the global for this stem).
+    void toggleClipLoop() {
+        if (m_dlgClipStem.empty()) return;
+        m_dlgLoopOverride[m_dlgClipStem] = !m_dlgClipLooping;
+        applyClipPlayback();
+    }
+    // Global: loop every clip, or play-through (once -> rest) every clip. Clears
+    // per-clip overrides so the choice is uniform, then re-applies to the current.
+    void setAllLoop(bool loop) {
+        m_dlgLoopGlobal = loop;
+        m_dlgLoopOverride.clear();
+        if (m_dlgVideo.isOpen()) applyClipPlayback();
+    }
+
+    void enterDialogue(const std::string& npcName, const std::string& greeting = "") {
+        m_dlgNpcName = npcName;
+        m_dlgNpcId = npcName;
+        for (auto& c : m_dlgNpcId) c = (char)std::tolower((unsigned char)c);
+        m_dlgSession.clear();
+        m_dlgLog.clear();
+        m_dlgInput[0] = '\0';
+        m_dlgWaiting = false;
+        m_dlgReplyReady = false;
+        m_dlgFocusInput = true;
+        m_dlgPersona = loadPersona();
+        loadMemory();
+        loadQuests();
+        loadDlgProfile();
+        loadTraits();
+        loadVideoConfig();
+        // Re-establish map markers for quests this NPC's already been given
+        // (accepted state persists in memory.json; markers are in-session).
+        for (const auto& dq : m_dlgQuests)
+            if (questAccepted(dq.id)) addQuestMarker(dq.targetCol, dq.targetRow, dq.targetLabel);
+        m_dlgQuestsOpen = false;
+        // Open the visit with the NPC's greeting: an authored greeting.txt wins,
+        // else the greeting the map/dialog handed us.
+        std::string g = readTextFile(dlgCharDir() + "greeting.txt");
+        if (g.empty()) g = greeting;
+        if (!g.empty()) m_dlgLog.push_back({false, g});
+        dlgPlayEmotion("neutral");
+        m_screen = Screen::Dialogue;
+    }
+
+    void leaveDialogue() {
+        m_dlgVideo.close();
+        m_dlgVideoFile.clear();
+        // Defer the profile-texture free — we're mid-frame and ImGui still
+        // references it in this frame's draw data (see update()).
+        m_dlgProfilePendingFree = true;
+        // Persist this visit's exchange into the character's rolling history.
+        for (const auto& l : m_dlgLog) m_dlgMem.history.push_back(l);
+        saveMemory();
+        m_screen = Screen::Game;
+    }
+
+    void destroyDlgTex() {
+        VkDevice device = getContext().getDevice();
+        if (m_dlgTex.mapped)     { vkUnmapMemory(device, m_dlgTex.stagingMem); m_dlgTex.mapped = nullptr; }
+        if (m_dlgTex.staging)    { vkDestroyBuffer(device, m_dlgTex.staging, nullptr); m_dlgTex.staging = VK_NULL_HANDLE; }
+        if (m_dlgTex.stagingMem) { vkFreeMemory(device, m_dlgTex.stagingMem, nullptr); m_dlgTex.stagingMem = VK_NULL_HANDLE; }
+        if (m_dlgTex.descriptor) { ImGui_ImplVulkan_RemoveTexture(m_dlgTex.descriptor); m_dlgTex.descriptor = VK_NULL_HANDLE; }
+        if (m_dlgTex.sampler)    { vkDestroySampler(device, m_dlgTex.sampler, nullptr); m_dlgTex.sampler = VK_NULL_HANDLE; }
+        if (m_dlgTex.view)       { vkDestroyImageView(device, m_dlgTex.view, nullptr); m_dlgTex.view = VK_NULL_HANDLE; }
+        if (m_dlgTex.image)      { vkDestroyImage(device, m_dlgTex.image, nullptr); m_dlgTex.image = VK_NULL_HANDLE; }
+        if (m_dlgTex.memory)     { vkFreeMemory(device, m_dlgTex.memory, nullptr); m_dlgTex.memory = VK_NULL_HANDLE; }
+        m_dlgTex.w = m_dlgTex.h = 0;
+        m_dlgTex.firstUpload = true;
+    }
+
+    // Persistent sampled image + mapped staging buffer sized to the video; the
+    // frame is memcpy'd + copied in place each tick rather than re-created.
+    // The view forces alpha to 1 because mpv's "rgb0" frames leave alpha zero.
+    bool createDlgVideoImage(int w, int h) {
+        VkDevice device = getContext().getDevice();
+
+        VkImageCreateInfo ii{}; ii.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+        ii.imageType = VK_IMAGE_TYPE_2D; ii.format = VK_FORMAT_R8G8B8A8_SRGB;
+        ii.extent = {(uint32_t)w, (uint32_t)h, 1}; ii.mipLevels = 1; ii.arrayLayers = 1;
+        ii.samples = VK_SAMPLE_COUNT_1_BIT; ii.tiling = VK_IMAGE_TILING_OPTIMAL;
+        ii.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+        ii.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        if (vkCreateImage(device, &ii, nullptr, &m_dlgTex.image) != VK_SUCCESS) return false;
+        VkMemoryRequirements mr; vkGetImageMemoryRequirements(device, m_dlgTex.image, &mr);
+        VkMemoryAllocateInfo ai{}; ai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+        ai.allocationSize = mr.size;
+        ai.memoryTypeIndex = getContext().findMemoryType(mr.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+        vkAllocateMemory(device, &ai, nullptr, &m_dlgTex.memory);
+        vkBindImageMemory(device, m_dlgTex.image, m_dlgTex.memory, 0);
+
+        VkImageViewCreateInfo vi{}; vi.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+        vi.image = m_dlgTex.image; vi.viewType = VK_IMAGE_VIEW_TYPE_2D; vi.format = VK_FORMAT_R8G8B8A8_SRGB;
+        vi.components.a = VK_COMPONENT_SWIZZLE_ONE;   // force opaque
+        vi.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+        vkCreateImageView(device, &vi, nullptr, &m_dlgTex.view);
+
+        VkSamplerCreateInfo si{}; si.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+        si.magFilter = si.minFilter = VK_FILTER_LINEAR;
+        si.addressModeU = si.addressModeV = si.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        vkCreateSampler(device, &si, nullptr, &m_dlgTex.sampler);
+
+        m_dlgTex.descriptor = ImGui_ImplVulkan_AddTexture(m_dlgTex.sampler, m_dlgTex.view,
+            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+
+        VkDeviceSize sz = (VkDeviceSize)w * h * 4;
+        getContext().createBuffer(sz, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+            m_dlgTex.staging, m_dlgTex.stagingMem);
+        vkMapMemory(device, m_dlgTex.stagingMem, 0, sz, 0, &m_dlgTex.mapped);
+
+        m_dlgTex.w = w; m_dlgTex.h = h;
+        m_dlgTex.firstUpload = true;
+        return true;
+    }
+
+    void uploadDlgVideoFrame() {
+        if (!m_dlgTex.mapped || !m_dlgTex.image) return;
+        VkDeviceSize sz = (VkDeviceSize)m_dlgTex.w * m_dlgTex.h * 4;
+        std::memcpy(m_dlgTex.mapped, m_dlgVideo.pixels.data(), (size_t)sz);
+
+        VkCommandBuffer cmd = getContext().beginSingleTimeCommands();
+        VkImageMemoryBarrier b{}; b.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        b.image = m_dlgTex.image;
+        b.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+        b.srcQueueFamilyIndex = b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        b.oldLayout = m_dlgTex.firstUpload ? VK_IMAGE_LAYOUT_UNDEFINED
+                                           : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        b.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        b.srcAccessMask = m_dlgTex.firstUpload ? 0 : VK_ACCESS_SHADER_READ_BIT;
+        b.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        vkCmdPipelineBarrier(cmd,
+            m_dlgTex.firstUpload ? VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT
+                                 : VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+            VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &b);
+
+        VkBufferImageCopy rg{}; rg.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+        rg.imageExtent = {(uint32_t)m_dlgTex.w, (uint32_t)m_dlgTex.h, 1};
+        vkCmdCopyBufferToImage(cmd, m_dlgTex.staging, m_dlgTex.image,
+            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &rg);
+
+        b.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        b.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        b.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        b.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
+            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr, 0, nullptr, 1, &b);
+        getContext().endSingleTimeCommands(cmd);
+        m_dlgTex.firstUpload = false;
+    }
+
+    void updateDialogueVideo() {
+        if (!m_dlgVideo.isOpen()) return;
+        m_dlgVideo.poll();
+        // Play-through clips settle on their rest frame once they reach the end.
+        if (!m_dlgClipLooping && !m_dlgClipSettled && m_dlgVideo.eofReached()) {
+            if (m_dlgClipRestFrame >= 0) m_dlgVideo.seekToFramePause(m_dlgClipRestFrame);
+            else m_dlgVideo.setPaused(true);   // no custom frame: hold the last one
+            m_dlgClipSettled = true;
+        }
+        if (!m_dlgVideo.newFrame || m_dlgVideo.w <= 0 || m_dlgVideo.h <= 0) return;
+        if (!m_dlgTex.descriptor || m_dlgTex.w != m_dlgVideo.w || m_dlgTex.h != m_dlgVideo.h) {
+            vkDeviceWaitIdle(getContext().getDevice());
+            destroyDlgTex();
+            createDlgVideoImage(m_dlgVideo.w, m_dlgVideo.h);
+        }
+        uploadDlgVideoFrame();
+        m_dlgVideo.newFrame = false;
+    }
+
+    void sendDialogueMessage() {
+        if (m_dlgWaiting) return;
+        std::string msg = m_dlgInput;
+        // trim
+        while (!msg.empty() && (msg.back() == ' ' || msg.back() == '\n')) msg.pop_back();
+        size_t s = msg.find_first_not_of(" \n");
+        if (s == std::string::npos) return;
+        msg = msg.substr(s);
+        m_dlgInput[0] = '\0';
+        m_dlgLog.push_back({true, msg});
+        m_dlgScrollDown = true;
+        m_dlgWaiting = true;
+        m_dlgFocusInput = true;
+
+        // The backend reminds the NPC of its standing and parses [emotion] and
+        // [rel:+N] tags out of the reply for us. Personality carries the authored
+        // persona plus remembered facts + recent history (only on the first
+        // message of the visit — after that the backend keeps session context).
+        std::string session = m_dlgSession;
+        std::string npc = m_dlgNpcName;
+        std::string personality = buildPersonality();
+        int rel = m_dlgMem.disposition;
+
+        std::thread([this, session, npc, personality, rel, msg]() {
+            DlgReply out;
+            try {
+                httplib::Client cli("localhost", 8080);
+                cli.set_connection_timeout(3);
+                cli.set_read_timeout(180);   // local models can be slow
+                nlohmann::json body;
+                if (!session.empty()) body["session_id"] = session;
+                body["message"] = msg;
+                body["npc_name"] = npc;
+                body["npc_personality"] = personality;
+                body["being_type"] = 1;
+                body["relationship"] = rel;
+                body["allow_actions"] = false;   // dialogue NPCs don't move/act
+                auto res = cli.Post("/chat", body.dump(), "application/json");
+                if (res && res->status == 200) {
+                    auto j = nlohmann::json::parse(res->body);
+                    out.text = j.value("response", "...");
+                    out.emotion = j.value("emotion", "neutral");
+                    out.session = j.value("session_id", session);
+                    out.relDelta = j.value("relationship_delta", 0);
+                } else {
+                    out.error = true;
+                }
+            } catch (...) {
+                out.error = true;
+            }
+            {
+                std::lock_guard<std::mutex> lk(m_dlgMx);
+                m_dlgReply = std::move(out);
+            }
+            m_dlgReplyReady = true;
+        }).detach();
+    }
+
+    void pollDialogueReply() {
+        if (!m_dlgReplyReady) return;
+        DlgReply r;
+        {
+            std::lock_guard<std::mutex> lk(m_dlgMx);
+            r = m_dlgReply;
+        }
+        m_dlgReplyReady = false;
+        m_dlgWaiting = false;
+        if (r.error) {
+            m_dlgLog.push_back({false, "(" + m_dlgNpcName + " stares blankly — the dialogue AI isn't running. "
+                                       "Open the Servers button below and Start All, then try again.)"});
+        } else {
+            m_dlgSession = r.session;
+            m_dlgLog.push_back({false, r.text});
+            dlgPlayEmotion(r.emotion.empty() ? "neutral" : r.emotion);
+            if (r.relDelta != 0)
+                m_dlgMem.disposition = std::clamp(m_dlgMem.disposition + r.relDelta, 0, 100);
+        }
+        m_dlgScrollDown = true;
+    }
+
+    // Options menu — game settings. Currently: the dialogue AI servers, so the
+    // player can start local models + the backend without leaving the game.
+    void renderOptions() {
+        ImVec2 disp = ImGui::GetIO().DisplaySize;
+        ImGui::SetNextWindowPos(ImVec2(disp.x * 0.5f, disp.y * 0.5f), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+        ImGui::SetNextWindowSize(ImVec2(520, 0), ImGuiCond_Appearing);
+        if (ImGui::Begin("Options", &m_showOptions, ImGuiWindowFlags_NoCollapse)) {
+            if (ImGui::CollapsingHeader("NPC Dialogue Servers", ImGuiTreeNodeFlags_DefaultOpen))
+                m_servers.renderPanel();
+            ImGui::Spacing();
+            if (ImGui::Button("Close", ImVec2(120, 0))) m_showOptions = false;
+        }
+        ImGui::End();
+    }
+
+    // Quests this NPC can offer. Accept adds to the journal and stops the offer.
+    void renderDlgQuests() {
+        ImVec2 disp = ImGui::GetIO().DisplaySize;
+        ImGui::SetNextWindowPos(ImVec2(disp.x * 0.5f, disp.y * 0.5f), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+        ImGui::SetNextWindowSize(ImVec2(520, 0), ImGuiCond_Appearing);
+        if (ImGui::Begin((m_dlgNpcName + "'s Tasks").c_str(), &m_dlgQuestsOpen, ImGuiWindowFlags_NoCollapse)) {
+            ImGui::TextDisabled("Select a task and %s will tell you about it.", m_dlgNpcName.c_str());
+            ImGui::Separator();
+            if (m_dlgQuests.empty())
+                ImGui::TextDisabled("%s has nothing for you right now.", m_dlgNpcName.c_str());
+            for (const auto& dq : m_dlgQuests) {
+                bool accepted = questAccepted(dq.id);
+                ImGui::PushID(dq.id.c_str());
+                ImGui::TextColored(ImVec4(0.91f, 0.89f, 0.85f, 1.0f), "%s", dq.title.c_str());
+                if (accepted) { ImGui::SameLine(); ImGui::TextColored(ImVec4(0.35f, 0.85f, 0.45f, 1.0f), "(accepted)"); }
+                if (ImGui::Button("Ask about this")) askAboutQuest(dq);
+                ImGui::SameLine();
+                if (accepted) {
+                    ImGui::BeginDisabled();
+                    ImGui::Button("Accepted");
+                    ImGui::EndDisabled();
+                } else if (ImGui::Button("Accept Quest")) {
+                    acceptQuest(dq);   // one-time: +5 disposition, journal, map marker
+                }
+                ImGui::Separator();
+                ImGui::PopID();
+            }
+        }
+        ImGui::End();
+    }
+
+    // Playback controls in the pillarbox to the right of the video. `avail` is
+    // the video child's content size. Drawn as a small panel at top-right.
+    void renderVideoControls(const ImVec2& avail) {
+        const float w = 150.0f;
+        ImGui::SetCursorPos(ImVec2(std::max(0.0f, avail.x - w - 8.0f), 8.0f));
+        ImGui::BeginGroup();
+        // Faint backdrop so the buttons read over the video/black.
+        ImVec2 gp = ImGui::GetCursorScreenPos();
+        ImGui::GetWindowDrawList()->AddRectFilled(
+            ImVec2(gp.x - 6, gp.y - 6), ImVec2(gp.x + w + 6, gp.y + ImGui::GetFrameHeight() * 5 + 34),
+            IM_COL32(0, 0, 0, 110), 5.0f);
+
+        bool paused = m_dlgVideo.paused();
+        if (ImGui::Button(paused ? "Play" : "Pause", ImVec2(w, 0))) togglePlayPause();
+
+        // Per-clip loop / play-through toggle (green when looping). Snapshot the
+        // flag so the click (which flips it) can't unbalance the push/pop.
+        const bool looping = m_dlgClipLooping;
+        if (looping) {
+            ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.18f, 0.55f, 0.34f, 1.0f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.22f, 0.65f, 0.40f, 1.0f));
+        }
+        if (ImGui::Button(looping ? "Loop: on" : "Play through", ImVec2(w, 0))) toggleClipLoop();
+        if (looping) ImGui::PopStyleColor(2);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("This clip: loop, or play once and rest.");
+
+        if (ImGui::Button(m_dlgMuted ? "Muted" : "Sound on", ImVec2(w, 0))) toggleMute();
+
+        ImGui::Dummy(ImVec2(0, 4));
+        ImGui::TextDisabled("All clips:");
+        if (ImGui::Button("Loop all", ImVec2(w, 0))) setAllLoop(true);
+        if (ImGui::Button("Play through all", ImVec2(w, 0))) setAllLoop(false);
+        ImGui::EndGroup();
+    }
+
+    void renderDialogueScreen() {
+        ImGuiViewport* vp = ImGui::GetMainViewport();
+        ImGui::SetNextWindowPos(vp->WorkPos);
+        ImGui::SetNextWindowSize(vp->WorkSize);
+        // NoScroll: this window exactly fills the viewport and manages its own
+        // sub-layout — never let ImGui add a scrollbar (which would clip the
+        // header off the top and the Send button off the bottom).
+        ImGui::Begin("##dialogue", nullptr,
+                     ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
+                     ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoBringToFrontOnFocus |
+                     ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+
+        // Header: name, disposition, backend status, server shortcut, leave.
+        ImGui::TextColored(ImVec4(0.95f, 0.85f, 0.55f, 1.0f), "%s", m_dlgNpcName.c_str());
+        ImGui::SameLine();
+        int rel = m_dlgMem.disposition;
+        ImVec4 relCol = rel >= 65 ? ImVec4(0.35f, 0.85f, 0.45f, 1.0f)
+                       : rel <= 35 ? ImVec4(0.9f, 0.35f, 0.3f, 1.0f)
+                                   : ImVec4(0.75f, 0.75f, 0.75f, 1.0f);
+        ImGui::TextColored(relCol, "   disposition %d/100", rel);
+        // Interaction shortcuts, on the same row (no menu step): Trade + Quests.
+        ImGui::SameLine();
+        ImGui::Spacing(); ImGui::SameLine();
+        if (m_dialogMerchant) {
+            if (ImGui::Button("Trade")) m_shopOpen = true;
+            ImGui::SameLine();
+        }
+        if (!m_dlgQuests.empty()) {
+            // Highlight the button when there's an un-taken quest to notice.
+            int open = 0;
+            for (const auto& dq : m_dlgQuests) if (!questAccepted(dq.id)) ++open;
+            if (open) ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.95f, 0.82f, 0.35f, 1.0f));
+            char lbl[32]; std::snprintf(lbl, sizeof(lbl), open ? "Quests (%d)" : "Quests", open);
+            if (ImGui::Button(lbl)) m_dlgQuestsOpen = !m_dlgQuestsOpen;
+            if (open) ImGui::PopStyleColor();
+            ImGui::SameLine();
+        }
+        // Right-aligned: backend status, server shortcut, leave.
+        ImGui::SameLine(ImGui::GetContentRegionAvail().x - 250.0f);
+        if (m_servers.backendReady()) ImGui::TextColored(ImVec4(0.35f, 0.85f, 0.45f, 1), "AI online");
+        else                          ImGui::TextColored(ImVec4(0.9f, 0.5f, 0.3f, 1), "AI offline");
+        ImGui::SameLine();
+        if (ImGui::Button("Servers")) m_showOptions = true;
+        ImGui::SameLine();
+        bool leave = ImGui::Button("Leave (Esc)", ImVec2(110, 0));
+        ImGui::Separator();
+        if (m_showOptions) renderOptions();   // floats over the dialogue screen
+        if (m_dlgQuestsOpen) renderDlgQuests();
+        if (m_shopOpen) renderShop();
+
+        // Body: a narrow info column on the left (portrait + room for more below),
+        // the video filling the center, and the chat column on the right.
+        const float infoW = 220.0f;
+        const float chatW = std::clamp(ImGui::GetContentRegionAvail().x * 0.26f, 300.0f, 440.0f);
+        float bodyH = ImGui::GetContentRegionAvail().y;
+
+        // ── Info column (far left): portrait under the name, space for more ──
+        ImGui::BeginChild("##dlginfo", ImVec2(infoW, bodyH), false);
+        {
+            float pw = ImGui::GetContentRegionAvail().x;
+            if (m_dlgHasProfile && m_dlgProfile.descriptor) {
+                float ar = m_dlgProfile.h > 0 ? (float)m_dlgProfile.w / m_dlgProfile.h : 1.0f;
+                ImGui::Image((ImTextureID)m_dlgProfile.descriptor, ImVec2(pw, pw / ar));
+            } else {
+                // Placeholder card until a profile.jpg is dropped in.
+                ImVec2 p0 = ImGui::GetCursorScreenPos();
+                ImGui::GetWindowDrawList()->AddRectFilled(p0, ImVec2(p0.x + pw, p0.y + pw),
+                                                          IM_COL32(40, 44, 52, 255), 4.0f);
+                ImGui::Dummy(ImVec2(pw, pw));
+            }
+            // Secondary traits under the portrait.
+            if (!m_dlgTraits.empty()) {
+                ImGui::Spacing();
+                ImGui::TextDisabled("Temperament");
+                ImGui::Separator();
+                float barX = 96.0f;
+                for (const auto& t : m_dlgTraits) {
+                    ImGui::TextUnformatted(t.name.c_str());
+                    ImGui::SameLine(barX);
+                    char ov[8]; std::snprintf(ov, sizeof(ov), "%d", t.value);
+                    ImGui::PushStyleColor(ImGuiCol_PlotHistogram, ImVec4(0.55f, 0.62f, 0.78f, 1.0f));
+                    ImGui::ProgressBar(t.value / 100.0f, ImVec2(-FLT_MIN, ImGui::GetTextLineHeight()), ov);
+                    ImGui::PopStyleColor();
+                }
+            }
+            // (Future: standing, faction, class, house/clan go here.)
+        }
+        ImGui::EndChild();
+        ImGui::SameLine();
+
+        // ── Video (center) ──
+        float videoW = ImGui::GetContentRegionAvail().x - chatW - ImGui::GetStyle().ItemSpacing.x;
+        ImGui::BeginChild("##dlgvideo", ImVec2(videoW, bodyH), false, ImGuiWindowFlags_NoScrollbar);
+        {
+            ImVec2 avail = ImGui::GetContentRegionAvail();
+            ImVec2 p0 = ImGui::GetCursorScreenPos();
+            ImGui::GetWindowDrawList()->AddRectFilled(p0, ImVec2(p0.x + avail.x, p0.y + avail.y),
+                                                      IM_COL32(10, 10, 14, 255));
+            if (m_dlgTex.descriptor && m_dlgTex.w > 0 && m_dlgVideo.isOpen()) {
+                float sc = std::min(avail.x / m_dlgTex.w, avail.y / m_dlgTex.h);
+                ImVec2 sz(m_dlgTex.w * sc, m_dlgTex.h * sc);
+                ImGui::SetCursorPos(ImVec2((avail.x - sz.x) * 0.5f, (avail.y - sz.y) * 0.5f));
+                ImGui::Image((ImTextureID)m_dlgTex.descriptor, sz);
+            } else {
+                // No dialogue videos yet for this NPC: name + state, centered.
+                std::string ph = m_dlgNpcName + "  [" + m_dlgEmotion + "]";
+                ImVec2 ts = ImGui::CalcTextSize(ph.c_str());
+                ImGui::SetCursorPos(ImVec2((avail.x - ts.x) * 0.5f, (avail.y - ts.y) * 0.5f));
+                ImGui::TextDisabled("%s", ph.c_str());
+            }
+            // State caption in the corner of the video pane.
+            ImGui::SetCursorPos(ImVec2(8, avail.y - ImGui::GetTextLineHeight() - 6));
+            if (m_dlgWaiting) {
+                m_dlgThinkPulse += ImGui::GetIO().DeltaTime * 2.0f;
+                float a = 0.55f + 0.45f * std::sin(m_dlgThinkPulse * 3.0f);
+                ImGui::TextColored(ImVec4(0.85f, 0.85f, 0.5f, a), "%s is thinking...", m_dlgNpcName.c_str());
+            } else {
+                ImGui::TextDisabled("[%s]", m_dlgEmotion.c_str());
+            }
+
+            // Playback controls, tucked into the empty space to the right of the
+            // (letterboxed) video, below the header.
+            if (m_dlgVideo.isOpen()) renderVideoControls(avail);
+        }
+        ImGui::EndChild();
+
+        ImGui::SameLine();
+
+        // ── Chat column (right) ──
+        ImGui::BeginChild("##dlgchat", ImVec2(chatW, bodyH), false);
+        {
+            float inputH = ImGui::GetFrameHeightWithSpacing() * 2.0f + ImGui::GetStyle().ItemSpacing.y;
+            float logH = ImGui::GetContentRegionAvail().y - inputH;
+
+            ImGui::BeginChild("##dlglog", ImVec2(0, logH), true);
+            for (const auto& line : m_dlgLog) {
+                if (line.player) ImGui::TextColored(ImVec4(0.95f, 0.85f, 0.55f, 1.0f), "You:");
+                else             ImGui::TextColored(ImVec4(0.6f, 0.8f, 1.0f, 1.0f), "%s:", m_dlgNpcName.c_str());
+                ImGui::PushTextWrapPos(0.0f);
+                ImGui::TextUnformatted(line.text.c_str());
+                ImGui::PopTextWrapPos();
+                ImGui::Spacing();
+            }
+            if (m_dlgScrollDown) { ImGui::SetScrollHereY(1.0f); m_dlgScrollDown = false; }
+            ImGui::EndChild();
+
+            // Input: full-width box with the Send button beneath it (narrow column).
+            if (m_dlgFocusInput) { ImGui::SetKeyboardFocusHere(); m_dlgFocusInput = false; }
+            ImGui::SetNextItemWidth(-FLT_MIN);
+            bool send = ImGui::InputText("##dlginput", m_dlgInput, sizeof(m_dlgInput),
+                                         ImGuiInputTextFlags_EnterReturnsTrue);
+            if (ImGui::Button("Send", ImVec2(-FLT_MIN, 0))) send = true;
+            if (send && !m_dlgWaiting) sendDialogueMessage();
+        }
+        ImGui::EndChild();
+
+        ImGui::End();
+
+        // Esc closes an open sub-panel first; only leave the conversation when
+        // none is up (so Trade/Quests/Options don't dump you back to the board).
+        if (ImGui::IsKeyPressed(ImGuiKey_Escape)) {
+            if (m_shopOpen)            m_shopOpen = false;
+            else if (m_dlgQuestsOpen)  m_dlgQuestsOpen = false;
+            else if (m_showOptions)    m_showOptions = false;
+            else                       leave = true;
+        }
+        if (leave) leaveDialogue();
+    }
+
     void renderUI() {
         ImGui::NewFrame();
 
@@ -4731,6 +5649,11 @@ private:
         }
         if (m_hasLevel && m_screen == Screen::WorldMap) {
             renderWorldMap();
+            ImGui::Render();
+            return;
+        }
+        if (m_hasLevel && m_screen == Screen::Dialogue) {
+            renderDialogueScreen();
             ImGui::Render();
             return;
         }
@@ -4760,6 +5683,8 @@ private:
             if (ImGui::Button("Character (C)")) m_sheetOpen = !m_sheetOpen;
             ImGui::SameLine();
             if (ImGui::Button("Journal (J)")) m_showJournal = !m_showJournal;
+            ImGui::SameLine();
+            if (ImGui::Button("Options")) m_showOptions = !m_showOptions;
             if (m_inWilderness) {
                 ImGui::Separator();
                 ImGui::TextDisabled("Wilderness - press M to resume overland travel");
@@ -4776,6 +5701,7 @@ private:
             if (m_showParty) renderPartyBar();
             if (m_sheetOpen) renderCharacterSheet();
             if (m_showJournal) renderJournal();
+            if (m_showOptions) renderOptions();
 
             // Transient hint (e.g. "move closer").
             if (m_hintTimer > 0.0f && !m_hint.empty()) {
@@ -4827,6 +5753,11 @@ private:
                 ImGui::TextWrapped("%s", m_dialogText.c_str());
                 ImGui::Spacing();
                 ImGui::Separator();
+                if (ImGui::Button("Let's talk", ImVec2(140, 0))) {   // LLM conversation
+                    m_dialogActive = false;
+                    enterDialogue(m_dialogName, m_dialogText);
+                }
+                ImGui::SameLine();
                 if (m_dialogMerchant) {
                     if (ImGui::Button("Show me your wares", ImVec2(200, 0))) {
                         m_shopOpen = true; m_dialogActive = false;
@@ -5060,9 +5991,75 @@ private:
     std::vector<glm::vec3> m_grid;
 
     // Title -> character creation -> game flow (game/level mode only).
-    enum class Screen { Title, CharCreate, Game, WorldMap };
+    enum class Screen { Title, CharCreate, Game, WorldMap, Dialogue };
     Screen m_screen = Screen::Game;   // set to Title when a level is loaded
     int    m_musicLoop = -1;          // title-music loop id (-1 = none)
+
+    // ── LLM dialogue screen (state video + chat via the ai_companion backend) ──
+    // One-on-one conversation: the NPC's emotion state (from the backend's
+    // [emotion] tag) picks a looping video from assets/characters/<npc>/<state>.mp4;
+    // missing state videos fall back to default.mp4, then to the dark placeholder.
+    struct DlgVideoTex {                   // streaming texture, re-created on size change
+        VkImage image = VK_NULL_HANDLE;
+        VkDeviceMemory memory = VK_NULL_HANDLE;
+        VkImageView view = VK_NULL_HANDLE;
+        VkSampler sampler = VK_NULL_HANDLE;
+        VkDescriptorSet descriptor = VK_NULL_HANDLE;
+        VkBuffer staging = VK_NULL_HANDLE;
+        VkDeviceMemory stagingMem = VK_NULL_HANDLE;
+        void* mapped = nullptr;
+        int w = 0, h = 0;
+        bool firstUpload = true;
+    };
+    VideoPlayer m_dlgVideo;
+    DlgVideoTex m_dlgTex;
+    std::string m_dlgNpcName;              // display name ("Orlen")
+    std::string m_dlgNpcId;                // lowercased key for asset paths + relationship
+    std::string m_dlgVideoFile;            // currently playing clip (avoid reloads)
+
+    // ── clip playback: default is play-once then hold a "rest frame" ──
+    //  Loop vs play-through is a binary. The global default (m_dlgLoopGlobal,
+    //  starts false = play-through) applies to every clip; a per-clip override
+    //  (keyed by clip stem this session) beats it. Rest frames come from the
+    //  character's videos.json, keyed by clip stem; no entry = last frame.
+    bool m_dlgLoopGlobal = false;
+    bool m_dlgMuted = false;                    // start unmuted
+    std::map<std::string, bool> m_dlgLoopOverride;   // clip stem -> loop?
+    std::map<std::string, long> m_dlgRestFrames;     // clip stem -> rest frame
+    // Live state of the currently loaded clip:
+    std::string m_dlgClipStem;                  // "requesting", "default", ...
+    bool m_dlgClipLooping = false;
+    long m_dlgClipRestFrame = -1;               // -1 = hold last frame
+    bool m_dlgClipSettled = false;              // already parked on the rest frame
+    std::string m_dlgSession;              // backend session id ("" until first reply)
+    std::string m_dlgEmotion = "neutral";
+    std::vector<DlgLine> m_dlgLog;         // this visit's on-screen transcript
+    char m_dlgInput[512] = {};
+    bool m_dlgFocusInput = false;
+    bool m_dlgScrollDown = false;
+    float m_dlgThinkPulse = 0.0f;          // animates "is thinking..." while waiting
+    // Reply handoff from the request worker thread to the main thread.
+    std::atomic<bool> m_dlgWaiting{false};
+    std::atomic<bool> m_dlgReplyReady{false};
+    std::mutex m_dlgMx;
+    DlgReply m_dlgReply;
+
+    // Per-character AI state files live in assets/characters/<id>/ (see the
+    // DlgLine/NpcMemory/DlgQuest declarations up near the Quest struct).
+    Portrait    m_dlgProfile;                 // active character's profile.jpg (if any)
+    bool        m_dlgHasProfile = false;
+    bool        m_dlgProfilePendingFree = false;   // free after the current frame
+    std::vector<Trait> m_dlgTraits;           // active character's traits.json
+    std::string m_dlgPersona;                 // active character's persona.txt
+    NpcMemory   m_dlgMem;                      // active character's memory.json
+    std::vector<DlgQuest> m_dlgQuests;         // active character's quests.json
+    bool m_dlgQuestsOpen = false;             // the Quests panel is up
+    static constexpr size_t kHistoryKeep   = 40;   // lines kept in memory.json
+    static constexpr size_t kHistoryInject = 8;    // recent lines fed to the LLM
+
+    // In-game Options menu (currently: dialogue server controls).
+    GameServers m_servers{CMAKE_SOURCE_DIR};
+    bool m_showOptions = false;
 
     // ── overland travel + persistent calendar ──────────────────────────────
     // In-world date: 12 months x 30 days (a 360-day year). Month names are
@@ -5079,6 +6076,7 @@ private:
     static constexpr int kFerroholdCol = 0,  kFerroholdRow = 12;
     static constexpr int kGreywatchCol = 23, kGreywatchRow = 12;
     int m_mapX = kFerroholdCol, m_mapY = kFerroholdRow;   // hero's square
+    std::vector<QuestMarker> m_questMarkers;   // active quest targets shown on the map
     std::string m_travelMsg;              // transient overland notice
     float m_travelMsgTimer = 0.0f;
     // Breadcrumb trail: what happened on each visited square. Dot = passed
@@ -5148,12 +6146,14 @@ private:
     bool m_female = false;                  // succession favors men in Aldermarch
     std::vector<rpgcf::ClassScore> m_classRanked;   // class fit for the rolled scores
 
-    // Portrait gallery (scanned from assets/portraits/, drop-and-appear).
+    // Portrait gallery (scanned from character bundles under assets/characters/player/).
     std::vector<Portrait> m_portraits;
     bool m_portraitsScanned = false;
     int  m_selectedPortrait = -1;      // confirmed portrait (via "Use This Portrait")
     int  m_previewPortrait  = -1;      // clicked/being-previewed portrait
     bool m_showAllPortraits = false;
+    bool m_freePortraitsPending = false;   // free the grid (minus the hero) after creation
+    std::string m_pcModelDir;          // chosen character's model bundle (portrait 1:1 model)
 
     // Doors: level-transition markers authored in the terrain editor as Door
     // primitives (PrimitiveType::Door). Each carries a doorId, a target level, and

@@ -55,6 +55,7 @@ void TerrainChunk::generate(const TerrainConfig& config) {
     m_splatmap6.resize(resolution * resolution, glm::vec4(0.0f));
     m_splatmap7.resize(resolution * resolution, glm::vec4(0.0f));
     m_selectionmap.resize(resolution * resolution, 0.0f);  // No selection by default
+    m_grassmap.resize(resolution * resolution, 1.0f);      // Full grass density by default
     m_texHSBmap.resize(resolution * resolution, glm::vec3(0.0f, 1.0f, 1.0f));  // Default: no hue shift, normal sat/bright
     m_holemap.resize(resolution * resolution, 0.0f);  // No holes by default
     for (int z = 0; z < resolution; z++) {
@@ -110,6 +111,7 @@ void TerrainChunk::resetToDefaults() {
     std::fill(m_splatmap7.begin(), m_splatmap7.end(), glm::vec4(0.0f));
     std::fill(m_texHSBmap.begin(), m_texHSBmap.end(), glm::vec3(0.0f, 1.0f, 1.0f));
     std::fill(m_selectionmap.begin(), m_selectionmap.end(), 0.0f);
+    std::fill(m_grassmap.begin(), m_grassmap.end(), 1.0f);
     std::fill(m_holemap.begin(), m_holemap.end(), 0.0f);
     regenerateMesh();
 }
@@ -727,6 +729,45 @@ void TerrainChunk::applySelectionBrush(float worldX, float worldZ, float radius,
     if (modified) {
         m_needsUpload = true;
     }
+}
+
+// Paint per-vertex grass density. Mirrors applySelectionBrush, but grass density is
+// CPU-only (drives foliage scatter), so there's NO mesh rebuild or GPU upload here.
+void TerrainChunk::applyGrassBrush(float worldX, float worldZ, float radius, float strength, float falloff, bool add,
+                                   const BrushShapeParams& shapeParams) {
+    if (m_grassmap.empty()) m_grassmap.assign(m_resolution * m_resolution, 1.0f);
+    glm::vec3 chunkPos = getWorldPosition();
+    float localX = worldX - chunkPos.x;
+    float localZ = worldZ - chunkPos.z;
+
+    float maxRadius = radius * (shapeParams.shape == BrushShape::Ellipse ? std::max(1.0f, 1.0f / shapeParams.aspectRatio) : 1.5f);
+    int minX = std::max(0, static_cast<int>((localX - maxRadius) / m_tileSize));
+    int maxX = std::min(m_resolution - 1, static_cast<int>((localX + maxRadius) / m_tileSize) + 1);
+    int minZ = std::max(0, static_cast<int>((localZ - maxRadius) / m_tileSize));
+    int maxZ = std::min(m_resolution - 1, static_cast<int>((localZ + maxRadius) / m_tileSize) + 1);
+
+    for (int z = minZ; z <= maxZ; z++) {
+        for (int x = minX; x <= maxX; x++) {
+            float vertexWorldX = chunkPos.x + x * m_tileSize;
+            float vertexWorldZ = chunkPos.z + z * m_tileSize;
+            float dx = vertexWorldX - worldX;
+            float dz = vertexWorldZ - worldZ;
+            float t = shapeParams.getNormalizedDistance(dx, dz, radius);
+            if (t <= 1.0f) {
+                float falloffMult = 1.0f - std::pow(t, 1.0f / (1.0f - falloff * 0.9f + 0.1f));
+                int idx = z * m_resolution + x;
+                float amount = strength * 0.2f * falloffMult;
+                m_grassmap[idx] = std::clamp(m_grassmap[idx] + (add ? amount : -amount), 0.0f, 1.0f);
+            }
+        }
+    }
+}
+
+float TerrainChunk::getGrassAtLocal(int x, int z) const {
+    if (m_grassmap.empty()) return 1.0f;
+    int idx = z * m_resolution + x;
+    if (idx < 0 || idx >= static_cast<int>(m_grassmap.size())) return 1.0f;
+    return m_grassmap[idx];
 }
 
 void TerrainChunk::clearSelection() {
@@ -1361,6 +1402,39 @@ void Terrain::applySelectionBrush(float worldX, float worldZ, float radius, floa
     if (anyModified) {
         updateSelectionCache();
     }
+}
+
+void Terrain::applyGrassBrush(float worldX, float worldZ, float radius, float strength, float falloff, bool add,
+                             const BrushShapeParams& shapeParams) {
+    float maxRadius = radius * (shapeParams.shape == BrushShape::Ellipse ? std::max(1.0f, 1.0f / shapeParams.aspectRatio) : 1.5f);
+    for (auto& vc : m_visibleChunks) {
+        glm::vec3 chunkPos = vc.chunk->getWorldPosition() + vc.renderOffset;
+        float chunkSize = vc.chunk->getChunkWorldSize();
+        if (worldX + maxRadius >= chunkPos.x && worldX - maxRadius < chunkPos.x + chunkSize &&
+            worldZ + maxRadius >= chunkPos.z && worldZ - maxRadius < chunkPos.z + chunkSize) {
+            float localX = worldX - vc.renderOffset.x;
+            float localZ = worldZ - vc.renderOffset.z;
+            vc.chunk->applyGrassBrush(localX, localZ, radius, strength, falloff, add, shapeParams);
+        }
+    }
+}
+
+// Grass density at a world position (nearest vertex). Defaults to 1.0 (full grass)
+// anywhere without data, so unpainted / legacy cells behave exactly as before.
+float Terrain::getGrassDensityAt(float worldX, float worldZ) const {
+    if (m_config.wrapWorld && m_config.useFixedBounds) {
+        glm::vec3 wrapped = wrapWorldPosition(glm::vec3(worldX, 0, worldZ));
+        worldX = wrapped.x; worldZ = wrapped.z;
+    }
+    glm::ivec2 chunkCoord = worldToChunkCoord(glm::vec3(worldX, 0, worldZ));
+    auto it = m_chunks.find(chunkCoord);
+    if (it == m_chunks.end()) return 1.0f;
+    auto& chunk = it->second;
+    glm::vec3 chunkPos = chunk->getWorldPosition();
+    int res = chunk->getResolution();
+    int localX = std::clamp(static_cast<int>((worldX - chunkPos.x) / chunk->getTileSize()), 0, res - 1);
+    int localZ = std::clamp(static_cast<int>((worldZ - chunkPos.z) / chunk->getTileSize()), 0, res - 1);
+    return chunk->getGrassAtLocal(localX, localZ);
 }
 
 void Terrain::setTriangulationMode(TriangulationMode mode) {

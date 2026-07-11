@@ -8238,6 +8238,16 @@ private:
             bool j = Input::isKeyDown(74); // GLFW_KEY_J
             if (j && !wasJ) { m_grassEnabled = !m_grassEnabled; if (m_grassEnabled) m_grassDirty = true; }
             wasJ = j;
+
+            // K — grass ERASE brush (carve paths/clearings); L — grass PAINT brush
+            // (thicken). Both make grass visible so you see what you're painting; use
+            // the normal brush radius/strength/ring. Pick another tool to exit.
+            static bool wasK = false, wasL = false;
+            bool k = Input::isKeyDown(75); // GLFW_KEY_K
+            bool l = Input::isKeyDown(76); // GLFW_KEY_L
+            if (k && !wasK) { m_editorUI.setTerrainToolsEnabled(true); m_editorUI.setBrushMode(BrushMode::GrassErase); m_grassEnabled = true; m_grassDirty = true; }
+            if (l && !wasL) { m_editorUI.setTerrainToolsEnabled(true); m_editorUI.setBrushMode(BrushMode::GrassPaint); m_grassEnabled = true; m_grassDirty = true; }
+            wasK = k; wasL = l;
         }
 
         // B — spawn battle test (only in play mode / F5)
@@ -16925,6 +16935,9 @@ private:
                 if (leftMouseDown) {
                     m_brushTool->apply(deltaTime);
                     m_chunkManager->updateModifiedChunks(m_terrain);
+                    // A grass-density stroke changed the scatter -> re-scatter next update.
+                    BrushMode bm = m_editorUI.getBrushMode();
+                    if (bm == BrushMode::GrassPaint || bm == BrushMode::GrassErase) m_grassDirty = true;
                 }
                 m_wasGrabbing = false;
                 m_splineRenderer->setVisible(false);
@@ -23757,10 +23770,17 @@ private:
                 if (nearMarker(wx, wz)) continue;   // don't grow grass on the marker props
                 float wy = m_terrain.getHeightAt(wx, wz);
                 if (wy < -1000.0f) continue;   // hole/unloaded sentinel
+
+                // Painted density (0..1). Thin the field probabilistically so painted
+                // bare spots/paths clear out, and shrink survivors a touch near edges.
+                float density = m_terrain.getGrassDensityAt(wx, wz);
+                if (density <= 0.02f) continue;
+                if (h01(ix + 13, iz + 29) > density) continue;   // fewer tufts where sparse
+
                 GrassBlade blade;
                 blade.pos    = glm::vec3(wx, wy, wz);
                 blade.yaw    = h01(ix - 11, iz + 5) * 6.2831853f;
-                blade.scale  = 0.75f + h01(ix + 3, iz + 9) * 0.85f;
+                blade.scale  = (0.75f + h01(ix + 3, iz + 9) * 0.85f) * (0.6f + 0.4f * density);
                 blade.bright = 0.80f + h01(ix - 4, iz - 8) * 0.50f;
                 m_grassBlades.push_back(blade);
             }

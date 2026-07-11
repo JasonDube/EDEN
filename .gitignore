@@ -38,3 +38,8 @@ Thumbs.db
 
 # Claude Code project memory (local only)
 .claude/
+
+# In-source CMake junk (real builds live in build/) + console logs
+/CMakeFiles/
+/_deps/
+*.log

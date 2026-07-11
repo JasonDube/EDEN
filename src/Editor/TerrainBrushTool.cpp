@@ -84,6 +84,22 @@ void TerrainBrushTool::apply(float deltaTime) {
             );
             break;
 
+        case BrushMode::GrassPaint:   // thicken grass density
+            m_terrain.applyGrassBrush(
+                m_position.x, m_position.z,
+                m_radius, scaledStrength, m_falloff,
+                true, m_shapeParams
+            );
+            break;
+
+        case BrushMode::GrassErase:   // carve grass away (paths, clearings)
+            m_terrain.applyGrassBrush(
+                m_position.x, m_position.z,
+                m_radius, scaledStrength, m_falloff,
+                false, m_shapeParams
+            );
+            break;
+
         case BrushMode::Terrace:
             m_terrain.applyBrush(
                 m_position.x, m_position.z,

@@ -2,6 +2,16 @@ add_executable(tabletop main.cpp)
 
 target_link_libraries(tabletop PRIVATE eden)
 
+# libmpv drives dialogue video playback (software render API -> ImGui texture),
+# same approach as Tearsheet.
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(MPV REQUIRED IMPORTED_TARGET mpv)
+target_link_libraries(tabletop PRIVATE PkgConfig::MPV)
+
+# So the in-game Options menu can launch the Python dialogue backend from the
+# source tree regardless of the game's working directory.
+target_compile_definitions(tabletop PRIVATE CMAKE_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+
 # Renderer/Editor headers live under src/, not include/.
 target_include_directories(tabletop PRIVATE ${CMAKE_SOURCE_DIR}/src)
 

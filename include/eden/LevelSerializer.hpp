@@ -34,6 +34,7 @@ struct LevelData {
         std::vector<glm::vec4> splatmap6;   // Weights for textures 24-27
         std::vector<glm::vec4> splatmap7;   // Weights for textures 28-31
         std::vector<glm::vec3> texHSBmap;
+        std::vector<float> grassmap;   // per-vertex grass density (v4+); empty => default 1.0
         // Legacy fields (populated when loading old format)
         std::vector<glm::vec4> texWeightmap;
         std::vector<glm::uvec4> texIndicesmap;
