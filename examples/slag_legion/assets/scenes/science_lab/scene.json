@@ -1,0 +1,13 @@
+{
+  "_comment": "Redesigned ship room (still image). Navigation hotboxes traced via F3/P then added to 'hotspots'.",
+  "video": "",
+  "poster": "science_lab.jpg",
+  "hotspots": [
+    {
+      "id": "to_hallway",
+      "label": "Hallway",
+      "polygon": [[0.292, 0.926], [0.295, 0.987], [0.760, 0.988], [0.752, 0.930]],
+      "action": "goto:hallway"
+    }
+  ]
+}

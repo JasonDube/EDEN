@@ -1,0 +1,25 @@
+{
+  "_comment": "Android SPEC — what a player buys. identity + personality traits + capabilities + commerce. traits DERIVE the mechanics (see main.cpp): neediness -> longing fill/call, intimacy -> intimate-clip gate. Put explicit overrides in `tuning` only when you want to bypass the trait-derived values.",
+
+  "identity": { "name": "Ada", "model": "ADA-4", "manufacturer": "Aether Dynamics", "being_type": 4 },
+
+  "traits": {
+    "neediness":    45,
+    "intimacy":     20,
+    "warmth":       50,
+    "temper":       55,
+    "curiosity":    70,
+    "independence": 60
+  },
+
+  "capabilities": {
+    "_chroma_note": "Key color for her composited clips. Ada rendered on GREEN. Options: white | green | magenta.",
+    "chroma": "green",
+    "_audio_note": "Ada's clips are near-silent, so audio stays off.",
+    "audio": false,
+    "_emotions_note": "The ONLY emotions the model may pick — exactly the clips she has (neutral is implicit -> default.mp4).",
+    "emotions": ["amused", "annoyed", "impatient", "informative", "mistrustful", "requesting", "thoughtful", "yearning"]
+  },
+
+  "commerce": { "price_credits": 190000, "tier": "crew", "warranty_years": 7 }
+}

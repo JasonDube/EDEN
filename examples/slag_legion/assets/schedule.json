@@ -1,0 +1,13 @@
+{
+  "_comment": "Clara's daily routine — the default life she falls back into whenever the Captain isn't commanding her and no station (Comm/Sensors/Combat) is engaged. 'start' is minutes since midnight. She charges 22:00-07:00 (handled separately), so these blocks fill her waking hours. 'room' may be a literal scene id (bridge/engine_room/life_support/science_lab/galley/hallway/captains_quarters), or a token: 'focus' = the room of today's focus problem, 'captain' = wherever the Captain currently is (she comes to be with him — this is the daily 'two of you' thread). 'activity' is the noun-phrase shown on the 'Working on' line and fed to her private thoughts; leave it empty on a 'focus' block to use the focus problem's title. 'mood' is her resting demeanor for the block (reserved; not yet forced onto her portrait). Tunable — no rebuild.",
+  "blocks": [
+    { "start": 420,  "activity": "her morning systems check",        "room": "engine_room", "mood": "attentive" },
+    { "start": 480,  "activity": "checking in on the Captain",        "room": "captain",     "mood": "warm" },
+    { "start": 510,  "activity": "",                                  "room": "focus",       "mood": "focused" },
+    { "start": 720,  "activity": "maintenance rounds",                "room": "hallway",     "mood": "workmanlike" },
+    { "start": 780,  "activity": "checking in on the Captain",        "room": "captain",     "mood": "warm" },
+    { "start": 840,  "activity": "",                                  "room": "focus",       "mood": "focused" },
+    { "start": 1080, "activity": "securing the ship for the night",   "room": "engine_room", "mood": "workmanlike" },
+    { "start": 1140, "activity": "off-duty for the evening",          "room": "captain",     "mood": "present" }
+  ]
+}

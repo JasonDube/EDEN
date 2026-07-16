@@ -1,0 +1,4 @@
+{
+  "_comment": "Top-level game config. active_character = which android companion boots (folder under assets/characters/). Ada is the real default; set to 'eva' right now for testing. Later, crew are added/removed at stations rather than picked at start.",
+  "active_character": "clara"
+}

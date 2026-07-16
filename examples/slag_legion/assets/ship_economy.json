@@ -1,0 +1,11 @@
+{
+  "_comment": "Ship daily operating costs (the 'burn'), in credits. Deducted once per in-game day (see advanceDay). The quantum singularity core (QSC-9) uses NO consumable fuel, so there's no fuel line. Each line has a checkbox in the Ship Ops panel: checked = active/billed, unchecked = you stop paying (and stop getting it). 'warn' is the hover tooltip that tells the player what unchecking costs them. Tune freely - no rebuild; the Ship Ops panel reads these live. Order here is the display order.",
+  "daily": {
+    "life_support":       { "label": "Life support & provisions",              "cost": 150, "warn": "Air, water, food, heat. You and Clara can't live without it - cutting this is not survivable for long." },
+    "qsc_containment":    { "label": "QSC-9 containment upkeep",                "cost": 200, "warn": "Coolant and containment consumables for the singularity core. Skip it and containment integrity starts to degrade - the one system Clara can't afford to lose." },
+    "maintenance":        { "label": "Hull & systems maintenance",             "cost": 250, "warn": "Spare parts and routine repair. Defer it and hull and systems wear out and fail faster." },
+    "clara_service":      { "label": "Android upkeep + Aether Dynamics service","cost": 300, "warn": "Clara's maintenance contract, parts, and calibration. Let it lapse and her performance degrades over time." },
+    "data_subscriptions": { "label": "Nav & comms relay (charts + external link)","cost": 50, "warn": "Your live link to the galactic network: current charts, beacons, and off-ship comms. Drop it and you're flying on stale cached charts and deaf to outside signals - adrift." },
+    "archive_subscription":{ "label": "Aether Dynamics data archives",           "cost": 150, "warn": "Premium reference data: species IDs, geo-profiles, and the anomaly baseline. Drop it and scans come back as raw, unclassified readings." }
+  }
+}

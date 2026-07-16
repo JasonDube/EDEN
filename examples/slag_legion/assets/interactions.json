@@ -1,0 +1,32 @@
+{
+  "_comment": "Unified causative schema, organized by DISPOSITION TIER. A 'causative' is any player action that acts on the companion. Each: 'delta' (disposition change, fractional — accumulates into 0..100), 'tier' (which disposition-gated tier it unlocks in), 'label' (button text), 'verb' (stage-direction sent to her when delivered by BUTTON), 'button' (does it appear as a player button; combat/inform/command fire from systems). Reactions live per-character in spec.json (her clip vocab). Tiers gate by disposition (see tier_thresholds); base is always available (apologize + negatives — you can always mend or damage). kiss/tickle are special (dedicated clips) and hardcoded in Tier 4. Cooldowns TBD (per-android personality). Two delivery paths: model classifies your chat, or a button delivers directly.",
+  "tier_order": ["base", "tier1", "tier2", "tier3", "tier4", "tier5", "tier6"],
+  "tier_thresholds": { "base": 0, "tier1": 50, "tier2": 60, "tier3": 70, "tier4": 80, "tier5": 90, "tier6": 100 },
+  "causatives": {
+    "apologize": { "delta": 1,    "tier": "base",  "label": "Apologize", "verb": "The Captain apologizes to you, sincerely.",                 "button": true },
+    "boast":     { "delta": -1,   "tier": "base",  "label": "Boast",     "verb": "The Captain boasts arrogantly at you.",                     "button": true },
+    "complain":  { "delta": -1,   "tier": "base",  "label": "Complain",  "verb": "The Captain complains to you.",                             "button": true },
+    "provoke":   { "delta": -5,   "tier": "base",  "label": "Provoke",   "verb": "The Captain provokes you, trying to get under your skin.",  "button": true },
+    "insult":    { "delta": -5,   "tier": "base",  "label": "Insult",    "verb": "The Captain insults you.",                                 "button": true },
+
+    "greet":     { "delta": 0.2,  "tier": "tier1", "label": "Greet",     "verb": "The Captain greets you.",                                  "button": true },
+    "chat":      { "delta": 0.2,  "tier": "tier1", "label": "Small talk","verb": "The Captain makes easy small talk with you.",              "button": true },
+    "question":  { "delta": 0.2,  "tier": "tier1", "label": "Ask",       "verb": "The Captain asks you a light, friendly question.",         "button": true },
+
+    "admire":    { "delta": 1,    "tier": "tier2", "label": "Admire",    "verb": "The Captain admires you openly.",                          "button": true },
+    "appreciate":{ "delta": 1,    "tier": "tier2", "label": "Appreciate","verb": "The Captain tells you how much they appreciate you.",       "button": true },
+    "joke":      { "delta": 1,    "tier": "tier2", "label": "Joke",      "verb": "The Captain shares a joke with you.",                      "button": true },
+    "thank":     { "delta": 1,    "tier": "tier2", "label": "Thank",     "verb": "The Captain thanks you sincerely.",                        "button": true },
+    "story":     { "delta": 1,    "tier": "tier2", "label": "Story",     "verb": "The Captain tells you a story.",                           "button": true },
+    "validate":  { "delta": 0.75, "tier": "tier2", "label": "Validate",  "verb": "The Captain validates how you feel.",                      "button": true },
+    "comfort":   { "delta": 2,    "tier": "tier2", "label": "Comfort",   "verb": "The Captain comforts you, warm and sincere.",              "button": true },
+
+    "confide":   { "delta": 1,    "tier": "tier3", "label": "Confide",   "verb": "The Captain confides something personal in you.",          "button": true },
+    "flirt":     { "delta": 1,    "tier": "tier3", "label": "Flirt",     "verb": "The Captain flirts with you.",                             "button": true },
+    "tease":     { "delta": 1,    "tier": "tier3", "label": "Tease",     "verb": "The Captain teases you, playfully.",                       "button": true },
+
+    "protect":   { "delta": 1.25, "tier": "base",  "label": "Protect",   "verb": "The Captain shields you from harm.",                       "button": false },
+    "inform":    { "delta": 0.2,  "tier": "base",  "label": "Inform",    "verb": "The Captain shares information with you.",                 "button": false },
+    "command":   { "delta": 0,    "tier": "base",  "label": "Command",   "verb": "The Captain gives you an order.",                          "button": false }
+  }
+}

@@ -1,0 +1,30 @@
+{
+  "_comment": "Android SPEC — what a player buys. traits DERIVE the mechanics (neediness -> longing fill/call, intimacy -> intimate-clip gate). Eva is a companion-tier model: more emotions, more warmth, full intimacy. Use `tuning` to override any derived value (e.g. fast timings for testing the call/search chain).",
+
+  "identity": { "name": "Eva", "model": "EVA-7", "manufacturer": "Aether Dynamics", "being_type": 4 },
+
+  "traits": {
+    "neediness":    70,
+    "intimacy":     85,
+    "warmth":       65,
+    "temper":       30,
+    "curiosity":    60,
+    "independence": 25
+  },
+
+  "capabilities": {
+    "_chroma_note": "Key color for her clips. Assuming GREEN like Ada; change if she holes/fringes. Options: white | green | magenta.",
+    "chroma": "green",
+    "_audio_note": "Muted for now — her clips have baked-in voice lines that replayed and read as 'repeating herself'. Conversation stays text-only via comm.",
+    "audio": false,
+    "_emotions_note": "Conversational emotions only (neutral implicit). Intimate/gated clips live in _gated_clips and are NOT free emotion picks.",
+    "emotions": ["afraid", "amused", "annoyed", "curious", "excited", "flirty", "happy", "impatient", "indecisive", "informative", "mistrustful", "nervous", "protective", "relieved", "requesting", "sad", "surprised", "thoughtful", "yearning"],
+    "_gated_clips": ["sexy", "ecstasy", "ecstasy_touch", "pleasured", "surrender", "tata_1"]
+  },
+
+  "commerce": { "price_credits": 340000, "tier": "companion", "warranty_years": 7 },
+
+  "_tuning_note": "Uncomment to override trait-derived values. Handy for testing the call->search chain fast.",
+  "tuning": {
+  }
+}

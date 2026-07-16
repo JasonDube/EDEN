@@ -1,0 +1,19 @@
+{
+  "_comment": "Redesigned ship room (still image). Navigation hotboxes traced via F3/P then added to 'hotspots'.",
+  "video": "",
+  "poster": "bridge.jpg",
+  "hotspots": [
+    {
+      "id": "to_hallway",
+      "label": "Hallway",
+      "polygon": [[0.350, 0.937], [0.350, 0.990], [0.603, 0.986], [0.599, 0.936]],
+      "action": "goto:hallway"
+    },
+    {
+      "id": "captain_terminal",
+      "label": "Captain's Terminal",
+      "polygon": [[0.003, 0.557], [0.012, 0.716], [0.165, 0.712], [0.074, 0.623]],
+      "action": "open_console"
+    }
+  ]
+}

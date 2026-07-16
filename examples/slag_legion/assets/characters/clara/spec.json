@@ -1,0 +1,58 @@
+{
+  "_comment": "Clara — a room-baked android. Unlike Ada/Eva (green-screen clips composited over a room still), Clara's clips are full-frame: she's filmed IN each room, so the room is baked into the shot. composite:false makes her clip the whole view. Emotion clips (no room suffix) are BRIDGE; informative_<room> is her default in that room; more room clips to come.",
+
+  "identity": { "name": "Clara", "model": "CLARA-9", "manufacturer": "Aether Dynamics", "being_type": 4 },
+
+  "traits": {
+    "neediness":    55,
+    "intimacy":     70,
+    "warmth":       75,
+    "temper":       35,
+    "curiosity":    80,
+    "independence": 45
+  },
+
+  "capabilities": {
+    "_composite_note": "false = full-frame room-baked clips (her clip IS the room view). No chroma key.",
+    "composite": false,
+    "chroma": "none",
+    "_audio_note": "Muted for now (baked voice lines would replay). Conversation is text over comm.",
+    "audio": false,
+    "_emotions_note": "BRIDGE conversational emotions only (neutral implicit -> idle). In other rooms she shows informative_<room> regardless of mood until room-specific clips exist. Intimate/pose/room clips are NOT free emotion picks.",
+    "emotions": ["afraid", "amused", "annoyed", "arrogant", "asking", "begging", "brave", "curious", "day_dreaming", "excited", "flirty", "friendly", "happy", "helpless", "indecisive", "nervous", "sad", "surprised", "thoughtful", "validated", "warmed", "yearning"],
+    "_aliases_note": "Built from tools/emotion_profiler.py (300 samples). Maps the model's slip words to a real clip so they never fall to neutral. alert->brave (all from combat prompts), concerned->nervous, comforting->friendly are judgment calls — tweak freely.",
+    "emotion_aliases": { "alert": "brave", "concerned": "nervous", "comforting": "friendly", "calm": "neutral", "confident": "brave", "content": "happy" },
+
+    "_reactions_note": "Hybrid reaction map: player-interaction -> her plausible reactions (her clip vocabulary). The model leads; if it returns neutral or something off this list for the interaction, the game snaps to one of these. This is where her personality lives.",
+    "reactions": {
+      "greet":     ["friendly", "happy", "neutral"],
+      "chat":      ["friendly", "amused", "curious", "neutral"],
+      "question":  ["curious", "thoughtful", "friendly"],
+      "inform":    ["thoughtful", "curious", "friendly", "neutral"],
+      "command":   ["neutral", "friendly", "annoyed"],
+      "protect":["flirty", "excited", "happy", "brave"],
+      "validate":  ["validated", "happy", "thoughtful", "friendly"],
+      "appreciate":["warmed", "happy", "flirty", "friendly"],
+      "admire":    ["happy", "flirty", "arrogant"],
+      "flirt":     ["flirty", "amused", "arrogant"],
+      "comfort":   ["thoughtful", "friendly", "yearning"],
+      "confide":   ["thoughtful", "curious", "friendly"],
+      "story":     ["curious", "amused", "thoughtful"],
+      "joke":      ["amused", "happy", "flirty"],
+      "tease":     ["amused", "flirty", "annoyed"],
+      "thank":     ["happy", "friendly", "flirty"],
+      "apologize": ["thoughtful", "friendly", "surprised"],
+      "boast":     ["amused", "arrogant", "annoyed"],
+      "complain":  ["thoughtful", "friendly", "annoyed"],
+      "provoke":   ["annoyed", "brave", "arrogant"],
+      "insult":    ["annoyed", "sad", "brave", "afraid"]
+    },
+    "_dominant_note": "interaction -> her signature reaction that dominates (~75%), overriding even a valid model pick. Use for reaction clips that should reliably play.",
+    "dominant_reactions": { "appreciate": "warmed" },
+
+    "_gated_clips": ["ecstasy", "sexy", "excited_show", "meditative_1", "looking_viewport", "port_window", "port_window_2", "terminal", "terminal_2", "greeting"],
+    "_room_clips": ["informative_bridge", "informative_captains_quarters", "informative_cargo_bay", "informative_engine_room", "informative_galley", "informative_science_lab", "seated_captains_quarters", "terminal_engine_room"]
+  },
+
+  "commerce": { "price_credits": 420000, "tier": "companion", "warranty_years": 7 }
+}
