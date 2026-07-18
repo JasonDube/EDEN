@@ -784,7 +784,7 @@ void FilesystemBrowser::clearFilesystemObjects() {
     while (it != m_sceneObjects->end()) {
         const auto& bt = (*it) ? (*it)->getBuildingType() : "";
         if (*it && (bt == "filesystem" || bt == "filesystem_wall" || bt == "filesystem_void" ||
-                    bt == "filesystem_void_filler" ||
+                    bt == "filesystem_void_filler" || bt == "agent" ||
                     bt == "image_desc" || bt == "platform_wall" || bt == "platform_slab" ||
                     bt == "wall_frame" || bt == "wall_widget")) {
             uint32_t handle = (*it)->getBufferHandle();
@@ -2813,6 +2813,7 @@ void FilesystemBrowser::spawnObjects(const std::string& dirPath) {
     auto deployedBots = m_forgeRoom.getDeployedBotsForTerritory(dirPath);
     bool spawnedDeployedBot = false;
     bool spawnedImageBot = false;
+    std::vector<std::string> agentModels;
     for (auto& bot : deployedBots) {
         if (bot.job == "CleanerBot" && !spawnedDeployedBot) {
             m_cleanerBot.init(m_sceneObjects, m_modelRenderer);
@@ -2833,6 +2834,26 @@ void FilesystemBrowser::spawnObjects(const std::string& dirPath) {
             m_cullSession.init(m_sceneObjects, m_modelRenderer, center, baseY);
             m_cullSession.spawnRobots(center, baseY, m_modelRenderer, bot.modelPath);
         }
+        if (bot.job == "Agent") {
+            agentModels.push_back(bot.modelPath); // spawned in a ring after the loop
+        }
+    }
+
+    // Spawn all deployed agents in a ring around the silo center (dedupe identical
+    // model paths from repeated deploys — one avatar per unique model).
+    std::sort(agentModels.begin(), agentModels.end());
+    agentModels.erase(std::unique(agentModels.begin(), agentModels.end()), agentModels.end());
+    if (!agentModels.empty()) {
+        int n = static_cast<int>(agentModels.size());
+        float radius = (n > 1) ? 12.0f : 0.0f;
+        for (int i = 0; i < n; ++i) {
+            float ang = (n > 1) ? (float)i / n * 6.2831853f : 0.0f;
+            glm::vec3 pos = center;
+            pos.y = baseY;
+            pos.x += std::cos(ang) * radius;
+            pos.z += std::sin(ang) * radius;
+            spawnAgentAvatar(pos, agentModels[i], dirPath);
+        }
     }
 
     // Spawn default cleaner bot in home directory (only if no deployed bot took the slot)
@@ -2846,6 +2867,168 @@ void FilesystemBrowser::spawnObjects(const std::string& dirPath) {
         }
     }
 
+}
+
+// Spawn a sentient Claude-backed "Agent" avatar in the silo. It's just a
+// SceneObject with BeingType::EDEN_COMPANION, so the host's existing NPC chat
+// (walk up + E / quick-chat) finds it via the shared scene-object list. Its
+// territory folder is tagged on targetLevel ("agent://<path>") for the folder-
+// aware step. buildingType "agent" so clearFilesystemObjects tears it down on nav.
+// Map an agent model filename to {backend provider, display name}. Provider keys
+// the per-avatar LLM ("" = backend default). Qwen is served via Ollama.
+static std::pair<std::string, std::string> agentProviderFromModel(const std::string& modelPath) {
+    std::string n = std::filesystem::path(modelPath).filename().string();
+    std::transform(n.begin(), n.end(), n.begin(), ::tolower);
+    if (n.find("claude")   != std::string::npos) return {"claude",   "Claude"};
+    if (n.find("grok")     != std::string::npos) return {"grok",     "Grok"};
+    if (n.find("deepseek") != std::string::npos) return {"deepseek", "DeepSeek"};
+    if (n.find("qwen")     != std::string::npos ||
+        n.find("ollama")   != std::string::npos) return {"ollama",   "Qwen"};
+    return {"", "Agent"};
+}
+
+void FilesystemBrowser::spawnAgentAvatar(const glm::vec3& pos, const std::string& modelPath,
+                                         const std::string& territory) {
+    if (!m_sceneObjects || !m_modelRenderer) return;
+
+    auto [provider, displayName] = agentProviderFromModel(modelPath);
+
+    std::unique_ptr<SceneObject> obj;
+    bool loaded = false;
+
+    std::string ext = std::filesystem::path(modelPath).extension().string();
+    std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+    if (!modelPath.empty() && (ext == ".glb" || ext == ".gltf")) {
+        auto result = GLBLoader::load(modelPath);
+        if (result.success && !result.meshes.empty()) {
+            std::vector<ModelVertex> verts;
+            std::vector<uint32_t> indices;
+            std::vector<unsigned char> tex;
+            int tw = 0, th = 0; bool hasTex = false;
+            for (auto& m : result.meshes) {
+                uint32_t base = static_cast<uint32_t>(verts.size());
+                verts.insert(verts.end(), m.vertices.begin(), m.vertices.end());
+                for (auto idx : m.indices) indices.push_back(base + idx);
+                if (!hasTex && m.hasTexture) {
+                    tex = m.texture.data; tw = m.texture.width; th = m.texture.height; hasTex = true;
+                }
+            }
+            // Center on XZ, feet on Y=0, scale to ~2m tall (human-ish avatar).
+            glm::vec3 bmin(FLT_MAX), bmax(-FLT_MAX);
+            for (auto& v : verts) { bmin = glm::min(bmin, v.position); bmax = glm::max(bmax, v.position); }
+            glm::vec3 off = {(bmin.x + bmax.x) * 0.5f, bmin.y, (bmin.z + bmax.z) * 0.5f};
+            for (auto& v : verts) v.position -= off;
+            bmin -= off; bmax -= off;
+            float height = bmax.y - bmin.y;
+            if (height > 0.01f) {
+                const float kAgentHeight = 7.0f; // feet tall (world units are feet) — tune here
+                float s = kAgentHeight / height;
+                for (auto& v : verts) v.position *= s;
+                bmin *= s; bmax *= s;
+            }
+            uint32_t handle = (hasTex && !tex.empty())
+                ? m_modelRenderer->createModel(verts, indices, tex.data(), tw, th)
+                : m_modelRenderer->createModel(verts, indices, nullptr, 0, 0);
+            obj = std::make_unique<SceneObject>(displayName);
+            obj->setBufferHandle(handle);
+            obj->setIndexCount(static_cast<uint32_t>(indices.size()));
+            obj->setVertexCount(static_cast<uint32_t>(verts.size()));
+            obj->setLocalBounds({bmin, bmax});
+            obj->setMeshData(verts, indices);
+            obj->setPrimitiveType(PrimitiveType::Cube);
+            loaded = true;
+        }
+    }
+    if (!loaded) {
+        // Fallback so the agent is always visible even without a model.
+        glm::vec4 col(0.30f, 0.80f, 1.0f, 1.0f);
+        auto mesh = PrimitiveMeshBuilder::createCube(6.0f, col);
+        uint32_t handle = m_modelRenderer->createModel(mesh.vertices, mesh.indices, nullptr, 0, 0);
+        obj = std::make_unique<SceneObject>("EDEN Agent");
+        obj->setBufferHandle(handle);
+        obj->setIndexCount(static_cast<uint32_t>(mesh.indices.size()));
+        obj->setVertexCount(static_cast<uint32_t>(mesh.vertices.size()));
+        obj->setLocalBounds(mesh.bounds);
+        obj->setMeshData(mesh.vertices, mesh.indices);
+        obj->setPrimitiveType(PrimitiveType::Cube);
+        obj->setPrimitiveSize(6.0f);
+        obj->setPrimitiveColor(col);
+    }
+
+    obj->setBeingType(BeingType::EDEN_COMPANION); // sentient → host NPC chat finds it
+    obj->setBuildingType("agent");
+    obj->setDescription(displayName);
+    obj->setAiProvider(provider);                 // per-avatar LLM (main.cpp registers it with the chat client)
+    obj->setTargetLevel("agent://" + territory);  // its assigned folder
+    obj->getTransform().setPosition(pos);
+    m_sceneObjects->push_back(std::move(obj));
+}
+
+std::string FilesystemBrowser::deployAgentInCurrentFolder() {
+    if (!m_sceneObjects || !m_modelRenderer) return "Not ready.";
+    if (m_currentPath.empty()) return "No folder open.";
+
+    // Re-deploy: remove any existing agent in this silo first, so pressing J
+    // refreshes it (size tuning, model swap) instead of stacking duplicates.
+    {
+        std::vector<uint32_t> oldHandles;
+        auto it = m_sceneObjects->begin();
+        while (it != m_sceneObjects->end()) {
+            if (*it && (*it)->getBuildingType() == "agent") {
+                uint32_t h = (*it)->getBufferHandle();
+                if (h != UINT32_MAX) oldHandles.push_back(h);
+                it = m_sceneObjects->erase(it);
+            } else {
+                ++it;
+            }
+        }
+        if (!oldHandles.empty()) m_modelRenderer->destroyModels(oldHandles);
+    }
+
+    // Collect every agent model in this folder: a .glb/.gltf whose name contains a
+    // provider keyword (claude/grok/deepseek/qwen/ollama) or a bot keyword.
+    namespace fs = std::filesystem;
+    std::vector<std::string> models;
+    try {
+        for (const auto& entry : fs::directory_iterator(
+                 m_currentPath, fs::directory_options::skip_permission_denied)) {
+            if (!entry.is_regular_file()) continue;
+            std::string lower = entry.path().filename().string();
+            std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
+            std::string ext = entry.path().extension().string();
+            std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+            if (ext != ".glb" && ext != ".gltf") continue;
+            const char* kw[] = {"claude","grok","deepseek","qwen","ollama",
+                                "robot","bot","agent","overseer"};
+            bool isAgent = false;
+            for (const char* k : kw) if (lower.find(k) != std::string::npos) { isAgent = true; break; }
+            if (isAgent) models.push_back(entry.path().string());
+        }
+    } catch (const std::exception& e) {
+        return std::string("Could not scan folder: ") + e.what();
+    }
+    if (models.empty())
+        return "No agent .glb models (claude/grok/deepseek/qwen/robot) in this folder.";
+    std::sort(models.begin(), models.end()); // stable order around the ring
+
+    // Rewrite this territory's Agent registry (dedupe), then spawn each in a ring
+    // around the silo center on the floor.
+    m_forgeRoom.loadRegistry();
+    m_forgeRoom.removeDeployedBotsForTerritory(m_currentPath, "Agent");
+    glm::vec3 center = m_spawnOrigin;
+    center.y = m_ringBaseY;
+    int n = static_cast<int>(models.size());
+    float radius = (n > 1) ? 12.0f : 0.0f;
+    std::string names;
+    for (int i = 0; i < n; ++i) {
+        float ang = (n > 1) ? (float)i / n * 6.2831853f : 0.0f;
+        glm::vec3 pos = center + glm::vec3(std::cos(ang) * radius, 0.0f, std::sin(ang) * radius);
+        m_forgeRoom.addDeployedBot(models[i], "Agent", m_currentPath);
+        spawnAgentAvatar(pos, models[i], m_currentPath);
+        if (!names.empty()) names += ", ";
+        names += agentProviderFromModel(models[i]).second;
+    }
+    return "Deployed " + std::to_string(n) + " agent(s): " + names;
 }
 
 // ── Label Rendering ────────────────────────────────────────────────────

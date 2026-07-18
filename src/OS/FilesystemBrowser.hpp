@@ -66,6 +66,11 @@ public:
     PlatformGridBuilder& getPlatformGrid() { return m_platformGrid; }
     float getPlatformY() const { return m_platformY; }
     float getRingBaseY() const { return m_ringBaseY; }
+
+    // One-key deploy: find a *robot*.glb (or any .glb) in the current folder,
+    // register it as an "Agent" for this territory, and spawn the avatar at the
+    // silo center (on the floor) right now. Returns a short status message.
+    std::string deployAgentInCurrentFolder();
     float getBasementHeight() const { return basementHeight(); }
     float getBasementFloorY() const { return m_basementBaseY - basementHeight(); }
     float getCeilingTopY() const { return m_basementBaseY - 0.5f; } // top surface of basement ceiling slab
@@ -223,6 +228,12 @@ private:
                           float yawDegrees);                                  // main thread
     void drainThumbnailResults();                                            // main thread
     void drainModelResults();                                               // main thread
+
+    // Spawn a sentient Claude-backed "Agent" avatar (EDEN_COMPANION) in the silo,
+    // tagged with its territory folder. The host's existing NPC chat picks it up
+    // automatically (it's just a sentient SceneObject in the shared list).
+    void spawnAgentAvatar(const glm::vec3& pos, const std::string& modelPath,
+                          const std::string& territory);
 
     ModelRenderer* m_modelRenderer = nullptr;
     std::vector<std::unique_ptr<SceneObject>>* m_sceneObjects = nullptr;

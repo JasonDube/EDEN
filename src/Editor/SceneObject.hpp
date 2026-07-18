@@ -110,6 +110,11 @@ public:
     void setDescription(const std::string& desc) { m_description = desc; }
     const std::string& getDescription() const { return m_description; }
 
+    // Backend LLM provider for agent NPCs ("claude","grok","deepseek","ollama";
+    // empty = backend default). Set on deployed Agent avatars.
+    void setAiProvider(const std::string& p) { m_aiProvider = p; }
+    const std::string& getAiProvider() const { return m_aiProvider; }
+
     // Metadata from .lime files (key-value properties like material, capacity, etc.)
     void setModelMetadata(const std::unordered_map<std::string, std::string>& meta) { m_modelMetadata = meta; }
     const std::unordered_map<std::string, std::string>& getModelMetadata() const { return m_modelMetadata; }
@@ -740,6 +745,7 @@ public:
 private:
     std::string m_name = "Object";
     std::string m_description;  // Description visible to AI perception
+    std::string m_aiProvider;   // backend LLM provider for agent NPCs (empty = default)
     std::unordered_map<std::string, std::string> m_modelMetadata;  // Key-value from .lime file
     std::string m_buildingType; // Building catalog type (e.g. "farm"). Empty = not a building.
     std::string m_modelPath;  // Source file path for save/load

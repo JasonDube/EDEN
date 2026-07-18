@@ -9,6 +9,7 @@
 #include <iostream>
 #include <filesystem>
 #include <cstdlib>
+#include <algorithm>
 
 namespace eden {
 
@@ -334,6 +335,15 @@ void ForgeRoom::addDeployedBot(const std::string& modelPath, const std::string& 
     m_deployedBots.push_back(bot);
     saveRegistry();
     std::cout << "[ForgeRoom] Deployed " << job << " (" << modelPath << ") to " << territory << std::endl;
+}
+
+void ForgeRoom::removeDeployedBotsForTerritory(const std::string& territory, const std::string& job) {
+    auto before = m_deployedBots.size();
+    m_deployedBots.erase(
+        std::remove_if(m_deployedBots.begin(), m_deployedBots.end(),
+                       [&](const DeployedBot& b) { return b.territory == territory && b.job == job; }),
+        m_deployedBots.end());
+    if (m_deployedBots.size() != before) saveRegistry();
 }
 
 // ── Registry ───────────────────────────────────────────────────────────

@@ -135,6 +135,18 @@ AsyncHttpClient::Response AsyncHttpClient::executeRequest(const Request& request
     return response;
 }
 
+void AsyncHttpClient::setProviderForNpc(const std::string& npcName, const std::string& provider) {
+    if (provider.empty()) m_providerByName.erase(npcName);
+    else m_providerByName[npcName] = provider;
+}
+
+// Attach this NPC's provider override to a chat body, if one is registered.
+static void applyProviderOverride(nlohmann::json& body, const std::string& npcName,
+                                  const std::unordered_map<std::string, std::string>& map) {
+    auto it = map.find(npcName);
+    if (it != map.end() && !it->second.empty()) body["provider"] = it->second;
+}
+
 void AsyncHttpClient::sendChatMessage(const std::string& sessionId, const std::string& message,
                                        const std::string& npcName, const std::string& npcPersonality,
                                        int beingType, ResponseCallback callback) {
@@ -146,6 +158,7 @@ void AsyncHttpClient::sendChatMessage(const std::string& sessionId, const std::s
     body["npc_name"] = npcName;
     body["npc_personality"] = npcPersonality;
     body["being_type"] = beingType;
+    applyProviderOverride(body, npcName, m_providerByName);
 
     Request request;
     request.method = "POST";
@@ -172,6 +185,7 @@ void AsyncHttpClient::sendChatMessageWithPerception(const std::string& sessionId
     body["npc_personality"] = npcPersonality;
     body["being_type"] = beingType;
     body["perception"] = perception.toJson();
+    applyProviderOverride(body, npcName, m_providerByName);
 
     Request request;
     request.method = "POST";
@@ -202,6 +216,7 @@ void AsyncHttpClient::sendChatMessageWithPerception(const std::string& sessionId
     if (!imagePath.empty()) {
         body["image_path"] = imagePath;
     }
+    applyProviderOverride(body, npcName, m_providerByName);
 
     Request request;
     request.method = "POST";

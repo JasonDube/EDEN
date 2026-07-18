@@ -1473,6 +1473,15 @@ protected:
         m_filesystemBrowser.setPlayerPosition(m_camera.getPosition());
         m_filesystemBrowser.updateAnimations(deltaTime);
 
+        // Register each deployed Agent avatar's provider with the chat client, so
+        // its /chat requests use that avatar's model (Claude/Grok/DeepSeek/Ollama).
+        if (m_isEdenOSLevel && m_httpClient) {
+            for (const auto& o : m_sceneObjects) {
+                if (o && o->getBuildingType() == "agent")
+                    m_httpClient->setProviderForNpc(o->getName(), o->getAiProvider());
+            }
+        }
+
         // Teleport to silo center after navigation completes
         if (hadPending && m_pendingTeleportToPlatform && m_filesystemBrowser.isActive()) {
             m_pendingTeleportToPlatform = false;
@@ -1879,6 +1888,195 @@ protected:
         updateEditorMode(deltaTime);
     }
 
+    // ── Multi-agent chat panels (EDEN OS) ───────────────────────────────────
+    // One always-open chat window per deployed Agent avatar, stacked down the
+    // right edge, each with an on/off toggle and its own session. Talk to any of
+    // the four without the open/close dance. Free the cursor (hold Left-Alt) to
+    // type. Provider routing is per-panel (already registered by name).
+    struct AgentPanel {
+        struct Msg { std::string sender; std::string text; bool isPlayer; };
+        std::string name;
+        std::string provider;
+        std::string sessionId;
+        std::vector<Msg> history;
+        char input[512] = {0};
+        bool active = true;
+        bool waiting = false;
+        bool scrollToBottom = false;
+        int beingType = 0;
+        SceneObject* obj = nullptr; // re-resolved each frame; may be null if despawned
+    };
+    std::vector<AgentPanel> m_agentPanels;
+
+    // Rebuild the panel list from the live agent avatars, preserving each panel's
+    // history/session by name. Removes panels whose agent has despawned.
+    void syncAgentPanels() {
+        // Drop panels whose agent no longer exists.
+        m_agentPanels.erase(std::remove_if(m_agentPanels.begin(), m_agentPanels.end(),
+            [this](const AgentPanel& p) {
+                for (const auto& o : m_sceneObjects)
+                    if (o && o->getBuildingType() == "agent" && o->getName() == p.name) return false;
+                return true;
+            }), m_agentPanels.end());
+        // Add/refresh a panel for each live agent.
+        for (const auto& o : m_sceneObjects) {
+            if (!o || o->getBuildingType() != "agent") continue;
+            AgentPanel* found = nullptr;
+            for (auto& p : m_agentPanels) if (p.name == o->getName()) { found = &p; break; }
+            if (!found) {
+                AgentPanel p;
+                p.name = o->getName();
+                m_agentPanels.push_back(std::move(p));
+                found = &m_agentPanels.back();
+            }
+            found->obj = o.get();
+            found->provider = o->getAiProvider();
+            found->beingType = static_cast<int>(o->getBeingType());
+        }
+    }
+
+    void sendAgentPanelMessage(AgentPanel& p) {
+        if (!m_httpClient || p.input[0] == '\0') return;
+        std::string msg = p.input;
+        p.input[0] = '\0';
+        p.history.push_back({p.name, msg, true});
+        p.waiting = true;
+        p.scrollToBottom = true;
+        m_httpClient->setProviderForNpc(p.name, p.provider); // ensure this panel's model
+
+        std::string name = p.name; // callback finds the panel by name (vector may realloc)
+        auto cb = [this, name](const AsyncHttpClient::Response& resp) {
+            AgentPanel* pp = nullptr;
+            for (auto& q : m_agentPanels) if (q.name == name) { pp = &q; break; }
+            if (!pp) return;
+            pp->waiting = false;
+            if (resp.success) {
+                try {
+                    auto j = nlohmann::json::parse(resp.body);
+                    if (j.contains("session_id")) pp->sessionId = j["session_id"].get<std::string>();
+                    std::string response = j.value("response", "...");
+                    std::string provider = j.value("provider", "?");
+                    std::string model = j.value("model", "?");
+                    pp->history.push_back({name, response + "  [" + provider + " / " + model + "]", false});
+                } catch (...) {
+                    pp->history.push_back({name, "...", false});
+                }
+            } else {
+                pp->history.push_back({name, "(no response)", false});
+            }
+            pp->scrollToBottom = true;
+        };
+
+        if (p.obj) {
+            PerceptionData perc = m_aiBehavior.performScanCone(p.obj, 120.0f, 50.0f);
+            m_httpClient->sendChatMessageWithPerception(p.sessionId, msg, p.name, "", p.beingType, perc, cb);
+        } else {
+            m_httpClient->sendChatMessage(p.sessionId, msg, p.name, "", p.beingType, cb);
+        }
+    }
+
+    void renderAgentPanels() {
+        if (!m_isEdenOSLevel) return;
+        syncAgentPanels();
+        if (m_agentPanels.empty()) return;
+
+        float W = static_cast<float>(getWindow().getWidth());
+        float H = static_cast<float>(getWindow().getHeight());
+        const float pw = 340.0f, gap = 8.0f, pad = 12.0f;
+        float ph = 230.0f;
+        int n = static_cast<int>(m_agentPanels.size());
+        float avail = (H - pad * 2 - gap * (n - 1)) / std::max(1, n);
+        if (avail < ph) ph = std::max(120.0f, avail); // shrink to fit if crowded
+
+        for (size_t i = 0; i < m_agentPanels.size(); ++i) {
+            auto& p = m_agentPanels[i];
+            const std::string& prov = p.provider;
+            ImVec4 col = prov == "claude"   ? ImVec4(0.91f, 0.56f, 0.29f, 1.0f)
+                       : prov == "grok"     ? ImVec4(0.35f, 0.66f, 0.92f, 1.0f)
+                       : prov == "deepseek" ? ImVec4(0.59f, 0.46f, 0.88f, 1.0f)
+                       : prov == "ollama"   ? ImVec4(0.41f, 0.79f, 0.51f, 1.0f)
+                                            : ImVec4(0.55f, 0.55f, 0.55f, 1.0f);
+            ImGui::SetNextWindowPos(ImVec2(W - pw - pad, pad + i * (ph + gap)), ImGuiCond_FirstUseEver);
+            ImGui::SetNextWindowSize(ImVec2(pw, ph), ImGuiCond_FirstUseEver);
+            ImGui::PushStyleColor(ImGuiCol_TitleBgActive, ImVec4(col.x * 0.6f, col.y * 0.6f, col.z * 0.6f, 1.0f));
+            ImGui::PushStyleColor(ImGuiCol_TitleBg, ImVec4(col.x * 0.35f, col.y * 0.35f, col.z * 0.35f, 1.0f));
+
+            std::string label = prov.empty() ? "default" : prov;
+            std::string title = p.name + "  [" + label + "]###agentpanel_" + p.name;
+            if (ImGui::Begin(title.c_str(), nullptr, ImGuiWindowFlags_NoSavedSettings)) {
+                ImGui::Checkbox(("On##" + p.name).c_str(), &p.active);
+                if (!p.active) { ImGui::SameLine(); ImGui::TextDisabled("(off)"); }
+                ImGui::Separator();
+
+                if (p.active) {
+                    float inputH = ImGui::GetFrameHeightWithSpacing();
+                    float histH = ImGui::GetContentRegionAvail().y - inputH;
+                    if (histH < 30.0f) histH = 30.0f;
+                    ImGui::BeginChild(("hist##" + p.name).c_str(), ImVec2(0, histH), true);
+                    for (const auto& m : p.history) {
+                        if (m.isPlayer) {
+                            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.6f, 0.9f, 0.6f, 1.0f));
+                            ImGui::TextWrapped("[You]: %s", m.text.c_str());
+                        } else {
+                            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.55f, 0.82f, 1.0f, 1.0f));
+                            ImGui::TextWrapped("[%s]: %s", m.sender.c_str(), m.text.c_str());
+                        }
+                        ImGui::PopStyleColor();
+                        ImGui::Spacing();
+                    }
+                    if (p.waiting) { ImGui::TextDisabled("thinking..."); }
+                    if (p.scrollToBottom) { ImGui::SetScrollHereY(1.0f); p.scrollToBottom = false; }
+                    ImGui::EndChild();
+
+                    ImGui::SetNextItemWidth(-52.0f);
+                    bool enter = ImGui::InputText(("##in_" + p.name).c_str(), p.input, sizeof(p.input),
+                                                  ImGuiInputTextFlags_EnterReturnsTrue);
+                    ImGui::SameLine();
+                    bool send = ImGui::Button(("Send##" + p.name).c_str());
+                    if (enter || send) sendAgentPanelMessage(p);
+                }
+            }
+            ImGui::End();
+            ImGui::PopStyleColor(2);
+        }
+    }
+
+    // Floating name tag above each deployed Agent avatar, so the four similar-
+    // looking robots are instantly identifiable (Claude / Grok / DeepSeek / Qwen).
+    void renderAgentNameTags() {
+        if (!m_isEdenOSLevel) return;
+        float w = static_cast<float>(getWindow().getWidth());
+        float h = static_cast<float>(getWindow().getHeight());
+        if (w <= 0.0f || h <= 0.0f) return;
+        glm::mat4 vp = m_camera.getProjectionMatrix(w / h, 0.1f, 5000.0f) * m_camera.getViewMatrix();
+        auto* dl = ImGui::GetForegroundDrawList();
+        for (const auto& o : m_sceneObjects) {
+            if (!o || o->getBuildingType() != "agent") continue;
+            glm::vec3 pos = const_cast<SceneObject*>(o.get())->getTransform().getPosition();
+            glm::vec4 clip = vp * glm::vec4(pos.x, pos.y + 8.0f, pos.z, 1.0f); // ~8ft, above the head
+            if (clip.w <= 0.0f) continue;
+            glm::vec3 ndc = glm::vec3(clip) / clip.w;
+            if (ndc.z < -1.0f || ndc.z > 1.0f) continue;
+            float sx = (ndc.x + 1.0f) * 0.5f * w;
+            float sy = (1.0f - ndc.y) * 0.5f * h;
+
+            const std::string& prov = o->getAiProvider();
+            ImU32 col = prov == "claude"   ? IM_COL32(233, 143, 74, 255)
+                      : prov == "grok"     ? IM_COL32(90, 168, 235, 255)
+                      : prov == "deepseek" ? IM_COL32(150, 118, 224, 255)
+                      : prov == "ollama"   ? IM_COL32(104, 202, 130, 255)
+                                           : IM_COL32(220, 220, 220, 255);
+            const std::string& label = o->getName();
+            ImVec2 ts = ImGui::CalcTextSize(label.c_str());
+            float pad = 5.0f;
+            ImVec2 p0(sx - ts.x * 0.5f - pad, sy - ts.y - pad);
+            ImVec2 p1(sx + ts.x * 0.5f + pad, sy + pad);
+            dl->AddRectFilled(p0, p1, IM_COL32(0, 0, 0, 170), 4.0f);
+            dl->AddRect(p0, p1, col, 4.0f);
+            dl->AddText(ImVec2(sx - ts.x * 0.5f, sy - ts.y * 0.5f), col, label.c_str());
+        }
+    }
+
     void recordCommandBuffer(VkCommandBuffer cmd, uint32_t imageIndex) override {
         m_chunkManager->processPendingDeletes();
 
@@ -1923,6 +2121,8 @@ protected:
         if (m_isPlayMode) {
             renderPlayModeUI();
             renderUVViewer();
+            renderAgentNameTags();
+            renderAgentPanels();
         } else {
             m_editorUI.render();
             renderModulePanel();
@@ -7867,6 +8067,15 @@ private:
             m_bootedEdenOS = true;
             if (!m_isPlayMode) enterPlayMode();
             spawnEdenOSFromHome();
+        }
+
+        // J — one-key: deploy a Claude-backed Agent avatar in the current folder
+        // (finds a *robot*.glb / any .glb here) and spawn it right in front of you.
+        if (m_isEdenOSLevel && m_isPlayMode &&
+            Input::isKeyPressed(74) /* GLFW_KEY_J */ &&
+            !ImGui::GetIO().WantCaptureKeyboard && !ImGui::GetIO().WantTextInput) {
+            std::string msg = m_filesystemBrowser.deployAgentInCurrentFolder();
+            std::cout << "[Agent] " << msg << std::endl;
         }
 
         // Ctrl+` (backtick) — toggle terminal
@@ -17652,9 +17861,10 @@ private:
             // (TTS overlap prevented by m_ttsInFlight + m_ttsCooldown in speakTTS)
             int beingType = static_cast<int>(m_currentInteractObject->getBeingType());
             
-            // For AI NPCs (Xenk, Eve, Robot), include updated perception data and parse actions
+            // For AI NPCs (Xenk, Eve, Robot, EDEN agents), include perception + parse actions
             if (m_currentInteractObject->getBeingType() == BeingType::AI_ARCHITECT ||
                 m_currentInteractObject->getBeingType() == BeingType::EVE ||
+                m_currentInteractObject->getBeingType() == BeingType::EDEN_COMPANION ||
                 m_currentInteractObject->getBeingType() == BeingType::ROBOT) {
                 // Use full scan results if available from recent look_around, otherwise do fresh scan
                 PerceptionData perception;
@@ -17679,10 +17889,15 @@ private:
                                 std::string response = json.value("response", "...");
                                 std::string emotion = json.value("emotion", "neutral");
                                 m_aiBehavior.npcEmotions()[npcName] = emotion;
+                                std::string provider = json.value("provider", "?");
                                 std::string model = json.value("model", "?");
-                                std::string chatMsg = "[" + emotion + "] " + response;
+                                // Stamp each reply with the provider+model that ACTUALLY answered
+                                // (backend reports the real one, incl. any silent fallback).
+                                std::string chatMsg = "[" + emotion + "] " + response +
+                                                      "  [" + provider + " / " + model + "]";
                                 m_aiBehavior.conversationHistory().push_back({npcName, chatMsg, false});
-                                std::cout << "[" << npcName << "] (" << emotion << ") [" << model << "] " << response << std::endl;
+                                std::cout << "[" << npcName << "] (" << emotion << ") [" << provider
+                                          << " / " << model << "] " << response << std::endl;
 
                                 // Speak the response via TTS
                                 m_aiBehavior.speakTTS(response, npcName);
@@ -20477,7 +20692,7 @@ private:
 
                 // Job selection
                 ImGui::Text("Job:");
-                const char* jobs[] = {"CleanerBot", "ImageBot", "CullRobot"};
+                const char* jobs[] = {"CleanerBot", "ImageBot", "CullRobot", "Agent"};
                 ImGui::Combo("##AlgobotJob", &m_algobotSelectedJob, jobs, IM_ARRAYSIZE(jobs));
 
                 ImGui::Separator();
@@ -28755,9 +28970,10 @@ private:
 
             // Start a new session and get AI greeting
             if (m_httpClient && m_httpClient->isConnected()) {
-                // For AI NPCs (Xenk, Eve, Robot), include perception data
+                // For AI NPCs (Xenk, Eve, Robot, EDEN agents), include perception data
                 if (closestObject->getBeingType() == BeingType::AI_ARCHITECT ||
                     closestObject->getBeingType() == BeingType::EVE ||
+                    closestObject->getBeingType() == BeingType::EDEN_COMPANION ||
                     closestObject->getBeingType() == BeingType::ROBOT) {
                     PerceptionData perception = m_aiBehavior.performScanCone(closestObject, 120.0f, 50.0f);
                     std::cout << "  Scan cone: " << perception.visibleObjects.size() << " objects visible" << std::endl;
@@ -28771,6 +28987,9 @@ private:
                                     auto json = nlohmann::json::parse(resp.body);
                                     m_currentSessionId = json.value("session_id", "");
                                     std::string greeting = json.value("response", "Hello there.");
+                                    std::string provider = json.value("provider", "?");
+                                    std::string model = json.value("model", "?");
+                                    greeting += "  [" + provider + " / " + model + "]";
                                     m_aiBehavior.conversationHistory().push_back({npcName, greeting, false});
                                 } catch (...) {
                                     m_aiBehavior.conversationHistory().push_back({npcName, "...", false});
@@ -28791,6 +29010,9 @@ private:
                                     auto json = nlohmann::json::parse(resp.body);
                                     m_currentSessionId = json.value("session_id", "");
                                     std::string greeting = json.value("response", "Hello there.");
+                                    std::string provider = json.value("provider", "?");
+                                    std::string model = json.value("model", "?");
+                                    greeting += "  [" + provider + " / " + model + "]";
                                     m_aiBehavior.conversationHistory().push_back({npcName, greeting, false});
                                 } catch (...) {
                                     m_aiBehavior.conversationHistory().push_back({npcName, "...", false});

@@ -8,6 +8,7 @@
 #include <atomic>
 #include <memory>
 #include <vector>
+#include <unordered_map>
 #include <nlohmann/json.hpp>
 
 namespace eden {
@@ -142,6 +143,11 @@ public:
     // Process completed requests (call from main thread)
     void pollResponses();
 
+    // Per-NPC backend provider override (by npc name). When set, chat requests for
+    // that NPC carry provider=... so different avatars can use different models.
+    // Call from the main thread. Empty provider clears the override.
+    void setProviderForNpc(const std::string& npcName, const std::string& provider);
+
 private:
     struct Request {
         std::string method;
@@ -160,6 +166,7 @@ private:
     Response executeRequest(const Request& request);
 
     std::string m_baseUrl;
+    std::unordered_map<std::string, std::string> m_providerByName; // npc name -> provider
     std::atomic<bool> m_running{false};
     std::atomic<bool> m_connected{false};
     std::thread m_workerThread;

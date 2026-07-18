@@ -65,6 +65,8 @@ public:
 
     // Direct deployment (from frame or external code — bypasses pad)
     void addDeployedBot(const std::string& modelPath, const std::string& job, const std::string& territory);
+    // Remove all deployed bots of the given job in a territory (dedupe before re-deploy).
+    void removeDeployedBotsForTerritory(const std::string& territory, const std::string& job);
 
     SceneObject* getPadObject() const { return m_padObject; }
 
