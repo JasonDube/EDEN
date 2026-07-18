@@ -1907,6 +1907,9 @@ protected:
         SceneObject* obj = nullptr; // re-resolved each frame; may be null if despawned
     };
     std::vector<AgentPanel> m_agentPanels;
+    int m_activeAgentTab = 0;        // which agent tab is showing in the single chat panel
+    bool m_wasCursorToggle = false;  // edge-detect for the Left-Alt cursor toggle
+    float m_uiFontScale = 0.8f;      // ImGui FontGlobalScale (adjustable in the Agents panel)
 
     // Rebuild the panel list from the live agent avatars, preserving each panel's
     // history/session by name. Removes panels whose agent has despawned.
@@ -1975,70 +1978,127 @@ protected:
         }
     }
 
+    static ImVec4 providerColor(const std::string& prov) {
+        return prov == "claude"   ? ImVec4(0.91f, 0.56f, 0.29f, 1.0f)
+             : prov == "grok"     ? ImVec4(0.35f, 0.66f, 0.92f, 1.0f)
+             : prov == "deepseek" ? ImVec4(0.59f, 0.46f, 0.88f, 1.0f)
+             : prov == "ollama"   ? ImVec4(0.41f, 0.79f, 0.51f, 1.0f)
+                                  : ImVec4(0.80f, 0.80f, 0.80f, 1.0f);
+    }
+
+    // ONE chat panel on the right; a left gutter of provider-colored tabs picks
+    // which agent you're talking to (like the slag_legion comm panel).
     void renderAgentPanels() {
         if (!m_isEdenOSLevel) return;
         syncAgentPanels();
         if (m_agentPanels.empty()) return;
+        if (m_activeAgentTab >= static_cast<int>(m_agentPanels.size())) m_activeAgentTab = 0;
+        if (m_activeAgentTab < 0) m_activeAgentTab = 0;
 
         float W = static_cast<float>(getWindow().getWidth());
         float H = static_cast<float>(getWindow().getHeight());
-        const float pw = 340.0f, gap = 8.0f, pad = 12.0f;
-        float ph = 230.0f;
-        int n = static_cast<int>(m_agentPanels.size());
-        float avail = (H - pad * 2 - gap * (n - 1)) / std::max(1, n);
-        if (avail < ph) ph = std::max(120.0f, avail); // shrink to fit if crowded
-
-        for (size_t i = 0; i < m_agentPanels.size(); ++i) {
-            auto& p = m_agentPanels[i];
-            const std::string& prov = p.provider;
-            ImVec4 col = prov == "claude"   ? ImVec4(0.91f, 0.56f, 0.29f, 1.0f)
-                       : prov == "grok"     ? ImVec4(0.35f, 0.66f, 0.92f, 1.0f)
-                       : prov == "deepseek" ? ImVec4(0.59f, 0.46f, 0.88f, 1.0f)
-                       : prov == "ollama"   ? ImVec4(0.41f, 0.79f, 0.51f, 1.0f)
-                                            : ImVec4(0.55f, 0.55f, 0.55f, 1.0f);
-            ImGui::SetNextWindowPos(ImVec2(W - pw - pad, pad + i * (ph + gap)), ImGuiCond_FirstUseEver);
-            ImGui::SetNextWindowSize(ImVec2(pw, ph), ImGuiCond_FirstUseEver);
-            ImGui::PushStyleColor(ImGuiCol_TitleBgActive, ImVec4(col.x * 0.6f, col.y * 0.6f, col.z * 0.6f, 1.0f));
-            ImGui::PushStyleColor(ImGuiCol_TitleBg, ImVec4(col.x * 0.35f, col.y * 0.35f, col.z * 0.35f, 1.0f));
-
-            std::string label = prov.empty() ? "default" : prov;
-            std::string title = p.name + "  [" + label + "]###agentpanel_" + p.name;
-            if (ImGui::Begin(title.c_str(), nullptr, ImGuiWindowFlags_NoSavedSettings)) {
-                ImGui::Checkbox(("On##" + p.name).c_str(), &p.active);
-                if (!p.active) { ImGui::SameLine(); ImGui::TextDisabled("(off)"); }
-                ImGui::Separator();
-
-                if (p.active) {
-                    float inputH = ImGui::GetFrameHeightWithSpacing();
-                    float histH = ImGui::GetContentRegionAvail().y - inputH;
-                    if (histH < 30.0f) histH = 30.0f;
-                    ImGui::BeginChild(("hist##" + p.name).c_str(), ImVec2(0, histH), true);
-                    for (const auto& m : p.history) {
-                        if (m.isPlayer) {
-                            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.6f, 0.9f, 0.6f, 1.0f));
-                            ImGui::TextWrapped("[You]: %s", m.text.c_str());
-                        } else {
-                            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.55f, 0.82f, 1.0f, 1.0f));
-                            ImGui::TextWrapped("[%s]: %s", m.sender.c_str(), m.text.c_str());
-                        }
-                        ImGui::PopStyleColor();
-                        ImGui::Spacing();
-                    }
-                    if (p.waiting) { ImGui::TextDisabled("thinking..."); }
-                    if (p.scrollToBottom) { ImGui::SetScrollHereY(1.0f); p.scrollToBottom = false; }
-                    ImGui::EndChild();
-
-                    ImGui::SetNextItemWidth(-52.0f);
-                    bool enter = ImGui::InputText(("##in_" + p.name).c_str(), p.input, sizeof(p.input),
-                                                  ImGuiInputTextFlags_EnterReturnsTrue);
-                    ImGui::SameLine();
-                    bool send = ImGui::Button(("Send##" + p.name).c_str());
-                    if (enter || send) sendAgentPanelMessage(p);
-                }
+        const float pw = 400.0f, ph = 480.0f, pad = 12.0f;
+        ImGui::SetNextWindowPos(ImVec2(W - pw - pad, (H - ph) * 0.5f), ImGuiCond_FirstUseEver);
+        ImGui::SetNextWindowSize(ImVec2(pw, ph), ImGuiCond_FirstUseEver);
+        if (ImGui::Begin("Agents###agentspanel", nullptr, ImGuiWindowFlags_NoSavedSettings)) {
+            float footerH = ImGui::GetFrameHeightWithSpacing();
+            float bodyH = ImGui::GetContentRegionAvail().y - footerH;
+            if (bodyH < 60.0f) bodyH = 60.0f;
+            // Left tab gutter — a single provider-colored initial per agent
+            // (C/G/D/Q); hover for the full name.
+            ImGui::BeginChild("##agenttabs", ImVec2(30.0f, bodyH), true);
+            for (size_t i = 0; i < m_agentPanels.size(); ++i) {
+                auto& p = m_agentPanels[i];
+                ImVec4 col = providerColor(p.provider);
+                if (!p.active) col = ImVec4(col.x * 0.5f, col.y * 0.5f, col.z * 0.5f, 1.0f);
+                ImGui::PushStyleColor(ImGuiCol_Text, col);
+                char letter = p.name.empty() ? '?' : p.name[0];
+                if (letter >= 'a' && letter <= 'z') letter -= 32; // uppercase
+                std::string lbl = std::string(1, letter) + "##tab" + std::to_string(i);
+                if (ImGui::Selectable(lbl.c_str(), static_cast<int>(i) == m_activeAgentTab))
+                    m_activeAgentTab = static_cast<int>(i);
+                ImGui::PopStyleColor();
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("%s%s", p.name.c_str(), p.active ? "" : " (off)");
             }
-            ImGui::End();
-            ImGui::PopStyleColor(2);
+            ImGui::EndChild();
+            ImGui::SameLine();
+
+            // Right — the selected agent's chat.
+            ImGui::BeginChild("##agentchat", ImVec2(0, bodyH), false);
+            auto& p = m_agentPanels[m_activeAgentTab];
+            ImVec4 col = providerColor(p.provider);
+            ImGui::TextColored(col, "%s", p.name.c_str());
+            ImGui::SameLine();
+            ImGui::TextDisabled("[%s]", p.provider.empty() ? "default" : p.provider.c_str());
+            ImGui::SameLine(ImGui::GetContentRegionAvail().x - 44.0f);
+            ImGui::Checkbox("On##active", &p.active);
+            ImGui::Separator();
+
+            if (p.active) {
+                float inputH = ImGui::GetFrameHeightWithSpacing();
+                float histH = ImGui::GetContentRegionAvail().y - inputH;
+                if (histH < 30.0f) histH = 30.0f;
+                ImGui::BeginChild("##hist", ImVec2(0, histH), true);
+                for (const auto& m : p.history) {
+                    if (m.isPlayer) {
+                        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.6f, 0.9f, 0.6f, 1.0f));
+                        ImGui::TextWrapped("[You]: %s", m.text.c_str());
+                    } else {
+                        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.55f, 0.82f, 1.0f, 1.0f));
+                        ImGui::TextWrapped("[%s]: %s", m.sender.c_str(), m.text.c_str());
+                    }
+                    ImGui::PopStyleColor();
+                    ImGui::Spacing();
+                }
+                if (p.waiting) ImGui::TextDisabled("thinking...");
+                if (p.scrollToBottom) { ImGui::SetScrollHereY(1.0f); p.scrollToBottom = false; }
+                ImGui::EndChild();
+
+                ImGui::SetNextItemWidth(-52.0f);
+                bool enter = ImGui::InputText("##in_active", p.input, sizeof(p.input),
+                                              ImGuiInputTextFlags_EnterReturnsTrue);
+                ImGui::SameLine();
+                bool send = ImGui::Button("Send##active");
+                if (enter || send) sendAgentPanelMessage(p);
+            } else {
+                ImGui::TextDisabled("(this agent is off)");
+            }
+            ImGui::EndChild();
+
+            // Footer: adjustable UI font size (fixes oversized text after a DPI/desktop change).
+            ImGui::SetNextItemWidth(160.0f);
+            ImGui::SliderFloat("UI font", &m_uiFontScale, 0.5f, 1.5f, "%.2f");
         }
+        ImGui::End();
+    }
+
+    // Target reticle at the aim/cursor point: screen center while flying (mouse
+    // captured), or the live mouse position when the cursor is freed (Left-Alt).
+    void renderReticle() {
+        if (!m_isEdenOSLevel) return;
+        float W = static_cast<float>(getWindow().getWidth());
+        float H = static_cast<float>(getWindow().getHeight());
+        ImVec2 c;
+        if (m_playModeCursorVisible) {
+            glm::vec2 mp = Input::getMousePosition();
+            c = ImVec2(mp.x, mp.y);
+        } else {
+            c = ImVec2(W * 0.5f, H * 0.5f);
+        }
+        auto* dl = ImGui::GetForegroundDrawList();
+        ImU32 col = IM_COL32(255, 240, 180, 220);
+        ImU32 shadow = IM_COL32(0, 0, 0, 150);
+        const float gap = 4.0f, len = 8.0f;
+        auto tick = [&](ImVec2 a, ImVec2 b) {
+            dl->AddLine(ImVec2(a.x + 1, a.y + 1), ImVec2(b.x + 1, b.y + 1), shadow, 2.0f);
+            dl->AddLine(a, b, col, 1.5f);
+        };
+        tick(ImVec2(c.x - gap - len, c.y), ImVec2(c.x - gap, c.y));
+        tick(ImVec2(c.x + gap, c.y), ImVec2(c.x + gap + len, c.y));
+        tick(ImVec2(c.x, c.y - gap - len), ImVec2(c.x, c.y - gap));
+        tick(ImVec2(c.x, c.y + gap), ImVec2(c.x, c.y + gap + len));
+        dl->AddCircleFilled(c, 1.6f, col, 8);
     }
 
     // Floating name tag above each deployed Agent avatar, so the four similar-
@@ -2068,10 +2128,11 @@ protected:
                                            : IM_COL32(220, 220, 220, 255);
             const std::string& label = o->getName();
             ImVec2 ts = ImGui::CalcTextSize(label.c_str());
-            float pad = 5.0f;
-            ImVec2 p0(sx - ts.x * 0.5f - pad, sy - ts.y - pad);
-            ImVec2 p1(sx + ts.x * 0.5f + pad, sy + pad);
-            dl->AddRectFilled(p0, p1, IM_COL32(0, 0, 0, 170), 4.0f);
+            // Bubble symmetric around the text center so the name sits centered in it.
+            float padX = 7.0f, padY = 3.0f;
+            ImVec2 p0(sx - ts.x * 0.5f - padX, sy - ts.y * 0.5f - padY);
+            ImVec2 p1(sx + ts.x * 0.5f + padX, sy + ts.y * 0.5f + padY);
+            dl->AddRectFilled(p0, p1, IM_COL32(0, 0, 0, 175), 4.0f);
             dl->AddRect(p0, p1, col, 4.0f);
             dl->AddText(ImVec2(sx - ts.x * 0.5f, sy - ts.y * 0.5f), col, label.c_str());
         }
@@ -2083,6 +2144,7 @@ protected:
         ImGui_ImplVulkan_NewFrame();
         ImGui_ImplGlfw_NewFrame();
         ImGui::NewFrame();
+        ImGui::GetIO().FontGlobalScale = m_uiFontScale; // adjustable UI text size
 
         // Create dockspace over the entire viewport for side docking
         ImGuiViewport* viewport = ImGui::GetMainViewport();
@@ -2123,6 +2185,7 @@ protected:
             renderUVViewer();
             renderAgentNameTags();
             renderAgentPanels();
+            renderReticle();
         } else {
             m_editorUI.render();
             renderModulePanel();
@@ -7098,12 +7161,14 @@ private:
     // via the screen-center crosshair (doCrosshairRay) + right-click, so mouse-look
     // and door navigation coexist. Hold Left-Alt to free the cursor for menus/terminal.
     void updateEdenOSFlyCamera(float deltaTime) {
-        // Left-Alt (hold) releases the cursor so you can click the menu bar / terminal.
-        bool altHeld = Input::isKeyDown(Input::KEY_LEFT_ALT);
-        if (altHeld != m_playModeCursorVisible) {
-            m_playModeCursorVisible = altHeld;
-            Input::setMouseCaptured(!altHeld);
+        // Left-Alt TOGGLES the cursor: press once to free it (click/type in the
+        // chat panels & UI), press again to recapture it for mouse-look/flying.
+        bool altDown = Input::isKeyDown(Input::KEY_LEFT_ALT) || Input::isKeyDown(Input::KEY_RIGHT_ALT);
+        if (altDown && !m_wasCursorToggle) {
+            m_playModeCursorVisible = !m_playModeCursorVisible;
+            Input::setMouseCaptured(!m_playModeCursorVisible);
         }
+        m_wasCursorToggle = altDown;
 
         // Mouse-look while the cursor is captured (hidden).
         if (!m_playModeCursorVisible) {
