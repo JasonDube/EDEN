@@ -12,6 +12,9 @@
 #include <thread>
 #include <mutex>
 #include <atomic>
+#include <queue>
+#include <condition_variable>
+#include <functional>
 #include "../AI/CleanerBot.hpp"
 #include "../AI/ImageBot.hpp"
 #include "../AI/CullSession.hpp"
@@ -208,6 +211,19 @@ private:
         std::shared_ptr<std::atomic<bool>> ready,
         std::shared_ptr<std::atomic<bool>> cancelled);
 
+    // ── Async image thumbnails: decode/downsample/cache off the main thread,
+    //    GPU upload stays on the main thread (drainThumbnailResults). ──────────
+    static std::string getImageCachePath(const std::string& imagePath);
+    static bool loadCachedThumbnail(const std::string& cachePath, const std::string& srcPath,
+                                    std::vector<unsigned char>& out, int size);
+    static bool saveCachedThumbnail(const std::string& cachePath, const std::string& srcPath,
+                                    const std::vector<unsigned char>& pixels, int size);
+    void enqueueThumbnail(uint32_t bufferHandle, const std::string& srcPath); // main thread
+    void enqueueModelLoad(SceneObject* placeholder, const std::string& srcPath,
+                          float yawDegrees);                                  // main thread
+    void drainThumbnailResults();                                            // main thread
+    void drainModelResults();                                               // main thread
+
     ModelRenderer* m_modelRenderer = nullptr;
     std::vector<std::unique_ptr<SceneObject>>* m_sceneObjects = nullptr;
     Terrain* m_terrain = nullptr;
@@ -255,6 +271,51 @@ private:
     std::vector<PendingExtraction> m_pendingExtractions;
 
     void cancelAllExtractions();
+
+    // Generic background-load pool: persistent worker threads run job lambdas
+    // (image thumbnail decode, 3D model parse) off the main thread. Jobs do only
+    // disk/CPU work and hand results back through the result vectors below; the
+    // GPU upload happens on the main thread in drain*Results(). Jobs capture the
+    // navigation's cancel flag, so results for a folder we've left are dropped and
+    // never uploaded to a freed handle. (The WM can lift this into its own job
+    // system later — it's deliberately self-contained.)
+    std::vector<std::thread> m_loadPool;
+    std::queue<std::function<void()>> m_loadQueue;
+    std::mutex m_loadMutex;
+    std::condition_variable m_loadCv;
+    std::atomic<bool> m_loadPoolStop{false};
+    static constexpr int LOAD_WORKERS = 6; // shared by thumbnails, models, and video extraction
+    void startLoadPool();
+    void stopLoadPool();
+    void loadWorkerLoop();
+    void enqueueLoadJob(std::function<void()> job);
+
+    // Finished image thumbnails awaiting the main-thread GPU upload.
+    struct ThumbResult {
+        uint32_t bufferHandle;
+        std::vector<unsigned char> pixels;         // LABEL_SIZE^2 RGBA
+        std::shared_ptr<std::atomic<bool>> cancel;
+    };
+    std::vector<ThumbResult> m_thumbResults;
+    std::mutex m_thumbResultMutex;
+    static constexpr size_t MAX_THUMB_UPLOADS_PER_FRAME = 12;
+
+    // Finished 3D model geometry awaiting the main-thread GPU upload + swap onto
+    // the labeled-cube placeholder that was spawned immediately.
+    struct ModelResult {
+        SceneObject* obj = nullptr;                // placeholder to upgrade (guarded by cancel)
+        std::vector<ModelVertex> vertices;
+        std::vector<uint32_t> indices;
+        std::vector<unsigned char> texData;
+        int texW = 0, texH = 0;
+        bool hasTex = false;
+        glm::vec3 bmin{0.0f}, bmax{0.0f};
+        float yaw = 0.0f;
+        std::shared_ptr<std::atomic<bool>> cancel;
+    };
+    std::vector<ModelResult> m_modelResults;
+    std::mutex m_modelResultMutex;
+    static constexpr size_t MAX_MODEL_UPLOADS_PER_FRAME = 4;
 
     // Model turntable animation state
     struct ModelSpin {

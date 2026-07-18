@@ -2265,7 +2265,8 @@ protected:
         TerrainPushConstants pushConstants{};
         // In play mode, override fog with a tight battle-render range so the world
         // visibly compresses to ~150m around the camera (smooth fade to black).
-        if (m_isPlayMode) {
+        // EDEN OS is exempt — its silo is bigger than that fade and must stay clear.
+        if (m_isPlayMode && !m_isEdenOSLevel) {
             pushConstants.fogColor = glm::vec4(0.0f, 0.0f, 0.0f, 1.0f);
             pushConstants.fogStart = 75.0f;
             pushConstants.fogEnd   = 150.0f;
@@ -2370,7 +2371,9 @@ protected:
 
                 if (m_isPlayMode && objPtr->isDoor() && objPtr->getBuildingType() != "filesystem" && objPtr->getBuildingType() != "wall_widget") continue;
 
-                if (m_isPlayMode) {
+                // The 150m cull is the tabletop game's battle fog; EDEN OS is a
+                // large silo (~160m across, ~256m tall) that must draw in full.
+                if (m_isPlayMode && !m_isEdenOSLevel) {
                     glm::vec3 op = const_cast<SceneObject*>(objPtr.get())->getTransform().getPosition();
                     glm::vec3 d = op - camPos;
                     if (glm::dot(d, d) > playModeCullSq) continue;

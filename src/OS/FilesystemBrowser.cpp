@@ -225,6 +225,275 @@ void FilesystemBrowser::cancelAllExtractions() {
     m_extractionThreads.clear();
     m_pendingExtractions.clear();
     m_cancelExtraction.reset();
+
+    // Drop queued/finished background-load work for the folder we just left. The
+    // in-flight jobs already carry the old cancel flag (set true above), so they
+    // bail early and any late result is ignored by the drain*Results() checks.
+    {
+        std::lock_guard<std::mutex> lk(m_loadMutex);
+        std::queue<std::function<void()>> empty;
+        std::swap(m_loadQueue, empty);
+    }
+    { std::lock_guard<std::mutex> lk(m_thumbResultMutex); m_thumbResults.clear(); }
+    { std::lock_guard<std::mutex> lk(m_modelResultMutex); m_modelResults.clear(); }
+}
+
+// ── Async image thumbnails ─────────────────────────────────────────────────
+
+std::string FilesystemBrowser::getImageCachePath(const std::string& imagePath) {
+    std::hash<std::string> hasher;
+    size_t h = hasher(imagePath);
+    const char* home = getenv("HOME");
+    std::string cacheDir = home ? std::string(home) + "/.cache/eden/image_thumbs"
+                                : "/tmp/eden_image_thumbs";
+    std::filesystem::create_directories(cacheDir);
+    return cacheDir + "/" + std::to_string(h) + ".bin";
+}
+
+// Cache format: int64 source-mtime, uint32 width, uint32 height, then RGBA. The
+// mtime is compared to the live file so an edited image invalidates its cache.
+bool FilesystemBrowser::loadCachedThumbnail(const std::string& cachePath,
+                                            const std::string& srcPath,
+                                            std::vector<unsigned char>& out, int size) {
+    std::ifstream f(cachePath, std::ios::binary);
+    if (!f.is_open()) return false;
+    int64_t storedMtime = 0;
+    uint32_t w = 0, h = 0;
+    f.read(reinterpret_cast<char*>(&storedMtime), 8);
+    f.read(reinterpret_cast<char*>(&w), 4);
+    f.read(reinterpret_cast<char*>(&h), 4);
+    if (!f || w != static_cast<uint32_t>(size) || h != static_cast<uint32_t>(size)) return false;
+
+    std::error_code ec;
+    auto t = std::filesystem::last_write_time(srcPath, ec);
+    if (ec) return false;
+    if (static_cast<int64_t>(t.time_since_epoch().count()) != storedMtime) return false; // stale
+
+    out.resize(static_cast<size_t>(size) * size * 4);
+    f.read(reinterpret_cast<char*>(out.data()), out.size());
+    if (!f) { out.clear(); return false; }
+    return true;
+}
+
+bool FilesystemBrowser::saveCachedThumbnail(const std::string& cachePath,
+                                            const std::string& srcPath,
+                                            const std::vector<unsigned char>& pixels, int size) {
+    std::error_code ec;
+    auto t = std::filesystem::last_write_time(srcPath, ec);
+    int64_t mtime = ec ? 0 : static_cast<int64_t>(t.time_since_epoch().count());
+    std::ofstream f(cachePath, std::ios::binary);
+    if (!f.is_open()) return false;
+    uint32_t w = static_cast<uint32_t>(size), h = static_cast<uint32_t>(size);
+    f.write(reinterpret_cast<const char*>(&mtime), 8);
+    f.write(reinterpret_cast<const char*>(&w), 4);
+    f.write(reinterpret_cast<const char*>(&h), 4);
+    f.write(reinterpret_cast<const char*>(pixels.data()), pixels.size());
+    return static_cast<bool>(f);
+}
+
+void FilesystemBrowser::startLoadPool() {
+    if (!m_loadPool.empty()) return;
+    m_loadPoolStop.store(false);
+    for (int i = 0; i < LOAD_WORKERS; ++i)
+        m_loadPool.emplace_back([this] { loadWorkerLoop(); });
+}
+
+void FilesystemBrowser::stopLoadPool() {
+    {
+        std::lock_guard<std::mutex> lk(m_loadMutex);
+        m_loadPoolStop.store(true);
+    }
+    m_loadCv.notify_all();
+    for (auto& t : m_loadPool)
+        if (t.joinable()) t.join();
+    m_loadPool.clear();
+}
+
+void FilesystemBrowser::loadWorkerLoop() {
+    for (;;) {
+        std::function<void()> job;
+        {
+            std::unique_lock<std::mutex> lk(m_loadMutex);
+            m_loadCv.wait(lk, [this] {
+                return m_loadPoolStop.load() || !m_loadQueue.empty();
+            });
+            if (m_loadPoolStop.load() && m_loadQueue.empty()) return;
+            job = std::move(m_loadQueue.front());
+            m_loadQueue.pop();
+        }
+        job();
+    }
+}
+
+void FilesystemBrowser::enqueueLoadJob(std::function<void()> job) {
+    if (m_loadPool.empty()) startLoadPool();
+    {
+        std::lock_guard<std::mutex> lk(m_loadMutex);
+        m_loadQueue.push(std::move(job));
+    }
+    m_loadCv.notify_one();
+}
+
+void FilesystemBrowser::enqueueThumbnail(uint32_t bufferHandle, const std::string& srcPath) {
+    auto cancel = m_cancelExtraction;            // this navigation's flag
+    std::string cachePath = getImageCachePath(srcPath);
+    enqueueLoadJob([this, bufferHandle, srcPath, cachePath, cancel] {
+        if (cancel && cancel->load()) return;    // folder was left
+        std::vector<unsigned char> px;
+        if (!loadCachedThumbnail(cachePath, srcPath, px, LABEL_SIZE)) {
+            if (cancel && cancel->load()) return;
+            int w, h, ch;
+            unsigned char* data = stbi_load(srcPath.c_str(), &w, &h, &ch, 4);
+            if (data) {
+                px.resize(static_cast<size_t>(LABEL_SIZE) * LABEL_SIZE * 4);
+                for (int py = 0; py < LABEL_SIZE; ++py) {
+                    int srcY = (LABEL_SIZE - 1 - py) * h / LABEL_SIZE; // flip Y like the sync path
+                    for (int pxi = 0; pxi < LABEL_SIZE; ++pxi) {
+                        int srcX = pxi * w / LABEL_SIZE;
+                        int s = (srcY * w + srcX) * 4;
+                        int d = (py * LABEL_SIZE + pxi) * 4;
+                        px[d + 0] = data[s + 0];
+                        px[d + 1] = data[s + 1];
+                        px[d + 2] = data[s + 2];
+                        px[d + 3] = data[s + 3];
+                    }
+                }
+                stbi_image_free(data);
+                saveCachedThumbnail(cachePath, srcPath, px, LABEL_SIZE);
+            }
+        }
+        if (px.empty() || (cancel && cancel->load())) return;
+        std::lock_guard<std::mutex> lk(m_thumbResultMutex);
+        m_thumbResults.push_back({bufferHandle, std::move(px), cancel});
+    });
+}
+
+void FilesystemBrowser::enqueueModelLoad(SceneObject* placeholder, const std::string& srcPath,
+                                         float yawDegrees) {
+    auto cancel = m_cancelExtraction;
+    enqueueLoadJob([this, placeholder, srcPath, yawDegrees, cancel] {
+        if (cancel && cancel->load()) return;
+        std::string ext = std::filesystem::path(srcPath).extension().string();
+        std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+
+        std::vector<ModelVertex> verts;
+        std::vector<uint32_t> indices;
+        std::vector<unsigned char> texData;
+        int texW = 0, texH = 0;
+        bool hasTex = false;
+
+        if (ext == ".glb" || ext == ".gltf") {
+            auto result = GLBLoader::load(srcPath);
+            if (result.success && !result.meshes.empty()) {
+                for (auto& m : result.meshes) {
+                    uint32_t baseIdx = static_cast<uint32_t>(verts.size());
+                    verts.insert(verts.end(), m.vertices.begin(), m.vertices.end());
+                    for (auto idx : m.indices) indices.push_back(baseIdx + idx);
+                    if (!hasTex && m.hasTexture) {
+                        texData = m.texture.data; texW = m.texture.width; texH = m.texture.height;
+                        hasTex = true;
+                    }
+                }
+            }
+        } else if (ext == ".lime") {
+            auto result = LimeLoader::load(srcPath);
+            if (result.success) {
+                verts = std::move(result.mesh.vertices);
+                indices = std::move(result.mesh.indices);
+                if (result.mesh.hasTexture) {
+                    texData = std::move(result.mesh.textureData);
+                    texW = result.mesh.textureWidth; texH = result.mesh.textureHeight;
+                    hasTex = true;
+                }
+            }
+        } else if (ext == ".obj") {
+            loadOBJ(srcPath, verts, indices);
+        }
+
+        if (verts.empty() || indices.empty() || (cancel && cancel->load())) return;
+
+        // Normalize: center at origin, scale to fit 1.5 units (same as the old
+        // synchronous path, just off the main thread now).
+        glm::vec3 bmin(FLT_MAX), bmax(-FLT_MAX);
+        for (auto& v : verts) { bmin = glm::min(bmin, v.position); bmax = glm::max(bmax, v.position); }
+        glm::vec3 center = (bmin + bmax) * 0.5f;
+        for (auto& v : verts) v.position -= center;
+        bmin -= center; bmax -= center;
+        float maxExtent = std::max({bmax.x - bmin.x, bmax.y - bmin.y, bmax.z - bmin.z});
+        if (maxExtent > 0.0f) {
+            float sf = 1.5f / maxExtent;
+            for (auto& v : verts) v.position *= sf;
+            bmin *= sf; bmax *= sf;
+        }
+
+        ModelResult r;
+        r.obj = placeholder;
+        r.vertices = std::move(verts);
+        r.indices = std::move(indices);
+        r.texData = std::move(texData);
+        r.texW = texW; r.texH = texH; r.hasTex = hasTex;
+        r.bmin = bmin; r.bmax = bmax; r.yaw = yawDegrees; r.cancel = cancel;
+        std::lock_guard<std::mutex> lk(m_modelResultMutex);
+        m_modelResults.push_back(std::move(r));
+    });
+}
+
+void FilesystemBrowser::drainModelResults() {
+    if (!m_modelRenderer || !m_sceneObjects) return;
+    std::vector<ModelResult> ready;
+    {
+        std::lock_guard<std::mutex> lk(m_modelResultMutex);
+        if (m_modelResults.empty()) return;
+        ready.swap(m_modelResults);
+    }
+    std::vector<uint32_t> oldHandles;
+    size_t done = 0, i = 0;
+    for (; i < ready.size() && done < MAX_MODEL_UPLOADS_PER_FRAME; ++i) {
+        auto& r = ready[i];
+        if (r.cancel && r.cancel->load()) continue;   // navigated away; obj may be gone
+        // Upload the real geometry and swap it onto the placeholder cube.
+        uint32_t newHandle = (r.hasTex && !r.texData.empty())
+            ? m_modelRenderer->createModel(r.vertices, r.indices, r.texData.data(), r.texW, r.texH)
+            : m_modelRenderer->createModel(r.vertices, r.indices, nullptr, 0, 0);
+        SceneObject* obj = r.obj;
+        uint32_t old = obj->getBufferHandle();
+        if (old != UINT32_MAX) oldHandles.push_back(old);
+        obj->setBufferHandle(newHandle);
+        obj->setIndexCount(static_cast<uint32_t>(r.indices.size()));
+        obj->setVertexCount(static_cast<uint32_t>(r.vertices.size()));
+        obj->setLocalBounds({r.bmin, r.bmax});
+        obj->setMeshData(r.vertices, r.indices);
+        m_modelSpins.push_back({obj, r.yaw, 0.0f});   // turntable spin now that it's a real model
+        ++done;
+    }
+    if (!oldHandles.empty()) m_modelRenderer->destroyModels(oldHandles); // one waitIdle for the batch
+    if (i < ready.size()) { // requeue the leftovers for next frame
+        std::lock_guard<std::mutex> lk(m_modelResultMutex);
+        for (; i < ready.size(); ++i) m_modelResults.push_back(std::move(ready[i]));
+    }
+}
+
+void FilesystemBrowser::drainThumbnailResults() {
+    if (!m_modelRenderer) return;
+    std::vector<ThumbResult> ready;
+    {
+        std::lock_guard<std::mutex> lk(m_thumbResultMutex);
+        if (m_thumbResults.empty()) return;
+        ready.swap(m_thumbResults);
+    }
+    // Cap GPU uploads per frame so a big folder finishing at once doesn't hitch.
+    size_t uploaded = 0, i = 0;
+    for (; i < ready.size() && uploaded < MAX_THUMB_UPLOADS_PER_FRAME; ++i) {
+        auto& r = ready[i];
+        if (r.cancel && r.cancel->load()) continue;   // navigated away; handle may be gone
+        if (r.pixels.empty()) continue;
+        m_modelRenderer->updateTexture(r.bufferHandle, r.pixels.data(), LABEL_SIZE, LABEL_SIZE);
+        ++uploaded;
+    }
+    if (i < ready.size()) { // requeue the leftovers for next frame
+        std::lock_guard<std::mutex> lk(m_thumbResultMutex);
+        for (; i < ready.size(); ++i) m_thumbResults.push_back(std::move(ready[i]));
+    }
 }
 
 // ── Folder visit tracking (attention system) ───────────────────────────
@@ -324,6 +593,7 @@ float FilesystemBrowser::getVisitGlow(const std::string& path) const {
 
 FilesystemBrowser::~FilesystemBrowser() {
     cancelSegmentation();
+    stopLoadPool();
     cancelAllExtractions();
 }
 
@@ -369,27 +639,11 @@ void FilesystemBrowser::processNavigation() {
 void FilesystemBrowser::updateAnimations(float deltaTime) {
     if (!m_modelRenderer) return;
 
-    // Drain finished threads and launch queued extractions
-    {
-        auto it = m_extractionThreads.begin();
-        while (it != m_extractionThreads.end()) {
-            // Check if thread is done by trying to join with no wait isn't possible,
-            // so we track via the ready flags in the animations instead.
-            // Just clean up joinable finished threads.
-            ++it;
-        }
-        // Launch pending extractions as slots free up
-        while (!m_pendingExtractions.empty() &&
-               static_cast<int>(m_extractionThreads.size()) < MAX_CONCURRENT_EXTRACTIONS) {
-            auto& pe = m_pendingExtractions.front();
-            m_extractionThreads.emplace_back(
-                extractionWorker,
-                pe.filePath, pe.cachePath,
-                LABEL_SIZE, MAX_VIDEO_FRAMES,
-                pe.outFrames, pe.ready, m_cancelExtraction);
-            m_pendingExtractions.erase(m_pendingExtractions.begin());
-        }
-    }
+    // Upload anything that finished on the background-load pool this frame.
+    drainThumbnailResults();
+    drainModelResults();
+    // (Video extraction now rides the shared background-load pool via
+    //  enqueueLoadJob, so the old manual thread throttle/reap block is gone.)
 
     for (auto& anim : m_videoAnimations) {
         if (!anim.loaded && anim.ready && anim.ready->load()) {
@@ -608,119 +862,10 @@ void FilesystemBrowser::spawnOneObject(const EntryInfo& entry, size_t index,
 
     PrimitiveMeshBuilder::MeshData meshData;
     PrimitiveType primType;
-    bool loadedModel = false;
 
-    if (entry.category == FileCategory::Model3D) {
-        // Try to load actual 3D model geometry
-        std::string ext = std::filesystem::path(entry.fullPath).extension().string();
-        std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
-
-        std::vector<ModelVertex> modelVerts;
-        std::vector<uint32_t> modelIndices;
-        bool hasModelTex = false;
-        std::vector<unsigned char> modelTexData;
-        int modelTexW = 0, modelTexH = 0;
-
-        if (ext == ".glb" || ext == ".gltf") {
-            auto result = GLBLoader::load(entry.fullPath);
-            if (result.success && !result.meshes.empty()) {
-                // Merge all meshes
-                for (auto& m : result.meshes) {
-                    uint32_t baseIdx = static_cast<uint32_t>(modelVerts.size());
-                    modelVerts.insert(modelVerts.end(), m.vertices.begin(), m.vertices.end());
-                    for (auto idx : m.indices) modelIndices.push_back(baseIdx + idx);
-                    if (!hasModelTex && m.hasTexture) {
-                        modelTexData = m.texture.data;
-                        modelTexW = m.texture.width;
-                        modelTexH = m.texture.height;
-                        hasModelTex = true;
-                    }
-                }
-            }
-        } else if (ext == ".lime") {
-            auto result = LimeLoader::load(entry.fullPath);
-            if (result.success) {
-                modelVerts = std::move(result.mesh.vertices);
-                modelIndices = std::move(result.mesh.indices);
-                if (result.mesh.hasTexture) {
-                    modelTexData = std::move(result.mesh.textureData);
-                    modelTexW = result.mesh.textureWidth;
-                    modelTexH = result.mesh.textureHeight;
-                    hasModelTex = true;
-                }
-            }
-        } else if (ext == ".obj") {
-            loadOBJ(entry.fullPath, modelVerts, modelIndices);
-        }
-
-        if (!modelVerts.empty() && !modelIndices.empty()) {
-            // Normalize: compute AABB, center at origin, scale to fit 1.5 units
-            glm::vec3 bmin(FLT_MAX), bmax(-FLT_MAX);
-            for (auto& v : modelVerts) {
-                bmin = glm::min(bmin, v.position);
-                bmax = glm::max(bmax, v.position);
-            }
-            glm::vec3 center = (bmin + bmax) * 0.5f;
-            for (auto& v : modelVerts) v.position -= center;
-            bmin -= center; bmax -= center;
-
-            float maxExtent = std::max({bmax.x - bmin.x, bmax.y - bmin.y, bmax.z - bmin.z});
-            if (maxExtent > 0.0f) {
-                float scaleFactor = 1.5f / maxExtent;
-                for (auto& v : modelVerts) v.position *= scaleFactor;
-                bmin *= scaleFactor; bmax *= scaleFactor;
-            }
-
-            meshData.vertices = std::move(modelVerts);
-            meshData.indices = std::move(modelIndices);
-            meshData.bounds = {bmin, bmax};
-            primType = PrimitiveType::Cube;
-            loadedModel = true;
-
-            // Upload with model's own texture or no texture
-            uint32_t handle;
-            if (hasModelTex && !modelTexData.empty()) {
-                handle = m_modelRenderer->createModel(
-                    meshData.vertices, meshData.indices,
-                    modelTexData.data(), modelTexW, modelTexH);
-            } else {
-                handle = m_modelRenderer->createModel(
-                    meshData.vertices, meshData.indices, nullptr, 0, 0);
-            }
-
-            auto obj = std::make_unique<SceneObject>(
-                "FSFile_" + entry.name);
-
-            obj->setBufferHandle(handle);
-            obj->setIndexCount(static_cast<uint32_t>(meshData.indices.size()));
-            obj->setVertexCount(static_cast<uint32_t>(meshData.vertices.size()));
-            obj->setLocalBounds(meshData.bounds);
-            obj->setModelPath("");
-            obj->setMeshData(meshData.vertices, meshData.indices);
-
-            obj->setPrimitiveType(primType);
-            obj->setPrimitiveSize(1.5f);
-            obj->setPrimitiveColor(color);
-
-            obj->setBuildingType("filesystem");
-            obj->setDescription(entry.name);
-            obj->setTargetLevel("fs://" + entry.fullPath);
-
-            obj->getTransform().setPosition(pos);
-            obj->getTransform().setScale(scale);
-
-            if (yawDegrees != 0.0f) {
-                obj->setEulerRotation({0.0f, yawDegrees, 0.0f});
-            }
-
-            // Register turntable spin animation
-            SceneObject* rawPtr = obj.get();
-            m_sceneObjects->push_back(std::move(obj));
-            m_modelSpins.push_back({rawPtr, yawDegrees, 0.0f});
-            return; // Done — model loaded successfully
-        }
-        // If loading failed, fall through to colored cube with label
-    }
+    // 3D models fall through to the labeled-cube placeholder below; their real
+    // geometry is parsed on the background-load pool and swapped in when ready
+    // (enqueueModelLoad after the object is spawned; drainModelResults uploads).
 
     if (entry.category == FileCategory::Folder) {
         meshData = PrimitiveMeshBuilder::createCube(2.0f, color);
@@ -736,23 +881,11 @@ void FilesystemBrowser::spawnOneObject(const EntryInfo& entry, size_t index,
     bool usedMedia = false;
 
     if (entry.category == FileCategory::Image) {
-        int imgW, imgH, imgChannels;
-        unsigned char* data = stbi_load(entry.fullPath.c_str(), &imgW, &imgH, &imgChannels, 4);
-        if (data) {
-            texPixels.resize(LABEL_SIZE * LABEL_SIZE * 4);
-            for (int py = 0; py < LABEL_SIZE; ++py) {
-                int srcY = (LABEL_SIZE - 1 - py) * imgH / LABEL_SIZE;
-                for (int px = 0; px < LABEL_SIZE; ++px) {
-                    int srcX = px * imgW / LABEL_SIZE;
-                    int srcIdx = (srcY * imgW + srcX) * 4;
-                    int dstIdx = (py * LABEL_SIZE + px) * 4;
-                    texPixels[dstIdx + 0] = data[srcIdx + 0];
-                    texPixels[dstIdx + 1] = data[srcIdx + 1];
-                    texPixels[dstIdx + 2] = data[srcIdx + 2];
-                    texPixels[dstIdx + 3] = data[srcIdx + 3];
-                }
-            }
-            stbi_image_free(data);
+        // Fast path: a warm cache thumbnail loads instantly (small file read).
+        // On a miss we keep the label placeholder and decode async (after
+        // createModel below) so the folder never stalls on full-res decodes.
+        std::string cachePath = getImageCachePath(entry.fullPath);
+        if (loadCachedThumbnail(cachePath, entry.fullPath, texPixels, LABEL_SIZE)) {
             usedMedia = true;
         }
     } else if (entry.category == FileCategory::Video) {
@@ -771,6 +904,12 @@ void FilesystemBrowser::spawnOneObject(const EntryInfo& entry, size_t index,
     uint32_t handle = m_modelRenderer->createModel(
         meshData.vertices, meshData.indices,
         texPixels.data(), texW, texH);
+
+    // Cache-miss image: decode + downsample + cache the thumbnail on a worker
+    // thread, then swap it onto this handle when ready (drainThumbnailResults).
+    if (entry.category == FileCategory::Image && !usedMedia) {
+        enqueueThumbnail(handle, entry.fullPath);
+    }
 
     auto obj = std::make_unique<SceneObject>(
         entry.category == FileCategory::Folder ? "FSDoor_" + entry.name : "FSFile_" + entry.name);
@@ -819,23 +958,29 @@ void FilesystemBrowser::spawnOneObject(const EntryInfo& entry, size_t index,
             anim.ready = std::make_shared<std::atomic<bool>>(false);
             anim.loaded = false;
 
-            // Throttle concurrent ffmpeg threads
-            if (static_cast<int>(m_extractionThreads.size()) < MAX_CONCURRENT_EXTRACTIONS) {
-                m_extractionThreads.emplace_back(
-                    extractionWorker,
-                    entry.fullPath, cachePath,
-                    LABEL_SIZE, MAX_VIDEO_FRAMES,
-                    anim.pendingFrames, anim.ready, m_cancelExtraction);
-            } else {
-                m_pendingExtractions.push_back({entry.fullPath, cachePath,
-                                                anim.pendingFrames, anim.ready});
-            }
+            // Extract on the shared background-load pool (its queue handles
+            // throttling correctly — the old manual m_extractionThreads throttle
+            // never reaped finished threads, so past the first few videos the rest
+            // sat in the pending queue forever and showed only [VID] labels).
+            auto pf = anim.pendingFrames;
+            auto rd = anim.ready;
+            auto cancel = m_cancelExtraction;
+            std::string fp = entry.fullPath, cp = cachePath;
+            enqueueLoadJob([fp, cp, pf, rd, cancel] {
+                extractionWorker(fp, cp, LABEL_SIZE, MAX_VIDEO_FRAMES, pf, rd, cancel);
+            });
         }
 
         m_videoAnimations.push_back(std::move(anim));
     }
 
+    // Cache-miss 3D model: parse geometry on a worker thread, then swap it onto
+    // this placeholder (labeled cube) when ready (drainModelResults).
+    SceneObject* rawObj = obj.get();
     m_sceneObjects->push_back(std::move(obj));
+    if (entry.category == FileCategory::Model3D) {
+        enqueueModelLoad(rawObj, entry.fullPath, yawDegrees);
+    }
 }
 
 // ── Gallery Ring ───────────────────────────────────────────────────────
