@@ -249,6 +249,9 @@ public:
     // canPowerReach() defined later in class — satisfies MachineHost::canPowerReach
 
     void setSessionMode(bool enabled) { m_sessionMode = enabled; }
+    // Boot straight into the saved EDEN OS world (~/.eden/os_level.eden) instead
+    // of the default level. Used by the desktop launcher (--eden-os).
+    void setBootEdenOS(bool enabled) { m_bootEdenOS = enabled; }
 
 protected:
     void onInit() override {
@@ -483,8 +486,14 @@ protected:
             std::cout << "[EDEN OS] Session mode: terminal + claude auto-launched" << std::endl;
         }
 
-        // Auto-load default level on startup
-        {
+        // Boot straight into EDEN OS, or auto-load the default level.
+        // --eden-os defers to a one-shot in handleKeyboardShortcuts() that runs
+        // on the first frame (same context as the F9 path), because loadLevel()
+        // aborts on the saved level's stale terrain reference. See spawnEdenOSFromHome().
+        if (m_bootEdenOS) {
+            std::cout << "[EDEN] --eden-os: EDEN OS silo will build on first frame" << std::endl;
+        } else {
+            // Auto-load default level on startup
             const char* home = getenv("HOME");
             if (home) {
                 std::string defaultLevel = getDefaultLevelPath();
@@ -6881,7 +6890,54 @@ private:
         m_camera.setPosition(camPos);
     }
 
+    // Minecraft-creative flycam for EDEN OS: mouse looks, WASD flies horizontally
+    // relative to facing, Space = up, Shift = down, Ctrl = boost. Interaction is
+    // via the screen-center crosshair (doCrosshairRay) + right-click, so mouse-look
+    // and door navigation coexist. Hold Left-Alt to free the cursor for menus/terminal.
+    void updateEdenOSFlyCamera(float deltaTime) {
+        // Left-Alt (hold) releases the cursor so you can click the menu bar / terminal.
+        bool altHeld = Input::isKeyDown(Input::KEY_LEFT_ALT);
+        if (altHeld != m_playModeCursorVisible) {
+            m_playModeCursorVisible = altHeld;
+            Input::setMouseCaptured(!altHeld);
+        }
+
+        // Mouse-look while the cursor is captured (hidden).
+        if (!m_playModeCursorVisible) {
+            if (!Input::isMouseCaptured()) Input::setMouseCaptured(true);
+            glm::vec2 d = Input::getMouseDelta();
+            m_camera.processMouse(d.x, -d.y);
+        }
+
+        // WASD flies horizontally relative to facing; Space/Shift are vertical.
+        if (!ImGui::GetIO().WantTextInput && !ImGui::GetIO().WantCaptureKeyboard) {
+            glm::vec3 fwd = m_camera.getFront(); fwd.y = 0.0f;
+            glm::vec3 rgt = m_camera.getRight(); rgt.y = 0.0f;
+            if (glm::length(fwd) > 1e-4f) fwd = glm::normalize(fwd);
+            if (glm::length(rgt) > 1e-4f) rgt = glm::normalize(rgt);
+            glm::vec3 move(0.0f);
+            if (Input::isKeyDown(Input::KEY_W)) move += fwd;
+            if (Input::isKeyDown(Input::KEY_S)) move -= fwd;
+            if (Input::isKeyDown(Input::KEY_D)) move += rgt;
+            if (Input::isKeyDown(Input::KEY_A)) move -= rgt;
+            if (Input::isKeyDown(Input::KEY_SPACE)) move += glm::vec3(0, 1, 0);
+            if (Input::isKeyDown(Input::KEY_LEFT_SHIFT)) move -= glm::vec3(0, 1, 0);
+            if (glm::length(move) > 1e-3f) {
+                move = glm::normalize(move);
+                float speed = 45.0f; // silo is ~256m tall — brisk but controllable
+                if (Input::isKeyDown(Input::KEY_LEFT_CONTROL)) speed *= 3.0f;
+                m_camera.setPosition(m_camera.getPosition() + move * speed * deltaTime);
+            }
+        }
+    }
+
     void handleCameraInput(float deltaTime) {
+        // EDEN OS: Minecraft-creative flycam (mouse-look + WASD + Space/Shift),
+        // not the RTS strategy camera the tabletop game uses.
+        if (m_isPlayMode && m_isEdenOSLevel && !m_inConversation) {
+            updateEdenOSFlyCamera(deltaTime);
+            return;
+        }
         // RTS play mode: hand off to the strategy camera and skip the FPS code paths
         if (m_isPlayMode && !m_inConversation) {
             // Cursor must stay visible in play mode (no mouse-look)
@@ -7801,6 +7857,15 @@ private:
     }
 
     void handleKeyboardShortcuts(float deltaTime) {
+        // One-shot: when launched with --eden-os, build the EDEN OS silo on the
+        // first frame (same runtime context as the F9 path). We can't do this at
+        // init because loadLevel() aborts on the saved level's stale terrain ref.
+        if (m_bootEdenOS && !m_bootedEdenOS) {
+            m_bootedEdenOS = true;
+            if (!m_isPlayMode) enterPlayMode();
+            spawnEdenOSFromHome();
+        }
+
         // Ctrl+` (backtick) — toggle terminal
         {
             static bool wasBacktick = false;
@@ -23928,6 +23993,47 @@ private:
         std::cerr << "[EDEN OS] Done — saved to " << m_currentLevelPath << std::endl;
     }
 
+    // Build the EDEN OS silo from the LIVE home folder, independent of the saved
+    // level's terrain (which loadLevel() chokes on). Mirrors the F9 enter path:
+    // load persistent OS objects if present, spawn basement, then navigate(home)
+    // which rebuilds all silo geometry from the current directory contents.
+    void spawnEdenOSFromHome() {
+        m_isEdenOSLevel = true;
+        m_terrain.getConfigMutable().heightScale = 0.0f; // EDEN OS has no terrain
+
+        const char* home = getenv("HOME");
+        std::string osLevelPath = std::string(home ? home : "/tmp") + "/.eden/os_level.eden";
+        if (std::filesystem::exists(osLevelPath)) {
+            loadOSLevelObjects(osLevelPath); // persistent buildings/basement; no terrain dependency
+            m_currentLevelPath = osLevelPath;
+        }
+
+        glm::vec3 spawnPos(0.0f, 0.0f, 0.0f);
+        m_filesystemBrowser.setSpawnOrigin(spawnPos);
+        float basementBaseY = m_filesystemBrowser.getBasementHeight() + 0.5f;
+        m_filesystemBrowser.spawnBasement(spawnPos, basementBaseY);
+
+        std::string homePath = home ? home : "/";
+        syncExcludedPaths(); // keep hotbar files out of the gallery
+        m_filesystemBrowser.navigate(homePath);
+        m_filesystemBrowser.processNavigation(); // rebuild silo from live folder now
+
+        // Spawn on the platform at the top of the silo, offset off-center.
+        float spawnY = m_filesystemBrowser.getPlatformY() + 1.7f;
+        glm::vec3 galleryCam(spawnPos.x + 10.0f, spawnY, spawnPos.z);
+        m_camera.setPosition(galleryCam);
+        if (m_characterController) m_characterController->setPosition(galleryCam);
+        m_playerZone = PlayerZone::Silo;
+        updateZoneVisibility();
+
+        // Start in mouse-look (creative flycam); Left-Alt frees the cursor for UI.
+        m_playModeCursorVisible = false;
+        Input::setMouseCaptured(true);
+        m_camera.setNoClip(true); // fly freely, no terrain/wall collision
+
+        std::cout << "[EDEN] EDEN OS silo built from " << homePath << std::endl;
+    }
+
     void loadEdenOSLevel() {
         const char* home = getenv("HOME");
         std::string osLevelPath = std::string(home ? home : "/tmp") + "/.eden/os_level.eden";
@@ -29289,6 +29395,8 @@ private:
     eden::EdenTerminal m_terminal;
     ImFont* m_monoFont = nullptr;
     bool m_sessionMode = false;
+    bool m_bootEdenOS = false;   // --eden-os: auto-load the saved EDEN OS world
+    bool m_bootedEdenOS = false; // one-shot guard for the --eden-os first-frame build
     bool m_terminalInitialized = false;
     // 3D terminal screen
     SceneObject* m_terminalScreenObject = nullptr;
@@ -30194,9 +30302,12 @@ int main(int argc, char* argv[]) {
     signal(SIGFPE, crashHandler);
 
     bool sessionMode = false;
+    bool bootEdenOS = false;
     for (int i = 1; i < argc; ++i) {
         if (std::string(argv[i]) == "--session-mode") {
             sessionMode = true;
+        } else if (std::string(argv[i]) == "--eden-os") {
+            bootEdenOS = true;
         }
     }
 
@@ -30204,6 +30315,9 @@ int main(int argc, char* argv[]) {
         TerrainEditor editor;
         if (sessionMode) {
             editor.setSessionMode(true);
+        }
+        if (bootEdenOS) {
+            editor.setBootEdenOS(true);
         }
         editor.run();
     } catch (const std::exception& e) {
