@@ -126,6 +126,7 @@ include(cmake/CompileShaders.cmake)
 set(EDEN_SOURCES
     src/Core.cpp
     src/Window.cpp
+    src/KmsPlatform.cpp
     src/Mesh.cpp
     src/Camera.cpp
     src/Input.cpp
@@ -254,6 +255,10 @@ pkg_check_modules(FFMPEG REQUIRED IMPORTED_TARGET
 )
 target_link_libraries(eden PUBLIC PkgConfig::FFMPEG)
 
+# DRM/KMS + libinput: EDEN as its own display server (KmsPlatform, EDEN_KMS boot).
+pkg_check_modules(KMSDEPS REQUIRED IMPORTED_TARGET libdrm libinput libudev)
+target_link_libraries(eden PUBLIC PkgConfig::KMSDEPS)
+
 # Enable validation layers in debug builds
 target_compile_definitions(eden PUBLIC
     $<$<CONFIG:Debug>:EDEN_DEBUG>
@@ -334,3 +339,4 @@ add_subdirectory(examples/spacegame)
 add_subdirectory(examples/trading_terminal)
 add_subdirectory(examples/image_categorizer)
 add_subdirectory(examples/tabletop)
+add_subdirectory(examples/tearsheet3d)

@@ -24,6 +24,11 @@ public:
     VulkanContext(const VulkanContext&) = delete;
     VulkanContext& operator=(const VulkanContext&) = delete;
 
+    // Opt-in: use the DRM-display instance extensions (no GLFW) instead of the
+    // GLFW-required set. Must be set BEFORE constructing the context. Only the
+    // KMS boot path (EDEN_KMS) touches this; every GLFW example leaves it false.
+    static void useKmsInstanceExtensions(bool on) { s_kmsExtensions = on; }
+
     void initialize(VkSurfaceKHR surface);
 
     VkInstance getInstance() const { return m_instance; }
@@ -67,6 +72,8 @@ private:
         VkDebugUtilsMessageTypeFlagsEXT messageType,
         const VkDebugUtilsMessengerCallbackDataEXT* pCallbackData,
         void* pUserData);
+
+    static inline bool s_kmsExtensions = false;
 
     VkInstance m_instance = VK_NULL_HANDLE;
     VkDebugUtilsMessengerEXT m_debugMessenger = VK_NULL_HANDLE;

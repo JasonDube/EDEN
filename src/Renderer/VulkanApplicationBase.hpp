@@ -2,6 +2,7 @@
 
 #include <eden/Window.hpp>
 #include <eden/Input.hpp>
+#include <eden/KmsPlatform.hpp>
 #include "VulkanContext.hpp"
 #include "Swapchain.hpp"
 #include "Buffer.hpp"
@@ -54,6 +55,15 @@ protected:
     // Swapchain recreation
     void recreateSwapchain();
 
+    // Platform: GLFW by default, or the DRM/KMS backend when EDEN_KMS is set.
+    bool isKmsMode() const { return m_kms != nullptr; }
+    KmsPlatform* getKmsPlatform() { return m_kms.get(); }
+    // Drawable size, whichever backend is live (GLFW window or KMS display).
+    void getViewportSize(int& w, int& h) const {
+        if (m_kms) { w = m_kms->width(); h = m_kms->height(); }
+        else       { w = m_window->getWidth(); h = m_window->getHeight(); }
+    }
+
     // Accessors for derived classes
     Window& getWindow() { return *m_window; }
     const Window& getWindow() const { return *m_window; }
@@ -80,7 +90,8 @@ private:
 
 protected:
     // Core Vulkan resources (accessible to derived classes)
-    std::unique_ptr<Window> m_window;
+    std::unique_ptr<Window> m_window;      // GLFW backend (null in KMS mode)
+    std::unique_ptr<KmsPlatform> m_kms;    // DRM/KMS backend (null in GLFW mode)
     std::unique_ptr<VulkanContext> m_context;
     VkSurfaceKHR m_surface = VK_NULL_HANDLE;
     std::unique_ptr<Swapchain> m_swapchain;

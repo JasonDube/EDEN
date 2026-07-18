@@ -2,6 +2,7 @@
 #include <GLFW/glfw3.h>
 #include <stdexcept>
 #include <iostream>
+#include <cstdlib>
 
 namespace eden {
 
@@ -27,34 +28,58 @@ void VulkanApplicationBase::run() {
 }
 
 void VulkanApplicationBase::init() {
-    // Create window
+    const bool kms = std::getenv("EDEN_KMS") != nullptr;
+
+    if (kms) {
+        // ── DRM/KMS backend: EDEN owns the display, no GLFW/X11/Wayland ──────
+        m_kms = std::make_unique<KmsPlatform>();
+        if (!m_kms->openDrm())
+            throw std::runtime_error("KMS: failed to open the DRM display");
+
+        // Instance must carry the display extensions (set before the context).
+        VulkanContext::useKmsInstanceExtensions(true);
+        m_context = std::make_unique<VulkanContext>();
+
+        // Acquire the display -> presentable surface, then finish the device.
+        m_surface = m_kms->createSurface(m_context->getInstance());
+        if (m_surface == VK_NULL_HANDLE)
+            throw std::runtime_error("KMS: failed to create the display surface");
+        m_context->initialize(m_surface);
+
+        m_swapchain = std::make_unique<Swapchain>(
+            *m_context, m_surface, m_kms->width(), m_kms->height());
+
+        m_bufferManager = std::make_unique<BufferManager>(*m_context);
+        createCommandBuffers();
+        createSyncObjects();
+
+        if (!m_kms->initInput())
+            std::cerr << "[KMS] input init failed — running without keyboard/mouse\n";
+
+        onInit();
+        return;
+    }
+
+    // ── GLFW backend (default; every existing example) ──────────────────────
     m_window = std::make_unique<Window>(m_initialWidth, m_initialHeight, m_title);
 
-    // Initialize Vulkan
     m_context = std::make_unique<VulkanContext>();
     m_surface = m_window->createSurface(m_context->getInstance());
     m_context->initialize(m_surface);
 
-    // Create swapchain
     m_swapchain = std::make_unique<Swapchain>(
         *m_context, m_surface, m_window->getWidth(), m_window->getHeight());
 
-    // Create buffer manager
     m_bufferManager = std::make_unique<BufferManager>(*m_context);
-
-    // Create command buffers and sync objects
     createCommandBuffers();
     createSyncObjects();
 
-    // Initialize input
     Input::init(m_window->getHandle());
 
-    // Set resize callback
     m_window->setResizeCallback([this](int, int) {
         m_framebufferResized = true;
     });
 
-    // Call derived class initialization
     onInit();
 }
 
@@ -64,8 +89,11 @@ void VulkanApplicationBase::mainLoop() {
 
     auto lastTime = std::chrono::high_resolution_clock::now();
 
-    while (!m_window->shouldClose()) {
-        m_window->pollEvents();
+    auto shouldClose = [this] { return m_kms ? m_kms->shouldClose() : m_window->shouldClose(); };
+    auto pollEvents  = [this] { if (m_kms) m_kms->pollEvents(); else m_window->pollEvents(); };
+
+    while (!shouldClose()) {
+        pollEvents();
 
         auto currentTime = std::chrono::high_resolution_clock::now();
         float deltaTime = std::chrono::duration<float>(currentTime - lastTime).count();
@@ -79,7 +107,7 @@ void VulkanApplicationBase::mainLoop() {
             endFrame(imageIndex);
         }
 
-        Input::update();
+        if (!m_kms) Input::update();  // Input is the GLFW path; KMS apps use callbacks
     }
 
     m_context->waitIdle();
@@ -104,6 +132,7 @@ void VulkanApplicationBase::cleanup() {
     vkDestroySurfaceKHR(m_context->getInstance(), m_surface, nullptr);
     m_context.reset();
     m_window.reset();
+    m_kms.reset();   // drops DRM master + closes libinput (no-op in GLFW mode)
 }
 
 void VulkanApplicationBase::createCommandBuffers() {
@@ -215,10 +244,15 @@ void VulkanApplicationBase::endFrame(uint32_t imageIndex) {
 
 void VulkanApplicationBase::recreateSwapchain() {
     int width = 0, height = 0;
-    glfwGetFramebufferSize(m_window->getHandle(), &width, &height);
-    while (width == 0 || height == 0) {
+    if (m_kms) {
+        // The display mode is fixed; nothing to wait on.
+        width = m_kms->width(); height = m_kms->height();
+    } else {
         glfwGetFramebufferSize(m_window->getHandle(), &width, &height);
-        glfwWaitEvents();
+        while (width == 0 || height == 0) {
+            glfwGetFramebufferSize(m_window->getHandle(), &width, &height);
+            glfwWaitEvents();
+        }
     }
 
     m_context->waitIdle();

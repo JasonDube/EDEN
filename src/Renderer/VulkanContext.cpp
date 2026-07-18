@@ -1,6 +1,7 @@
 #include "VulkanContext.hpp"
 #include "Buffer.hpp"
 #include <GLFW/glfw3.h>
+#include <eden/KmsPlatform.hpp>
 #include <stdexcept>
 #include <iostream>
 #include <fstream>
@@ -243,10 +244,15 @@ bool VulkanContext::checkDeviceExtensionSupport(VkPhysicalDevice device) {
 }
 
 std::vector<const char*> VulkanContext::getRequiredExtensions() {
-    uint32_t glfwExtensionCount = 0;
-    const char** glfwExtensions = glfwGetRequiredInstanceExtensions(&glfwExtensionCount);
-
-    std::vector<const char*> extensions(glfwExtensions, glfwExtensions + glfwExtensionCount);
+    std::vector<const char*> extensions;
+    if (s_kmsExtensions) {
+        // DRM-display path: no GLFW (it may not even be initable without X11).
+        extensions = eden::KmsPlatform::instanceExtensions();
+    } else {
+        uint32_t glfwExtensionCount = 0;
+        const char** glfwExtensions = glfwGetRequiredInstanceExtensions(&glfwExtensionCount);
+        extensions.assign(glfwExtensions, glfwExtensions + glfwExtensionCount);
+    }
 
     if (m_enableValidationLayers) {
         extensions.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
