@@ -25,6 +25,7 @@ function layout(sequence title, sequence body)
 	"<center>[ <a href=\"/\">Home</a> ]&nbsp;&nbsp;" &
 	"[ <a href=\"/history\">History</a> ]&nbsp;&nbsp;" &
 	"[ <a href=\"/engine\">The Engine</a> ]&nbsp;&nbsp;" &
+	"[ <a href=\"/editor\">The Editor</a> ]&nbsp;&nbsp;" &
 	"[ <a href=\"/games\">Games</a> ]</center>\n" &
 	"<hr>\n" &
 	body &
@@ -54,6 +55,7 @@ function home()
 	"<ul>\n" &
 	"<li><a href=\"/history\">The History</a> &mdash; where Euphoria came from</li>\n" &
 	"<li><a href=\"/engine\">The Engine</a> &mdash; giving Euphoria pixels again</li>\n" &
+	"<li><a href=\"/editor\">The Editor</a> &mdash; diglot, Python and Euphoria side by side</li>\n" &
 	"<li><a href=\"/games\">The Games</a> &mdash; Language War &amp; Snake</li>\n" &
 	"</ul>\n"
 end function
@@ -94,7 +96,26 @@ function engine()
 	"and your Euphoria code never has to change a line.</p>\n" &
 	"<p>It already has windows, shapes, keyboard input, timing, and a built-in bitmap " &
 	"font for text on screen. Enough to build real games &mdash; see " &
-	"<a href=\"/games\">the games</a>.</p>\n"
+	"<a href=\"/games\">the games</a>.</p>\n" &
+	"<center><img src=\"/snake.png\" width=\"480\" border=\"2\" " &
+	"alt=\"Snake running on the VEUPHORIA engine\"><br>\n" &
+	"<font size=\"1\"><i>Snake, running on VEUPHORIA &mdash; and that very picture " &
+	"was rendered by the engine itself.</i></font></center>\n"
+end function
+
+function editor()
+	return
+	"<h2>diglot &mdash; the parallel editor</h2>\n" &
+	"<p>Before the engine, there was <b>diglot</b>: a split-screen console editor " &
+	"grown from Euphoria's own classic editor, <tt>ed</tt>. <b>Python on the left, " &
+	"Euphoria on the right</b> &mdash; like parallel Bible translations &mdash; so you " &
+	"can learn both languages side by side.</p>\n" &
+	"<center><img src=\"/diglot.png\" width=\"580\" border=\"2\" " &
+	"alt=\"diglot: Python on the left, Euphoria on the right\"><br>\n" &
+	"<font size=\"1\"><i>diglot: the same little program, in Python and in Euphoria.</i></font></center>\n" &
+	"<p>Press <b>Ctrl-E</b> to run the pane you are in. Press <b>Ctrl-A</b> and a local " &
+	"AI model translates one side into the other's language. It keeps <tt>ed</tt>'s old " &
+	"gray soul &mdash; just words on a screen &mdash; and adds a few new tricks.</p>\n"
 end function
 
 function games()
@@ -119,6 +140,7 @@ function route(sequence path)
 	if    equal(path, "/")        then return {200, layout("Home",        home())}
 	elsif equal(path, "/history") then return {200, layout("History",     history())}
 	elsif equal(path, "/engine")  then return {200, layout("The Engine",  engine())}
+	elsif equal(path, "/editor")  then return {200, layout("The Editor",  editor())}
 	elsif equal(path, "/games")   then return {200, layout("Games",       games())}
 	else
 		return {404, layout("Not Found",
@@ -137,8 +159,33 @@ function response(integer code, sequence html)
 		"Connection: close\r\n\r\n" & html
 end function
 
+function slurp_bytes(sequence fname)
+-- read a whole file into a sequence of bytes (-1 if it doesn't exist)
+	integer f = open(fname, "rb")
+	if f = -1 then
+		return -1
+	end if
+	sequence data = ""
+	object c = getc(f)
+	while c != -1 do
+		data &= c
+		c = getc(f)
+	end while
+	close(f)
+	return data
+end function
+
+function image_response(sequence bytes)
+	return "HTTP/1.1 200 OK\r\n" &
+		"Content-Type: image/png\r\n" &
+		"Content-Length: " & sprintf("%d", length(bytes)) & "\r\n" &
+		"Connection: close\r\n\r\n" & bytes
+end function
+
 procedure main()
 	sock:socket server = sock:create(sock:AF_INET, sock:SOCK_STREAM, 0)
+	-- allow immediate rebinds after a restart (skip the TIME_WAIT wait)
+	sock:set_option(server, sock:SOL_SOCKET, sock:SO_REUSEADDR, 1)
 	if sock:bind(server, BIND_ADDR) != sock:OK then
 		printf(2, "VEUPHORIA: could not bind %s (error %d) -- is the port in use?\n",
 			{BIND_ADDR, sock:error_code()})
@@ -158,8 +205,21 @@ procedure main()
 					path = parts[2]
 				end if
 			end if
-			sequence r = route(path)
-			sock:send(cs, response(r[1], r[2]), 0)
+			sequence full
+			if match(".png", path) and not match("..", path) then
+				-- serve a static image from the site directory
+				object bytes = slurp_bytes("." & path)
+				if sequence(bytes) then
+					full = image_response(bytes)
+				else
+					full = response(404, layout("Not Found",
+						"<h2>404</h2><p>No image at <tt>" & path & "</tt>.</p>\n"))
+				end if
+			else
+				sequence r = route(path)
+				full = response(r[1], r[2])
+			end if
+			sock:send(cs, full, 0)
 			sock:close(cs)
 		end if
 	end while

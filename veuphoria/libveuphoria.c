@@ -128,6 +128,22 @@ int veu_ticks(void) {
     return (int)SDL_GetTicks();
 }
 
+/* save the current frame to a .bmp file (for screenshots). 1 ok, 0 fail. */
+int veu_save(const char *path) {
+    if (!ren) return 0;
+    int w = 0, h = 0;
+    SDL_GetRendererOutputSize(ren, &w, &h);
+    if (w <= 0 || h <= 0) return 0;
+    SDL_Surface *s = SDL_CreateRGBSurfaceWithFormat(0, w, h, 32,
+                                                    SDL_PIXELFORMAT_ARGB8888);
+    if (!s) return 0;
+    int ok = (SDL_RenderReadPixels(ren, NULL, SDL_PIXELFORMAT_ARGB8888,
+                                   s->pixels, s->pitch) == 0)
+             && (SDL_SaveBMP(s, path) == 0);
+    SDL_FreeSurface(s);
+    return ok;
+}
+
 /* tear the window down */
 void veu_close(void) {
     if (ren) { SDL_DestroyRenderer(ren); ren = NULL; }

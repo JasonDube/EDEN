@@ -2,3 +2,4 @@
 libveuphoria.so
 *.o
 ex.err
+*.bmp

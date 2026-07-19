@@ -32,6 +32,7 @@ constant
 	_line    = define_c_proc(lib, "veu_line",    {C_INT, C_INT, C_INT, C_INT}),
 	_rect    = define_c_proc(lib, "veu_rect",    {C_INT, C_INT, C_INT, C_INT, C_INT}),
 	_text    = define_c_proc(lib, "veu_text",    {C_INT, C_INT, C_POINTER, C_INT}),
+	_save    = define_c_func(lib, "veu_save",    {C_POINTER}, C_INT),
 	_present = define_c_proc(lib, "veu_present", {}),
 	_poll    = define_c_func(lib, "veu_poll",    {}, C_INT),
 	_key     = define_c_func(lib, "veu_key",     {C_INT}, C_INT),
@@ -105,6 +106,14 @@ end procedure
 public function ticks()
 -- milliseconds since the engine started
 	return c_func(_ticks, {})
+end function
+
+public function save(sequence path)
+-- save the current frame to a .bmp file; returns 1 ok, 0 fail
+	atom p = allocate_string(path)
+	integer ok = c_func(_save, {p})
+	free(p)
+	return ok
 end function
 
 public procedure close_window()
