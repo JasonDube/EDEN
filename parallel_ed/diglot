@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# diglot — parallel Python|Euphoria editor
+# usage: ./diglot [leftfile] [rightfile]
+cd "$(dirname "$0")"
+eui diglot.ex "${1:-left.py}" "${2:-right.ex}"

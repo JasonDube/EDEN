@@ -1,0 +1,5 @@
+# diglot runtime temp files (regenerated on each run)
+llm_req.json
+llm_resp.json
+diglot_run.out
+ex.err
