@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# serve the VEUPHORIA website
+cd "$(dirname "$0")"
+echo "VEUPHORIA -> http://localhost:8090   (Ctrl-C to stop)"
+exec eui serve.ex
