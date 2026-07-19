@@ -8,6 +8,8 @@
 include std/socket.e as sock
 include std/text.e            -- trim
 include std/sequence.e        -- split
+include std/eds.e             -- guestbook storage (Euphoria Database System)
+include std/datetime.e as dt  -- timestamps
 
 constant BIND_ADDR = "0.0.0.0:8090"   -- 8080 is taken by the AI backend
 
@@ -26,7 +28,8 @@ function layout(sequence title, sequence body)
 	"[ <a href=\"/history\">History</a> ]&nbsp;&nbsp;" &
 	"[ <a href=\"/engine\">The Engine</a> ]&nbsp;&nbsp;" &
 	"[ <a href=\"/editor\">The Editor</a> ]&nbsp;&nbsp;" &
-	"[ <a href=\"/games\">Games</a> ]</center>\n" &
+	"[ <a href=\"/games\">Games</a> ]&nbsp;&nbsp;" &
+	"[ <a href=\"/guestbook\">Guestbook</a> ]</center>\n" &
 	"<hr>\n" &
 	body &
 	"<hr>\n" &
@@ -57,6 +60,7 @@ function home()
 	"<li><a href=\"/engine\">The Engine</a> &mdash; giving Euphoria pixels again</li>\n" &
 	"<li><a href=\"/editor\">The Editor</a> &mdash; diglot, Python and Euphoria side by side</li>\n" &
 	"<li><a href=\"/games\">The Games</a> &mdash; Language War &amp; Snake</li>\n" &
+	"<li><a href=\"/guestbook\">The Guestbook</a> &mdash; sign it (backed by Euphoria's own database)</li>\n" &
 	"</ul>\n"
 end function
 
@@ -134,6 +138,127 @@ function games()
 	"not an arcade. Yet.)</i></p>\n"
 end function
 
+-- =================  guestbook (EDS)  =====================================
+
+function html_escape(sequence s)
+-- make user text safe to drop into a page
+	sequence out = ""
+	for i = 1 to length(s) do
+		integer c = s[i]
+		if    c = '&' then out &= "&amp;"
+		elsif c = '<' then out &= "&lt;"
+		elsif c = '>' then out &= "&gt;"
+		elsif c = '"' then out &= "&quot;"
+		else out &= c
+		end if
+	end for
+	return out
+end function
+
+function hexval(integer c)
+	if    c >= '0' and c <= '9' then return c - '0'
+	elsif c >= 'a' and c <= 'f' then return c - 'a' + 10
+	elsif c >= 'A' and c <= 'F' then return c - 'A' + 10
+	end if
+	return 0
+end function
+
+function url_decode(sequence s)
+-- undo form-url-encoding: '+' -> space, %XX -> byte
+	sequence out = ""
+	integer i = 1
+	while i <= length(s) do
+		if s[i] = '+' then
+			out &= ' '
+			i += 1
+		elsif s[i] = '%' and i + 2 <= length(s) then
+			out &= hexval(s[i+1]) * 16 + hexval(s[i+2])
+			i += 3
+		else
+			out &= s[i]
+			i += 1
+		end if
+	end while
+	return out
+end function
+
+function form_value(sequence body, sequence key)
+-- pull one field out of a  name=..&message=..  form body
+	sequence pairs = split(body, '&')
+	for i = 1 to length(pairs) do
+		integer eq = find('=', pairs[i])
+		if eq and equal(pairs[i][1..eq-1], key) then
+			return url_decode(pairs[i][eq+1..$])
+		end if
+	end for
+	return ""
+end function
+
+procedure open_guestbook()
+-- open (or first create) the EDS database that holds the entries
+	if db_open("guestbook.edb", DB_LOCK_NO) != DB_OK then
+		if db_create("guestbook.edb", DB_LOCK_NO) != DB_OK then
+			puts(2, "guestbook: could not create guestbook.edb\n")
+			abort(1)
+		end if
+		if db_create_table("entries") != DB_OK then
+			puts(2, "guestbook: could not create table\n")
+			abort(1)
+		end if
+	end if
+	if db_select_table("entries") != DB_OK then
+		puts(2, "guestbook: could not select table\n")
+		abort(1)
+	end if
+end procedure
+
+procedure add_entry(sequence name, sequence message)
+	name = trim(name)
+	message = trim(message)
+	if length(name) = 0 then name = "anonymous" end if
+	if length(name) > 40 then name = name[1..40] end if
+	if length(message) > 2000 then message = message[1..2000] end if
+	if length(message) = 0 then
+		return                       -- ignore empty sign-ins
+	end if
+	sequence when = dt:format(dt:now(), "%Y-%m-%d %H:%M")
+	integer key = db_table_size() + 1
+	if db_insert(key, {name, message, when}) != DB_OK then
+		-- silently ignore a failed insert; the page will just not show it
+	end if
+end procedure
+
+function guestbook_page()
+	sequence entries = ""
+	integer n = db_table_size()
+	if n = 0 then
+		entries = "<p><i>No entries yet &mdash; be the first to sign!</i></p>\n"
+	else
+		for rec = n to 1 by -1 do        -- newest first
+			object d = db_record_data(rec)
+			entries &=
+				"<p><b>" & html_escape(d[1]) & "</b> " &
+				"<font size=\"1\" color=\"#555555\">(" & html_escape(d[3]) & ")</font><br>\n" &
+				html_escape(d[2]) & "</p>\n"
+		end for
+	end if
+	return
+	"<h2>Guestbook</h2>\n" &
+	"<p>Leave your mark. This page is backed by <b>EDS</b>, Euphoria's own database " &
+	"&mdash; your words are written to <tt>guestbook.edb</tt> and will outlast the " &
+	"server.</p>\n" &
+	"<form action=\"/sign\" method=\"post\">\n" &
+	"<table cellpadding=\"3\">\n" &
+	"<tr><td align=\"right\">Name:</td>" &
+	"<td><input type=\"text\" name=\"name\" size=\"32\" maxlength=\"40\"></td></tr>\n" &
+	"<tr><td align=\"right\" valign=\"top\">Message:</td>" &
+	"<td><textarea name=\"message\" rows=\"4\" cols=\"44\" wrap=\"virtual\"></textarea></td></tr>\n" &
+	"<tr><td></td><td><input type=\"submit\" value=\"Sign the guestbook\"></td></tr>\n" &
+	"</table>\n</form>\n" &
+	"<hr>\n<h3>Entries (" & sprintf("%d", n) & ")</h3>\n" &
+	entries
+end function
+
 -- =================  routing + HTTP  ======================================
 
 function route(sequence path)
@@ -142,6 +267,7 @@ function route(sequence path)
 	elsif equal(path, "/engine")  then return {200, layout("The Engine",  engine())}
 	elsif equal(path, "/editor")  then return {200, layout("The Editor",  editor())}
 	elsif equal(path, "/games")   then return {200, layout("Games",       games())}
+	elsif equal(path, "/guestbook") then return {200, layout("Guestbook", guestbook_page())}
 	else
 		return {404, layout("Not Found",
 			"<h2>404 &mdash; Lost in space</h2>\n" &
@@ -191,6 +317,7 @@ procedure main()
 			{BIND_ADDR, sock:error_code()})
 		abort(1)
 	end if
+	open_guestbook()
 	puts(1, "VEUPHORIA is serving at http://localhost:8090   (Ctrl-C to stop)\n")
 
 	while sock:listen(server, 10) = sock:OK do
@@ -198,15 +325,26 @@ procedure main()
 		if sequence(client) then
 			sock:socket cs = client[1]
 			object req = sock:receive(cs, 0)
-			sequence path = "/"
-			if sequence(req) and length(trim(req)) > 0 then
-				sequence parts = split(trim(req))
-				if length(parts) >= 2 then
-					path = parts[2]
-				end if
+			sequence method = "GET", path = "/", body = ""
+			if sequence(req) and length(req) > 0 then
+				integer nl = match("\r\n", req)
+				sequence firstline = req
+				if nl then firstline = req[1..nl-1] end if
+				sequence parts = split(trim(firstline))
+				if length(parts) >= 1 then method = parts[1] end if
+				if length(parts) >= 2 then path  = parts[2] end if
+				integer bsep = match("\r\n\r\n", req)
+				if bsep then body = req[bsep+4..$] end if
 			end if
+
 			sequence full
-			if match(".png", path) and not match("..", path) then
+			if equal(method, "POST") and equal(path, "/sign") then
+				-- a guestbook sign-in: save it, then redirect (Post/Redirect/Get)
+				add_entry(form_value(body, "name"), form_value(body, "message"))
+				full = "HTTP/1.1 303 See Other\r\n" &
+					"Location: /guestbook\r\n" &
+					"Content-Length: 0\r\nConnection: close\r\n\r\n"
+			elsif match(".png", path) and not match("..", path) then
 				-- serve a static image from the site directory
 				object bytes = slurp_bytes("." & path)
 				if sequence(bytes) then
