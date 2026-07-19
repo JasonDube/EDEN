@@ -1,5 +1,0 @@
-# build artifacts (rebuilt by ./build.sh / ./run)
-libveuphoria.so
-*.o
-ex.err
-*.bmp

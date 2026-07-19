@@ -1,7 +1,0 @@
-#!/usr/bin/env bash
-# build (if needed) and run the VEUPHORIA demo
-cd "$(dirname "$0")"
-if [ ! -f libveuphoria.so ] || [ libveuphoria.c -nt libveuphoria.so ]; then
-    ./build.sh || exit 1
-fi
-eui "${1:-hello.ex}"
