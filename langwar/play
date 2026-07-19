@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# play Language War
+cd "$(dirname "$0")"
+eui lw.ex
