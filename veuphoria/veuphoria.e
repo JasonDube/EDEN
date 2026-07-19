@@ -31,6 +31,7 @@ constant
 	_color   = define_c_proc(lib, "veu_color",   {C_INT, C_INT, C_INT}),
 	_line    = define_c_proc(lib, "veu_line",    {C_INT, C_INT, C_INT, C_INT}),
 	_rect    = define_c_proc(lib, "veu_rect",    {C_INT, C_INT, C_INT, C_INT, C_INT}),
+	_text    = define_c_proc(lib, "veu_text",    {C_INT, C_INT, C_POINTER, C_INT}),
 	_present = define_c_proc(lib, "veu_present", {}),
 	_poll    = define_c_func(lib, "veu_poll",    {}, C_INT),
 	_key     = define_c_func(lib, "veu_key",     {C_INT}, C_INT),
@@ -74,6 +75,18 @@ end procedure
 public procedure rect(integer x, integer y, integer w, integer h, integer fill)
 	c_proc(_rect, {x, y, w, h, fill})
 end procedure
+
+public procedure text(integer x, integer y, sequence s, integer scale)
+-- draw text in the current colour (5x7 font). scale = pixel size.
+	atom p = allocate_string(s)
+	c_proc(_text, {x, y, p, scale})
+	free(p)
+end procedure
+
+public function text_width(sequence s, integer scale)
+-- pixel width of s at the given scale (6 px per char), for centering
+	return length(s) * 6 * scale
+end function
 
 public procedure present()
 	c_proc(_present, {})

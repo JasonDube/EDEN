@@ -9,6 +9,7 @@
  * build:  gcc -shared -fPIC -o libveuphoria.so libveuphoria.c `sdl2-config --cflags --libs`
  */
 #include <SDL2/SDL.h>
+#include "font5x7.h"
 
 static SDL_Window   *win = NULL;
 static SDL_Renderer *ren = NULL;
@@ -53,6 +54,31 @@ void veu_rect(int x, int y, int w, int h, int fill) {
     SDL_Rect rc = { x, y, w, h };
     if (fill) SDL_RenderFillRect(ren, &rc);
     else      SDL_RenderDrawRect(ren, &rc);
+}
+
+/* draw text at (x,y) in the current colour, using the built-in 5x7 font.
+ * scale is the pixel size (1 = 5x7 px per glyph, 2 = twice as big, ...).
+ * lowercase renders as uppercase; unknown chars are blank; '\n' starts a line. */
+void veu_text(int x, int y, const char *s, int scale) {
+    if (!ren || !s) return;
+    if (scale < 1) scale = 1;
+    int cx = x;
+    for (const char *p = s; *p; ++p) {
+        int c = (unsigned char)*p;
+        if (c >= 'a' && c <= 'z') c -= 32;          /* lowercase -> uppercase */
+        if (c == '\n') { y += 8 * scale; cx = x; continue; }
+        if (c < 32 || c > 90) { cx += 6 * scale; continue; }
+        const unsigned char *g = FONT5X7[c - 32];
+        for (int row = 0; row < 7; ++row) {
+            for (int col = 0; col < 5; ++col) {
+                if (g[row] & (1 << (4 - col))) {
+                    SDL_Rect r = { cx + col*scale, y + row*scale, scale, scale };
+                    SDL_RenderFillRect(ren, &r);
+                }
+            }
+        }
+        cx += 6 * scale;                            /* 5px glyph + 1px gap */
+    }
 }
 
 /* show everything drawn since the last present */
