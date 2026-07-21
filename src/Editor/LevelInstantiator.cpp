@@ -237,6 +237,9 @@ void LevelInstantiator::spawnObjects(const LevelData& data, const SpawnContext& 
         if (!objData.groveScript.empty()) {
             obj->setGroveScriptPath(objData.groveScript);
         }
+        if (!objData.entityScript.empty()) {
+            obj->setEntityScript(objData.entityScript);
+        }
 
         // Apply frozen transform if saved (re-bake rotation/scale into vertices)
         if (objData.frozenTransform && obj->hasMeshData()) {
@@ -572,6 +575,11 @@ bool LevelInstantiator::spawnObjectsBinary(const std::string& levelPath,
         // Add to physics world
         if (obj->hasBulletCollision() && ctx.physicsWorld) {
             ctx.physicsWorld->addObject(obj.get(), obj->getBulletCollisionType());
+        }
+
+        // Restore assigned @entity script from JSON (not in binary cache).
+        if (!jsonObj.entityScript.empty()) {
+            obj->setEntityScript(jsonObj.entityScript);
         }
 
         // Restore wall holes from JSON (not in binary)

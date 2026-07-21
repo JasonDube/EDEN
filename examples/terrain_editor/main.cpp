@@ -4181,6 +4181,12 @@ private:
             showModelImportDialog();
         });
 
+        // "Refresh scripts" in the Models window re-reads the level script's
+        // @entity functions (via `heidic_v2 symbols`) into the dropdown.
+        m_editorUI.setRefreshEntityFunctionsCallback([this]() {
+            refreshEntityFunctionList();
+        });
+
         m_editorUI.setSelectObjectCallback([this](int index) {
             selectObject(index);
         });
@@ -22393,6 +22399,66 @@ private:
         }
     }
 
+    // Scaffold (and return the path of) the level's HEIDIC entry-point script:
+    //   <dir>/<name>/scripts/<name>.hd
+    // This is where @entity functions live; the editor lists them via
+    // `heidic_v2 symbols` to populate the assign-script dropdown. Idempotent —
+    // creates a starter script only if one doesn't exist yet. (Interim layout;
+    // the full "New Level" folder scaffolding arrives with the World Builder.)
+    std::string ensureLevelScript(const std::string& edenPath) {
+        namespace fs = std::filesystem;
+        fs::path p(edenPath);
+        std::string name = p.stem().string();
+        if (name.empty()) name = "level";
+        fs::path scriptDir = p.parent_path() / name / "scripts";
+        fs::path scriptPath = scriptDir / (name + ".hd");
+        std::error_code ec;
+        if (!fs::exists(scriptPath)) {
+            fs::create_directories(scriptDir, ec);
+            std::ofstream f(scriptPath);
+            if (f) {
+                f << "// " << name << " - level script (entry point)\n";
+                f << "// Assign @entity functions to objects in the World Builder;\n";
+                f << "// each runs every tick on the object it's bound to.\n\n";
+                f << "// Example placeholder behavior - bind it to a model to try it:\n";
+                f << "@entity fn idle(dt: f32): void {\n}\n";
+                std::cout << "[Level] Created level script: " << scriptPath.string() << std::endl;
+            }
+        }
+        return scriptPath.string();
+    }
+
+    // Re-read the level script's @entity functions via `heidic_v2 symbols` so the
+    // dropdown reflects what's in the .hd right now. The editor never parses
+    // HEIDIC itself — the compiler emits the list as JSON.
+    void refreshEntityFunctionList() {
+        m_entityFnList.clear();
+        m_currentLevelScriptPath.clear();
+        if (m_currentLevelPath.empty()) return;
+        m_currentLevelScriptPath = ensureLevelScript(m_currentLevelPath);
+
+        const char* home = getenv("HOME");
+        std::string bin = home ? std::string(home) + "/Desktop/HEIDIC/target/release/heidic_v2" : "";
+        if (bin.empty() || !std::filesystem::exists(bin)) return;  // compiler not built
+
+        std::string cmd = "\"" + bin + "\" symbols \"" + m_currentLevelScriptPath + "\" 2>/dev/null";
+        std::string out;
+        if (FILE* pipe = popen(cmd.c_str(), "r")) {
+            char buf[512];
+            while (fgets(buf, sizeof(buf), pipe)) out += buf;
+            pclose(pipe);
+        }
+        try {
+            auto j = nlohmann::json::parse(out);
+            for (const auto& f : j.value("entity_functions", nlohmann::json::array())) {
+                m_entityFnList.push_back(f.value("name", std::string("")));
+            }
+        } catch (...) { /* compiler error / bad JSON -> leave list empty */ }
+
+        // Hand the list to the Models-window dropdown.
+        m_editorUI.setEntityFunctions(m_entityFnList);
+    }
+
     void saveLevel(const std::string& filepath) {
         // Temporarily remove runtime-only objects for serialization
         // Collect and remove filesystem objects + player avatar, then restore after save
@@ -22511,6 +22577,11 @@ private:
 
             m_currentLevelPath = filepath;
             std::cout << "Level saved to: " << filepath << std::endl;
+
+            // Scaffold the level's HEIDIC entry-point script if it doesn't exist,
+            // and load its @entity functions into the Models-window dropdown.
+            ensureLevelScript(filepath);
+            refreshEntityFunctionList();
 
             // Also save binary format for fast loading
             saveBinaryLevel(filepath);
@@ -22895,6 +22966,9 @@ private:
 
         m_currentLevelPath = filepath;
         std::cout << "Level loaded from: " << filepath << std::endl;
+
+        // Populate the Models-window @entity dropdown for this level's script.
+        refreshEntityFunctionList();
 
         // Load expression textures for sentient NPCs
         for (auto& obj : m_sceneObjects) {
@@ -29507,6 +29581,8 @@ private:
 
     // Level save/load
     std::string m_currentLevelPath;
+    std::vector<std::string> m_entityFnList;   // @entity fns from the level script (dropdown)
+    std::string m_currentLevelScriptPath;      // path of that level script (.hd)
     std::string m_pendingDoorSpawn;  // Door ID to spawn at after level load
     std::unordered_map<std::string, LevelData> m_levelCache;  // Preloaded adjacent levels
 

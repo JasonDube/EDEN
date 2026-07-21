@@ -509,6 +509,9 @@ bool LevelSerializer::save(const std::string& filepath,
             if (!obj->getGroveScriptPath().empty()) {
                 objJson["groveScript"] = obj->getGroveScriptPath();
             }
+            if (!obj->getEntityScript().empty()) {
+                objJson["entityScript"] = obj->getEntityScript();
+            }
             objJson["dailySchedule"] = obj->hasDailySchedule();
             objJson["patrolSpeed"] = obj->getPatrolSpeed();
             if (!obj->getDescription().empty()) {
@@ -949,6 +952,7 @@ bool LevelSerializer::load(const std::string& filepath, LevelData& outData) {
 
                 obj.beingType = objJson.value("beingType", 0);
                 obj.groveScript = objJson.value("groveScript", std::string(""));
+                obj.entityScript = objJson.value("entityScript", std::string(""));
                 obj.dailySchedule = objJson.value("dailySchedule", false);
                 obj.patrolSpeed = objJson.value("patrolSpeed", 5.0f);
                 obj.description = objJson.value("description", std::string(""));

@@ -438,6 +438,12 @@ public:
     void setGroveScriptPath(const std::string& path) { m_groveScriptPath = path; }
     const std::string& getGroveScriptPath() const { return m_groveScriptPath; }
 
+    // @entity function assigned to this object (a HEIDIC function name from the
+    // level's script, chosen in the editor). The runtime binds it as the entity's
+    // per-tick script. Empty = none assigned.
+    void setEntityScript(const std::string& fn) { m_entityScript = fn; }
+    const std::string& getEntityScript() const { return m_entityScript; }
+
     // Trader script link (when "trader" script is active)
     void setTraderId(uint32_t id) { m_traderId = id; }
     uint32_t getTraderId() const { return m_traderId; }
@@ -833,6 +839,7 @@ private:
     std::vector<std::string> m_scripts;
     uint32_t m_traderId = 0;  // Link to TraderAI when "trader" script is active
     std::string m_groveScriptPath;  // .grove file for AlgoBot execution
+    std::string m_entityScript;     // assigned @entity HEIDIC function name
 
     // Behaviors
     std::vector<Behavior> m_behaviors;

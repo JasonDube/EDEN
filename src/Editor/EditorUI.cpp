@@ -875,11 +875,17 @@ void EditorUI::renderModelsWindow() {
                         if (ImGui::Selectable(obj->getName().c_str(), isSelected)) {
                             handleObjectClick(objIdx);
                         }
+                        // Context menu binds to the Selectable (must be the last
+                        // item) — render the script label AFTER it.
                         if (ImGui::BeginPopupContextItem()) {
                             if (ImGui::MenuItem("Delete")) {
                                 if (m_onDeleteObject) m_onDeleteObject(objIdx);
                             }
                             ImGui::EndPopup();
+                        }
+                        if (!obj->getEntityScript().empty()) {
+                            ImGui::SameLine();
+                            ImGui::TextDisabled("[%s]", obj->getEntityScript().c_str());
                         }
                         ImGui::PopID();
                     }
@@ -900,11 +906,17 @@ void EditorUI::renderModelsWindow() {
                 if (ImGui::Selectable(obj->getName().c_str(), isSelected)) {
                     handleObjectClick(static_cast<int>(i));
                 }
+                // Context menu binds to the Selectable (must be the last item) —
+                // render the script label AFTER it.
                 if (ImGui::BeginPopupContextItem()) {
                     if (ImGui::MenuItem("Delete")) {
                         if (m_onDeleteObject) m_onDeleteObject(static_cast<int>(i));
                     }
                     ImGui::EndPopup();
+                }
+                if (!obj->getEntityScript().empty()) {
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("[%s]", obj->getEntityScript().c_str());
                 }
                 ImGui::PopID();
             }
@@ -982,6 +994,28 @@ void EditorUI::renderModelsWindow() {
             } else if (selected->isSentient()) {
                 ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), "(Can be talked to)");
             }
+
+            ImGui::Spacing();
+
+            // Entity Script dropdown: bind an @entity function from the level
+            // script to run every tick on this object. Sits under Being Type.
+            ImGui::Text("Entity Script");
+            ImGui::PushItemWidth(-1);
+            const std::string& curScript = selected->getEntityScript();
+            std::string scriptPreview = curScript.empty() ? "(none)" : curScript;
+            if (ImGui::BeginCombo("##entityscript", scriptPreview.c_str())) {
+                if (ImGui::Selectable("(none)", curScript.empty())) selected->setEntityScript("");
+                for (const auto& fn : m_entityFunctions) {
+                    if (ImGui::Selectable(fn.c_str(), fn == curScript)) selected->setEntityScript(fn);
+                }
+                ImGui::EndCombo();
+            }
+            ImGui::PopItemWidth();
+            if (ImGui::SmallButton("Refresh scripts")) {
+                if (m_onRefreshEntityFunctions) m_onRefreshEntityFunctions();
+            }
+            ImGui::SameLine();
+            ImGui::TextDisabled("(%d @entity fns)", static_cast<int>(m_entityFunctions.size()));
 
             ImGui::Spacing();
 

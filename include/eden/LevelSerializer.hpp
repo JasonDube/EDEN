@@ -97,6 +97,7 @@ struct LevelData {
 
         int beingType = 0;  // BeingType enum as int (0 = STATIC)
         std::string groveScript;  // .grove file path for AlgoBot
+        std::string entityScript; // assigned @entity HEIDIC function name
         bool dailySchedule = false;  // Reset behaviors at midnight for daily routines
         float patrolSpeed = 5.0f;    // Movement speed for FOLLOW_PATH
         std::string description;     // Description visible to AI perception

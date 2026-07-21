@@ -208,6 +208,12 @@ public:
     }
     void setImportModelCallback(ImportModelCallback callback) { m_onImportModel = callback; }
     void setBrowseModelCallback(BrowseModelCallback callback) { m_onBrowseModel = callback; }
+
+    // @entity script binding: the host supplies the current list of @entity
+    // functions (via a refresh callback that reruns `heidic_v2 symbols`); the
+    // Models window renders a dropdown that reads/writes SceneObject::entityScript.
+    void setEntityFunctions(const std::vector<std::string>& fns) { m_entityFunctions = fns; }
+    void setRefreshEntityFunctionsCallback(std::function<void()> cb) { m_onRefreshEntityFunctions = cb; }
     void setSelectObjectCallback(SelectObjectCallback callback) { m_onSelectObject = callback; }
     void setMultiSelectObjectCallback(MultiSelectObjectCallback callback) { m_onMultiSelectObject = callback; }
     void setDeleteObjectCallback(DeleteObjectCallback callback) { m_onDeleteObject = callback; }
@@ -571,6 +577,8 @@ private:
     TiltSelectionCallback m_onTiltSelection;
     ImportModelCallback m_onImportModel;
     BrowseModelCallback m_onBrowseModel;
+    std::vector<std::string> m_entityFunctions;          // @entity fns for the dropdown
+    std::function<void()> m_onRefreshEntityFunctions;    // rerun `heidic_v2 symbols`
     SelectObjectCallback m_onSelectObject;
     MultiSelectObjectCallback m_onMultiSelectObject;
     DeleteObjectCallback m_onDeleteObject;
