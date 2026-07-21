@@ -1,6 +1,7 @@
 #pragma once
 
 #include <memory>
+#include <string>
 #include <vector>
 
 namespace eden {
@@ -63,6 +64,17 @@ public:
     // holes and behaviors, then appends each object to ctx.sceneObjects.
     // Behavior-preserving lift of terrain_editor loadLevel()'s object loop.
     static void spawnObjects(const LevelData& data, const SpawnContext& ctx);
+
+    // Spawn scene objects from the binary sidecar (.edenbin) — the fast path
+    // used when it exists. Reads geometry/textures inline from binary but pulls
+    // behaviors, wall holes, and current animation from `data` (JSON). Returns
+    // false (and spawns nothing) if the sidecar is missing, fails to parse, or
+    // its object count disagrees with `data` — the caller then falls back to
+    // spawnObjects(). `levelPath` is the .eden path (the .edenbin path is
+    // derived from it). Behavior-preserving lift of tryLoadBinaryObjects().
+    static bool spawnObjectsBinary(const std::string& levelPath,
+                                   const LevelData& data,
+                                   const SpawnContext& ctx);
 };
 
 } // namespace eden
