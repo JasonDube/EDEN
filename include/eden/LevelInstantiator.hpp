@@ -1,11 +1,30 @@
 #pragma once
 
+#include <memory>
+#include <vector>
+
 namespace eden {
 
 class Terrain;
 class ChunkManager;
 class VulkanContext;
+class ModelRenderer;
+class SkinnedModelRenderer;
+class PhysicsWorld;
+class SceneObject;
 struct LevelData;
+
+// Dependencies the object-spawning path needs from a host game: the renderers
+// that create GPU models, the physics world to register colliders with (may be
+// null), and the scene-object list to append spawned objects to. Bundled into
+// one struct so the instantiator API stays stable as the loop grows, and so a
+// host wires it up once instead of threading four args through every call.
+struct SpawnContext {
+    ModelRenderer& modelRenderer;
+    SkinnedModelRenderer& skinnedRenderer;
+    PhysicsWorld* physicsWorld;   // nullable — objects without collision still load
+    std::vector<std::unique_ptr<SceneObject>>& sceneObjects;  // output
+};
 
 // LevelInstantiator turns parsed LevelData (from LevelSerializer::load) into a
 // LIVE world: terrain, and — as this module grows — scene objects, behaviors,
@@ -36,6 +55,14 @@ public:
                              Terrain& terrain,
                              ChunkManager& chunkManager,
                              VulkanContext& context);
+
+    // Spawn scene objects from LevelData::objects — the JSON/GLB path used when
+    // no binary object sidecar (.edenbin) is present. Creates GPU models
+    // (primitive, skinned, LIME, GLB), applies transforms/material/collision,
+    // re-bakes frozen transforms, registers Bullet colliders, restores wall
+    // holes and behaviors, then appends each object to ctx.sceneObjects.
+    // Behavior-preserving lift of terrain_editor loadLevel()'s object loop.
+    static void spawnObjects(const LevelData& data, const SpawnContext& ctx);
 };
 
 } // namespace eden
