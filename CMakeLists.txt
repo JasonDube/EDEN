@@ -162,6 +162,7 @@ set(EDEN_SOURCES
     src/Entity/Entity.cpp
     src/Entity/Action.cpp
     src/Entity/ActionSystem.cpp
+    src/Entity/EntityScriptAPI.cpp
     src/Editor/LevelSerializer.cpp
     src/Editor/LevelInstantiator.cpp
     src/Editor/BinaryLevelWriter.cpp

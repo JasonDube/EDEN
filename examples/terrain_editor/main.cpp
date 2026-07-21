@@ -64,6 +64,7 @@
 #include <eden/LevelInstantiator.hpp>
 #include <eden/Audio.hpp>
 #include <eden/PhysicsWorld.hpp>
+#include <eden/EntityScriptAPI.hpp>
 #include <eden/ICharacterController.hpp>
 #include <eden/JoltCharacter.hpp>
 #include <eden/HomebrewCharacter.hpp>
@@ -432,6 +433,11 @@ protected:
         m_zoneSystem = std::make_unique<ZoneSystem>(-2016.0f, -2016.0f, 2016.0f, 2016.0f, 32.0f);
         m_zoneSystem->generateDefaultLayout();
         m_editorUI.setZoneSystem(m_zoneSystem.get());
+
+        // Anchor EntityScriptAPI.o from the static lib: without a reference the
+        // linker drops it and the exe exports no self_* symbols, so dlopen'd
+        // HEIDIC script .so files couldn't resolve their API at load time.
+        eden::setCurrentScriptEntity(nullptr);
 
         initGroveVM();
         loadEditorConfig();
@@ -4981,16 +4987,31 @@ private:
         });
 
         m_editorUI.setGroveFileListCallback([this]() -> std::vector<std::string> {
+            namespace fs = std::filesystem;
             std::vector<std::string> files;
-            if (std::filesystem::exists(m_groveScriptsDir)) {
-                for (const auto& entry : std::filesystem::directory_iterator(m_groveScriptsDir)) {
-                    if (entry.path().extension() == ".grove") {
-                        files.push_back(entry.path().string());
-                    }
-                }
-                std::sort(files.begin(), files.end());
+            // Grove scripts (.grove) from the shared scripts dir.
+            if (fs::exists(m_groveScriptsDir)) {
+                for (const auto& e : fs::directory_iterator(m_groveScriptsDir))
+                    if (e.path().extension() == ".grove") files.push_back(e.path().string());
             }
+            // HEIDIC scripts (.hd) from the current level's scripts folder.
+            if (!m_currentLevelPath.empty()) {
+                fs::path p(m_currentLevelPath);
+                fs::path scriptsDir = p.parent_path() / p.stem() / "scripts";
+                if (fs::exists(scriptsDir))
+                    for (const auto& e : fs::directory_iterator(scriptsDir))
+                        if (e.path().extension() == ".hd") files.push_back(e.path().string());
+            }
+            std::sort(files.begin(), files.end());
             return files;
+        });
+
+        // Compile button (shown for .hd files in the Script Editor): save the
+        // buffer, run the HEIDIC compiler, show progress/errors in the editor's
+        // output box.
+        m_editorUI.setCompileScriptCallback([this](const std::string& source, const std::string& file) {
+            { std::ofstream f(file); if (f) f << source; }   // compile what's on screen
+            compileScriptFile(file);
         });
 
         // Wire up behavior script loading (Load Grove Script button in behavior editor)
@@ -22457,6 +22478,63 @@ private:
 
         // Hand the list to the Models-window dropdown.
         m_editorUI.setEntityFunctions(m_entityFnList);
+    }
+
+    // Run a shell command, capture merged stdout+stderr into `out`, return the
+    // process exit code (0 = success). Used to drive the HEIDIC compiler.
+    int runCapture(const std::string& cmd, std::string& out) {
+        out.clear();
+        std::string full = cmd + " 2>&1";
+        FILE* pipe = popen(full.c_str(), "r");
+        if (!pipe) { out = "failed to launch: " + cmd; return -1; }
+        char buf[512];
+        while (fgets(buf, sizeof(buf), pipe)) out += buf;
+        int rc = pclose(pipe);
+        return (rc == -1) ? -1 : (WIFEXITED(rc) ? WEXITSTATUS(rc) : -1);
+    }
+
+    // Compile one HEIDIC script file, streaming progress/errors into the Script
+    // Editor's output box (the same box grove Run uses). Step 1 (HEIDIC -> C++)
+    // is live; the shared-library build and entity binding land next. Electroscribe
+    // will later drive the same steps with more verbose output.
+    void compileScriptFile(const std::string& scriptPath) {
+        const char* home = getenv("HOME");
+        std::string bin = home ? std::string(home) + "/Desktop/HEIDIC/target/release/heidic_v2" : "";
+        if (bin.empty() || !std::filesystem::exists(bin)) {
+            m_editorUI.setGroveError("HEIDIC compiler not found at:\n  " + bin +
+                "\nBuild it: cd ~/Desktop/HEIDIC && cargo build --release", 0);
+            return;
+        }
+
+        // [1/3] HEIDIC -> C++ (entity-script mode: minimal TU, extern "C" exports)
+        std::string log = "[1/3] Compiling HEIDIC -> C++\n  " + scriptPath + "\n\n";
+        std::string out;
+        int rc = runCapture("\"" + bin + "\" compile \"" + scriptPath + "\" --script", out);
+        log += out;
+        if (rc != 0) {
+            log += "\n[1/3] FAILED - fix the error above and recompile.";
+            m_editorUI.setGroveError(log, 0);
+            return;
+        }
+        log += "\n[1/3] OK\n\n";
+
+        // [2/3] C++ -> shared library. This is where semantic errors the HEIDIC
+        // front-end forwards (bad types, unknown calls) surface as compiler errors.
+        namespace fs = std::filesystem;
+        fs::path cpp = fs::path(scriptPath).replace_extension(".cpp");
+        fs::path so  = fs::path(scriptPath).replace_extension(".so");
+        log += "[2/3] Building shared library (g++)\n  " + so.string() + "\n\n";
+        rc = runCapture("g++ -std=c++17 -O2 -fPIC -shared \"" + cpp.string() +
+                        "\" -o \"" + so.string() + "\"", out);
+        if (!out.empty()) log += out;
+        if (rc != 0) {
+            log += "\n[2/3] FAILED - fix the error above and recompile.";
+            m_editorUI.setGroveError(log, 0);
+            return;
+        }
+        log += "[2/3] OK\n\n[3/3] Load + bind to entities ... (not wired yet)\n\nScripts compiled.";
+        m_editorUI.setGroveOutput(log);
+        refreshEntityFunctionList();  // compile confirms the @entity symbol list
     }
 
     void saveLevel(const std::string& filepath) {

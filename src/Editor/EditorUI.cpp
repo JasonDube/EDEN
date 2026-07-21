@@ -201,7 +201,7 @@ void EditorUI::renderMenuBar() {
             ImGui::MenuItem("Models", nullptr, &m_showModels);
             ImGui::MenuItem("AI Nodes", nullptr, &m_showAINodes);
             ImGui::MenuItem("Tech Tree", nullptr, &m_showTechTree);
-            ImGui::MenuItem("Grove Script Editor", nullptr, &m_showGroveEditor);
+            ImGui::MenuItem("Script Editor", nullptr, &m_showGroveEditor);
             ImGui::MenuItem("Zones", nullptr, &m_showZones);
             ImGui::MenuItem("AI Mind Map", nullptr, &m_showMindMap);
             ImGui::MenuItem("Building Textures", nullptr, &m_showBuildingTextures);
@@ -3213,17 +3213,26 @@ void EditorUI::setGroveSource(const std::string& source) {
 
 void EditorUI::renderGroveEditor() {
     ImGui::SetNextWindowSize(ImVec2(600, 500), ImGuiCond_FirstUseEver);
-    if (!ImGui::Begin("Grove Script Editor", &m_showGroveEditor)) {
+    if (!ImGui::Begin("Script Editor", &m_showGroveEditor)) {
         ImGui::End();
         return;
     }
+
+    // Language is decided by the current file's extension: .hd = HEIDIC (compiled),
+    // anything else = Grove (interpreted). Drives whether we show Compile vs Run.
+    bool isHeidic = m_groveCurrentFile.size() >= 3 &&
+                    m_groveCurrentFile.compare(m_groveCurrentFile.size() - 3, 3, ".hd") == 0;
 
     // Header: logo + title
     if (m_groveLogoDescriptor) {
         ImGui::Image((ImTextureID)m_groveLogoDescriptor, ImVec2(32, 32));
         ImGui::SameLine();
     }
-    ImGui::Text("Grove Scripting Language");
+    if (isHeidic) {
+        ImGui::TextColored(ImVec4(0.6f, 0.8f, 1.0f, 1.0f), "HEIDIC (compiled)");
+    } else {
+        ImGui::Text("Grove Scripting Language (interpreted)");
+    }
     ImGui::Separator();
 
     // File toolbar
@@ -3251,9 +3260,18 @@ void EditorUI::renderGroveEditor() {
         if (m_onGroveSaveAs) m_onGroveSaveAs(std::string(m_groveSource));
     }
     ImGui::SameLine(0, 20);
-    if (ImGui::Button("Run")) {
-        if (m_onGroveRun) {
-            m_onGroveRun(std::string(m_groveSource));
+    if (isHeidic) {
+        // Compile the open .hd via the HEIDIC compiler; output lands below.
+        if (ImGui::ArrowButton("##compile", ImGuiDir_Right)) {
+            if (m_onCompileScript) m_onCompileScript(std::string(m_groveSource), m_groveCurrentFile);
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Compile")) {
+            if (m_onCompileScript) m_onCompileScript(std::string(m_groveSource), m_groveCurrentFile);
+        }
+    } else {
+        if (ImGui::Button("Run")) {
+            if (m_onGroveRun) m_onGroveRun(std::string(m_groveSource));
         }
     }
     ImGui::SameLine();

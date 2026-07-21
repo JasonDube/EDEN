@@ -74,6 +74,9 @@ using SaveBotScriptCallback = std::function<void(SceneObject* target, const std:
 
 // Grove script editor callbacks
 using GroveRunCallback = std::function<void(const std::string& source)>;
+// Compile the currently-open HEIDIC script (.hd): save `source` to `file`, run
+// the HEIDIC compiler, and report progress/errors back via setGroveOutput/Error.
+using CompileScriptCallback = std::function<void(const std::string& source, const std::string& file)>;
 using GroveOpenCallback = std::function<void()>;
 using GroveSaveCallback = std::function<void(const std::string& source, const std::string& currentPath)>;
 using GroveSaveAsCallback = std::function<void(const std::string& source)>;
@@ -333,6 +336,7 @@ public:
 
     // Grove script editor
     void setGroveRunCallback(GroveRunCallback cb) { m_onGroveRun = std::move(cb); }
+    void setCompileScriptCallback(CompileScriptCallback cb) { m_onCompileScript = std::move(cb); }
     void setGroveOpenCallback(GroveOpenCallback cb) { m_onGroveOpen = std::move(cb); }
     void setGroveSaveCallback(GroveSaveCallback cb) { m_onGroveSave = std::move(cb); }
     void setGroveSaveAsCallback(GroveSaveAsCallback cb) { m_onGroveSaveAs = std::move(cb); }
@@ -694,6 +698,7 @@ private:
     LoadBotScriptCallback m_onLoadBotScript;
     SaveBotScriptCallback m_onSaveBotScript;
     GroveRunCallback m_onGroveRun;
+    CompileScriptCallback m_onCompileScript;
     GroveOpenCallback m_onGroveOpen;
     GroveSaveCallback m_onGroveSave;
     GroveSaveAsCallback m_onGroveSaveAs;

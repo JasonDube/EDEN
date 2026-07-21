@@ -16,6 +16,10 @@ set_target_properties(grove PROPERTIES
     IMPORTED_LOCATION ${CMAKE_SOURCE_DIR}/modules/eden_script/grove/target/release/libgrove.a
 )
 target_link_libraries(terrain_editor PRIVATE grove dl m)
+
+# Export the executable's symbols (self_* entity-script API) so dlopen'd HEIDIC
+# script .so files resolve them at load time.
+set_target_properties(terrain_editor PROPERTIES ENABLE_EXPORTS ON)
 target_compile_definitions(terrain_editor PRIVATE CMAKE_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
 
 # Need access to internal headers for TerrainPipeline
