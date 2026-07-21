@@ -165,6 +165,7 @@ set(EDEN_SOURCES
     src/Entity/EntityScriptAPI.cpp
     src/Editor/LevelSerializer.cpp
     src/Editor/LevelInstantiator.cpp
+    src/Editor/ScriptLibrary.cpp
     src/Editor/BinaryLevelWriter.cpp
     src/Editor/BinaryLevelReader.cpp
     src/Editor/PrimitiveMeshBuilder.cpp

@@ -65,6 +65,7 @@
 #include <eden/Audio.hpp>
 #include <eden/PhysicsWorld.hpp>
 #include <eden/EntityScriptAPI.hpp>
+#include <eden/ScriptLibrary.hpp>
 #include <eden/ICharacterController.hpp>
 #include <eden/JoltCharacter.hpp>
 #include <eden/HomebrewCharacter.hpp>
@@ -1699,6 +1700,14 @@ protected:
 
         m_totalTime += deltaTime;
         m_actionSystem.update(deltaTime, m_camera.getPosition());
+
+        // Run compiled @entity per-tick scripts on their bound objects (play
+        // mode only — in edit mode objects stay put for authoring).
+        if (m_isPlayMode) {
+            for (auto& obj : m_sceneObjects) {
+                if (obj && obj->hasTickScript()) obj->runTickScript(deltaTime);
+            }
+        }
         m_dialogueRenderer.update(deltaTime);
         updateChatLog(deltaTime);
 
@@ -22480,6 +22489,48 @@ private:
         m_editorUI.setEntityFunctions(m_entityFnList);
     }
 
+    // [3/3] Load the compiled level-script library and bind each object's
+    // assigned @entity function as its per-tick script. Safe to call any time:
+    // it unbinds everything first (old function pointers dangle after a library
+    // reload), then rebinds from the fresh handle. Returns a human-readable
+    // summary for the Script Editor's output box / console.
+    std::string bindEntityScripts() {
+        // 1) Unbind ALL tick scripts before touching the library.
+        for (auto& obj : m_sceneObjects) if (obj) obj->clearTickScript();
+
+        if (m_currentLevelScriptPath.empty()) return "no level script";
+        namespace fs = std::filesystem;
+        fs::path so = fs::path(m_currentLevelScriptPath).replace_extension(".so");
+        if (!fs::exists(so)) return "no compiled library (" + so.filename().string() + ") — Compile first";
+
+        // 2) (Re)load the .so.
+        std::string err;
+        if (!m_scriptLibrary.load(so.string(), err)) return "load failed: " + err;
+
+        // 3) Bind each object's assigned function.
+        int bound = 0; std::string missing;
+        for (auto& obj : m_sceneObjects) {
+            if (!obj || obj->getEntityScript().empty()) continue;
+            auto fn = m_scriptLibrary.resolveTick(obj->getEntityScript());
+            if (!fn) {
+                missing += (missing.empty() ? "" : ", ") + obj->getEntityScript();
+                continue;
+            }
+            // The wrapper points the self_* API at THIS object for the duration
+            // of the call — that's what makes "self" mean the bound object.
+            obj->setTickScript([fn](SceneObject& self, float dt) {
+                eden::setCurrentScriptTransform(&self.getTransform());
+                fn(dt);
+                eden::setCurrentScriptTransform(nullptr);
+            });
+            bound++;
+        }
+        std::string msg = "bound " + std::to_string(bound) + " object(s)";
+        if (!missing.empty()) msg += "; missing from library: " + missing;
+        std::cout << "[Scripts] " << msg << std::endl;
+        return msg;
+    }
+
     // Run a shell command, capture merged stdout+stderr into `out`, return the
     // process exit code (0 = success). Used to drive the HEIDIC compiler.
     int runCapture(const std::string& cmd, std::string& out) {
@@ -22532,9 +22583,14 @@ private:
             m_editorUI.setGroveError(log, 0);
             return;
         }
-        log += "[2/3] OK\n\n[3/3] Load + bind to entities ... (not wired yet)\n\nScripts compiled.";
-        m_editorUI.setGroveOutput(log);
+        log += "[2/3] OK\n\n";
+
+        // [3/3] dlopen the fresh .so and bind assigned @entity functions to
+        // their objects (unbinds everything first — see bindEntityScripts).
         refreshEntityFunctionList();  // compile confirms the @entity symbol list
+        log += "[3/3] Loading library + binding entities\n  " + bindEntityScripts() + "\n";
+        log += "\nScripts compiled. Enter play mode (F5) to see them run.";
+        m_editorUI.setGroveOutput(log);
     }
 
     void saveLevel(const std::string& filepath) {
@@ -23045,8 +23101,11 @@ private:
         m_currentLevelPath = filepath;
         std::cout << "Level loaded from: " << filepath << std::endl;
 
-        // Populate the Models-window @entity dropdown for this level's script.
+        // Populate the Models-window @entity dropdown for this level's script,
+        // and bind any previously-compiled script library to the loaded objects
+        // (no-op with a console note if the level has no compiled .so yet).
         refreshEntityFunctionList();
+        std::cout << "[Scripts] " << bindEntityScripts() << std::endl;
 
         // Load expression textures for sentient NPCs
         for (auto& obj : m_sceneObjects) {
@@ -29661,6 +29720,7 @@ private:
     std::string m_currentLevelPath;
     std::vector<std::string> m_entityFnList;   // @entity fns from the level script (dropdown)
     std::string m_currentLevelScriptPath;      // path of that level script (.hd)
+    eden::ScriptLibrary m_scriptLibrary;       // dlopen'd compiled level script (.so)
     std::string m_pendingDoorSpawn;  // Door ID to spawn at after level load
     std::unordered_map<std::string, LevelData> m_levelCache;  // Preloaded adjacent levels
 

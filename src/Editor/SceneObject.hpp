@@ -444,6 +444,14 @@ public:
     void setEntityScript(const std::string& fn) { m_entityScript = fn; }
     const std::string& getEntityScript() const { return m_entityScript; }
 
+    // Bound per-tick script (resolved from the compiled script library). Runs
+    // every frame in play mode. MUST be cleared before the script library is
+    // reloaded — the wrapped function pointer dangles after dlclose.
+    void setTickScript(std::function<void(SceneObject&, float)> fn) { m_tickScript = std::move(fn); }
+    bool hasTickScript() const { return static_cast<bool>(m_tickScript); }
+    void runTickScript(float dt) { if (m_tickScript) m_tickScript(*this, dt); }
+    void clearTickScript() { m_tickScript = nullptr; }
+
     // Trader script link (when "trader" script is active)
     void setTraderId(uint32_t id) { m_traderId = id; }
     uint32_t getTraderId() const { return m_traderId; }
@@ -840,6 +848,7 @@ private:
     uint32_t m_traderId = 0;  // Link to TraderAI when "trader" script is active
     std::string m_groveScriptPath;  // .grove file for AlgoBot execution
     std::string m_entityScript;     // assigned @entity HEIDIC function name
+    std::function<void(SceneObject&, float)> m_tickScript;  // bound compiled script
 
     // Behaviors
     std::vector<Behavior> m_behaviors;
