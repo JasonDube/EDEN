@@ -61,6 +61,7 @@
 #include <eden/Terrain.hpp>
 #include <eden/ActionSystem.hpp>
 #include <eden/LevelSerializer.hpp>
+#include <eden/LevelInstantiator.hpp>
 #include <eden/Audio.hpp>
 #include <eden/PhysicsWorld.hpp>
 #include <eden/ICharacterController.hpp>
@@ -22849,55 +22850,11 @@ private:
             }
         }
 
-        // Restore the terrain's world scale + bounds so the level reloads at the
-        // size it was authored — instead of dropping its height pixels into
-        // whatever (possibly giant default) terrain is currently active. Only
-        // levels saved with this field reconfigure; older levels keep old behavior.
-        if (levelData.hasTerrainConfig) {
-            TerrainConfig tcfg = m_terrain.getConfig();
-            tcfg.tileSize        = levelData.terrainTileSize;
-            tcfg.chunkResolution = levelData.terrainChunkResolution;
-            tcfg.heightScale     = levelData.terrainHeightScale;
-            tcfg.useFixedBounds  = levelData.terrainUseFixedBounds;
-            tcfg.minChunk        = levelData.terrainMinChunk;
-            tcfg.maxChunk        = levelData.terrainMaxChunk;
-            tcfg.wrapWorld       = levelData.terrainWrapWorld;
-            tcfg.stretchTexToBounds = levelData.terrainStretchTex;
-            getContext().waitIdle();
-            m_chunkManager->releaseAllChunkBuffers(m_terrain);
-            m_terrain.reconfigure(tcfg);
-            m_chunkManager->preloadAllChunks(m_terrain, nullptr);
-        } else if (!levelData.chunks.empty()) {
-            // Old levels (saved before hasTerrainConfig existed) carry no bounds.
-            // Derive them from the chunk coords in the file, otherwise loading an
-            // archive while the tiny worktable terrain (1x1 chunk) is active
-            // applies 1 of N chunks and the level comes up as a postage stamp.
-            glm::ivec2 mn(INT_MAX), mx(INT_MIN);
-            for (const auto& c : levelData.chunks) {
-                mn = glm::min(mn, glm::ivec2(c.coord));
-                mx = glm::max(mx, glm::ivec2(c.coord));
-            }
-            const TerrainConfig& cur = m_terrain.getConfig();
-            bool covers = cur.useFixedBounds &&
-                          cur.minChunk.x <= mn.x && cur.minChunk.y <= mn.y &&
-                          cur.maxChunk.x >= mx.x && cur.maxChunk.y >= mx.y;
-            if (!covers) {
-                TerrainConfig tcfg = cur;
-                tcfg.useFixedBounds = true;
-                tcfg.minChunk = mn;
-                tcfg.maxChunk = mx;
-                // Classic full-world levels (32x32 at -16..15) were wrap-worlds.
-                tcfg.wrapWorld = (mn == glm::ivec2(-16, -16) && mx == glm::ivec2(15, 15));
-                std::cout << "[LevelSerializer] Old level without terrain config — derived bounds ("
-                          << mn.x << "," << mn.y << ")..(" << mx.x << "," << mx.y << ")" << std::endl;
-                getContext().waitIdle();
-                m_chunkManager->releaseAllChunkBuffers(m_terrain);
-                m_terrain.reconfigure(tcfg);
-                m_chunkManager->preloadAllChunks(m_terrain, nullptr);
-            }
-        }
-
-        LevelSerializer::applyToTerrain(levelData, m_terrain);
+        // Configure the terrain scale/bounds for this level (handling both
+        // config-bearing levels and old archives) and apply its height/splat
+        // data. Extracted to the shared engine so every game instantiates
+        // terrain the same way — see LevelInstantiator / docs/EDEN_FORMAT.md §4.
+        LevelInstantiator::applyTerrain(levelData, m_terrain, *m_chunkManager, getContext());
 
         // Cache terrain data for re-apply after chunk creation (needed for startup
         // when chunks don't exist yet at load time)

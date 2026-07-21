@@ -163,6 +163,7 @@ set(EDEN_SOURCES
     src/Entity/Action.cpp
     src/Entity/ActionSystem.cpp
     src/Editor/LevelSerializer.cpp
+    src/Editor/LevelInstantiator.cpp
     src/Editor/BinaryLevelWriter.cpp
     src/Editor/BinaryLevelReader.cpp
     src/Editor/PrimitiveMeshBuilder.cpp
