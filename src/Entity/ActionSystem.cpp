@@ -170,6 +170,11 @@ void ActionSystem::update(float deltaTime, const glm::vec3& playerPosition) {
                 player.tick(deltaTime, *entity, *this);
             }
         }
+
+        // Run the entity's @entity per-tick script (if one is bound). This is the
+        // code counterpart to data-driven behaviors above — arbitrary scripted
+        // logic that runs every frame for this specific entity.
+        entity->runTickScript(deltaTime);
     }
 
     // Cleanup destroyed entities

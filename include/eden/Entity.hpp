@@ -6,10 +6,21 @@
 #include <vector>
 #include <unordered_map>
 #include <memory>
+#include <functional>
 #include "Action.hpp"
 #include "Transform.hpp"
 
 namespace eden {
+
+class Entity;
+
+// An @entity function bound to a specific entity. The tick script is the
+// per-frame body (the dog's "while 1 wander"); event scripts fire on named
+// events (the dog's "if petted -> bite()"). The engine only ever sees a
+// std::function, so the body can be HEIDIC-compiled today or Grove-interpreted
+// later — same binding either way.
+using EntityScriptFn = std::function<void(Entity&, float /*dt*/)>;
+using EntityEventFn  = std::function<void(Entity&)>;
 
 // Entity flags
 enum class EntityFlags : uint32_t {
@@ -67,6 +78,24 @@ public:
     // Behavior players (runtime state)
     std::vector<BehaviorPlayer>& getBehaviorPlayers() { return m_behaviorPlayers; }
 
+    // --- Entity script (@entity function) ---
+    // Per-tick body: runs every frame while the entity is ACTIVE.
+    void setTickScript(EntityScriptFn fn) { m_tickScript = std::move(fn); }
+    bool hasTickScript() const { return static_cast<bool>(m_tickScript); }
+    void runTickScript(float dt) { if (m_tickScript) m_tickScript(*this, dt); }
+
+    // Event handlers: fired by name (e.g. "interact"/"petted", "damaged", signals).
+    void setEventScript(const std::string& event, EntityEventFn fn) { m_eventScripts[event] = std::move(fn); }
+    bool hasEventScript(const std::string& event) const { return m_eventScripts.count(event) > 0; }
+    // Fire an event; returns true if a handler ran.
+    bool fireEvent(const std::string& event) {
+        auto it = m_eventScripts.find(event);
+        if (it == m_eventScripts.end() || !it->second) return false;
+        it->second(*this);
+        return true;
+    }
+    void clearScripts() { m_tickScript = nullptr; m_eventScripts.clear(); }
+
     // Properties (generic key-value storage for game logic)
     void setProperty(const std::string& key, float value) { m_properties[key] = value; }
     float getProperty(const std::string& key, float defaultVal = 0.0f) const;
@@ -91,6 +120,9 @@ private:
 
     std::vector<Behavior> m_behaviors;
     std::vector<BehaviorPlayer> m_behaviorPlayers;
+
+    EntityScriptFn m_tickScript;                                  // @entity per-tick body
+    std::unordered_map<std::string, EntityEventFn> m_eventScripts; // named event handlers
 
     std::unordered_map<std::string, float> m_properties;
     std::vector<std::string> m_tags;
