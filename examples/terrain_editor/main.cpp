@@ -409,15 +409,12 @@ protected:
         loadBuildingTextures();
         m_textureBrowser.init(getContext());
         m_imageReferences.init(getContext());
-        // Only load EDEN OS hotbar inventory if loading the original OS background level
-        {
-            std::string defaultLevel = getDefaultLevelPath();
-            const char* home = getenv("HOME");
-            std::string xenk2Path = home ? std::string(home) + "/.eden/default_level/xenk2.eden" : "";
-            if (defaultLevel == xenk2Path) {
-                loadInventory();
-            }
-        }
+        // TEMP RESTORE (akelba plumbing): load the global hotbar inventory for ALL
+        // levels, not just the EDEN OS background level. The hotbar holds the
+        // placeable items (pipes, machines) you drop with number keys / RMB. This
+        // is scaffolding — the whole build/place flow moves out to HEIDIC-scripted
+        // levels later; for now akelba needs its inventory back.
+        loadInventory();
         syncExcludedPaths();
 
         // Create scripts directory
@@ -2086,11 +2083,17 @@ protected:
     // Target reticle at the aim/cursor point: screen center while flying (mouse
     // captured), or the live mouse position when the cursor is freed (Left-Alt).
     void renderReticle() {
-        if (!m_isEdenOSLevel) return;
+        // The aim reticle is ALWAYS visible in play mode (this is only called from
+        // the play-mode UI pass). It sits at the freed cursor when the cursor is
+        // visible, otherwise at screen center — and in wire mode (T) it stays at
+        // screen center because wiring selects the CP nearest the screen center.
+        // (The old EDEN-OS-only gate was a leftover from the RTS-camera experiments.)
         float W = static_cast<float>(getWindow().getWidth());
         float H = static_cast<float>(getWindow().getHeight());
         ImVec2 c;
-        if (m_playModeCursorVisible) {
+        // Wire mode selects the CP nearest SCREEN CENTER, so the reticle must sit
+        // at center there regardless of cursor mode; otherwise follow a freed cursor.
+        if (m_playModeCursorVisible && !m_showCPsInGame) {
             glm::vec2 mp = Input::getMousePosition();
             c = ImVec2(mp.x, mp.y);
         } else {
@@ -9943,7 +9946,7 @@ private:
             int rmbqSlot = -1;
             bool rmbqForceCtrl = false;
             bool altHeldForRMB = Input::isKeyDown(Input::KEY_LEFT_ALT) || Input::isKeyDown(Input::KEY_RIGHT_ALT);
-            if (Input::isMouseButtonPressed(Input::MOUSE_RIGHT) && !altHeldForRMB) {
+            if (Input::isMouseButtonPressed(Input::MOUSE_RIGHT) && !altHeldForRMB && !m_showCPsInGame) {
                 rmbqSlot = m_activeToolbarSlot;
                 rmbqForceCtrl = true;  // RMB = surface placement
             } else if (Input::isKeyPressed(Input::KEY_Q)) {
@@ -10945,6 +10948,80 @@ private:
                     m_wiringActive = false;
                     m_wireFromObj = nullptr;
                     m_wireFromCP.clear();
+                }
+            }
+        }
+
+        // Right-click in T mode: remove every wire on the CP nearest the crosshair.
+        // (RMB's normal play-mode jobs — salvage placement, navigation/shoot — are
+        //  paused while wiring; see their !m_showCPsInGame guards.)
+        if (m_isPlayMode && m_showCPsInGame && Input::isMouseButtonPressed(Input::MOUSE_RIGHT)
+            && !ImGui::GetIO().WantCaptureMouse) {
+            glm::vec3 camPos = m_camera.getPosition();
+            float windowW = static_cast<float>(getWindow().getWidth());
+            float windowH = static_cast<float>(getWindow().getHeight());
+            float aspect = windowW / windowH;
+            glm::mat4 vp = m_camera.getProjectionMatrix(aspect, 0.1f, 5000.0f) * m_camera.getViewMatrix();
+
+            // Same crosshair-nearest-CP search as the left-click connect path.
+            SceneObject* bestObj = nullptr;
+            std::string bestCPName;
+            float bestScreenDist = 30.0f;  // Max pixel distance from crosshair center
+            for (auto& obj : m_sceneObjects) {
+                if (!obj || !obj->isVisible() || !obj->hasControlPoints() || !obj->hasMeshData()) continue;
+                if (glm::length(obj->getTransform().getPosition() - camPos) > 5.0f) continue;
+                const auto& cps = obj->getControlPoints();
+                const auto& verts = obj->getVertices();
+                glm::mat4 modelMat = obj->getTransform().getMatrix();
+                for (const auto& cp : cps) {
+                    if (cp.vertexIndex >= verts.size()) continue;
+                    glm::vec3 worldPos = glm::vec3(modelMat * glm::vec4(verts[cp.vertexIndex].position, 1.0f));
+                    glm::vec4 clip = vp * glm::vec4(worldPos, 1.0f);
+                    if (clip.w <= 0.0f) continue;
+                    glm::vec3 ndc = glm::vec3(clip) / clip.w;
+                    float sx = (ndc.x + 1.0f) * 0.5f * windowW;
+                    float sy = (1.0f - ndc.y) * 0.5f * windowH;
+                    float dx = sx - windowW * 0.5f, dy = sy - windowH * 0.5f;
+                    float screenDist = std::sqrt(dx * dx + dy * dy);
+                    if (screenDist < bestScreenDist) {
+                        bestScreenDist = screenDist;
+                        bestObj = obj.get();
+                        bestCPName = cp.name;
+                    }
+                }
+            }
+
+            if (bestObj && !bestCPName.empty()) {
+                auto touchesCP = [&](const CPWire& w) {
+                    return (w.fromObj == bestObj && w.fromCP == bestCPName) ||
+                           (w.toObj   == bestObj && w.toCP   == bestCPName);
+                };
+                // Free GPU meshes for the wires we're about to remove.
+                for (auto& w : m_wires) {
+                    if (touchesCP(w) && w.meshHandle != 0 && m_modelRenderer) {
+                        m_modelRenderer->destroyModel(w.meshHandle);
+                        w.meshHandle = 0;
+                    }
+                }
+                size_t before = m_wires.size();
+                m_wires.erase(std::remove_if(m_wires.begin(), m_wires.end(), touchesCP), m_wires.end());
+                int removed = static_cast<int>(before - m_wires.size());
+                if (removed > 0) {
+                    m_wiresMeshDirty = true;
+                    // Cancel any in-progress connect that started from this CP.
+                    if (m_wireFromObj == bestObj && m_wireFromCP == bestCPName) {
+                        m_wiringActive = false;
+                        m_wireFromObj = nullptr;
+                        m_wireFromCP.clear();
+                    }
+                    m_screenMessage = "Removed " + std::to_string(removed) +
+                                      (removed == 1 ? " wire from " : " wires from ") + bestCPName;
+                    m_screenMessageTimer = 3.0f;
+                    std::cout << "[Wire] Removed " << removed << " wire(s) on "
+                              << bestObj->getName() << "." << bestCPName << std::endl;
+                } else {
+                    m_screenMessage = "No wires on " + bestCPName;
+                    m_screenMessageTimer = 2.0f;
                 }
             }
         }
@@ -13138,7 +13215,9 @@ private:
                 m_fsDragActive = false;
             }
             // Right-click: navigation (doors, folders, silo entry, void teleport)
+            // Suppressed in wire mode (T), where RMB removes wires instead.
             if (Input::isMouseButtonPressed(Input::MOUSE_RIGHT) && m_shootCooldown <= 0.0f &&
+                !m_showCPsInGame &&
                 !(Input::isKeyDown(Input::KEY_LEFT_ALT) || Input::isKeyDown(Input::KEY_RIGHT_ALT))) {
                 glm::vec3 rayO, rayD;
                 doCrosshairRay(rayO, rayD);
@@ -20035,7 +20114,7 @@ private:
             m_editorUI.renderBuildingTextureWindow();
         }
         if (m_showServerManager) m_serverManager.renderImGui(&m_showServerManager);
-        // renderToolbarUI();  // Hotbar disabled — not used in this game
+        renderToolbarUI();  // TEMP RESTORE (akelba plumbing): hotbar slot bar back on
         updateUnitSelection();
 
         // SAM2 segmentation progress overlay
@@ -22500,288 +22579,8 @@ private:
 
     // Try to load objects from binary level file
     // Returns true and populates m_sceneObjects if successful
-    bool tryLoadBinaryObjects(const std::string& filepath, const LevelData& levelData) {
-        std::string binPath = BinaryLevelReader::getBinaryPath(filepath);
-
-        if (!BinaryLevelReader::exists(binPath)) {
-            return false;
-        }
-
-        BinaryLevelReader reader;
-        BinaryLevelData binData = reader.load(binPath);
-
-        if (!binData.success) {
-            std::cerr << "Binary level load failed: " << binData.error << std::endl;
-            return false;
-        }
-
-        // Verify object counts match
-        if (binData.objects.size() != levelData.objects.size()) {
-            std::cerr << "Binary/JSON object count mismatch, falling back to JSON" << std::endl;
-            return false;
-        }
-
-        std::cout << "Loading from binary format (" << binPath << ")" << std::endl;
-
-        // Load each object from binary data
-        for (size_t i = 0; i < binData.objects.size(); ++i) {
-            const auto& binObj = binData.objects[i];
-            const auto& jsonObj = levelData.objects[i];
-
-            std::unique_ptr<SceneObject> obj;
-
-            // Skinned models still need GLB loading
-            if (binObj.isSkinned) {
-                auto result = SkinnedGLBLoader::load(binObj.modelPath);
-                if (!result.success || result.meshes.empty()) {
-                    std::cerr << "Failed to load skinned model: " << binObj.modelPath << std::endl;
-                    continue;
-                }
-
-                const auto& mesh = result.meshes[0];
-                uint32_t handle = m_skinnedModelRenderer->createModel(
-                    mesh.vertices,
-                    mesh.indices,
-                    std::make_unique<Skeleton>(*result.skeleton),
-                    result.animations,
-                    mesh.hasTexture ? mesh.textureData.data() : nullptr,
-                    mesh.textureWidth,
-                    mesh.textureHeight
-                );
-
-                obj = std::make_unique<SceneObject>(mesh.name);
-                obj->setSkinnedModelHandle(handle);
-                obj->setVertexCount(static_cast<uint32_t>(mesh.vertices.size()));
-
-                auto animNames = m_skinnedModelRenderer->getAnimationNames(handle);
-                obj->setAnimationNames(animNames);
-                if (!jsonObj.currentAnimation.empty()) {
-                    m_skinnedModelRenderer->playAnimation(handle, jsonObj.currentAnimation, true);
-                    obj->setCurrentAnimation(jsonObj.currentAnimation);
-                } else if (!animNames.empty()) {
-                    m_skinnedModelRenderer->playAnimation(handle, animNames[0], true);
-                    obj->setCurrentAnimation(animNames[0]);
-                }
-            }
-            // Objects with mesh data in binary
-            else if (binObj.meshId >= 0 && binObj.meshId < static_cast<int32_t>(binData.meshes.size())) {
-                const auto& meshData = binData.meshes[binObj.meshId];
-
-                obj = std::make_unique<SceneObject>(binObj.name);
-
-                // Upload mesh to GPU with optional texture
-                const unsigned char* texData = nullptr;
-                int texW = 0, texH = 0;
-                if (meshData.textureId >= 0 && meshData.textureId < static_cast<int32_t>(binData.textures.size())) {
-                    const auto& tex = binData.textures[meshData.textureId];
-                    texData = tex.pixels.data();
-                    texW = tex.width;
-                    texH = tex.height;
-                }
-
-                uint32_t handle = m_modelRenderer->createModel(
-                    meshData.vertices,
-                    meshData.indices,
-                    texData, texW, texH
-                );
-
-                obj->setBufferHandle(handle);
-                obj->setIndexCount(static_cast<uint32_t>(meshData.indices.size()));
-                obj->setVertexCount(static_cast<uint32_t>(meshData.vertices.size()));
-                obj->setLocalBounds(meshData.bounds);
-
-                // Store mesh data for raycasting
-                obj->setMeshData(meshData.vertices, meshData.indices);
-
-                // Store texture data for painting
-                if (texData && texW > 0 && texH > 0) {
-                    const auto& tex = binData.textures[meshData.textureId];
-                    obj->setTextureData(tex.pixels, texW, texH);
-                } else {
-                    // Create default white texture
-                    std::vector<unsigned char> defaultTex(256 * 256 * 4, 255);
-                    obj->setTextureData(defaultTex, 256, 256);
-                }
-            }
-            // Fallback: no mesh in binary, try loading from model path or generate primitive
-            else if (binObj.isPrimitive) {
-                PrimitiveType primType = static_cast<PrimitiveType>(binObj.primitiveType);
-                PrimitiveMeshBuilder::MeshData meshData;
-
-                switch (primType) {
-                    case PrimitiveType::Cube:
-                        meshData = PrimitiveMeshBuilder::createCube(binObj.primitiveSize, binObj.primitiveColor);
-                        break;
-                    case PrimitiveType::Cylinder:
-                        meshData = PrimitiveMeshBuilder::createCylinder(
-                            binObj.primitiveRadius, binObj.primitiveHeight,
-                            binObj.primitiveSegments, binObj.primitiveColor);
-                        break;
-                    case PrimitiveType::SpawnMarker:
-                        meshData = PrimitiveMeshBuilder::createSpawnMarker(binObj.primitiveSize);
-                        break;
-                    case PrimitiveType::Wedge:
-                        meshData = PrimitiveMeshBuilder::createWedge(binObj.primitiveSize, binObj.slopeRatio, binObj.primitiveColor);
-                        break;
-                    case PrimitiveType::Door:
-                        meshData = PrimitiveMeshBuilder::createCube(binObj.primitiveSize, binObj.primitiveColor);
-                        break;
-                    case PrimitiveType::NPC:
-                        meshData = PrimitiveMeshBuilder::createCube(binObj.primitiveSize, binObj.primitiveColor);
-                        break;
-                    default:
-                        std::cerr << "Unknown primitive type in binary: " << binObj.primitiveType << std::endl;
-                        continue;
-                }
-
-                obj = std::make_unique<SceneObject>(binObj.name);
-                uint32_t handle = m_modelRenderer->createModel(meshData.vertices, meshData.indices);
-                obj->setBufferHandle(handle);
-                obj->setIndexCount(static_cast<uint32_t>(meshData.indices.size()));
-                obj->setVertexCount(static_cast<uint32_t>(meshData.vertices.size()));
-                obj->setLocalBounds(meshData.bounds);
-                obj->setMeshData(meshData.vertices, meshData.indices);
-            }
-            else if (!binObj.modelPath.empty()) {
-                // Load from file as fallback (supports both GLB and LIME)
-                bool isLime = binObj.modelPath.size() >= 5 &&
-                    binObj.modelPath.substr(binObj.modelPath.size() - 5) == ".lime";
-                if (isLime) {
-                    auto result = LimeLoader::load(binObj.modelPath);
-                    if (!result.success) {
-                        std::cerr << "Failed to load LIME model: " << binObj.modelPath << std::endl;
-                        continue;
-                    }
-                    obj = LimeLoader::createSceneObject(result.mesh, *m_modelRenderer);
-                    if (!obj) continue;
-                } else {
-                    auto result = GLBLoader::load(binObj.modelPath);
-                    if (!result.success || result.meshes.empty()) {
-                        std::cerr << "Failed to load model: " << binObj.modelPath << std::endl;
-                        continue;
-                    }
-                    const auto& mesh = result.meshes[0];
-                    obj = GLBLoader::createSceneObject(mesh, *m_modelRenderer);
-                    if (!obj) continue;
-                }
-            }
-            else {
-                continue;  // Skip invalid objects
-            }
-
-            // Apply properties from binary
-            obj->setModelPath(binObj.modelPath);
-
-            // Restore ports and CPs from .lime file (binary cache doesn't store these)
-            if (binObj.modelPath.size() >= 5 &&
-                binObj.modelPath.substr(binObj.modelPath.size() - 5) == ".lime") {
-                auto limeResult = LimeLoader::load(binObj.modelPath);
-                if (limeResult.success) {
-                    if (!limeResult.mesh.controlPoints.empty()) {
-                        std::vector<SceneObject::StoredControlPoint> cps;
-                        for (const auto& cp : limeResult.mesh.controlPoints)
-                            cps.push_back({cp.vertexIndex, cp.name});
-                        obj->setControlPoints(cps);
-                    }
-                    if (!limeResult.mesh.ports.empty()) {
-                        std::vector<SceneObject::StoredPort> ports;
-                        for (const auto& p : limeResult.mesh.ports)
-                            ports.push_back({p.name, p.position, p.forward, p.up});
-                        obj->setPorts(ports);
-                    }
-                    if (!limeResult.mesh.metadata.empty()) {
-                        obj->setModelMetadata(limeResult.mesh.metadata);
-                    }
-                }
-            }
-
-            obj->getTransform().setPosition(binObj.position);
-            obj->setEulerRotation(binObj.rotation);
-            obj->getTransform().setScale(binObj.scale);
-            obj->setHueShift(binObj.hueShift);
-            obj->setSaturation(binObj.saturation);
-            obj->setBrightness(binObj.brightness);
-            obj->setVisible(binObj.visible);
-            obj->setAABBCollision(binObj.aabbCollision);
-            obj->setPolygonCollision(binObj.polygonCollision);
-            obj->setBulletCollisionType(static_cast<BulletCollisionType>(binObj.bulletCollisionType));
-            obj->setKinematicPlatform(binObj.kinematicPlatform);
-            obj->setBeingType(static_cast<BeingType>(binObj.beingType));
-            obj->setDailySchedule(binObj.dailySchedule);
-            obj->setPatrolSpeed(binObj.patrolSpeed);
-            if (!binObj.description.empty()) {
-                obj->setDescription(binObj.description);
-            }
-            if (!binObj.buildingType.empty()) {
-                obj->setBuildingType(binObj.buildingType);
-            }
-            obj->setTransparent(binObj.transparent);
-            obj->setIndoor(binObj.indoor);
-
-            // Primitive properties
-            if (binObj.isPrimitive) {
-                obj->setPrimitiveType(static_cast<PrimitiveType>(binObj.primitiveType));
-                obj->setPrimitiveSize(binObj.primitiveSize);
-                obj->setPrimitiveRadius(binObj.primitiveRadius);
-                obj->setPrimitiveHeight(binObj.primitiveHeight);
-                obj->setPrimitiveSegments(binObj.primitiveSegments);
-                obj->setPrimitiveColor(binObj.primitiveColor);
-                obj->setSlopeRatio(binObj.slopeRatio);
-            }
-
-            // Door properties
-            if (binObj.isDoor) {
-                obj->setDoorId(binObj.doorId);
-                obj->setTargetLevel(binObj.targetLevel);
-                obj->setTargetDoorId(binObj.targetDoorId);
-            }
-
-            // Frozen transform (already baked in binary, just record it)
-            if (binObj.hasFrozenTransform) {
-                obj->setFrozenTransform(binObj.frozenRotation, binObj.frozenScale);
-            }
-
-            // Add to physics world
-            if (obj->hasBulletCollision() && m_physicsWorld) {
-                m_physicsWorld->addObject(obj.get(), obj->getBulletCollisionType());
-            }
-
-            // Restore wall holes from JSON (not in binary)
-            for (const auto& [hMin, hMax] : jsonObj.wallHoles) {
-                obj->addWallHole(hMin, hMax);
-            }
-
-            // Restore behaviors from JSON (not in binary)
-            for (const auto& behData : jsonObj.behaviors) {
-                Behavior behavior;
-                behavior.name = behData.name;
-                behavior.trigger = static_cast<TriggerType>(behData.trigger);
-                behavior.triggerParam = behData.triggerParam;
-                behavior.triggerRadius = behData.triggerRadius;
-                behavior.loop = behData.loop;
-                behavior.enabled = behData.enabled;
-
-                for (const auto& actData : behData.actions) {
-                    Action action;
-                    action.type = static_cast<ActionType>(actData.type);
-                    action.vec3Param = actData.vec3Param;
-                    action.floatParam = actData.floatParam;
-                    action.stringParam = actData.stringParam;
-                    action.animationParam = actData.animationParam;
-                    action.boolParam = actData.boolParam;
-                    action.easing = static_cast<Action::Easing>(actData.easing);
-                    action.duration = actData.duration;
-                    behavior.actions.push_back(action);
-                }
-                obj->addBehavior(behavior);
-            }
-
-            m_sceneObjects.push_back(std::move(obj));
-        }
-
-        return true;
-    }
-
+    // tryLoadBinaryObjects() moved to eden::LevelInstantiator::spawnObjectsBinary()
+    // (shared engine). loadLevel() calls it directly. See docs/EDEN_FORMAT.md §3.4.
     // Load expression textures from assets/textures/expressions/<npcName>/
     // Each .png in the folder becomes a named expression (filename without extension)
     void loadExpressionsForNPC(SceneObject* obj) {
@@ -22872,17 +22671,14 @@ private:
         m_terminalScreenObject = nullptr;  // Will re-bind after load
         m_terminalScreenBound = false;
 
-        // Try binary loading first for fast load
-        if (tryLoadBinaryObjects(filepath, levelData)) {
-            // Binary loading succeeded, skip JSON object loop
-            // (behaviors were already applied in tryLoadBinaryObjects)
-        } else {
-            // Fall back to JSON + GLB loading — spawn objects via the shared
-            // instantiator (see LevelInstantiator / docs/EDEN_FORMAT.md §3.4).
-            SpawnContext ctx{ *m_modelRenderer, *m_skinnedModelRenderer,
-                              m_physicsWorld.get(), m_sceneObjects };
+        // Spawn objects via the shared instantiator: binary sidecar (.edenbin)
+        // fast path first, JSON/GLB fallback if it's absent/mismatched (see
+        // LevelInstantiator / docs/EDEN_FORMAT.md §3.4).
+        SpawnContext ctx{ *m_modelRenderer, *m_skinnedModelRenderer,
+                          m_physicsWorld.get(), m_sceneObjects };
+        if (!LevelInstantiator::spawnObjectsBinary(filepath, levelData, ctx)) {
             LevelInstantiator::spawnObjects(levelData, ctx);
-        }  // End of else (JSON+GLB fallback)
+        }
 
         m_chunkManager->updateModifiedChunks(m_terrain);
 
