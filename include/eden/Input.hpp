@@ -82,6 +82,7 @@ public:
     static constexpr int KEY_F2 = 291;
     static constexpr int KEY_F3 = 292;
     static constexpr int KEY_F5 = 294;
+    static constexpr int KEY_F6 = 295;
 
     // Number keys (for weapon slots, toolbar, etc.)
     static constexpr int KEY_0 = 48;

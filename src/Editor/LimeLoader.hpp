@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Renderer/ModelRenderer.hpp"
+#include "eden/Animation.hpp"
 #include <glm/glm.hpp>
 #include <vector>
 #include <string>
@@ -45,6 +46,16 @@ public:
         std::vector<ControlPoint> controlPoints;
         std::vector<Port> ports;
         std::unordered_map<std::string, std::string> metadata;
+
+        // Rig + animation (LIME v3.0 skeleton + RIG_RUNTIME blob). When present
+        // the model can be created as a SKINNED object playing its animation.
+        // boneIndices/boneWeights are parallel to `vertices`.
+        bool hasSkeleton = false;
+        Skeleton skeleton;
+        std::vector<glm::ivec4> boneIndices;
+        std::vector<glm::vec4> boneWeights;
+        bool hasAnimation = false;
+        AnimationClip animClip;   // converted from LIME world-space keys to local TRS channels
     };
 
     struct LoadResult {

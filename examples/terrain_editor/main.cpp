@@ -1255,6 +1255,15 @@ protected:
     }
 
     void update(float deltaTime) override {
+        // Deferred level load (from the Load dialog) — safe point at frame
+        // start, before any UI holds pointers into the current scene.
+        if (!m_pendingLevelLoad.empty()) {
+            std::string path = m_pendingLevelLoad;
+            m_pendingLevelLoad.clear();
+            loadLevel(path);
+            preloadAdjacentLevels();  // Preload levels linked by doors
+        }
+
         // Tick the standalone clip editor (no-op when no video loaded).
         if (m_videoEditor) m_videoEditor->update(deltaTime);
 
@@ -7206,9 +7215,11 @@ private:
             updateEdenOSFlyCamera(deltaTime);
             return;
         }
-        // RTS play mode: hand off to the strategy camera and skip the FPS code paths
-        if (m_isPlayMode && !m_inConversation) {
-            // Cursor must stay visible in play mode (no mouse-look)
+        // RTS/battle camera: ONLY when toggled on (F6). It was previously
+        // unconditional here, which hijacked all of play mode — first-person
+        // WASD (the character controller below) is the default again.
+        if (m_isPlayMode && !m_inConversation && m_playRTSCamera) {
+            // Cursor must stay visible in RTS mode (no mouse-look)
             if (!m_playModeCursorVisible) m_playModeCursorVisible = true;
             if (Input::isMouseCaptured()) Input::setMouseCaptured(false);
             updateRTSCamera(deltaTime);
@@ -7354,6 +7365,18 @@ private:
                 }
                 wasBuildPanning = m_isPanning;
                 m_wasTumbling = m_isTumbling;
+            }
+        } else if (m_isPlayMode && !m_inConversation) {
+            // FIRST-PERSON PLAY: automatic mouse-look — no button held, like any
+            // FPS. Movement is the character controller further below; the
+            // editor's orbit/pan (RMB) nav in the final else is skipped so the
+            // two camera systems no longer fight. (RTS/battle cam already
+            // returned above when m_playRTSCamera.)
+            if (!m_playModeCursorVisible && !m_inPanelFocusMode &&
+                !m_filesystemBrowser.isActive() && !ImGui::GetIO().WantCaptureMouse) {
+                if (!Input::isMouseCaptured()) Input::setMouseCaptured(true);
+                glm::vec2 d = Input::getMouseDelta();
+                m_camera.processMouse(d.x, -d.y);
             }
         } else if (m_inConversation) {
             // During conversation: same right-click toggle, but default is cursor visible
@@ -8132,6 +8155,14 @@ private:
             m_bootedEdenOS = true;
             if (!m_isPlayMode) enterPlayMode();
             spawnEdenOSFromHome();
+        }
+
+        // One-shot: --level <path> loads a level on the first frame (same
+        // runtime context as the Load Level dialog). Debug/automation aid.
+        if (!m_startupLevel.empty() && !m_loadedStartupLevel) {
+            m_loadedStartupLevel = true;
+            std::cout << "[Startup] Loading level: " << m_startupLevel << std::endl;
+            loadLevel(m_startupLevel);
         }
 
         // J — one-key: deploy a Claude-backed Agent avatar in the current folder
@@ -8994,6 +9025,27 @@ private:
             runGame();
         }
         wasF5Down = f5Down;
+
+        // F6 — toggle play camera: first-person WASD <-> RTS/battle overhead
+        static bool wasF6Down = false;
+        bool f6Down = Input::isKeyDown(Input::KEY_F6);
+        if (f6Down && !wasF6Down && m_isPlayMode && !ImGui::GetIO().WantTextInput) {
+            m_playRTSCamera = !m_playRTSCamera;
+            if (m_playRTSCamera) {
+                m_playModeCursorVisible = true;
+                Input::setMouseCaptured(false);
+                m_camera.setMovementMode(MovementMode::Fly);
+                m_camera.setNoClip(true);
+            } else {
+                m_playModeCursorVisible = false;
+                Input::setMouseCaptured(true);
+                m_camera.setMovementMode(MovementMode::Walk);
+                m_camera.setNoClip(false);
+            }
+            std::cout << "[PlayMode] Camera -> " << (m_playRTSCamera ? "RTS/battle" : "first-person WASD")
+                      << std::endl;
+        }
+        wasF6Down = f6Down;
 
         // F3 toggles debug visuals in play mode (waypoints, AI nodes, collision hulls, etc.)
         static bool wasF3Down = false;
@@ -22230,8 +22282,13 @@ private:
         nfdresult_t result = NFD_OpenDialog(&outPath, filters, 1, levelsDir.c_str());
 
         if (result == NFD_OKAY) {
-            loadLevel(outPath);
-            preloadAdjacentLevels();  // Preload levels linked by doors
+            // DEFER the load to the top of the next frame. This dialog runs
+            // inside the UI render pass; loading synchronously destroys every
+            // scene object mid-frame, and UI windows rendered after this point
+            // (Models list, etc.) still hold raw SceneObject* from before —
+            // instant use-after-free segfault (ImGui::Selectable on a freed
+            // name). Same safe-point pattern as deferred deletions.
+            m_pendingLevelLoad = outPath;
             NFD_FreePath(outPath);
         }
     }
@@ -22810,6 +22867,34 @@ private:
             m_chunkManager->releaseAllChunkBuffers(m_terrain);
             m_terrain.reconfigure(tcfg);
             m_chunkManager->preloadAllChunks(m_terrain, nullptr);
+        } else if (!levelData.chunks.empty()) {
+            // Old levels (saved before hasTerrainConfig existed) carry no bounds.
+            // Derive them from the chunk coords in the file, otherwise loading an
+            // archive while the tiny worktable terrain (1x1 chunk) is active
+            // applies 1 of N chunks and the level comes up as a postage stamp.
+            glm::ivec2 mn(INT_MAX), mx(INT_MIN);
+            for (const auto& c : levelData.chunks) {
+                mn = glm::min(mn, glm::ivec2(c.coord));
+                mx = glm::max(mx, glm::ivec2(c.coord));
+            }
+            const TerrainConfig& cur = m_terrain.getConfig();
+            bool covers = cur.useFixedBounds &&
+                          cur.minChunk.x <= mn.x && cur.minChunk.y <= mn.y &&
+                          cur.maxChunk.x >= mx.x && cur.maxChunk.y >= mx.y;
+            if (!covers) {
+                TerrainConfig tcfg = cur;
+                tcfg.useFixedBounds = true;
+                tcfg.minChunk = mn;
+                tcfg.maxChunk = mx;
+                // Classic full-world levels (32x32 at -16..15) were wrap-worlds.
+                tcfg.wrapWorld = (mn == glm::ivec2(-16, -16) && mx == glm::ivec2(15, 15));
+                std::cout << "[LevelSerializer] Old level without terrain config — derived bounds ("
+                          << mn.x << "," << mn.y << ")..(" << mx.x << "," << mx.y << ")" << std::endl;
+                getContext().waitIdle();
+                m_chunkManager->releaseAllChunkBuffers(m_terrain);
+                m_terrain.reconfigure(tcfg);
+                m_chunkManager->preloadAllChunks(m_terrain, nullptr);
+            }
         }
 
         LevelSerializer::applyToTerrain(levelData, m_terrain);
@@ -25011,10 +25096,17 @@ private:
 
     void enterPlayMode() {
         m_isPlayMode = true;
-        m_playModeCursorVisible = true;   // RTS: cursor always visible
         m_playModeDebug = false;          // Debug visuals off by default
         m_selectedFaces.clear();
-        Input::setMouseCaptured(false);   // RTS: never capture the mouse
+        if (m_playRTSCamera) {
+            m_playModeCursorVisible = true;   // RTS: cursor always visible
+            Input::setMouseCaptured(false);   // RTS: never capture the mouse
+        } else {
+            m_playModeCursorVisible = false;  // FPS: mouse-look, cursor captured
+            Input::setMouseCaptured(true);
+        }
+        std::cout << "[PlayMode] Camera: " << (m_playRTSCamera ? "RTS/battle (F6 for first-person)"
+                                                               : "first-person WASD (F6 for RTS)") << std::endl;
 
         // Clear all editor selections so yellow outlines don't carry over
         for (auto& obj : m_sceneObjects) {
@@ -25109,22 +25201,27 @@ private:
         int startMinute = static_cast<int>(m_gameTimeMinutes);
         checkInitialGameTimeTriggers(startMinute);
 
-        // RTS: cursor stays visible, no mouse capture
-        Input::setMouseCaptured(false);
+        if (m_playRTSCamera) {
+            // RTS/battle camera: cursor visible, free-fly overhead, no collision.
+            Input::setMouseCaptured(false);
+            m_camera.setMovementMode(MovementMode::Fly);
+            m_camera.setNoClip(true);
+            m_lastMovementMode = MovementMode::Fly;
 
-        // RTS: free-fly camera, no terrain stick / collision
-        m_camera.setMovementMode(MovementMode::Fly);
-        m_camera.setNoClip(true);
-        m_lastMovementMode = MovementMode::Fly;
-
-        // RTS overhead view: lift camera high above the unit spawn area, looking down
-        {
+            // Lift camera high above the unit spawn area, looking down.
             glm::vec3 startPos(0.0f, 0.0f, 25.0f);
             float terrainHeight = m_terrain.getHeightAt(startPos.x, startPos.z);
             startPos.y = terrainHeight + 60.0f;
             m_camera.setPosition(startPos);
             m_camera.setYaw(-90.0f);     // face -Z (toward unit spawn cells)
             m_camera.setPitch(-55.0f);   // look down at the battlefield
+        } else {
+            // First-person: WALK mode (activates the character controller below),
+            // collision on, mouse captured for mouse-look. Camera stays at the
+            // editor position (spawn teleport handled earlier if a marker exists).
+            m_camera.setMovementMode(MovementMode::Walk);
+            m_camera.setNoClip(false);
+            m_lastMovementMode = MovementMode::Walk;
         }
 
         // Get physics backend from EditorUI (may have been changed by user)
@@ -28091,11 +28188,21 @@ private:
             obj->setVertexCount(static_cast<uint32_t>(mesh.vertices.size()));
 
             // The Mixamo correction (Z-up→Y-up rotation + cm→m scale) is wrong
-            // for engine-authored exports (LIME, etc.) which already ship in
-            // engine-native space. Detect via asset.generator.
+            // for engine-authored exports (LIME, etc.) and for modern
+            // meters-authored GLBs (Meshy: mesh ~1.7 units tall, Y-up — applying
+            // it lays the model flat at 2cm). Detect cm-authored assets by mesh
+            // size: only a mesh tens/hundreds of units tall needs the correction.
             const std::string& gen = result.generator;
             bool isLimeExport = gen.find("LIME") != std::string::npos;
-            if (!isLimeExport) {
+            glm::vec3 vmin(FLT_MAX), vmax(-FLT_MAX);
+            for (const auto& v : mesh.vertices) {
+                vmin = glm::min(vmin, v.position);
+                vmax = glm::max(vmax, v.position);
+            }
+            glm::vec3 vsize = vmax - vmin;
+            float meshMaxDim = std::max({vsize.x, vsize.y, vsize.z});
+            bool cmAuthored = meshMaxDim > 10.0f;  // meters-authored humanoids are ~2
+            if (!isLimeExport && cmAuthored) {
                 obj->setEulerRotation(glm::vec3(90.0f, 0.0f, 0.0f));
                 obj->getTransform().setScale(glm::vec3(0.012f));
             }
@@ -28129,6 +28236,56 @@ private:
         auto result = LimeLoader::load(path);
         if (!result.success) {
             std::cerr << "!!! Failed to load LIME model: " << result.error << std::endl;
+            return;
+        }
+
+        // Rigged + animated .lime (LIME rigging/mocap workflow): create it as a
+        // SKINNED model so the saved animation plays via GPU skinning, exactly
+        // reproducing LIME's reskin (translation-only IBMs + local TRS channels).
+        if (result.mesh.hasSkeleton && result.mesh.hasAnimation &&
+            result.mesh.boneWeights.size() == result.mesh.vertices.size()) {
+            std::vector<SkinnedVertex> sverts(result.mesh.vertices.size());
+            for (size_t i = 0; i < result.mesh.vertices.size(); ++i) {
+                const auto& mv = result.mesh.vertices[i];
+                sverts[i].position = mv.position;
+                sverts[i].normal   = mv.normal;
+                sverts[i].texCoord = mv.texCoord;
+                sverts[i].color    = mv.color;
+                sverts[i].joints   = result.mesh.boneIndices[i];
+                float sum = result.mesh.boneWeights[i].x + result.mesh.boneWeights[i].y +
+                            result.mesh.boneWeights[i].z + result.mesh.boneWeights[i].w;
+                sverts[i].weights  = (sum > 1e-6f) ? result.mesh.boneWeights[i] / sum
+                                                   : glm::vec4(1, 0, 0, 0);
+            }
+
+            uint32_t handle = m_skinnedModelRenderer->createModel(
+                sverts, result.mesh.indices,
+                std::make_unique<Skeleton>(result.mesh.skeleton),
+                std::vector<AnimationClip>{result.mesh.animClip},
+                result.mesh.hasTexture ? result.mesh.textureData.data() : nullptr,
+                result.mesh.textureWidth, result.mesh.textureHeight);
+
+            auto sobj = std::make_unique<SceneObject>(result.mesh.name);
+            sobj->setSkinnedModelHandle(handle);
+            sobj->setModelPath(path);
+            sobj->setVertexCount(static_cast<uint32_t>(sverts.size()));
+
+            glm::vec3 spawnPos = m_camera.getPosition() + m_camera.getFront() * 5.0f;
+            spawnPos.y = getPlacementFloorHeight(spawnPos.x, spawnPos.z);
+            sobj->getTransform().setPosition(spawnPos);
+
+            auto animNames = m_skinnedModelRenderer->getAnimationNames(handle);
+            sobj->setAnimationNames(animNames);
+            if (!animNames.empty()) {
+                m_skinnedModelRenderer->playAnimation(handle, animNames[0], true);
+                sobj->setCurrentAnimation(animNames[0]);
+            }
+
+            std::cout << "Created SKINNED lime object: " << sobj->getName() << " ("
+                      << result.mesh.skeleton.bones.size() << " bones, playing '"
+                      << (animNames.empty() ? "none" : animNames[0]) << "')" << std::endl;
+            m_selectedObjectIndex = static_cast<int>(m_sceneObjects.size());
+            m_sceneObjects.push_back(std::move(sobj));
             return;
         }
 
@@ -29686,6 +29843,13 @@ private:
     ImFont* m_monoFont = nullptr;
     bool m_sessionMode = false;
     bool m_bootEdenOS = false;   // --eden-os: auto-load the saved EDEN OS world
+public:
+    void setStartupLevel(const std::string& p) { m_startupLevel = p; }
+private:
+    std::string m_startupLevel;          // --level <path>: load on first frame
+    bool m_loadedStartupLevel = false;
+    std::string m_pendingLevelLoad;      // Load-dialog result, applied at frame start (see update())
+    bool m_playRTSCamera = false;        // F6 in play mode: false = first-person WASD (default), true = RTS/battle cam
     bool m_bootedEdenOS = false; // one-shot guard for the --eden-os first-frame build
     bool m_terminalInitialized = false;
     // 3D terminal screen
@@ -30593,11 +30757,14 @@ int main(int argc, char* argv[]) {
 
     bool sessionMode = false;
     bool bootEdenOS = false;
+    std::string startupLevel;
     for (int i = 1; i < argc; ++i) {
         if (std::string(argv[i]) == "--session-mode") {
             sessionMode = true;
         } else if (std::string(argv[i]) == "--eden-os") {
             bootEdenOS = true;
+        } else if (std::string(argv[i]) == "--level" && i + 1 < argc) {
+            startupLevel = argv[++i];
         }
     }
 
@@ -30608,6 +30775,9 @@ int main(int argc, char* argv[]) {
         }
         if (bootEdenOS) {
             editor.setBootEdenOS(true);
+        }
+        if (!startupLevel.empty()) {
+            editor.setStartupLevel(startupLevel);
         }
         editor.run();
     } catch (const std::exception& e) {
