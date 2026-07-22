@@ -2693,7 +2693,6 @@ protected:
 
             // Battle render mode: in play mode, hide objects beyond the fog end
             // (matches the terrain's 150m tight render distance).
-            const float playModeCullSq = 150.0f * 150.0f;
             glm::vec3 camPos = m_camera.getPosition();
 
             for (size_t i = 0; i < m_sceneObjects.size(); i++) {
@@ -2704,10 +2703,15 @@ protected:
 
                 // The 150m cull is the tabletop game's battle fog; EDEN OS is a
                 // large silo (~160m across, ~256m tall) that must draw in full.
+                // SIZE-AWARE: measure to the object's bounding sphere, not its
+                // pivot — a mountain's pivot can be >150m away while its slopes
+                // fill the screen (invisible model with working collision).
                 if (m_isPlayMode && !m_isEdenOSLevel) {
-                    glm::vec3 op = const_cast<SceneObject*>(objPtr.get())->getTransform().getPosition();
-                    glm::vec3 d = op - camPos;
-                    if (glm::dot(d, d) > playModeCullSq) continue;
+                    auto* so = const_cast<SceneObject*>(objPtr.get());
+                    AABB wb = so->getWorldBounds();
+                    glm::vec3 d = wb.getCenter() - camPos;
+                    float reach = 150.0f + 0.5f * glm::length(wb.getSize());
+                    if (glm::dot(d, d) > reach * reach) continue;
                 }
 
                 glm::mat4 modelMatrix = const_cast<SceneObject*>(objPtr.get())->getTransform().getMatrix();
