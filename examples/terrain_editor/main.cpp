@@ -123,6 +123,16 @@
 
 using namespace eden;
 
+// Startup profiler: prints "[startup +NNms] phase" to the Console. g_startupClock
+// is set at program load, so the first stamp inside onInit measures how long the
+// Vulkan/window constructor took. Gaps between stamps = the slow phase.
+static std::chrono::steady_clock::time_point g_startupClock = std::chrono::steady_clock::now();
+static void stampStartup(const char* phase) {
+    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - g_startupClock).count();
+    std::cout << "[startup +" << ms << "ms] " << phase << std::endl;
+}
+
 static std::string shellEscapeFS(const std::string& s) {
     std::string result = "'";
     for (char c : s) {
@@ -261,11 +271,14 @@ public:
 
 protected:
     void onInit() override {
+        stampStartup("onInit begin (window + Vulkan device/swapchain/pipelines done)");
         NFD_Init();
         Audio::getInstance().init();
+        stampStartup("NFD + Audio");
 
         m_textureManager = std::make_unique<TextureManager>(getContext());
         m_textureManager->loadTerrainTexturesFromFolder(std::string(CMAKE_SOURCE_DIR) + "/examples/terrain_editor/assets/textures/");
+        stampStartup("terrain textures loaded");
 
         // Pass loaded texture names to the editor UI
         m_editorUI.setTextureNames(m_textureManager->getTextureNames(), m_textureManager->getTextureCount(), m_textureManager->getTextureColors());
@@ -381,8 +394,10 @@ protected:
         terrainInfo.tileSize = 2.0f;
         terrainInfo.heightScale = 200.0f;
         m_editorUI.setTerrainInfo(terrainInfo);
+        stampStartup("editor-UI callbacks wired");
 
         initImGui();
+        stampStartup("initImGui");
 
         // Load monospace font for terminal
         {
@@ -409,12 +424,16 @@ protected:
             }
         }
         m_editorUI.setMonoFont(m_monoFont);   // code editor uses the monospace font
+        stampStartup("fonts");
 
         loadSplashTexture();
         loadGroveLogoTexture();
+        stampStartup("splash + logo textures");
         loadBuildingTextures();
+        stampStartup("building textures");
         m_textureBrowser.init(getContext());
         m_imageReferences.init(getContext());
+        stampStartup("texture browser + image refs");
         // Eyedropper in the Image References window feeds the terrain Paint color.
         m_imageReferences.setColorPickCallback([this](const glm::vec3& c) {
             m_editorUI.setPaintColor(c);
@@ -464,8 +483,11 @@ protected:
             return m_terrain.getHeightAt(x, z);
         });
 
+        stampStartup("zone system + callbacks");
         initGroveVM();
+        stampStartup("grove VM");
         loadEditorConfig();
+        stampStartup("editor config");
 
         // Initialize AI backend client
         m_httpClient = std::make_unique<AsyncHttpClient>("http://localhost:8080");
@@ -478,11 +500,15 @@ protected:
             }
         });
 
+        stampStartup("AI backend client started (async)");
+
         // Initialize MCP Server
         initMCPServer();
+        stampStartup("MCP server");
 
         // Initialize Bullet physics collision world
         m_physicsWorld = std::make_unique<PhysicsWorld>();
+        stampStartup("physics world");
 
         float startHeight = 20.0f;
         m_camera.setPosition({50, startHeight, 50});
@@ -527,12 +553,16 @@ protected:
             if (home) {
                 std::string defaultLevel = getDefaultLevelPath();
                 if (std::filesystem::exists(defaultLevel)) {
+                    stampStartup("init done — starting default-level load (chunks next)");
                     std::cout << "[EDEN] Auto-loading default level: " << defaultLevel << std::endl;
                     loadLevel(defaultLevel);
                     preloadAdjacentLevels();
+                    m_bootLevelLoaded = true;   // loadLevel already preloaded chunks; skip the onBeforeMainLoop duplicate
+                    stampStartup("default level + adjacent loaded");
                 }
             }
         }
+        stampStartup("onInit complete");
     }
 
     void initializeEconomySystems() {
@@ -1163,6 +1193,14 @@ protected:
     }
 
     void onBeforeMainLoop() override {
+        // If onInit auto-loaded a level, loadLevel() already generated + uploaded
+        // its chunks — don't preload them all a SECOND time here (that was a full
+        // redundant 1024-chunk load at every startup). Just refresh the visible set.
+        if (m_bootLevelLoaded) {
+            if (!m_isEdenOSLevel && m_terrain.getConfig().useFixedBounds)
+                m_terrain.update(m_camera.getPosition());
+            return;
+        }
         if (!m_isEdenOSLevel && m_terrain.getConfig().useFixedBounds) {
             int totalChunks = m_terrain.getTotalChunkCount();
             int64_t preVram = eden::Buffer::getVramUsedBytes() / (1024 * 1024);
@@ -29848,6 +29886,7 @@ private:
     // camera follows it (first-person). Movement is relative to where the camera
     // looks (mouse-look stays the engine's job). F8 toggles between this and the
     // default C++ free-cam controller (for editor walk/fly testing).
+    bool m_bootLevelLoaded = false;      // onInit auto-loaded a level (skip the onBeforeMainLoop chunk re-preload)
     eden::Transform m_playerTransform;
     eden::ScriptLibrary::TickFn m_playerControllerFn = nullptr;  // bound "player" fn
     bool m_useScriptedPlayer = false;    // this play session drives via the script

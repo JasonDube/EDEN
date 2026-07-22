@@ -1,4 +1,5 @@
 #include <eden/LevelInstantiator.hpp>
+#include <chrono>
 
 #include <eden/LevelSerializer.hpp>   // LevelData
 #include <eden/Terrain.hpp>           // Terrain, TerrainConfig
@@ -45,6 +46,42 @@ void LevelInstantiator::applyTerrain(const LevelData& data,
         tcfg.noiseSeed       = data.terrainNoiseSeed;
         context.waitIdle();
         chunkManager.releaseAllChunkBuffers(terrain);
+
+        if (!data.chunks.empty()) {
+            // The file defines the heights, so the procedural noise generation
+            // would just be OVERWRITTEN below — skip it. Generate FLAT chunk
+            // objects (cheap, no GPU upload), apply the saved heights (setChunkData
+            // rebuilds each mesh), then upload every chunk ONCE with the real mesh.
+            // Avoids ~3s of wasted FBM + a wasted procedural upload at load time.
+            tcfg.proceduralHeights = false;
+            terrain.reconfigure(tcfg);
+            auto t0 = std::chrono::steady_clock::now();
+            terrain.preloadAllChunks(nullptr);               // flat chunk objects only
+            auto t1 = std::chrono::steady_clock::now();
+            LevelSerializer::applyToTerrain(data, terrain);  // saved heights + rebuilt meshes
+            auto t2 = std::chrono::steady_clock::now();
+            // Batch the GPU uploads (~2048 per-chunk queue-waits -> a handful).
+            // Flush every 128 chunks to cap host-visible staging memory (~225MB).
+            int inBatch = 0;
+            chunkManager.beginUploadBatch();
+            for (auto& [coord, chunk] : terrain.getAllChunks()) {
+                if (!chunk->needsUpload()) continue;
+                chunkManager.uploadChunk(*chunk);
+                if (++inBatch >= 128) {
+                    chunkManager.endUploadBatch();
+                    chunkManager.beginUploadBatch();
+                    inBatch = 0;
+                }
+            }
+            chunkManager.endUploadBatch();
+            auto t3 = std::chrono::steady_clock::now();
+            auto ms = [](auto a, auto b){ return std::chrono::duration_cast<std::chrono::milliseconds>(b - a).count(); };
+            std::cout << "[LevelInstantiator] saved terrain: flat-gen " << ms(t0, t1)
+                      << "ms, apply " << ms(t1, t2) << "ms, upload(batched) " << ms(t2, t3) << "ms" << std::endl;
+            return;   // applyToTerrain already done for this path
+        }
+
+        // No saved chunk data (e.g. a fresh procedural planet): generate + upload.
         terrain.reconfigure(tcfg);
         chunkManager.preloadAllChunks(terrain, nullptr);
     } else if (!data.chunks.empty()) {

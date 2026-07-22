@@ -29,6 +29,10 @@ public:
     void upload(const void* data, VkDeviceSize size);
 
     static void copy(VulkanContext& context, Buffer& src, Buffer& dst, VkDeviceSize size);
+    // Record a copy into an existing command buffer (no submit) — for batching
+    // many copies into one submit. Caller must keep `src` alive until the submit
+    // completes and submit/wait the command buffer itself.
+    static void recordCopy(VkCommandBuffer cmd, Buffer& src, Buffer& dst, VkDeviceSize size);
 
     // VRAM usage tracking (across all Vulkan allocations)
     static std::atomic<int64_t> s_vramUsedBytes;
@@ -72,10 +76,21 @@ public:
     MeshBuffers* getMeshBuffers(uint32_t handle);
     void destroyMeshBuffers(uint32_t handle);
 
+    // Batched upload: between begin/endBatch, createMeshBuffers records its copies
+    // into ONE command buffer instead of submitting + full-GPU-waiting per buffer.
+    // Cuts thousands of vkQueueWaitIdle stalls (e.g. 2048 → a few) when loading a
+    // 1024-chunk level. Staging buffers are held alive until endBatch submits once.
+    void beginBatch();
+    void endBatch();
+
 private:
     VulkanContext& m_context;
     std::vector<std::unique_ptr<MeshBuffers>> m_meshBuffers;
     std::vector<uint32_t> m_freeHandles;
+
+    bool m_batching = false;
+    VkCommandBuffer m_batchCmd = VK_NULL_HANDLE;
+    std::vector<std::unique_ptr<Buffer>> m_batchStaging;   // kept alive until endBatch
 };
 
 } // namespace eden

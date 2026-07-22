@@ -24,6 +24,10 @@ public:
     // Upload a single chunk
     void uploadChunk(TerrainChunk& chunk);
 
+    // Batch many uploadChunk() calls into few GPU submits (see BufferManager).
+    void beginUploadBatch();
+    void endUploadBatch();
+
     // Regenerate and upload modified chunks
     void updateModifiedChunks(Terrain& terrain);
 

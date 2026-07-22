@@ -1,4 +1,5 @@
 #include "ChunkManager.hpp"
+#include <chrono>
 #include "Renderer/Buffer.hpp"
 #include <iostream>
 
@@ -19,6 +20,7 @@ void ChunkManager::preloadAllChunks(Terrain& terrain, LoadProgressCallback progr
     m_totalChunks = terrain.getTotalChunkCount();
     m_chunksLoaded = 0;
 
+    auto tGen0 = std::chrono::steady_clock::now();
     // Generate all chunk data
     terrain.preloadAllChunks([this, &progressCallback](int loaded, int total) {
         m_chunksLoaded = loaded;
@@ -26,39 +28,36 @@ void ChunkManager::preloadAllChunks(Terrain& terrain, LoadProgressCallback progr
             progressCallback(loaded, total);
         }
     });
+    auto tGen1 = std::chrono::steady_clock::now();
 
-    // Upload all chunks to GPU
-    float chunkSize = (config.chunkResolution - 1) * config.tileSize;
+    // Upload all chunks to GPU. Iterate the chunk set ONCE. The old code called
+    // terrain.update(chunkCenter) for every chunk position (1024x on a planet),
+    // and each update() rebuilt a ~1089-chunk visible list with wrap math — an
+    // O(N^2) sweep (~1.1M iterations) that dominated level-load time. The chunks
+    // were already generated above, so just walk them directly.
     int uploaded = 0;
     bool vramExhausted = false;
-
-    for (int z = config.minChunk.y; z <= config.maxChunk.y && !vramExhausted; z++) {
-        for (int x = config.minChunk.x; x <= config.maxChunk.x && !vramExhausted; x++) {
-            glm::vec3 chunkCenter((x + 0.5f) * chunkSize, 0, (z + 0.5f) * chunkSize);
-            terrain.update(chunkCenter);
-
-            for (auto& vc : terrain.getVisibleChunks()) {
-                if (vc.chunk->needsUpload()) {
-                    try {
-                        uploadChunk(*vc.chunk);
-                        uploaded++;
-                    } catch (const std::runtime_error& e) {
-                        int64_t usedMB = Buffer::getVramUsedBytes() / (1024 * 1024);
-                        std::cerr << "[ChunkManager] VRAM exhausted after uploading "
-                                  << uploaded << " chunks (" << usedMB << " MB used). "
-                                  << "Remaining chunks will load on-demand." << std::endl;
-                        vramExhausted = true;
-                        break;
-                    }
-                }
-            }
+    for (auto& [coord, chunk] : terrain.getAllChunks()) {
+        if (vramExhausted || !chunk->needsUpload()) continue;
+        try {
+            uploadChunk(*chunk);
+            uploaded++;
+        } catch (const std::runtime_error& e) {
+            int64_t usedMB = Buffer::getVramUsedBytes() / (1024 * 1024);
+            std::cerr << "[ChunkManager] VRAM exhausted after uploading "
+                      << uploaded << " chunks (" << usedMB << " MB used). "
+                      << "Remaining chunks will load on-demand." << std::endl;
+            vramExhausted = true;
         }
     }
 
+    auto tUp1 = std::chrono::steady_clock::now();
+    auto ms = [](auto a, auto b){ return std::chrono::duration_cast<std::chrono::milliseconds>(b - a).count(); };
     if (!vramExhausted) {
         int64_t usedMB = Buffer::getVramUsedBytes() / (1024 * 1024);
         std::cout << "[ChunkManager] All " << uploaded << " chunks uploaded ("
-                  << usedMB << " MB VRAM used)" << std::endl;
+                  << usedMB << " MB VRAM used) — generate " << ms(tGen0, tGen1)
+                  << "ms, upload " << ms(tGen1, tUp1) << "ms" << std::endl;
     }
 
     m_isLoading = false;
@@ -77,6 +76,9 @@ void ChunkManager::uploadPendingChunks(Terrain& terrain) {
         }
     }
 }
+
+void ChunkManager::beginUploadBatch() { m_bufferManager.beginBatch(); }
+void ChunkManager::endUploadBatch()   { m_bufferManager.endBatch(); }
 
 void ChunkManager::uploadChunk(TerrainChunk& chunk) {
     const auto& vertices = chunk.getVertices();

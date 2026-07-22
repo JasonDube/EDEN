@@ -87,6 +87,12 @@ void Buffer::upload(const void* data, VkDeviceSize size) {
     unmap();
 }
 
+void Buffer::recordCopy(VkCommandBuffer cmd, Buffer& src, Buffer& dst, VkDeviceSize size) {
+    VkBufferCopy copyRegion{};
+    copyRegion.size = size;
+    vkCmdCopyBuffer(cmd, src.getHandle(), dst.getHandle(), 1, &copyRegion);
+}
+
 void Buffer::copy(VulkanContext& context, Buffer& src, Buffer& dst, VkDeviceSize size) {
     VkCommandBufferAllocateInfo allocInfo{};
     allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
@@ -147,36 +153,44 @@ uint32_t BufferManager::createMeshBuffers(const void* vertices, uint32_t vertexC
     auto meshBuffers = std::make_unique<MeshBuffers>();
     VkDeviceSize vertexBufferSize = vertexCount * vertexSize;
 
-    // Create staging buffer
-    Buffer stagingBuffer(m_context, vertexBufferSize,
+    // Copy staging -> device, batched (record into the shared command buffer,
+    // keep staging alive) or immediate (submit + wait now).
+    auto copyStaging = [&](std::unique_ptr<Buffer> staging, Buffer& dst, VkDeviceSize size) {
+        if (m_batching) {
+            Buffer::recordCopy(m_batchCmd, *staging, dst, size);
+            m_batchStaging.push_back(std::move(staging));   // alive until endBatch
+        } else {
+            Buffer::copy(m_context, *staging, dst, size);
+        }
+    };
+
+    // Create staging buffer + vertex buffer
+    auto vStaging = std::make_unique<Buffer>(m_context, vertexBufferSize,
                          VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
                          VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-    stagingBuffer.upload(vertices, vertexBufferSize);
+    vStaging->upload(vertices, vertexBufferSize);
 
-    // Create vertex buffer
     meshBuffers->vertexBuffer = std::make_unique<Buffer>(
         m_context, vertexBufferSize,
         VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
         VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-
-    Buffer::copy(m_context, stagingBuffer, *meshBuffers->vertexBuffer, vertexBufferSize);
+    copyStaging(std::move(vStaging), *meshBuffers->vertexBuffer, vertexBufferSize);
     meshBuffers->vertexCount = vertexCount;
 
     // Create index buffer if needed
     if (indices && indexCount > 0) {
         VkDeviceSize indexBufferSize = indexCount * sizeof(uint32_t);
 
-        Buffer indexStagingBuffer(m_context, indexBufferSize,
+        auto iStaging = std::make_unique<Buffer>(m_context, indexBufferSize,
                                   VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
                                   VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-        indexStagingBuffer.upload(indices, indexBufferSize);
+        iStaging->upload(indices, indexBufferSize);
 
         meshBuffers->indexBuffer = std::make_unique<Buffer>(
             m_context, indexBufferSize,
             VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
             VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-
-        Buffer::copy(m_context, indexStagingBuffer, *meshBuffers->indexBuffer, indexBufferSize);
+        copyStaging(std::move(iStaging), *meshBuffers->indexBuffer, indexBufferSize);
         meshBuffers->indexCount = indexCount;
     }
 
@@ -191,6 +205,33 @@ uint32_t BufferManager::createMeshBuffers(const void* vertices, uint32_t vertexC
     }
 
     return handle;
+}
+
+void BufferManager::beginBatch() {
+    if (m_batching) return;
+    VkCommandBufferAllocateInfo allocInfo{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+    allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    allocInfo.commandPool = m_context.getCommandPool();
+    allocInfo.commandBufferCount = 1;
+    vkAllocateCommandBuffers(m_context.getDevice(), &allocInfo, &m_batchCmd);
+    VkCommandBufferBeginInfo beginInfo{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+    beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    vkBeginCommandBuffer(m_batchCmd, &beginInfo);
+    m_batching = true;
+}
+
+void BufferManager::endBatch() {
+    if (!m_batching) return;
+    vkEndCommandBuffer(m_batchCmd);
+    VkSubmitInfo submitInfo{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+    submitInfo.commandBufferCount = 1;
+    submitInfo.pCommandBuffers = &m_batchCmd;
+    vkQueueSubmit(m_context.getGraphicsQueue(), 1, &submitInfo, VK_NULL_HANDLE);
+    vkQueueWaitIdle(m_context.getGraphicsQueue());   // ONE wait for the whole batch
+    vkFreeCommandBuffers(m_context.getDevice(), m_context.getCommandPool(), 1, &m_batchCmd);
+    m_batchCmd = VK_NULL_HANDLE;
+    m_batchStaging.clear();   // copies done — free staging
+    m_batching = false;
 }
 
 BufferManager::MeshBuffers* BufferManager::getMeshBuffers(uint32_t handle) {
