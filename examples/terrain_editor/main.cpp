@@ -66,6 +66,7 @@
 #include <eden/PhysicsWorld.hpp>
 #include <eden/EntityScriptAPI.hpp>
 #include <eden/ScriptLibrary.hpp>
+#include <eden/Transform.hpp>
 #include <eden/ICharacterController.hpp>
 #include <eden/JoltCharacter.hpp>
 #include <eden/HomebrewCharacter.hpp>
@@ -1725,12 +1726,9 @@ protected:
         // Run compiled @entity per-tick scripts on their bound objects (play
         // mode only — in edit mode objects stay put for authoring).
         if (m_isPlayMode) {
-            glm::vec3 p = m_camera.getPosition();          // the player (self_*_player verbs)
-            eden::setScriptPlayerPosition(p.x, p.y, p.z);
-
             // Feed player input to scripted controllers (input_* verbs). Suppressed
             // while ImGui wants the keyboard (typing in a field) so movement keys
-            // don't leak. Same key reads the C++ controller uses.
+            // don't leak. Same keys the C++ controller reads.
             bool typing = ImGui::GetIO().WantTextInput;
             float mx = 0.0f, mz = 0.0f;
             if (!typing) {
@@ -1743,6 +1741,27 @@ protected:
             float run  = (!typing && Input::isKeyDown(Input::KEY_LEFT_CONTROL)) ? 1.0f : 0.0f;
             glm::vec2 md = Input::getMouseDelta();
             eden::setScriptInput(mx, mz, jump, run, md.x, md.y);
+
+            // Scripted first-person player: the level's `player` controller drives
+            // m_playerTransform, then the camera follows it (eye above the player).
+            // Movement is relative to where the camera looks; mouse-look stays the
+            // engine's job (default controller already updated the camera above), so
+            // we set the player's facing from the camera and overwrite only the
+            // camera POSITION to follow.
+            if (m_useScriptedPlayer && m_playerControllerFn) {
+                glm::vec3 f = m_camera.getFront();
+                float yawDeg = std::atan2(f.x, f.z) * 180.0f / 3.14159265f;
+                m_playerTransform.setRotation(glm::vec3(0.0f, yawDeg, 0.0f));
+                eden::setCurrentScriptTransform(&m_playerTransform);
+                eden::setCurrentScriptObject(nullptr);
+                m_playerControllerFn(deltaTime);
+                eden::setCurrentScriptTransform(nullptr);
+                glm::vec3 pp = m_playerTransform.getPosition();
+                m_camera.setPosition(glm::vec3(pp.x, pp.y + m_playerEyeHeight, pp.z));
+            }
+
+            glm::vec3 p = m_camera.getPosition();          // the player (self_*_player verbs)
+            eden::setScriptPlayerPosition(p.x, p.y, p.z);
 
             for (auto& obj : m_sceneObjects) {
                 if (obj && obj->hasTickScript()) obj->runTickScript(deltaTime);
@@ -9214,6 +9233,19 @@ private:
                       << std::endl;
         }
         wasF6Down = f6Down;
+
+        // F8 — playtest with the built-in free-cam (walk/fly) controller. F5
+        // starts the game with the HEIDIC scripts; F8 starts (or switches to) the
+        // editor's own camera for walking/flying a level through. Enters play mode
+        // if not already in it.
+        static bool wasF8Down = false;
+        bool f8Down = Input::isKeyDown(Input::KEY_F8);
+        if (f8Down && !wasF8Down && !ImGui::GetIO().WantTextInput) {
+            if (!m_isPlayMode) enterPlayMode();
+            m_useScriptedPlayer = false;   // built-in controller drives the camera
+            std::cout << "[PlayMode] Free-cam (F8) — built-in walk/fly controller" << std::endl;
+        }
+        wasF8Down = f8Down;
 
         // F3 toggles debug visuals in play mode (waypoints, AI nodes, collision hulls, etc.)
         static bool wasF3Down = false;
@@ -22623,8 +22655,10 @@ private:
     // reload), then rebinds from the fresh handle. Returns a human-readable
     // summary for the Script Editor's output box / console.
     std::string bindEntityScripts() {
-        // 1) Unbind ALL tick scripts before touching the library.
+        // 1) Unbind ALL tick scripts (and the player controller) before touching
+        //    the library.
         for (auto& obj : m_sceneObjects) if (obj) obj->clearTickScript();
+        m_playerControllerFn = nullptr;
 
         if (m_currentLevelScriptPath.empty()) return "no level script";
         namespace fs = std::filesystem;
@@ -22655,7 +22689,12 @@ private:
             });
             bound++;
         }
+        // The player controller is bound by NAME, not to an object: if the script
+        // exports `player`, it becomes the scripted first-person controller.
+        m_playerControllerFn = m_scriptLibrary.resolveTick("player");
+
         std::string msg = "bound " + std::to_string(bound) + " object(s)";
+        if (m_playerControllerFn) msg += " + player controller";
         if (!missing.empty()) msg += "; missing from library: " + missing;
         std::cout << "[Scripts] " << msg << std::endl;
         return msg;
@@ -25060,6 +25099,15 @@ private:
 
         // Disable noclip for play mode (terrain collision enabled)
         m_camera.setNoClip(false);
+
+        // Scripted player: if the level bound a `player` controller and we're in
+        // first-person (not RTS/EDEN OS), drive the player through it this session.
+        // F8 toggles back to the default free-cam for editor walk/fly testing.
+        m_useScriptedPlayer = (m_playerControllerFn != nullptr) && !m_playRTSCamera && !m_isEdenOSLevel;
+        m_playerTransform.setPosition(m_camera.getPosition());   // Y gets ground-snapped on tick 1
+        m_playerTransform.setRotation(glm::vec3(0.0f, 0.0f, 0.0f));
+        if (m_useScriptedPlayer)
+            std::cout << "[PlayMode] Scripted player controller active (F8 for free-cam)" << std::endl;
 
         // Set up signal callback for SceneObject SEND_SIGNAL actions
         SceneObject::setSignalCallback([this](const std::string& signalName, const std::string& targetName, SceneObject* sender) {
@@ -29792,6 +29840,16 @@ private:
     bool m_loadedStartupLevel = false;
     std::string m_pendingLevelLoad;      // Load-dialog result, applied at frame start (see update())
     bool m_playRTSCamera = false;        // F6 in play mode: false = first-person WASD (default), true = RTS/battle cam
+
+    // Scripted player controller (HEIDIC). If the level's compiled script exports
+    // a `player` function, it drives m_playerTransform each play frame and the
+    // camera follows it (first-person). Movement is relative to where the camera
+    // looks (mouse-look stays the engine's job). F8 toggles between this and the
+    // default C++ free-cam controller (for editor walk/fly testing).
+    eden::Transform m_playerTransform;
+    eden::ScriptLibrary::TickFn m_playerControllerFn = nullptr;  // bound "player" fn
+    bool m_useScriptedPlayer = false;    // this play session drives via the script
+    float m_playerEyeHeight = 1.7f;      // camera above the player's feet (planet ~meters)
     bool m_bootedEdenOS = false; // one-shot guard for the --eden-os first-frame build
     bool m_terminalInitialized = false;
     // 3D terminal screen

@@ -73,6 +73,10 @@ extern "C" {
     float self_dist_to_player();               // feet to the player
     void  self_face_player();                  // turn (yaw) to look at the player
     void  self_move_toward_player(float step); // step `step` feet toward the player
+    // Facing-relative movement (horizontal): move along where this entity faces,
+    // for a player/creature controller. self_rotate_y turns the facing first.
+    void  self_move_forward(float dist);       // + = forward, - = back (own facing)
+    void  self_move_right(float dist);         // + = right strafe, - = left
     // Terrain: keep a ground creature on the surface as it moves over hills.
     float self_ground_y();                     // terrain height at this entity's (x,z)
     void  self_snap_to_ground();               // set this entity's Y to the ground

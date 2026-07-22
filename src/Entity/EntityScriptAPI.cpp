@@ -117,6 +117,35 @@ void self_move_toward_player(float step) {
     t->translate(dx / d * m, 0.0f, dz / d * m);  // horizontal step
 }
 
+// --- Facing-relative movement (horizontal plane) ---
+// Direction comes from the entity's own rotation (quat * axis), so it inherits
+// self_face_player / self_rotate_y's convention automatically. Y is flattened so
+// pitch never drives the creature into or off the ground.
+
+void self_move_forward(float dist) {
+    auto* t = currentScriptTransform();
+    if (!t) return;
+    glm::vec3 f = t->getRotation() * glm::vec3(0.0f, 0.0f, 1.0f);
+    f.y = 0.0f;
+    float len = glm::length(f);
+    if (len < 1e-6f) return;
+    f /= len;
+    t->translate(f.x * dist, 0.0f, f.z * dist);
+}
+
+void self_move_right(float dist) {
+    auto* t = currentScriptTransform();
+    if (!t) return;
+    // Forward is +Z, up is +Y, so the player's RIGHT is local -X (matches the
+    // engine camera's getRight()); +X would strafe left.
+    glm::vec3 r = t->getRotation() * glm::vec3(-1.0f, 0.0f, 0.0f);
+    r.y = 0.0f;
+    float len = glm::length(r);
+    if (len < 1e-6f) return;
+    r /= len;
+    t->translate(r.x * dist, 0.0f, r.z * dist);
+}
+
 // --- Terrain ground verbs ---
 
 float self_ground_y() {
