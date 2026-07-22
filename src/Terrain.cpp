@@ -26,7 +26,7 @@ static glm::vec2 noiseSeedOffset(uint32_t seed) {
     return glm::vec2(ox, oz);
 }
 
-TerrainChunk::TerrainChunk(glm::ivec2 coord, const TerrainConfig& config)
+TerrainChunk::TerrainChunk(glm::ivec2 coord, const TerrainConfig& config, bool buildMesh)
     : m_coord(coord)
     , m_resolution(config.chunkResolution)
     , m_tileSize(config.tileSize)
@@ -36,14 +36,14 @@ TerrainChunk::TerrainChunk(glm::ivec2 coord, const TerrainConfig& config)
     , m_maxChunk(config.maxChunk)
 {
     m_chunkWorldSize = (config.chunkResolution - 1) * config.tileSize;
-    generate(config);
+    generate(config, buildMesh);
 }
 
 glm::vec3 TerrainChunk::getWorldPosition() const {
     return glm::vec3(m_coord.x * m_chunkWorldSize, 0, m_coord.y * m_chunkWorldSize);
 }
 
-void TerrainChunk::generate(const TerrainConfig& config) {
+void TerrainChunk::generate(const TerrainConfig& config, bool buildMesh) {
     int resolution = config.chunkResolution;
     float tileSize = config.tileSize;
     float worldOffsetX = m_coord.x * (resolution - 1) * tileSize;
@@ -120,7 +120,10 @@ void TerrainChunk::generate(const TerrainConfig& config) {
         }
     }
 
-    rebuildVerticesFromHeightmap();
+    // Skip the vertex/normal build when the caller will immediately overwrite the
+    // heights (loading a saved level applies its own heightmaps, then rebuilds) —
+    // avoids ~1.3s of throwaway mesh work when preloading a 1024-chunk level.
+    if (buildMesh) rebuildVerticesFromHeightmap();
 }
 
 void TerrainChunk::resetToDefaults() {
@@ -889,7 +892,7 @@ int Terrain::getTotalChunkCount() const {
     return width * height;
 }
 
-int Terrain::preloadAllChunks(TerrainLoadCallback progressCallback) {
+int Terrain::preloadAllChunks(TerrainLoadCallback progressCallback, bool buildMesh) {
     if (!m_config.useFixedBounds) {
         return 0;  // Can't preload infinite terrain
     }
@@ -902,7 +905,7 @@ int Terrain::preloadAllChunks(TerrainLoadCallback progressCallback) {
             glm::ivec2 coord{x, z};
 
             if (m_chunks.find(coord) == m_chunks.end()) {
-                auto chunk = std::make_shared<TerrainChunk>(coord, m_config);
+                auto chunk = std::make_shared<TerrainChunk>(coord, m_config, buildMesh);
                 m_chunks[coord] = chunk;
             }
 

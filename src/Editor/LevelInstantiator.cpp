@@ -56,7 +56,7 @@ void LevelInstantiator::applyTerrain(const LevelData& data,
             tcfg.proceduralHeights = false;
             terrain.reconfigure(tcfg);
             auto t0 = std::chrono::steady_clock::now();
-            terrain.preloadAllChunks(nullptr);               // flat chunk objects only
+            terrain.preloadAllChunks(nullptr, /*buildMesh=*/false);  // chunk objects, no mesh
             auto t1 = std::chrono::steady_clock::now();
             LevelSerializer::applyToTerrain(data, terrain);  // saved heights + rebuilt meshes
             auto t2 = std::chrono::steady_clock::now();

@@ -101,7 +101,7 @@ using TerrainLoadCallback = std::function<void(int, int)>;
 
 class TerrainChunk {
 public:
-    TerrainChunk(glm::ivec2 coord, const TerrainConfig& config);
+    TerrainChunk(glm::ivec2 coord, const TerrainConfig& config, bool buildMesh = true);
 
     const std::vector<Vertex3D>& getVertices() const { return m_vertices; }
     const std::vector<uint32_t>& getIndices() const { return m_indices; }
@@ -172,7 +172,7 @@ public:
 
     friend class Terrain;
 private:
-    void generate(const TerrainConfig& config);
+    void generate(const TerrainConfig& config, bool buildMesh = true);
     void rebuildVerticesFromHeightmap();
     void rebuildIndices();
     glm::vec3 getTerrainColor(float normalizedHeight);
@@ -224,7 +224,7 @@ public:
 
     // Pre-load all chunks within fixed bounds (call once at startup)
     // Returns total number of chunks loaded
-    int preloadAllChunks(TerrainLoadCallback progressCallback = nullptr);
+    int preloadAllChunks(TerrainLoadCallback progressCallback = nullptr, bool buildMesh = true);
 
     // Check if pre-loading is complete
     bool isFullyLoaded() const { return m_fullyLoaded; }
