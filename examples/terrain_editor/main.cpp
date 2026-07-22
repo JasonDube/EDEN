@@ -1727,6 +1727,23 @@ protected:
         if (m_isPlayMode) {
             glm::vec3 p = m_camera.getPosition();          // the player (self_*_player verbs)
             eden::setScriptPlayerPosition(p.x, p.y, p.z);
+
+            // Feed player input to scripted controllers (input_* verbs). Suppressed
+            // while ImGui wants the keyboard (typing in a field) so movement keys
+            // don't leak. Same key reads the C++ controller uses.
+            bool typing = ImGui::GetIO().WantTextInput;
+            float mx = 0.0f, mz = 0.0f;
+            if (!typing) {
+                if (Input::isKeyDown(Input::KEY_D)) mx += 1.0f;
+                if (Input::isKeyDown(Input::KEY_A)) mx -= 1.0f;
+                if (Input::isKeyDown(Input::KEY_W)) mz += 1.0f;
+                if (Input::isKeyDown(Input::KEY_S)) mz -= 1.0f;
+            }
+            float jump = (!typing && Input::isKeyDown(Input::KEY_SPACE)) ? 1.0f : 0.0f;
+            float run  = (!typing && Input::isKeyDown(Input::KEY_LEFT_CONTROL)) ? 1.0f : 0.0f;
+            glm::vec2 md = Input::getMouseDelta();
+            eden::setScriptInput(mx, mz, jump, run, md.x, md.y);
+
             for (auto& obj : m_sceneObjects) {
                 if (obj && obj->hasTickScript()) obj->runTickScript(deltaTime);
             }

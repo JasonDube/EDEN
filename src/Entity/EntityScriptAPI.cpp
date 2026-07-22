@@ -32,6 +32,12 @@ void setScriptGroundHeightHook(std::function<float(float, float)> hook) {
 }
 void setScriptPlayerPosition(float x, float y, float z) { s_playerPos = {x, y, z}; }
 
+// Player input, refreshed by the host each play-mode frame.
+static struct { float moveX, moveZ, jump, run, mouseDx, mouseDy; } s_input{};
+void setScriptInput(float mx, float mz, float j, float r, float dx, float dy) {
+    s_input = {mx, mz, j, r, dx, dy};
+}
+
 } // namespace eden
 
 using eden::currentScriptTransform;
@@ -120,6 +126,13 @@ float self_ground_y() {
     if (eden::s_groundHeightFn) return eden::s_groundHeightFn(s.x, s.z);
     return s.y;   // no terrain hook -> leave height as-is
 }
+
+float input_move_x() { return eden::s_input.moveX; }
+float input_move_z() { return eden::s_input.moveZ; }
+float input_jump()   { return eden::s_input.jump; }
+float input_run()    { return eden::s_input.run; }
+float mouse_dx()     { return eden::s_input.mouseDx; }
+float mouse_dy()     { return eden::s_input.mouseDy; }
 
 void self_snap_to_ground() {
     auto* t = currentScriptTransform();

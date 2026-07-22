@@ -36,6 +36,12 @@ SceneObject* currentScriptObject();
 // once per frame before ticking scripts (in play mode it's the camera).
 void setScriptPlayerPosition(float x, float y, float z);
 
+// Player input, set by the host once per frame (play mode) so scripted
+// controllers can read WASD / jump / run / mouse-look. moveX/moveZ are -1..1
+// (strafe / forward), buttons are 0 or 1, mouse deltas are pixels this frame.
+void setScriptInput(float moveX, float moveZ, float jump, float run,
+                    float mouseDx, float mouseDy);
+
 // Host hook for self_play_anim: the app owns the skinned-model renderer, so it
 // installs how "play this animation on this object" actually happens. The hook
 // should no-op when the requested animation is already playing (scripts call
@@ -70,4 +76,11 @@ extern "C" {
     // Terrain: keep a ground creature on the surface as it moves over hills.
     float self_ground_y();                     // terrain height at this entity's (x,z)
     void  self_snap_to_ground();               // set this entity's Y to the ground
+    // Player input (for scripted controllers). Valid in play mode; 0 otherwise.
+    float input_move_x();                      // -1 (A/left) .. +1 (D/right)
+    float input_move_z();                      // -1 (S/back) .. +1 (W/forward)
+    float input_jump();                        // 1 while jump (space) held, else 0
+    float input_run();                         // 1 while run (ctrl) held, else 0
+    float mouse_dx();                          // look delta X this frame (pixels)
+    float mouse_dy();                          // look delta Y this frame (pixels)
 }
