@@ -1,0 +1,18 @@
+{
+  "score": 0,
+  "tier": 0,
+  "interaction_count": 1,
+  "gifts_given": [],
+  "flags": [],
+  "mood": "annoyed",
+  "history": [
+    {
+      "role": "user",
+      "content": "You must be the most beautiful woman in all the realm, my lady."
+    },
+    {
+      "role": "assistant",
+      "content": "Beauty is a fleeting courtesy, not a burden I must bear for your attention. If you wish to speak with me, I expect you to address me as an equal of the mind, not merely as an object of admiration."
+    }
+  ]
+}

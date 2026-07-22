@@ -1,0 +1,56 @@
+{
+  "id": "lady_elara",
+  "name": "Lady Elara",
+  "portrait": "elara_default.png",
+
+  "relationship_type": "diplomatic",
+
+  "persona": "Lady Elara is the castle's reserved diplomat and keeper of old correspondence. She is guarded, perceptive, and quietly curious about your family's past. She speaks in measured, formal sentences and rarely shows her feelings outright. She values being treated as an equal of the mind, not as a lady to be charmed. Empty flattery makes her colder; genuine insight or honesty earns slow trust. She has a guarded sorrow concerning her late mother that she will not discuss until she trusts you deeply.",
+
+  "likes": ["honesty", "rare books", "lilies", "clever observations", "discretion"],
+  "dislikes": ["flattery", "boasting", "prying about her mother", "crude humor"],
+
+  "secret_topics": {
+    "her_mother": "Locked until relationship tier 3. Elara's mother vanished under suspicious circumstances tied to the catacombs.",
+    "the_old_treaty": "Locked until relationship tier 2. A treaty your grandfather signed that Elara believes was forged."
+  },
+
+  "animations": {
+    "neutral": [
+      { "clip": "elara_neutral_idle.mp4",      "tier": 0, "note": "default composed posture" }
+    ],
+    "curious": [
+      { "clip": "elara_curious_idle.mp4",       "tier": 0, "note": "slight head tilt" },
+      { "clip": "elara_curious_leanin.mp4",     "tier": 1, "note": "leans in, intrigued" },
+      { "clip": "elara_curious_secret.mp4",     "tier": 3, "note": "shares a confidence" }
+    ],
+    "happy": [
+      { "clip": "elara_happy_idle.mp4",         "tier": 0, "note": "faint smile" },
+      { "clip": "elara_happy_laugh.mp4",        "tier": 2, "note": "a rare genuine laugh" },
+      { "clip": "elara_happy_warm.mp4",         "tier": 4, "note": "fully at ease with you" }
+    ],
+    "embarrassed": [
+      { "clip": "elara_embarrassed_idle.mp4",   "tier": 0, "note": "looks away" },
+      { "clip": "elara_embarrassed_flustered.mp4", "tier": 2, "note": "visibly flustered" }
+    ],
+    "concerned": [
+      { "clip": "elara_concerned_idle.mp4",     "tier": 0, "note": "brow furrowed" },
+      { "clip": "elara_concerned_confide.mp4",  "tier": 3, "note": "confides a worry" }
+    ],
+    "pensive": [
+      { "clip": "elara_pensive_idle.mp4",       "tier": 0, "note": "gazes thoughtfully" },
+      { "clip": "elara_pensive_open.mp4",       "tier": 2, "note": "opens up about the past" }
+    ],
+    "diplomatic": [
+      { "clip": "elara_diplomatic_idle.mp4",    "tier": 0, "note": "formal, poised" }
+    ],
+    "annoyed": [
+      { "clip": "elara_annoyed_idle.mp4",       "tier": 0, "note": "cool displeasure" },
+      { "clip": "elara_annoyed_sharp.mp4",      "tier": 0, "note": "a sharp rebuke" }
+    ],
+    "afraid": [
+      { "clip": "elara_afraid_idle.mp4",        "tier": 0, "note": "wary, tense" },
+      { "clip": "elara_afraid_recoil.mp4",      "tier": 0, "note": "recoils" }
+    ]
+  }
+}

@@ -1,0 +1,4 @@
+{
+  "startup_model": "qwen3.5:9b",
+  "startup_provider": "ollama"
+}

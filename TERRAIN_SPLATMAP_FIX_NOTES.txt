@@ -1,0 +1,56 @@
+TERRAIN TEXTURE SEAM FIX - Splatmap Conversion (March 15, 2026)
+================================================================
+
+PROBLEM:
+Terrain textures had visible seams/tears at chunk boundaries when painting
+with textures beyond the original 4 (grass, dirt, rock, sand).
+
+ROOT CAUSE:
+The old system used `uvec4 texIndices` with `flat` interpolation in the Vulkan
+shader. Integer types REQUIRE flat interpolation, meaning the "provoking vertex"
+(last vertex of each triangle) determines which texture indices are used for the
+ENTIRE triangle. At chunk boundaries, the provoking vertex could be an interior
+vertex with different texture index slot assignments than the shared edge vertices,
+causing visible seams. This was fundamentally unfixable with per-vertex integer
+texture indices.
+
+FIX:
+Replaced the 4-index + 4-weight system with a SPLATMAP approach:
+- 16 float weights (one per texture), stored in 4x vec4 (texSplat0-3)
+- All weights are smoothly interpolated across triangles (no `flat` keyword)
+- No integer texture indices at all -- the weight position IS the texture index
+- Painting just increases the target texture's weight and normalizes all 16
+
+KEY FILES CHANGED:
+- include/eden/Terrain.hpp        -- Vertex3D struct: texWeights+texIndices -> texSplat0-3
+- src/Terrain.cpp                 -- Brush code, edge sync, chunk data
+- shaders/terrain.vert            -- 4 vec4 splatmap inputs (locations 4,5,10,11)
+- shaders/terrain.frag            -- Samples all 16 textures, blends by weight
+- src/Renderer/TerrainPipeline.cpp -- 12 vertex attributes (was 10)
+- include/eden/LevelSerializer.hpp -- ChunkData with splatmap + legacy fields
+- src/Editor/LevelSerializer.cpp  -- Binary format v2, backward-compatible v1 load
+
+BACKWARD COMPATIBILITY:
+- Binary terrain files: version 1 (old) auto-converts to splatmap on load
+- JSON .eden files: checks for "splatmap0" key, falls back to legacy texWeights/texIndices
+- setChunkDataLegacy() scatters old indices+weights into the correct splatmap slots
+
+CAPACITY:
+- Supports up to 16 terrain textures (4x vec4 splatmap)
+- Texture array supports up to 32 layers (MAX_TERRAIN_TEXTURES in TextureManager.hpp)
+- To go beyond 16: add more texSplat vec4s + shader lines + vertex attributes
+
+APPROACHES THAT FAILED (10+ attempts before splatmap fix):
+1. Post-hoc edge stitching (averaging weights/indices)
+2. Post-hoc edge sync (copying from modified chunk to neighbor)
+3. Unreal-style global coordinate brush
+4. Texture slot sorting by index (canonical order)
+5. Float interpolation of indices with round() -- wrong textures at transitions
+6. 1-ring neighbor index propagation -- made seams WIDER
+7. Deterministic tie-breaking for slot replacement
+8. Default texIndicesmap (0,0,0,0) instead of (0,1,2,3)
+9. Various combinations of the above
+
+The fundamental insight: you CANNOT fix seams caused by `flat` interpolation
+on integer texture indices without eliminating the integer indices entirely.
+The splatmap approach does exactly that.

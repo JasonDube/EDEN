@@ -1,0 +1,6 @@
+{
+  "deepseek_chat": "electra",
+  "dolphin_mixtral_8x7b": "electra",
+  "grok_3": "electra",
+  "qwen3_5_9b": "electra"
+}

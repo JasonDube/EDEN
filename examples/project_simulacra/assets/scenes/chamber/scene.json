@@ -1,0 +1,6 @@
+{
+  "_comment": "The chamber — Project Simulacra's placeholder room (still image). Trace navigation hotboxes via F3/P and add them to 'hotspots' (same schema as Slag Legion).",
+  "video": "",
+  "poster": "chamber.jpg",
+  "hotspots": []
+}

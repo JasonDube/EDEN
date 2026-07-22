@@ -1,0 +1,15 @@
+{
+  "_comment": "The shared default simulacrum shell. The NAME comes from the loaded model (Servers panel), not from here \u2014 a per-model folder (assets/characters/<sanitized_model>/) overrides this one if present. Minimal spec: no reactions, no tiers, no clip vocabulary.",
+  "identity": {
+    "name": "simulacrum",
+    "model": "",
+    "manufacturer": "",
+    "being_type": 4
+  },
+  "capabilities": {
+    "composite": false,
+    "chroma": "none",
+    "audio": false,
+    "emotions": []
+  }
+}

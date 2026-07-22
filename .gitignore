@@ -53,3 +53,7 @@ examples/slag_legion/**/*.png
 examples/slag_legion/**/*.glb
 # Slag Legion runtime save state (regenerated)
 examples/slag_legion/save/
+
+# Runtime data / transient junk
+modules/ai_companion/backend/transcripts/
+ex.err
