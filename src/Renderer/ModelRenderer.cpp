@@ -163,6 +163,7 @@ ModelRenderer::~ModelRenderer() {
     if (m_descriptorSetLayout) vkDestroyDescriptorSetLayout(device, m_descriptorSetLayout, nullptr);
     if (m_pipeline) vkDestroyPipeline(device, m_pipeline, nullptr);
     if (m_twoSidedPipeline) vkDestroyPipeline(device, m_twoSidedPipeline, nullptr);
+    if (m_additivePipeline) vkDestroyPipeline(device, m_additivePipeline, nullptr);
     if (m_pipelineLayout) vkDestroyPipelineLayout(device, m_pipelineLayout, nullptr);
     if (m_grassPipeline) vkDestroyPipeline(device, m_grassPipeline, nullptr);
     if (m_instancedPipeline) vkDestroyPipeline(device, m_instancedPipeline, nullptr);
@@ -400,6 +401,22 @@ void ModelRenderer::createPipeline(VkRenderPass renderPass, VkExtent2D extent) {
     // Keep blend settings from above
     if (vkCreateGraphicsPipelines(m_context.getDevice(), VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &m_transparentPipeline) != VK_SUCCESS) {
         throw std::runtime_error("Failed to create transparent model pipeline");
+    }
+
+    // Create additive pipeline (no culling, no depth write, ADDITIVE blending) — for glows,
+    // explosions and fire: black contributes nothing, bright accumulates light (no "tinted
+    // glass" see-through, and overlapping sprites brighten rather than occlude).
+    rasterizer.cullMode = VK_CULL_MODE_NONE;
+    depthStencil.depthWriteEnable = VK_FALSE;
+    colorBlend.blendEnable = VK_TRUE;
+    colorBlend.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
+    colorBlend.dstColorBlendFactor = VK_BLEND_FACTOR_ONE;
+    colorBlend.colorBlendOp = VK_BLEND_OP_ADD;
+    colorBlend.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+    colorBlend.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+    colorBlend.alphaBlendOp = VK_BLEND_OP_ADD;
+    if (vkCreateGraphicsPipelines(m_context.getDevice(), VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &m_additivePipeline) != VK_SUCCESS) {
+        throw std::runtime_error("Failed to create additive model pipeline");
     }
 
     vkDestroyShaderModule(m_context.getDevice(), vertModule, nullptr);
@@ -1291,14 +1308,15 @@ void ModelRenderer::setDayNight(float sunY, float ambientLevel) {
 void ModelRenderer::render(VkCommandBuffer commandBuffer, const glm::mat4& viewProj,
                            uint32_t modelHandle, const glm::mat4& modelMatrix,
                            float hueShift, float saturation, float brightness,
-                           bool twoSided, bool indoor, bool transparent) {
+                           bool twoSided, bool indoor, bool transparent, bool additive) {
     auto it = m_models.find(modelHandle);
     if (it == m_models.end()) return;
 
     ModelGPUData& data = it->second;
 
     VkPipeline pipe = m_pipeline;
-    if (transparent && m_transparentPipeline) pipe = m_transparentPipeline;
+    if (additive && m_additivePipeline) pipe = m_additivePipeline;
+    else if (transparent && m_transparentPipeline) pipe = m_transparentPipeline;
     else if (twoSided) pipe = m_twoSidedPipeline;
     vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
 
@@ -1873,6 +1891,10 @@ void ModelRenderer::recreatePipeline(VkRenderPass renderPass, VkExtent2D extent)
     if (m_transparentPipeline) {
         vkDestroyPipeline(device, m_transparentPipeline, nullptr);
         m_transparentPipeline = VK_NULL_HANDLE;
+    }
+    if (m_additivePipeline) {
+        vkDestroyPipeline(device, m_additivePipeline, nullptr);
+        m_additivePipeline = VK_NULL_HANDLE;
     }
     if (m_pipelineLayout) {
         vkDestroyPipelineLayout(device, m_pipelineLayout, nullptr);

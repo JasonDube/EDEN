@@ -116,7 +116,8 @@ public:
     void render(VkCommandBuffer commandBuffer, const glm::mat4& viewProj,
                 uint32_t modelHandle, const glm::mat4& modelMatrix,
                 float hueShift = 0.0f, float saturation = 1.0f, float brightness = 1.0f,
-                bool twoSided = false, bool indoor = false, bool transparent = false);
+                bool twoSided = false, bool indoor = false, bool transparent = false,
+                bool additive = false);
 
     // Render multiple instances of the same model in a single draw call.
     // alphaTest=true routes through the grass pipeline (alpha-cutout, double-sided) for
@@ -204,6 +205,7 @@ private:
     void* m_instanceMapped = nullptr;
 
     VkPipeline m_transparentPipeline = VK_NULL_HANDLE;
+    VkPipeline m_additivePipeline = VK_NULL_HANDLE;   // additive blend (glows/explosions/fire)
 
     // Wireframe pipeline
     VkPipelineLayout m_wireframePipelineLayout = VK_NULL_HANDLE;
