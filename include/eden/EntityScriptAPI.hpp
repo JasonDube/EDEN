@@ -1,5 +1,7 @@
 #pragma once
 
+#include <functional>
+
 // The entity-script API: the extern "C" surface compiled HEIDIC entity scripts
 // (heidic_v2 --script) call into. "self" is implicit — the dispatcher points
 // the API at the scripted thing's Transform before invoking a script function,
@@ -14,6 +16,7 @@ namespace eden {
 
 class Entity;
 class Transform;
+class SceneObject;
 
 // Point the self_* API at a transform (nullptr = no target; calls become no-ops).
 // The dispatcher wraps every script call:
@@ -23,6 +26,21 @@ Transform* currentScriptTransform();
 
 // Convenience for ActionSystem entities.
 void setCurrentScriptEntity(Entity* e);
+
+// For SceneObject-level API calls (animation etc.), the dispatcher also points
+// the API at the object itself. Optional — transform-only targets leave it null.
+void setCurrentScriptObject(SceneObject* o);
+SceneObject* currentScriptObject();
+
+// The player's world position, for the self_*_player verbs. The host sets this
+// once per frame before ticking scripts (in play mode it's the camera).
+void setScriptPlayerPosition(float x, float y, float z);
+
+// Host hook for self_play_anim: the app owns the skinned-model renderer, so it
+// installs how "play this animation on this object" actually happens. The hook
+// should no-op when the requested animation is already playing (scripts call
+// self_play_anim every tick).
+void setScriptPlayAnimHook(std::function<void(SceneObject&, const char*)> hook);
 
 } // namespace eden
 
@@ -36,4 +54,11 @@ extern "C" {
     // Rotation (degrees)
     void self_rotate_y(float degrees);
     void self_set_rotation(float rx, float ry, float rz);
+    // Animation: play the named clip (looped) on this object's skinned model.
+    // Safe to call every tick — switching only happens when the name changes.
+    void self_play_anim(const char* name);
+    // Player-relative verbs (horizontal / XZ plane, in feet). "self" is this entity.
+    float self_dist_to_player();               // feet to the player
+    void  self_face_player();                  // turn (yaw) to look at the player
+    void  self_move_toward_player(float step); // step `step` feet toward the player
 }

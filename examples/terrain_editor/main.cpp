@@ -440,6 +440,16 @@ protected:
         // HEIDIC script .so files couldn't resolve their API at load time.
         eden::setCurrentScriptEntity(nullptr);
 
+        // self_play_anim: the app owns the skinned renderer, so it supplies the
+        // "play animation on this object" behavior. No-ops when that clip is
+        // already playing — scripts call this every tick.
+        eden::setScriptPlayAnimHook([this](SceneObject& obj, const char* anim) {
+            if (obj.getSkinnedModelHandle() == UINT32_MAX) return;   // not skinned
+            if (obj.getCurrentAnimation() == anim) return;           // already playing
+            m_skinnedModelRenderer->playAnimation(obj.getSkinnedModelHandle(), anim, true);
+            obj.setCurrentAnimation(anim);
+        });
+
         initGroveVM();
         loadEditorConfig();
 
@@ -1704,6 +1714,8 @@ protected:
         // Run compiled @entity per-tick scripts on their bound objects (play
         // mode only — in edit mode objects stay put for authoring).
         if (m_isPlayMode) {
+            glm::vec3 p = m_camera.getPosition();          // the player (self_*_player verbs)
+            eden::setScriptPlayerPosition(p.x, p.y, p.z);
             for (auto& obj : m_sceneObjects) {
                 if (obj && obj->hasTickScript()) obj->runTickScript(deltaTime);
             }
@@ -22537,7 +22549,9 @@ private:
             // of the call — that's what makes "self" mean the bound object.
             obj->setTickScript([fn](SceneObject& self, float dt) {
                 eden::setCurrentScriptTransform(&self.getTransform());
+                eden::setCurrentScriptObject(&self);
                 fn(dt);
+                eden::setCurrentScriptObject(nullptr);
                 eden::setCurrentScriptTransform(nullptr);
             });
             bound++;

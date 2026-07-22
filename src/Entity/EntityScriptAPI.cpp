@@ -1,6 +1,7 @@
 #include <eden/EntityScriptAPI.hpp>
 #include <eden/Entity.hpp>
 #include <eden/Transform.hpp>
+#include <cmath>
 
 namespace eden {
 
@@ -14,6 +15,17 @@ Transform* currentScriptTransform() { return t_currentScriptTransform; }
 void setCurrentScriptEntity(Entity* e) {
     t_currentScriptTransform = e ? &e->getTransform() : nullptr;
 }
+
+static thread_local SceneObject* t_currentScriptObject = nullptr;
+static std::function<void(SceneObject&, const char*)> s_playAnimHook;
+static glm::vec3 s_playerPos{0.0f};   // set by the host each frame
+
+void setCurrentScriptObject(SceneObject* o) { t_currentScriptObject = o; }
+SceneObject* currentScriptObject() { return t_currentScriptObject; }
+void setScriptPlayAnimHook(std::function<void(SceneObject&, const char*)> hook) {
+    s_playAnimHook = std::move(hook);
+}
+void setScriptPlayerPosition(float x, float y, float z) { s_playerPos = {x, y, z}; }
 
 } // namespace eden
 
@@ -50,6 +62,48 @@ void self_rotate_y(float degrees) {
 
 void self_set_rotation(float rx, float ry, float rz) {
     if (auto* t = currentScriptTransform()) t->setRotation(glm::vec3(rx, ry, rz));
+}
+
+void self_play_anim(const char* name) {
+    if (!name) return;
+    auto* o = eden::currentScriptObject();
+    // The host-installed hook owns renderer access and already-playing dedup.
+    if (o && eden::s_playAnimHook) eden::s_playAnimHook(*o, name);
+}
+
+// --- Player-relative verbs (horizontal XZ plane, feet) ---
+
+float self_dist_to_player() {
+    auto* t = currentScriptTransform();
+    if (!t) return 1.0e9f;   // no self -> "infinitely far" so idle branches win
+    glm::vec3 s = t->getPosition();
+    float dx = eden::s_playerPos.x - s.x;
+    float dz = eden::s_playerPos.z - s.z;
+    return std::sqrt(dx * dx + dz * dz);
+}
+
+void self_face_player() {
+    auto* t = currentScriptTransform();
+    if (!t) return;
+    glm::vec3 s = t->getPosition();
+    float dx = eden::s_playerPos.x - s.x;
+    float dz = eden::s_playerPos.z - s.z;
+    if (dx * dx + dz * dz < 1.0e-6f) return;  // player is right on top — keep facing
+    // Same convention as the engine's turn_to: yaw aligns local forward with (dx,dz).
+    float yaw = std::atan2(dx, dz) * 180.0f / 3.14159265f;
+    t->setRotation(glm::vec3(0.0f, yaw, 0.0f));  // yaw only (ground creature)
+}
+
+void self_move_toward_player(float step) {
+    auto* t = currentScriptTransform();
+    if (!t || step == 0.0f) return;
+    glm::vec3 s = t->getPosition();
+    float dx = eden::s_playerPos.x - s.x;
+    float dz = eden::s_playerPos.z - s.z;
+    float d = std::sqrt(dx * dx + dz * dz);
+    if (d < 1.0e-4f) return;
+    float m = (step < d) ? step : d;             // don't overshoot past the player
+    t->translate(dx / d * m, 0.0f, dz / d * m);  // horizontal step
 }
 
 } // extern "C"
