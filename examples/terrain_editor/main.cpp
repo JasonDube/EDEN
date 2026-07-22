@@ -2533,8 +2533,17 @@ protected:
 
         float aspect = static_cast<float>(getSwapchain().getExtent().width) /
                        static_cast<float>(getSwapchain().getExtent().height);
+        // VISIBILITY CONTROL. Far clip = the user's view-distance slider (edit AND
+        // play — this is a flight/space sim, you must see far). Overview forces it
+        // large enough for the whole map. Draw ALL terrain chunks in overview and in
+        // first-person/flight play so distant terrain never clips (battle keeps the
+        // view-distance set — its fog hides the rest anyway).
+        const bool overview = m_editorUI.getOverviewMode() && !m_isPlayMode;
+        const bool drawAllChunks = overview || (m_isPlayMode && !m_playRTSCamera);
+        float farPlane = m_editorUI.getViewDistance();
+        if (overview) farPlane = std::max(farPlane, 20000.0f);
         glm::mat4 view = m_camera.getViewMatrix();
-        glm::mat4 proj = m_camera.getProjectionMatrix(aspect, 0.1f, 5000.0f);
+        glm::mat4 proj = m_camera.getProjectionMatrix(aspect, 0.1f, farPlane);
         proj[1][1] *= -1;
         glm::mat4 vp = proj * view;
 
@@ -2602,7 +2611,7 @@ protected:
         // TABLETOP thing — only apply it in RTS/battle mode. Walking a world
         // first-person (m_playRTSCamera == false) uses the level's own fog so you
         // can actually see the terrain and navigate. EDEN OS is exempt too.
-        if (m_isPlayMode && !m_isEdenOSLevel && m_playRTSCamera) {
+        if (m_isPlayMode && !m_isEdenOSLevel && m_playRTSCamera && m_editorUI.getFogEnabled()) {
             pushConstants.fogColor = glm::vec4(0.0f, 0.0f, 0.0f, 1.0f);
             pushConstants.fogStart = 75.0f;
             pushConstants.fogEnd   = 150.0f;
@@ -2611,14 +2620,35 @@ protected:
             pushConstants.fogStart = m_editorUI.getFogStart();
             pushConstants.fogEnd   = m_editorUI.getFogEnd();
         }
+        // Hard fog switch (VISIBILITY CONTROL) — OFF pushes fog past any real
+        // distance so NOTHING hazes, in edit OR play mode. Overview also kills it.
+        if (overview || !m_editorUI.getFogEnabled()) {
+            pushConstants.fogStart = 1.0e8f;
+            pushConstants.fogEnd   = 1.0e9f;
+        }
         pushConstants.sunY = sunHeight;
         pushConstants.ambientLevel = ambientLevel;
         pushConstants.cameraPos = glm::vec4(m_camera.getPosition(), 1.0f);
 
         // Skip terrain rendering in test/space level mode or EDEN OS mode
         if (!m_isTestLevel && !m_isSpaceLevel && !m_isEdenOSLevel) {
-            for (const auto& vc : m_terrain.getVisibleChunks()) {
-                auto* buffers = getBufferManager().getMeshBuffers(vc.chunk->getBufferHandle());
+            // Overview draws EVERY loaded chunk at its true position (see the whole
+            // map from anywhere); normal render draws only the view-distance visible
+            // set, which carries wrap offsets.
+            std::vector<std::pair<eden::TerrainChunk*, glm::vec3>> draws;
+            if (drawAllChunks) {
+                // Chunk vertices are already baked in WORLD space, so the model
+                // offset is ZERO (same as a non-wrapped visible chunk's
+                // renderOffset). Using getWorldPosition() here double-offsets every
+                // chunk and leaves gaps — the checkerboard-of-sky bug.
+                for (const auto& [coord, chunk] : m_terrain.getAllChunks())
+                    draws.emplace_back(chunk.get(), glm::vec3(0.0f));
+            } else {
+                for (const auto& vc : m_terrain.getVisibleChunks())
+                    draws.emplace_back(vc.chunk.get(), vc.renderOffset);
+            }
+            for (const auto& [chunk, offset] : draws) {
+                auto* buffers = getBufferManager().getMeshBuffers(chunk->getBufferHandle());
                 if (!buffers || !buffers->vertexBuffer) continue;
 
                 VkBuffer vertexBuffers[] = {buffers->vertexBuffer->getHandle()};
@@ -2629,7 +2659,7 @@ protected:
                     vkCmdBindIndexBuffer(cmd, buffers->indexBuffer->getHandle(), 0, VK_INDEX_TYPE_UINT32);
                 }
 
-                glm::mat4 model = glm::translate(glm::mat4(1.0f), vc.renderOffset);
+                glm::mat4 model = glm::translate(glm::mat4(1.0f), offset);
                 pushConstants.mvp = vp * model;
                 vkCmdPushConstants(cmd, m_pipeline->getLayout(),
                                    VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
@@ -2716,7 +2746,10 @@ protected:
                     auto* so = const_cast<SceneObject*>(objPtr.get());
                     AABB wb = so->getWorldBounds();
                     glm::vec3 d = wb.getCenter() - camPos;
-                    float cullBase = m_playRTSCamera ? 150.0f : m_editorUI.getFogEnd();
+                    // Objects show as far as you can see (view distance). Only the
+                    // tabletop battle (with fog on) compresses them to 150m.
+                    float cullBase = (m_playRTSCamera && m_editorUI.getFogEnabled())
+                                         ? 150.0f : m_editorUI.getViewDistance();
                     float reach = cullBase + 0.5f * glm::length(wb.getSize());
                     if (glm::dot(d, d) > reach * reach) continue;
                 }

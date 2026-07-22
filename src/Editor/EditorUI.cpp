@@ -213,6 +213,16 @@ void EditorUI::renderMenuBar() {
             ImGui::MenuItem("Servers", nullptr, &m_showServerManager);
             ImGui::MenuItem("Video Editor", nullptr, &m_showVideoEditor);
             ImGui::Separator();
+            ImGui::MenuItem("Fog (visibility)", nullptr, &m_fogEnabled);
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Hard fog on/off — edit AND play mode. Off = zero fog anywhere.\n"
+                                  "Fine control + view distance in the Fog Settings window.");
+            ImGui::MenuItem("Overview: no fog / no clip", nullptr, &m_overviewMode);
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Terrain-building overview: kills fog and the far clip plane\n"
+                                  "and draws the whole map, so you can pull up and see it all.\n"
+                                  "Edit mode only.");
+            ImGui::Separator();
             // UI font size — typeable field + -/+ steppers (0.05 per click).
             // Discrete steps on purpose: a live-drag slider re-rasterizes the
             // 1.92 font atlas every frame (flicker) and the old FontGlobalScale
@@ -385,13 +395,37 @@ void EditorUI::renderMainWindow() {
     }
 
     ImGui::Separator();
+    ImGui::Text("VISIBILITY CONTROL");
+
+    // Hard fog switch — big and obvious. OFF = zero fog, edit AND play mode.
+    if (m_fogEnabled) {
+        ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.62f, 0.20f, 0.20f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.75f, 0.24f, 0.24f, 1.0f));
+        if (ImGui::Button("FOG: ON  (click to SHUT OFF)", ImVec2(-1, 0))) m_fogEnabled = false;
+        ImGui::PopStyleColor(2);
+    } else {
+        ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.18f, 0.50f, 0.30f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.22f, 0.60f, 0.36f, 1.0f));
+        if (ImGui::Button("FOG: OFF  (click to turn on)", ImVec2(-1, 0))) m_fogEnabled = true;
+        ImGui::PopStyleColor(2);
+    }
+
+    // Global view distance = far clip plane. Terrain/objects never clip inside this.
+    ImGui::SliderFloat("View distance", &m_viewDistance, 1000.0f, 40000.0f, "%.0f");
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Far clip plane (world units), edit AND play mode.\n"
+                          "Raise it so distant terrain/ships don't clip when flying.");
+
+    ImGui::Separator();
+    ImGui::BeginDisabled(!m_fogEnabled);
     ImGui::Text("Fog Settings");
     float fogCol[3] = {m_fogColor.x, m_fogColor.y, m_fogColor.z};
     if (ImGui::ColorEdit3("Fog Color", fogCol)) {
         m_fogColor = glm::vec3(fogCol[0], fogCol[1], fogCol[2]);
     }
-    ImGui::SliderFloat("Fog Start", &m_fogStart, 0.0f, 2000.0f);
-    ImGui::SliderFloat("Fog End", &m_fogEnd, 1.0f, 4000.0f);
+    ImGui::SliderFloat("Fog Start", &m_fogStart, 0.0f, 20000.0f, "%.0f");
+    ImGui::SliderFloat("Fog End", &m_fogEnd, 1.0f, 40000.0f, "%.0f");
+    ImGui::EndDisabled();
 
     ImGui::Separator();
     ImGui::Text("Controls:");

@@ -172,6 +172,15 @@ public:
     glm::vec3 getFogColor() const { return m_fogColor; }
     float getFogStart() const { return m_fogStart; }
     float getFogEnd() const { return m_fogEnd; }
+    // ---- VISIBILITY CONTROL (see memory note "visibility-control") ----
+    // A hard fog switch and a global view-distance (far clip). These apply in
+    // BOTH edit and play mode — this is a flight/space sim, visibility is a
+    // first-class control, never a per-request tweak.
+    bool  getFogEnabled() const { return m_fogEnabled; }
+    void  setFogEnabled(bool v) { m_fogEnabled = v; }
+    bool& fogEnabled() { return m_fogEnabled; }
+    float getViewDistance() const { return m_viewDistance; }   // far clip plane, world units
+    float& viewDistance() { return m_viewDistance; }
 
     // Getters for texture color adjustments (for currently selected texture)
     float getSelectedTexHue() const { return m_selectedTexture < (int)m_texHue.size() ? m_texHue[m_selectedTexture] : 0.0f; }
@@ -423,6 +432,12 @@ public:
     bool getShowBuild() const { return m_showBuild; }
     void setShowBuild(bool v) { m_showBuild = v; }
 
+    // Overview mode (edit-mode terrain-building aid): no fog and a far-out clip
+    // plane + draw ALL terrain chunks, so you can pull the camera up and see the
+    // whole map at once. Ignored in play mode.
+    bool getOverviewMode() const { return m_overviewMode; }
+    void setOverviewMode(bool v) { m_overviewMode = v; }
+
     // UI font scale (ImGui 1.92 style.FontScaleMain). Owned here so the
     // Window-menu control, the Agents-panel control, and the prefs file all
     // share one value.
@@ -587,6 +602,8 @@ private:
     glm::vec3 m_fogColor{0.5f, 0.7f, 1.0f};
     float m_fogStart = 1000.0f;
     float m_fogEnd = 2000.0f;
+    bool  m_fogEnabled = true;        // VISIBILITY CONTROL: hard fog on/off (both modes)
+    float m_viewDistance = 8000.0f;   // VISIBILITY CONTROL: far clip plane (both modes)
 
     // Callbacks
     SpeedChangedCallback m_onSpeedChanged;
@@ -683,6 +700,7 @@ private:
     bool m_showCharacterController = false;
     bool m_showLevelSettings = false;
     bool m_showBuild = false;          // Build (floors/walls) panel — opt-in via Window menu (persisted in ted_prefs.ini)
+    bool m_overviewMode = false;       // no fog / far clip / all chunks — terrain-building overview (edit mode)
     // UI font scale = ImGui 1.92 style.FontScaleMain (ABSOLUTE — the old
     // io.FontGlobalScale is deprecated and ASSERTS if set >1 alongside
     // FontScaleMain; never write it). 1.2 == the old 1.5 * 0.8 look.
