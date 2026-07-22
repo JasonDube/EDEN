@@ -1,0 +1,29 @@
+{
+  "accepted_quests": [
+    "missing_shipment"
+  ],
+  "disposition": 55,
+  "history": [
+    {
+      "player": false,
+      "text": "Welcome to Orlen's Wares, traveler. Have a look at my goods."
+    },
+    {
+      "player": false,
+      "text": "My supply wagon out of Greywatch is three days late. Twenty years I've run this shop and it's never been more than a day behind. Something's wrong on that road. I'd take it as a real kindness — and pay you fairly — if you'd ride east and find out what's become of it."
+    },
+    {
+      "player": false,
+      "text": "Welcome to Orlen's Wares, traveler. Have a look at my goods."
+    },
+    {
+      "player": false,
+      "text": "My supply wagon out of Greywatch is three days late. Twenty years I've run this shop and it's never been more than a day behind. Something's wrong on that road. I'd take it as a real kindness — and pay you fairly — if you'd ride east and find out what's become of it."
+    },
+    {
+      "player": false,
+      "text": "Welcome to Orlen's Wares, traveler. Have a look at my goods."
+    }
+  ],
+  "memories": []
+}

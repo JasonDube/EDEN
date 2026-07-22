@@ -210,6 +210,82 @@ int Audio::startLoop(const std::string& filepath, float volume) {
     return loopId;
 }
 
+int Audio::startLoopFrom(const std::string& filepath, float loopStartSeconds, float volume) {
+    if (!m_initialized) return -1;
+
+    std::string absPath = filepath;
+    if (!std::filesystem::path(filepath).is_absolute())
+        absPath = std::filesystem::absolute(filepath).string();
+
+    ma_sound* sound = new ma_sound();
+    if (ma_sound_init_from_file(&m_impl->engine, absPath.c_str(), MA_SOUND_FLAG_DECODE,
+                                nullptr, nullptr, sound) != MA_SUCCESS) {
+        delete sound;
+        return -1;
+    }
+
+    // Loop the tail only: play 0..end once, then wrap back to loopStartSeconds every pass after.
+    ma_format fmt; ma_uint32 ch, sr = 48000;
+    ma_sound_get_data_format(sound, &fmt, &ch, &sr, nullptr, 0);
+    ma_uint64 total = 0;
+    ma_sound_get_length_in_pcm_frames(sound, &total);
+    ma_uint64 beg = (ma_uint64)((double)loopStartSeconds * sr);
+    if (total > 0 && beg < total)
+        ma_data_source_set_loop_point_in_pcm_frames(ma_sound_get_data_source(sound), beg, total);
+
+    ma_sound_set_looping(sound, MA_TRUE);
+    ma_sound_set_volume(sound, volume);
+    ma_sound_start(sound);
+
+    int loopId = m_impl->nextLoopId++;
+    m_impl->loops[loopId] = sound;
+    return loopId;
+}
+
+int Audio::startLoopRange(const std::string& filepath, float startSec,
+                          float loopBegSec, float loopEndSec, float volume) {
+    if (!m_initialized) return -1;
+
+    std::string absPath = filepath;
+    if (!std::filesystem::path(filepath).is_absolute())
+        absPath = std::filesystem::absolute(filepath).string();
+
+    ma_sound* sound = new ma_sound();
+    if (ma_sound_init_from_file(&m_impl->engine, absPath.c_str(), MA_SOUND_FLAG_DECODE,
+                                nullptr, nullptr, sound) != MA_SUCCESS) {
+        delete sound;
+        return -1;
+    }
+
+    ma_format fmt; ma_uint32 ch, sr = 48000;
+    ma_sound_get_data_format(sound, &fmt, &ch, &sr, nullptr, 0);
+    ma_uint64 total = 0;
+    ma_sound_get_length_in_pcm_frames(sound, &total);
+
+    if (loopBegSec >= 0.0f) {   // loop a sub-range forever
+        ma_uint64 beg = (ma_uint64)((double)loopBegSec * sr);
+        ma_uint64 end = (loopEndSec > 0.0f) ? (ma_uint64)((double)loopEndSec * sr) : total;
+        if (total > 0 && end > total) end = total;
+        if (total == 0 || beg < end)
+            ma_data_source_set_loop_point_in_pcm_frames(ma_sound_get_data_source(sound), beg, end);
+        ma_sound_set_looping(sound, MA_TRUE);
+    } else {
+        ma_sound_set_looping(sound, MA_FALSE);   // one-shot from startSec to the end
+    }
+
+    if (startSec > 0.0f) {
+        ma_uint64 s = (ma_uint64)((double)startSec * sr);
+        if (total == 0 || s < total) ma_sound_seek_to_pcm_frame(sound, s);
+    }
+
+    ma_sound_set_volume(sound, volume);
+    ma_sound_start(sound);
+
+    int loopId = m_impl->nextLoopId++;
+    m_impl->loops[loopId] = sound;
+    return loopId;
+}
+
 int Audio::startCrossfadeLoop(const std::string& filepath, float volume) {
     if (!m_initialized) return -1;
 

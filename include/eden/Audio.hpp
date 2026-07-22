@@ -32,6 +32,16 @@ public:
     // Start a looping sound (returns loop ID, or -1 on failure)
     int startLoop(const std::string& filepath, float volume = 1.0f);
 
+    // Play from the start through the end ONCE, then loop back to loopStartSeconds forever
+    // (mirrors a video that plays once then loops a tail range). Returns loop ID, or -1.
+    int startLoopFrom(const std::string& filepath, float loopStartSeconds, float volume = 1.0f);
+
+    // General ranged playback: begin at startSec; if loopBegSec >= 0, loop the sub-range
+    // [loopBegSec, loopEndSec] forever (loopEndSec <= 0 means "to end"); otherwise play once.
+    // Mirrors a video that starts somewhere and loops a middle range. Returns loop ID, or -1.
+    int startLoopRange(const std::string& filepath, float startSec,
+                       float loopBegSec, float loopEndSec, float volume = 1.0f);
+
     // Start a seamless crossfade loop (two overlapping copies, no gap)
     // Returns loop ID for the pair, or -1 on failure
     int startCrossfadeLoop(const std::string& filepath, float volume = 1.0f);

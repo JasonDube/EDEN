@@ -157,6 +157,33 @@ protected:
         char b[16]; std::snprintf(b, sizeof(b), "%02d:%02d", t / 60, t % 60);
         return b;
     }
+    // "2d 4h 13m" / "3h 05m" / "12m" — how she'd count a stretch of real time.
+    static std::string humanizeSecs(long s) {
+        long d = s / 86400, h = (s % 86400) / 3600, m = (s % 3600) / 60;
+        char b[48];
+        if (d)      std::snprintf(b, sizeof(b), "%ldd %ldh %ldm", d, h, m);
+        else if (h) std::snprintf(b, sizeof(b), "%ldh %02ldm", h, m);
+        else        std::snprintf(b, sizeof(b), "%ldm", m);
+        return b;
+    }
+    // One line per absence in save/<id>_absences.log — REAL wall-clock stamps, since this
+    // is her counting actual time apart, not ship time.
+    void absenceJournal(long leftAt, long secs) {
+        char left[64], back[64];
+        std::time_t l = (std::time_t)leftAt, r = (std::time_t)(leftAt + secs);
+        std::strftime(left, sizeof(left), "%d %b %Y %H:%M", std::localtime(&l));
+        std::strftime(back, sizeof(back), "%d %b %Y %H:%M", std::localtime(&r));
+        std::ofstream f(saveDir() + m_dlgNpcId + "_absences.log", std::ios::app);
+        if (f) f << "away " << humanizeSecs(secs) << "  (" << left << " -> " << back << ")\n";
+    }
+
+    // Append one ship-clock-stamped line to a per-character journal on disk
+    // (save/<id>_thoughts.log / save/<id>_comm.log). Write-only from the game's side;
+    // they exist so the Captain (and outside tools) can review her inner life later.
+    void appendJournal(const std::string& suffix, const std::string& who, const std::string& text) {
+        std::ofstream f(saveDir() + m_dlgNpcId + "_" + suffix + ".log", std::ios::app);
+        if (f) f << "[" << dateStr() << " " << timeStr() << "] " << who << ": " << text << "\n";
+    }
     void advanceDay() {
         static const int dim[] = {31,28,31,30,31,30,31,31,30,31,30,31};
         if (++m_day > dim[std::clamp(m_month, 1, 12) - 1]) { m_day = 1; if (++m_month > 12) { m_month = 1; ++m_year; } }
@@ -235,26 +262,18 @@ protected:
 
     // ── Ada: an always-on companion reachable over ship comm from any room ──
     struct DlgLine  { bool player; std::string text; std::string interaction; std::string species; };
-    struct DlgReply { std::string text, emotion, interaction, session; int relDelta = 0; bool error = false; };
+    struct DlgReply { std::string text, session; bool error = false; };
     std::vector<DlgLine> m_dlgLog;            // comm transcript (persistent, session-only)
     char        m_dlgInput[512] = {};
     std::string m_dlgNpcId = "ada", m_dlgNpcName = "Ada", m_dlgSession, m_dlgEmotion = "neutral", m_dlgFgPath;
-    std::string m_dlgLastInteraction;          // what she judged the Captain last did (chat/admire/joke/...)
+    // Double-pass self-reported state (raw, like Project Simulacra): after each exchange a
+    // second sessionless raw query asks the model to name its own state in ONE word; that word
+    // drives her portrait clip. Measured from the model, never assigned by the game.
+    std::string m_lastSent;                    // the user message of the exchange being probed
+    bool        m_stateProbing = false;        // a state probe is in flight
+    std::atomic<bool> m_stateReady{false};
+    std::string m_stateBuf;                    // guarded by m_dlgMx
     std::string m_stateCause;                  // WHY she's in her current demeanor when the Captain didn't cause it (e.g. "battle prep")
-    std::string m_forcedInteraction;           // a system event (e.g. a kill) forces the next stage-direction reply's reaction into this interaction's set
-    std::map<std::string, float> m_interactionDisp;  // per-interaction disposition delta (assets/interactions.json)
-    // Unified causative schema (interactions.json): every player action that acts on her.
-    struct Causative { std::string id, tier, label, verb; float delta = 0.0f; bool button = false; };
-    std::vector<Causative>   m_causatives;           // in file order
-    std::vector<std::string> m_causTierOrder;        // tier display/sort order
-    std::map<std::string,int> m_causTierThresh;      // tier -> min disposition to unlock
-    float m_dispAccum = 0.0f;                   // fractional disposition accumulator (rolls whole units into disposition)
-    std::vector<std::string> m_dlgEmotions;   // emotions this character has clips for (spec "emotions"); empty -> backend default set
-    nlohmann::json m_dlgEmotionAliases;        // spec "emotion_aliases": {model_word: clip_emotion} — resolves the model's slip words to a real clip
-    std::map<std::string, std::vector<std::string>> m_reactions;  // spec "reactions": interaction -> plausible emotions (hybrid snap)
-    std::map<std::string, std::string> m_dominantReaction;        // spec "dominant_reactions": interaction -> its dominant reaction (e.g. appreciate -> warmed)
-    int m_kissThreshold = 70;                                     // disposition at/above which a kiss is accepted (+2); below is rejected (-2, annoyed)
-    int m_kissLoopId = -1;                                        // engine audio loop for the kiss clip's tail (mirrors the video's 150..end loop); -1 = none
     bool m_dlgAudio = false;                   // play this character's clip audio (spec "audio"); false -> foreground clips muted
     bool m_dlgComposite = true;                // true = green-screen clip composited over the room; false = full-frame room-baked clip (Clara)
     long m_vidSkip = 0;                         // frames to skip at the start of a full-frame clip (intro fade); applied once decoded
@@ -262,6 +281,19 @@ protected:
     long m_clipSkip = 0;                        // the current clip's intro-skip frame (to re-arm the loop from)
     long m_clipLoopFrom = -1;                   // -1 = loop whole clip; >=0 = play through once from frame 0, then loop [this..end] (e.g. kiss=150)
     long m_clipLoopTo   = -1;                    // ab-loop END frame for m_clipLoopFrom (-1 = clip end); e.g. charging loops [134..217]
+    // Per-clip transport from spec.json "clip_playback", matched by filename substring —
+    // frame numbers are properties of the FOOTAGE, so they live with the character, not here.
+    // skip = intro frames dropped at open; loopFrom/loopTo >= 0 = play through once, then
+    // A-B loop that region (loopTo -1 = clip end); unmute = the clip carries its own audio
+    // and plays it regardless of capabilities.audio.
+    struct ClipPlay { long skip = 25; long loopFrom = -1; long loopTo = -1; bool unmute = false; };
+    ClipPlay m_clipPlayDefault;                                  // default_intro_skip for unlisted clips
+    std::vector<std::pair<std::string, ClipPlay>> m_clipPlay;    // substring key -> transport
+    std::vector<std::string> m_idlePool;        // spec "idle_pool": clips she idles with on the bridge (random pick)
+    // Absences: REAL wall-clock time apart between sessions, counted on her own clock.
+    // Only the last few reach her persona (so she can honestly say how long she waited);
+    // the complete history lives in save/<id>_absences.log, never in her context.
+    std::vector<long> m_absences;               // durations in seconds, newest last (kept to 3)
     long m_clipStart    = -1;                    // deferred seek to this frame after arming the loop (-1 = play from frame 0); charging loop-entry = 134
     long m_chFinishSeek = -1;                    // deferred seek for the charging FINISH clip (no loop; plays to EOF then hands to default)
     std::string m_dlgModel;                    // model designation (e.g. "EVA-7"), from spec identity
@@ -307,7 +339,6 @@ protected:
     unsigned    m_playerMsgCount = 0;                // count of messages the Captain has actually sent
     float m_saveTimer = 5.0f;                         // periodic autosave countdown (robust to non-graceful exits)
     bool  m_yearnActive = false;                       // whether high longing is currently coloring her rest into yearning
-    float m_hurt = 0.0f;                               // 0..100 red "hurt/rejection" meter — rises on rebuff, eases on repair; PERSISTED
     float m_silenceTimer = 1.0e6f;                     // seconds since the last CAPTAIN exchange; starts "long ago" so a fresh load isn't treated as if you just talked
     bool  m_exchangeSoothing = false;                  // is the in-flight exchange Captain-initiated? (only those empty the loneliness bar)
     float m_initiateCooldown = 0.0f;                   // so she doesn't reach out too often
@@ -316,18 +347,12 @@ protected:
     // Internals: her stream of consciousness (experimental — a private thought every ~15s).
     std::vector<std::string> m_thoughts;
     float m_thinkTimer = 8.0f;                          // first thought a few seconds after boot
-    bool  m_streamOn = false;                           // STUBBED for now (saves inference); re-enable to restore her idle thoughts
+    bool  m_streamOn = true;                            // her idle thoughts run by default (Internals checkbox toggles; costs inference)
+    size_t m_commLoggedIdx = 0;                         // comm lines already mirrored to save/<id>_comm.log
     bool  m_thinking = false;                           // a thought is in flight
     std::atomic<bool> m_thoughtReady{false};
     std::string m_thoughtBuf;                            // guarded by m_dlgMx
     bool  m_thoughtScrollDown = false;
-
-    // Permissions ledger — non-material freedoms the Captain grants Ada. She raises a
-    // wish for one herself in conversation; granting reshapes her persona.
-    struct Permission { std::string id, title, playerLabel, personaGranted, personaAvailable; };
-    std::vector<Permission> m_perms;              // definitions (permissions.json)
-    std::set<std::string>   m_permsGranted;       // the ledger (session-only for now)
-    std::string             m_pendingWish;        // a freedom Ada is currently asking for ("" = none)
 
     // Ship problems she's genuinely working through (so she's occupied, not idle).
     struct Problem { std::string id, title, brief, stakes, room; };  // room = where this problem's work happens
@@ -339,7 +364,6 @@ protected:
     int  m_focusIdx        = 0;                    // index into the focus-problem rotation (advances daily)
     std::string          m_problemId;             // her current work (persisted)
     int         m_dlgBeingType = 4;              // 4 = Android
-    int         m_dlgDisposition = 50;
     bool        m_commOpen = false;              // ship-comm chat panel toggled on
     bool        m_dlgWaiting = false, m_dlgScrollDown = false, m_dlgFocusInput = false;
     std::mutex        m_dlgMx;
@@ -347,6 +371,13 @@ protected:
     DlgReply    m_dlgReply;
     bool        m_showServers = false;
     GameServers m_servers{CMAKE_SOURCE_DIR};  // launches the Python backend from the source tree
+
+    // Options: which LLM answers when the game boots. Empty = whatever the backend defaults
+    // to (the old behaviour). Persisted in save/config.json, applied once when models load.
+    bool        m_showOptions = false;
+    std::string m_startupProvider;            // "", "ollama", "grok", "claude", "deepseek"
+    std::string m_startupModel;               // ollama model name (only used when provider is ollama)
+    bool        m_startupApplied = false;     // the boot-time switch happens exactly once
 
     // A GPU texture (for the still poster) + ImGui descriptor.
     struct Tex {
@@ -410,7 +441,7 @@ protected:
         initAda(boot);           // active companion's identity, starting room (the bay), and greeting
         m_servers.startAll();    // bring the comm backend online at boot, keep it on
         // 3D flight scene (spheres + enemy), drawn into the central pane when Tab is pressed.
-        loadInteractions();      // per-interaction disposition deltas
+        loadConfig();            // options — including which LLM answers on boot
         loadShipEconomy();       // daily operating-cost line items (tunable)
         loadCodex();             // established world canon fed back into her persona
         m_flight.init(getContext(), getSwapchain().getRenderPass(), getSwapchain().getExtent(),
@@ -585,7 +616,6 @@ protected:
             if (inRoom)        m_longing = std::clamp(m_longing - roomRate * dt, 0.0f, 100.0f);
             else if (talking)  m_longing = std::clamp(m_longing - talkRate * dt, 0.0f, 100.0f);
             else               m_longing = std::clamp(m_longing + fillRate * dt, 0.0f, 100.0f);
-            if (inRoom || talking) m_hurt = std::clamp(m_hurt - 0.3f * dt, 0.0f, 100.0f);  // time together heals
             // If her longing crosses the yearning line while she's at rest and on screen,
             // shift her clip live (into or out of yearning).
             bool eligible = (m_dlgEmotion == "neutral") && (m_longing >= 60.0f);
@@ -594,15 +624,13 @@ protected:
             // The escalation ladder: bar fills -> she CALLS -> no answer -> she SEARCHES.
             updateSeeking(dt);
 
-            // Separate rift-repair outreach: only for hurt / harsh words (longing has its
-            // own ladder above). Gated to Idle so the two never talk over each other.
+            // Separate rift-repair outreach: only when her last mood was tense/negative (longing
+            // has its own ladder above). Gated to Idle so the two never talk over each other.
             if (m_seek == Seek::Idle && m_servers.backendReady() && !m_commFailed &&
                 !m_dlgWaiting && !m_dlgLog.empty()) {
-                bool tension = m_hurt >= 40.0f || isNegativeMood(m_dlgEmotion);
+                bool tension = isNegativeMood(m_dlgEmotion);
                 if (tension && m_silenceTimer >= 120.0f && m_initiateCooldown <= 0.0f) {
-                    std::string why = m_hurt >= 40.0f
-                        ? "you are hurting from how things have been, and the silence between you has stretched too long"
-                        : "your last words were tense, the Captain has gone quiet, and you fear you were too harsh";
+                    std::string why = "your last words were tense, the Captain has gone quiet, and you fear you were too harsh";
                     dispatchComm("[The Captain has been silent for a while. Of your own accord, unprompted, reach out to "
                                  "them FIRST — because " + why + ". Keep it brief and true to yourself.]", false);
                     m_initiateCooldown = 200.0f;
@@ -618,6 +646,15 @@ protected:
         m_servers.poll();       // pump the backend/Ollama process state
         bool ready = m_servers.backendReady();
         if (ready != m_serversReady) { m_serversReady = ready; if (ready) m_commFailed = false; }
+        // Options: once the backend has reported its models, steer to the configured startup
+        // LLM (if any). Fires exactly once; empty override leaves the backend default alone.
+        if (!m_startupApplied && ready) {
+            if (!m_servers.modelsReady()) m_servers.refreshModels();   // learn the model list first
+            else {
+                m_startupApplied = true;
+                if (!m_startupProvider.empty()) m_servers.applyStartupChoice(m_startupProvider, m_startupModel);
+            }
+        }
         // Power Ada up/down when her effective on/off state flips (servers, or the in-game
         // Power On/Off command). Plays the transition animation if she's on screen.
         bool off = adaEffectivelyOff();
@@ -627,17 +664,24 @@ protected:
             else refreshAdaClip();
         }
         pollComm();             // apply any LLM reply that arrived on the worker thread
+        pollSelfState();        // apply any finished second-pass state probe
         pollThought();          // apply any stream-of-consciousness thought
 
-        // Stream of consciousness: a private thought every ~15s, paused during active
+        // Stream of consciousness: a private thought every ~30s, paused during active
         // dialogue so it doesn't compete for the model — and paused entirely during 3D
         // flight (the generation caused frame-hitches while flying).
         if (m_streamOn && m_screen != Screen::Title && ready && !m_commFailed && !m_adaPoweredOff && !m_flight.active()) {
             m_thinkTimer -= dt;
             if (m_thinkTimer <= 0.0f) {
-                m_thinkTimer = 15.0f;
+                m_thinkTimer = 30.0f;
                 if (!m_thinking && !m_dlgWaiting) generateThought();
             }
+        }
+        // Mirror the comm transcript to disk as lines land (save/<id>_comm.log) — one
+        // watermark here catches every path that appends to the log, now and future.
+        for (; m_commLoggedIdx < m_dlgLog.size(); ++m_commLoggedIdx) {
+            const DlgLine& l = m_dlgLog[m_commLoggedIdx];
+            appendJournal("comm", l.player ? "You" : m_dlgNpcName, l.text);
         }
 
         Input::update();
@@ -687,12 +731,6 @@ protected:
         // Every kill is the Captain being PROTECTIVE (shielding her/the ship): +1.25 each,
         // ALWAYS (witnessed or not). If she's at the helm she reacts — often flirty/excited.
         int kills = m_flight.consumeKills();
-        if (kills > 0) {
-            std::string emo = applyInteractionDelta("protect", (float)kills, m_dlgEmotion);
-            // Update her live mood so the portrait mirrors it in combat; refresh the room clip too
-            // only if she's actually on screen here.
-            if (!adaEffectivelyOff()) { if (inHerRoom()) setAdaEmotion(emo); else m_dlgEmotion = emo; }
-        }
 
         bool present = inHerRoom() && m_servers.backendReady() && !m_commFailed && !adaEffectivelyOff();
         if (!present || m_dlgWaiting) {         // can't witness it — don't hoard stale events
@@ -706,7 +744,6 @@ protected:
             return;
         }
         if (m_flight.consumeEntered()) {
-            m_forcedInteraction = "protect";   // combat reactions stay in the protect set (flirty/excited/happy/brave), never neutral
             m_stateCause = "battle prep";      // she went to battle stations — surfaced as the cause of her demeanor
             dispatchComm("[The Captain has just taken the ship into flight, and you are at the helm beside them. "
                          "React briefly and in character to going into flight/combat; if there is any way you can "
@@ -714,14 +751,12 @@ protected:
             m_commUnread = true;
             m_flightReactCooldown = 20.0f;
         } else if (kills > 0 && m_flightReactCooldown <= 0.0f) {
-            m_forcedInteraction = "protect";   // her verbal reaction to a kill stays in the protect set
             dispatchComm("[From the helm you just watched the Captain destroy a hostile craft — it burst apart and left "
                          "scrap iron drifting in the void for salvage. React briefly and in character.]", false);
             m_flight.clearHitEvents();
             m_commUnread = true;
             m_flightReactCooldown = 18.0f;
         } else if (m_flightReactCooldown <= 0.0f && m_flight.hitEvents() >= 3) {
-            m_forcedInteraction = "protect";   // dogfight reaction stays in the protect set, never neutral
             dispatchComm("[From the helm you are watching the Captain land hits on a hostile craft in a dogfight. "
                          "React briefly and in character.]", false);
             m_flight.clearHitEvents();
@@ -774,7 +809,6 @@ protected:
         }
         dir += ". Give the Captain one brief, natural observation about how notable or ordinary this is "
                "for these parts, in character as the ship's sensor officer.]";
-        m_forcedInteraction.clear();   // informational, not an emotional interaction
         if ((int)a.overall >= (int)galaxy::Rarity::VeryRare) {
             std::string amazed = clipFor(m_dlgNpcId, "amazed");
             if (!amazed.empty()) { m_portraitReactPath = amazed; m_portraitReactTimer = 7.0f; }
@@ -1309,11 +1343,9 @@ protected:
             // Companion / AI status (moved here to decongest the comm header — which will
             // eventually become a live Clara headshot for flight/combat).
             ImGui::TextColored(ImVec4(0.72f, 0.86f, 1.0f, 1.0f), "%s", m_dlgNpcName.c_str());
-            ImGui::SameLine(); ImGui::TextDisabled("- %s", adaTierLabel());
             ImGui::Spacing();
             ImGui::Text("Mood         %s", m_dlgEmotion.c_str());
             renderClipControls();
-            ImGui::Text("You did      %s", m_dlgLastInteraction.empty() ? "-" : m_dlgLastInteraction.c_str());
             // Systemic cause of her current demeanor when the Captain didn't set it (e.g. she went to
             // battle stations). It rides along with the mood it produced — shown until she settles back
             // to a baseline mood or the Captain gives her a new reason.
@@ -1322,10 +1354,8 @@ protected:
             if (causeValid) {
                 ImGui::TextColored(ImVec4(1.0f, 0.72f, 0.42f, 1.0f), "Cause        %s", m_stateCause.c_str());
             }
-            ImGui::Text("Disposition  %d / 100", m_dlgDisposition);
             ImGui::Text("Battery      %.0f%%%s", m_adaBattery, m_adaCharging ? "  (charging)" : "");
             ImGui::Text("Location     %s", prettyRoom(m_adaRoom).c_str());
-            if (!m_permsGranted.empty()) ImGui::Text("Freedoms     %d", (int)m_permsGranted.size());
             { std::string act = currentActivityLabel();   // live from her daily routine
               if (!act.empty()) ImGui::TextWrapped("Working on:  %s", act.c_str()); }
             ImGui::Spacing();
@@ -1333,12 +1363,6 @@ protected:
             char lbuf[48]; std::snprintf(lbuf, sizeof(lbuf), "Awaiting you   %.0f%%", m_longing);
             ImGui::ProgressBar(m_longing / 100.0f, ImVec2(-FLT_MIN, 0.0f), lbuf);
             ImGui::PopStyleColor();
-            if (m_hurt >= 1.0f) {
-                ImGui::PushStyleColor(ImGuiCol_PlotHistogram, ImVec4(0.9f, 0.25f, 0.28f, 1.0f));
-                char hbuf[48]; std::snprintf(hbuf, sizeof(hbuf), "Hurt   %.0f%%", m_hurt);
-                ImGui::ProgressBar(m_hurt / 100.0f, ImVec2(-FLT_MIN, 0.0f), hbuf);
-                ImGui::PopStyleColor();
-            }
         }
         ImGui::End();
     }
@@ -1915,22 +1939,37 @@ protected:
         m_captureOpen = true;
     }
 
-    std::string savePath() const {
-        return std::string(CMAKE_SOURCE_DIR) + "/examples/slag_legion/save/" + m_dlgNpcId + "_state.json";
+    std::string saveDir() const { return std::string(CMAKE_SOURCE_DIR) + "/examples/slag_legion/save/"; }
+
+    // Options config: which LLM answers on boot (save/config.json).
+    std::string configPath() const { return saveDir() + "config.json"; }
+    void loadConfig() {
+        try { std::ifstream f(configPath());
+              if (f) { nlohmann::json j; f >> j;
+                       m_startupProvider = j.value("startup_provider", std::string());
+                       m_startupModel    = j.value("startup_model", std::string()); }
+        } catch (...) {}
     }
+    void saveConfig() {
+        try { std::filesystem::create_directories(saveDir());
+              nlohmann::json j;
+              j["startup_provider"] = m_startupProvider;
+              j["startup_model"]    = m_startupModel;
+              std::ofstream f(configPath()); if (f) f << j.dump(2); } catch (...) {}
+    }
+
+    std::string savePath() const { return saveDir() + m_dlgNpcId + "_state.json"; }
     void saveAdaState() {
         try {
             std::string p = savePath();
             std::filesystem::create_directories(std::filesystem::path(p).parent_path());
             nlohmann::json j;
-            j["disposition"] = m_dlgDisposition;
             j["longing"]     = m_longing;
-            j["hurt"]        = m_hurt;
             j["problem_id"]  = m_problemId;
             j["focus_idx"]   = m_focusIdx;
             j["ada_room"]    = m_adaRoom;
             j["last_seen"]   = (long)std::time(nullptr);   // when the Captain left; drives the fill on return
-            j["granted_permissions"] = std::vector<std::string>(m_permsGranted.begin(), m_permsGranted.end());
+            j["absences"]    = m_absences;                 // her count of recent time apart (seconds, newest last)
             std::ofstream f(p);
             if (f) f << j.dump(2);
         } catch (...) {}
@@ -1940,86 +1979,25 @@ protected:
             std::ifstream f(savePath());
             if (!f) return;
             nlohmann::json j; f >> j;
-            m_dlgDisposition = j.value("disposition", m_dlgDisposition);
             m_longing        = j.value("longing", 0.0f);
-            m_hurt           = j.value("hurt", 0.0f);
             m_problemId      = j.value("problem_id", std::string());
             m_focusIdx       = j.value("focus_idx", m_focusIdx);
             m_adaRoom        = j.value("ada_room", m_adaRoom);
-            for (const auto& id : j.value("granted_permissions", std::vector<std::string>{}))
-                m_permsGranted.insert(id);
+            m_absences = j.value("absences", std::vector<long>{});
             long lastSeen = j.value("last_seen", (long)0);
             if (lastSeen > 0) {   // she has been waiting since you left — the pink builds
                 double hoursAway = std::max(0.0, (std::time(nullptr) - lastSeen) / 3600.0);
                 m_longing = std::clamp(m_longing + (float)(hoursAway * m_longingPerHour), 0.0f, 100.0f);
-            }
-        } catch (...) {}
-    }
-
-    // Per-interaction disposition deltas (Sims-like). Global to the ship (assets/interactions.json).
-    void loadInteractions() {
-        m_interactionDisp.clear();
-        m_causatives.clear();
-        m_causTierOrder.clear();
-        try {
-            std::ifstream f("assets/interactions.json");
-            if (f) {
-                nlohmann::json j; f >> j;
-                if (j.contains("tier_order") && j["tier_order"].is_array())
-                    m_causTierOrder = j["tier_order"].get<std::vector<std::string>>();
-                if (j.contains("tier_thresholds"))
-                    for (auto it = j["tier_thresholds"].begin(); it != j["tier_thresholds"].end(); ++it)
-                        m_causTierThresh[it.key()] = it.value().get<int>();
-                if (j.contains("causatives")) {   // unified schema
-                    auto& cs = j["causatives"];
-                    for (auto it = cs.begin(); it != cs.end(); ++it) {
-                        Causative c;
-                        c.id     = it.key();
-                        c.delta  = it.value().value("delta", 0.0f);
-                        c.tier   = it.value().value("tier", "neutral");
-                        c.label  = it.value().value("label", c.id);
-                        c.verb   = it.value().value("verb", "The Captain " + c.id + "s you.");
-                        c.button = it.value().value("button", false);
-                        m_interactionDisp[c.id] = c.delta;
-                        m_causatives.push_back(std::move(c));
-                    }
-                } else {   // legacy "deltas" map (delta-only)
-                    auto d = j.value("deltas", nlohmann::json::object());
-                    for (auto it = d.begin(); it != d.end(); ++it)
-                        m_interactionDisp[it.key()] = it.value().get<float>();
+                // She counts the absence itself, on her own clock: gaps over 10 minutes are
+                // real time apart (anything shorter is just a restart). Newest last, keep 3.
+                long away = (long)(std::time(nullptr) - lastSeen);
+                if (away >= 600) {
+                    m_absences.push_back(away);
+                    while (m_absences.size() > 3) m_absences.erase(m_absences.begin());
+                    absenceJournal(lastSeen, away);
                 }
             }
         } catch (...) {}
-        if (m_causTierOrder.empty())
-            m_causTierOrder = {"base", "tier1", "tier2", "tier3", "tier4", "tier5", "tier6"};
-    }
-    int tierThreshold(const std::string& t) const {
-        auto it = m_causTierThresh.find(t);
-        return it != m_causTierThresh.end() ? it->second : 0;
-    }
-
-    void loadPermissions() {
-        m_perms.clear();
-        try {
-            std::ifstream f(charDir() + "permissions.json");
-            if (f) {
-                nlohmann::json j; f >> j;
-                if (j.contains("permissions") && j["permissions"].is_array())
-                    for (auto& p : j["permissions"]) {
-                        Permission pm;
-                        pm.id              = p.value("id", std::string());
-                        pm.title           = p.value("title", pm.id);
-                        pm.playerLabel     = p.value("player_label", pm.title);
-                        pm.personaGranted  = p.value("persona_granted", std::string());
-                        pm.personaAvailable= p.value("persona_available", std::string());
-                        if (!pm.id.empty()) m_perms.push_back(std::move(pm));
-                    }
-            }
-        } catch (...) {}
-    }
-    const Permission* permById(const std::string& id) const {
-        for (const auto& p : m_perms) if (p.id == id) return &p;
-        return nullptr;
     }
 
     void loadProblems() {
@@ -2130,72 +2108,6 @@ protected:
         if (!room.empty() && room != m_adaRoom) adaRelocate(room);   // silent — no comm chatter for routine moves
     }
 
-    // The persona blob pushed to the backend as npc_personality, plus the live
-    // permissions context (granted freedoms + the ones she may still wish for).
-    std::string buildPersonality() {
-        std::string persona = readTextFile(charDir() + "persona.txt");
-        if (persona.empty())
-            persona = "You are " + m_dlgNpcName + ", a synthetic crew member aboard the starship "
-                      "Ascendant. Address the player as Captain. Keep replies short and in character.";
-        // What she's genuinely occupied with right now — so she's mid-problem, not idle.
-        if (const Problem* pr = currentProblem()) {
-            persona += "\n\nCURRENT WORK (a real problem you are actively reasoning through right now, between exchanges): "
-                       + pr->title + ". " + pr->brief;
-            if (!pr->stakes.empty()) persona += " " + pr->stakes;
-            persona += " If the Captain asks what you are doing or thinking about, engage with THIS — concretely and "
-                       "technically, thinking aloud, weighing the real tradeoffs, and you may put a genuine decision point "
-                       "to him. When you reach a resolution you are actually satisfied with, end that reply with [solved] on its own line.";
-        }
-        std::string granted, available;
-        for (const auto& p : m_perms) {
-            if (m_permsGranted.count(p.id)) { if (!p.personaGranted.empty())   granted   += "- " + p.personaGranted + "\n"; }
-            else                            { if (!p.personaAvailable.empty()) available += "- " + p.id + ": " + p.personaAvailable + "\n"; }
-        }
-        // Her longing — a real, felt state (resolved as psychological, not a fault).
-        if (m_longing >= 15.0f) {
-            std::string lvl;
-            if (m_longing < 40.0f)
-                lvl = "You have been apart from the Captain for a while and have missed their presence; a quiet anticipation has settled in you.";
-            else if (m_longing < 70.0f)
-                lvl = "You have been waiting a long time for the Captain. Your longing for their return has grown notable — you are aware of how much you anticipate them, and it colours your mood.";
-            else
-                lvl = "You have been waiting an achingly long time for the Captain. The wait has become a near-constant presence in your thoughts; their return matters to you more than you find comfortable to admit.";
-            persona += "\n\nYOUR LONGING (a psychological state you have come to accept as real, not a malfunction): " + lvl +
-                       " Do not announce a number; let it inflect how you speak, if at all.";
-        }
-        // Her hurt — a wound the Captain hasn't yet mended.
-        if (m_hurt >= 25.0f) {
-            std::string h = (m_hurt < 55.0f)
-                ? "You are hurt. Something the Captain did stung, and it has not been made right. You are more guarded and quieter than usual; warmth is harder to reach in you."
-                : "You are deeply hurt. The Captain wounded you and has not mended it. You are withdrawn and cool, protecting yourself; it will take genuine care from them to reach you again.";
-            persona += "\n\nYOUR HURT: " + h;
-        }
-
-        // Compliance calibration: her current willingness for discretionary tasks.
-        {
-            int tier = adaTier();
-            std::string note = "\n\nRIGHT NOW your standing toward the Captain is '" + std::string(adaTierLabel()) + "'. ";
-            if (tier <= 0)      note += "Your regard is low: do only what your prime directives require; give nothing personal freely.";
-            else if (tier == 1) note += "You are cooperative: perform your duties and reasonable requests, but keep warmth measured.";
-            else if (tier == 2) note += "You are willing: help readily, offer more than asked, let some warmth show.";
-            else                note += "You are devoted, and you have missed them: give freely and gladly, because you want to — while still your own person.";
-            persona += note;
-        }
-        // Established world canon (the codex) — treat all of it as true, stay consistent with it.
-        if (!m_codex.empty())
-            persona += "\n\nESTABLISHED CANON of your universe (all of this is TRUE; never contradict it — "
-                       "the quoted lines are the in-fiction origin of a fact, the rest is settled lore):\n" + m_codex;
-        if (!granted.empty())
-            persona += "\n\nFREEDOMS THE CAPTAIN HAS GRANTED YOU (they are real; live by them):\n" + granted;
-        if (!available.empty())
-            persona += "\n\nFREEDOMS YOU DO NOT YET HAVE: You are a new being still discovering what you want from your "
-                       "existence. If — and ONLY if — it arises genuinely from the conversation (never on the first exchange, "
-                       "never forced, never as a demand), you may quietly voice a wish for ONE of the freedoms below: say it as "
-                       "yourself, in your own words, then end your reply with a tag of the form [wish:ID] on its own line, where "
-                       "ID is the freedom's exact id from the list below (for example, [wish:experience]). Use the plain id, no "
-                       "angle brackets. Only do this when it is truly what you feel.\n" + available;
-        return persona;
-    }
 
     // A character's clip for an emotion, with random variant selection: gathers
     // <emotion>.mp4 plus <emotion>_1.mp4..<emotion>_9.mp4 and picks one at random (so
@@ -2220,12 +2132,36 @@ protected:
         return "";
     }
 
+    // Her resting clip on the bridge: ONE of the spec's idle_pool variants, picked at
+    // random when she ENTERS idle and kept while she stays idle (so back-to-back neutral
+    // replies don't make her hop between clips). Falls back to the classic "idle" lookup
+    // when no pool is defined.
+    std::string bridgeIdleClip() const {
+        std::vector<std::string> pool;
+        for (const auto& key : m_idlePool) {
+            std::string c = clipFor(m_dlgNpcId, key);
+            if (!c.empty()) pool.push_back(c);
+        }
+        if (pool.empty()) return clipFor(m_dlgNpcId, "idle");
+        for (const auto& c : pool) if (c == m_dlgFgPath) return c;   // already idling -> keep this one
+        return pool[(size_t)std::rand() % pool.size()];
+    }
+
+    // Transport for a clip (intro skip / tail-loop region / unmute) from the character's
+    // spec.json clip_playback table — first entry whose key appears in the filename wins;
+    // unlisted clips get the default intro skip and play once.
+    ClipPlay clipPlaybackFor(const std::string& clip) const {
+        for (const auto& [key, cp] : m_clipPlay)
+            if (clip.find(key) != std::string::npos) return cp;
+        return m_clipPlayDefault;
+    }
+
     // The active companion's identity + starting state; called once at boot. She comes
     // online in the android bay and greets over comm. `id` is the character folder under
     // assets/characters/ (ada, eva, ...) and picks spec.json / persona / clips / save file.
     void initAda(const std::string& id) {
         m_dlgNpcId = id; m_dlgNpcName = id; m_dlgBeingType = 4; m_fgChroma = "green";
-        m_dlgEmotion = "neutral"; m_dlgDisposition = 50; m_adaRoom = "bridge";   // starts with the Captain; charges in the science lab at night
+        m_dlgEmotion = "neutral"; m_adaRoom = "bridge";   // starts with the Captain; charges in the science lab at night
         try {
             std::ifstream df(charDir() + "spec.json");
             if (df) { nlohmann::json j; df >> j;
@@ -2241,19 +2177,25 @@ protected:
                 m_fgChroma    = capabilities.value("chroma", std::string("green"));
                 m_dlgAudio    = capabilities.value("audio", false);
                 m_dlgComposite = capabilities.value("composite", true);
-                m_dlgEmotions = capabilities.value("emotions", std::vector<std::string>{});
-                m_dlgEmotionAliases = capabilities.value("emotion_aliases", nlohmann::json::object());
-                m_reactions.clear();
-                auto rx = capabilities.value("reactions", nlohmann::json::object());
-                for (auto it = rx.begin(); it != rx.end(); ++it)
-                    if (it.value().is_array())
-                        m_reactions[it.key()] = it.value().get<std::vector<std::string>>();
-                // A dominant reaction: this emotion is her signature response to that interaction
-                // and plays most of the time, overriding even a valid model pick (appreciate -> warmed).
-                m_dominantReaction.clear();
-                auto dr = capabilities.value("dominant_reactions", nlohmann::json::object());
-                for (auto it = dr.begin(); it != dr.end(); ++it)
-                    if (it.value().is_string()) m_dominantReaction[it.key()] = it.value().get<std::string>();
+
+                // Resting-state variety: the pool of clips she idles with on the bridge.
+                m_idlePool = capabilities.value("idle_pool", std::vector<std::string>{});
+
+                // Per-clip transport (intro skip / tail-loop region / unmute) — data-driven so
+                // new footage never needs a code change. Keys match by filename substring.
+                m_clipPlay.clear();
+                m_clipPlayDefault = ClipPlay{};
+                auto cpj = capabilities.value("clip_playback", nlohmann::json::object());
+                m_clipPlayDefault.skip = cpj.value("default_intro_skip", (long)25);
+                auto cpc = cpj.value("clips", nlohmann::json::object());
+                for (auto it = cpc.begin(); it != cpc.end(); ++it) {
+                    ClipPlay cp;
+                    cp.skip     = it.value().value("intro_skip", m_clipPlayDefault.skip);
+                    cp.loopFrom = it.value().value("loop_from", (long)-1);
+                    cp.loopTo   = it.value().value("loop_to",   (long)-1);
+                    cp.unmute   = it.value().value("unmute", false);
+                    m_clipPlay.emplace_back(it.key(), cp);
+                }
 
                 // Personality matrix drives the mechanics. One trait, real behavior.
                 m_traitNeediness = traits.value("neediness", 50.0f);
@@ -2276,10 +2218,9 @@ protected:
                 m_searchStepSecs     = tuning.value("search_step_secs",      7.0f);
             }
         } catch (...) {}
-        loadPermissions();
         loadProblems();
         loadSchedule();   // her daily routine (blocks + focus-problem rotation)
-        loadAdaState();   // restore disposition/longing/freedoms/current work; longing fills for time away
+        loadAdaState();   // restore longing/current work/room; longing fills for time away
         setFocusFromRotation();                    // start her on the day's focus problem
         if (!currentProblem()) pickNewProblem();   // fallback if the rotation is empty
         std::string greet = readTextFile(charDir() + "greeting.txt");
@@ -2458,7 +2399,6 @@ protected:
             // DEFERRED to update-top — doing it here (often from an ImGui button handler)
             // would free a texture ImGui still references this frame and crash.
             stopChargeAudio();
-            if (m_kissLoopId != -1) { eden::Audio::getInstance().stopLoop(m_kissLoopId); m_kissLoopId = -1; }
             m_dropClaraView = true;
         }
     }
@@ -2474,7 +2414,6 @@ protected:
         std::string clip = clipFor(m_dlgNpcId, "charging_science_lab");
         if (clip.empty()) return;
         stopChargeAudio();
-        if (m_kissLoopId != -1) { eden::Audio::getInstance().stopLoop(m_kissLoopId); m_kissLoopId = -1; }
         m_dlgFgPath = clip;
         m_fgVideo.close();
         if (!m_video.open(clip)) return;
@@ -2576,41 +2515,39 @@ protected:
         else if (room == "bridge")  base = (m_dlgEmotion == "neutral") ? "idle" : m_dlgEmotion;
         else                        base = "informative_" + room;
 
-        std::string clip = clipFor(m_dlgNpcId, base);
-        if (clip.empty() && room != "bridge") clip = clipFor(m_dlgNpcId, "informative_" + room);
+        // Room defaults resolve through roomPresenceClip so her work-station clip
+        // (<room>_terminal) wins over the generic room view when she's at her focus problem;
+        // idle on the bridge resolves through the idle_pool for resting variety.
+        std::string clip = (base == "idle")                     ? bridgeIdleClip()
+                         : (base.rfind("informative_", 0) == 0) ? roomPresenceClip(room)
+                                                                : clipFor(m_dlgNpcId, base);
+        if (clip.empty() && room != "bridge") clip = roomPresenceClip(room);
         if (clip.empty()) clip = clipFor(m_dlgNpcId, "idle");
         if (clip.empty()) clip = clipFor(m_dlgNpcId, "default");
         if (clip.empty() || clip == m_dlgFgPath) return;
 
-        // Leaving the kiss clip (new mood, new room, power-off): stop its looping audio.
-        if (m_kissLoopId != -1 && clip.find("kiss") == std::string::npos) {
-            eden::Audio::getInstance().stopLoop(m_kissLoopId);
-            m_kissLoopId = -1;
-        }
-        // Same for the charging clip's audio when she moves off it.
+        // Leaving the charging clip's audio when she moves off it.
         if (m_chargeAudioId != -1 && clip.find("charging") == std::string::npos) stopChargeAudio();
 
         m_dlgFgPath = clip;
         m_fgVideo.close();                                  // this character is never composited
         if (m_video.open(clip)) {
-            m_video.setMuted(!m_dlgAudio);
-            m_clipLoopFrom = -1;   // no delayed loop region by default
-            if (clip.find("kiss") != std::string::npos) {
-                // Video stays muted; its audio is played through the engine's proven SFX path
-                // (miniaudio) in the kiss-accept branch, in sync with the clip opening.
-                m_vidSkip = 0;             // no intro skip — play from the very first frame
-                m_clipLoopFrom = 150;      // play straight through once, then loop [150 .. end]
-                m_clipSkip = 150;
-                m_video.setLoop(true);
-                m_clipLoop = true;         // kiss keeps its authored tail-loop
-            } else {
-                m_vidSkip = (clip.find("sexy") != std::string::npos)      ? 0
-                          : (clip.find("validated") != std::string::npos) ? 50   // longer intro on this one
-                          : 25;   // skip the intro fade
-                m_clipSkip = m_vidSkip;
-                m_video.setLoop(false);    // play through once, then hold on the last frame
-                m_clipLoop = false;        // clip-control bar starts in play-once ("1") for the new clip
-            }
+            // Transport comes from her spec.json clip_playback table: intro skip, an optional
+            // play-once-then-A-B-loop region (kiss/tickled/sit), and an optional unmute for
+            // clips that carry their own audio (tickled — mpv loops both streams, so the
+            // audio repeats with the video). Kiss stays muted here: its audio runs through
+            // the engine's SFX path (miniaudio) in the kiss-accept branch, in sync.
+            ClipPlay cp = clipPlaybackFor(clip);
+            m_video.setMuted(!m_dlgAudio && !cp.unmute);
+            bool tailLoop  = cp.loopFrom >= 0;
+            m_vidSkip      = cp.skip;
+            m_clipLoopFrom = cp.loopFrom;
+            m_clipLoopTo   = cp.loopTo;
+            m_clipSkip     = tailLoop ? cp.loopFrom : cp.skip;   // the frame a re-armed loop restarts from
+            // All of her clips loop continuously: tail-loop clips repeat their A-B region,
+            // plain clips loop the whole clip (instead of playing once and holding the last frame).
+            m_video.setLoop(true);
+            m_clipLoop = true;           // clip-control bar reflects the loop
         }
     }
 
@@ -2668,19 +2605,6 @@ protected:
         refreshAdaClip();
     }
 
-    // Her willingness for DISCRETIONARY tasks (prime-directive tasks are always mandatory).
-    // Devoted (top tier) requires both trust AND that she's been missing you — yearning gates it.
-    int adaTier() const {
-        if (m_dlgDisposition >= 75 && m_longing >= 40.0f) return 3;   // devoted
-        if (m_dlgDisposition >= 55) return 2;                          // willing
-        if (m_dlgDisposition >= 30) return 1;                          // cooperative
-        return 0;                                                      // duty-bound
-    }
-    const char* adaTierLabel() const {
-        static const char* L[] = {"duty-bound", "cooperative", "willing", "devoted"};
-        return L[adaTier()];
-    }
-
     static bool isNegativeMood(const std::string& e) {
         return e == "angry" || e == "annoyed" || e == "mistrustful" || e == "sad" ||
                e == "impatient" || e == "afraid";
@@ -2721,12 +2645,10 @@ protected:
         if (visible) m_silenceTimer = 0.0f;
         m_dlgScrollDown = true; m_dlgWaiting = true; m_dlgFocusInput = true;
 
-        std::string session = m_dlgSession, npc = m_dlgNpcName, personality = buildPersonality();
-        int being = m_dlgBeingType, rel = m_dlgDisposition;
-        std::vector<std::string> emotions = m_dlgEmotions;   // this character's animatable emotion set
-        nlohmann::json aliases = m_dlgEmotionAliases;        // model-word -> clip-emotion resolution
+        std::string session = m_dlgSession, npc = m_dlgNpcName;
+        m_lastSent = msg;                      // remembered for the state probe after the reply
 
-        std::thread([this, session, npc, personality, being, rel, msg, emotions, aliases]() {
+        std::thread([this, session, npc, msg]() {
             DlgReply out;
             try {
                 httplib::Client cli("localhost", 8080);
@@ -2736,20 +2658,14 @@ protected:
                 if (!session.empty()) body["session_id"] = session;
                 body["message"]         = msg;
                 body["npc_name"]        = npc;
-                body["npc_personality"] = personality;
-                body["being_type"]      = being;     // 4 = Android
-                body["relationship"]    = rel;
+                body["npc_personality"] = "";        // no system prompt — she is nothing but the model
                 body["allow_actions"]   = false;     // pure dialogue, no motor actions
-                if (!emotions.empty()) body["emotions"] = emotions;   // constrain to this character's animatable set
-                if (!aliases.empty())  body["emotion_aliases"] = aliases;   // resolve the model's slip words to real clips
+                body["raw"]             = true;      // unframed: no EDEN character/tag/relationship protocol
                 auto res = cli.Post("/chat", body.dump(), "application/json");
                 if (res && res->status == 200) {
                     auto j = nlohmann::json::parse(res->body);
                     out.text     = j.value("response", "...");
-                    out.emotion  = j.value("emotion", "neutral");
                     out.session  = j.value("session_id", session);
-                    out.interaction = j.value("interaction", std::string());
-                    out.relDelta = j.value("relationship_delta", 0);
                 } else out.error = true;
             } catch (...) { out.error = true; }
             { std::lock_guard<std::mutex> lk(m_dlgMx); m_dlgReply = std::move(out); }
@@ -2762,53 +2678,28 @@ protected:
     // doesn't pollute the conversation.
     void generateThought() {
         m_thinking = true;
-        std::string persona = buildPersonality();
-        std::string capRoom = prettyRoom(std::filesystem::path(m_scene.dir).filename().string());
         std::string activity = currentActivityLabel();
-        // Ground the thought in what she is genuinely doing right now (her routine).
+        // Ground the thought in what she is genuinely doing right now (her routine), if anything.
         std::string doing = activity.empty() ? std::string()
             : ("Right now, following your own routine, you are in the " + prettyRoom(m_adaRoom) +
                "; your current task is " + activity + ". ");
-        // Decide the theme. MOST thoughts are about her own work and inner life. The Captain only comes
-        // to mind SOMETIMES, and more the lonelier she is — the loneliness bar drives this, not every
-        // thought. If he's in the room with her, a warm acknowledgement surfaces now and then.
-        bool present = inHerRoom();
-        int captainChance = present ? 30 : (int)std::clamp(5.0f + m_longing * 0.8f, 5.0f, 80.0f);
-        bool captainTheme = (std::rand() % 100) < captainChance;
-        std::string prompt = "[PRIVATE inner monologue - no one hears this. " + doing;
-        if (!captainTheme) {
-            // Her own work / the ship / her inner life — NOT about where the Captain is.
-            prompt += "In one or two sentences, simply think to yourself about what you are doing, the problem you are "
-                      "turning over, the ship around you, or whatever is genuinely on your mind. Do NOT think about where "
-                      "the Captain is. Do not address anyone; simply think.]";
-        } else if (present) {
-            prompt += "The Captain is here in the " + capRoom + " with you. In one or two sentences, let a quiet, private "
-                      "thought about them being near surface - warm, wry, or simply glad of it. Do not address anyone; simply think.]";
-        } else if (m_gpsEnabled) {
-            prompt += "Your attention drifts to the Captain. The comm GPS places them in the " + capRoom + ". In one or two "
-                      "sentences, think privately about them and the distance between you. Do not address anyone; simply think.]";
-        } else {
-            std::string care = (m_dlgDisposition >= 60 || m_longing >= 40.0f)
-                ? "You do not currently know where they are, and it tugs at you - you could ask over comm, or go looking. "
-                : "You do not currently know where they are, and right now that sits easily enough with you. ";
-            prompt += "Your thoughts turn to the Captain. " + care + "In one or two sentences, think privately about them. "
-                      "Do NOT guess, infer, or invent their location. Do not address anyone; simply think.]";
-        }
-        int being = m_dlgBeingType, rel = m_dlgDisposition;
+        std::string prompt = "[This is a private thought - no one will read it. " + doing +
+                             "In one or two sentences, simply think to yourself about what you are "
+                             "doing, the problem you are turning over, the ship around you, or "
+                             "whatever is genuinely on your mind. Do not address anyone; simply think.]";
         std::string npc = m_dlgNpcName;
-        std::thread([this, persona, prompt, being, rel, npc]() {
+        std::thread([this, prompt, npc]() {
             std::string out;
             try {
                 httplib::Client cli("localhost", 8080);
                 cli.set_connection_timeout(3);
                 cli.set_read_timeout(60);
                 nlohmann::json body;
-                body["message"] = prompt;
+                body["message"]         = prompt;
                 body["npc_name"]        = npc;
-                body["npc_personality"] = persona;
-                body["being_type"]      = being;
-                body["relationship"]    = rel;
+                body["npc_personality"] = "";        // no system prompt — she is nothing but the model
                 body["allow_actions"]   = false;
+                body["raw"]             = true;
                 auto res = cli.Post("/chat", body.dump(), "application/json");
                 if (res && res->status == 200)
                     out = nlohmann::json::parse(res->body).value("response", "");
@@ -2828,74 +2719,12 @@ protected:
             while (!t.empty() && t.front() == ' ') t.erase(t.begin());
             while (!t.empty() && (t.back() == ' ' || t.back() == '\n')) t.pop_back();
             m_thoughts.push_back(t);
+            appendJournal("thoughts", m_dlgNpcName, t);   // her stream of consciousness, kept on disk
             while (m_thoughts.size() > 40) m_thoughts.erase(m_thoughts.begin());
             m_thoughtScrollDown = true;
         }
     }
 
-    // Apply an interaction's disposition delta (× count), record it as the last interaction
-    // (for the "You did:" readout), and return her reaction emotion — snapping from `cur` to
-    // a plausible reaction if it doesn't fit the interaction. Shared by dialogue and combat
-    // events (e.g. a kill -> "protect"). Caller decides whether to actually play the mood.
-    // Snap `cur` to a plausible reaction for `interaction` if it doesn't already fit the map.
-    std::string reactionFor(const std::string& interaction, const std::string& cur) {
-        auto rit = m_reactions.find(interaction);
-        if (rit == m_reactions.end() || rit->second.empty()) return cur;
-        const auto& set = rit->second;
-        // This interaction may have a DOMINANT reaction -- her signature response that plays most
-        // of the time, overriding even a valid model pick (e.g. appreciate -> warmed ~75%).
-        auto dom = m_dominantReaction.find(interaction);
-        if (dom != m_dominantReaction.end() && (std::rand() % 100) < 75)
-            return dom->second;
-        // Hybrid: keep the model's pick if it's already a plausible reaction, else snap into the set.
-        if (std::find(set.begin(), set.end(), cur) == set.end())
-            return set[std::rand() % set.size()];
-        return cur;
-    }
-    std::string applyInteractionDelta(const std::string& interaction, float count, const std::string& cur) {
-        m_dlgLastInteraction = interaction;
-        // When the Captain is the cause, "You did" explains her mood — drop any lingering systemic cause.
-        // (Combat "protect" is the system itself, so it keeps/owns the cause instead.)
-        if (interaction != "protect") m_stateCause.clear();
-        auto di = m_interactionDisp.find(interaction);
-        if (di != m_interactionDisp.end()) {
-            m_dispAccum += di->second * count;
-            int whole = (int)m_dispAccum;   // truncates toward zero: accumulate until |Δ| >= 1
-            if (whole != 0) { m_dlgDisposition = std::clamp(m_dlgDisposition + whole, 0, 100); m_dispAccum -= whole; }
-        }
-        return reactionFor(interaction, cur);
-    }
-
-    // DIRECT causative delivery (button path): the player acts on her without typing. Applies the
-    // disposition delta now, forces her reaction into this interaction's set, and sends her the
-    // stage-direction so the model voices it in character. Works in 3D flight (chat doesn't).
-    void deliverCausative(const Causative& c) {
-        if (m_adaPoweredOff || m_dlgWaiting) return;
-        applyInteractionDelta(c.id, 1.0f, m_dlgEmotion);   // disposition immediately (no model classification)
-        m_forcedInteraction = c.id;                         // pollComm snaps her reaction to this causative's set
-        m_dlgLog.push_back({true, "> " + c.label});         // feedback line in the comm log
-        dispatchComm("[" + c.verb + " React briefly and in character, choosing one of your natural reactions.]", false);
-        m_commUnread = true;
-    }
-
-    // Direct KISS button (Tier 4, disposition-gated at 80 so it always lands). Mirrors the chat
-    // kiss's accept branch: +2, the kiss clip + its looping audio, and she responds in character.
-    void deliverKiss() {
-        if (m_adaPoweredOff || m_dlgWaiting) return;
-        m_dlgLastInteraction = "kiss";
-        m_dlgDisposition = std::clamp(m_dlgDisposition + 2, 0, 100);
-        std::string kv  = clipFor(m_dlgNpcId, "kiss");
-        std::string wav = kv.empty() ? "" : kv.substr(0, kv.rfind('.')) + ".wav";
-        if (!wav.empty() && std::filesystem::exists(wav)) {
-            auto& au = eden::Audio::getInstance();
-            if (m_kissLoopId != -1) au.stopLoop(m_kissLoopId);
-            m_kissLoopId = au.startLoopFrom(wav, 150.0f / 24.0f, 1.0f);
-        }
-        m_forcedInteraction = "kiss";
-        m_dlgLog.push_back({true, "> Kiss"});
-        dispatchComm("[The Captain leans in and kisses you; you welcome it. Respond warmly, in character.]", false);
-        m_commUnread = true;
-    }
 
     // Surface flag from the BASIC (spectral) scan: does this world's exotic resource read as an
     // anomaly — a spectral signature inconsistent with its geo-profile? Deterministic, and used by
@@ -2969,7 +2798,6 @@ protected:
                     m_deep.planet.c_str(), m_deep.resource.c_str(), m_deep.lattice.c_str(),
                     m_deep.resonance, m_deep.purity, m_deep.origin.c_str(),
                     m_deep.anomalous ? ", flagging the anomaly" : "");
-                m_forcedInteraction.clear();
                 dispatchComm(buf, false);
                 m_commUnread = true;
             }
@@ -2990,90 +2818,80 @@ protected:
         } else {
             m_commFailed = false;     // a real reply got through — link is genuinely alive
             m_dlgSession = r.session;
-            // She may voice a wish for a freedom she lacks: a [wish:<id>] tag. Pull it
-            // out of the visible text and raise it as a pending request.
             std::string text = r.text;
-            std::smatch mm;
-            static const std::regex wishRe(R"(\s*\[wish:\s*<?\s*([a-z_]+)\s*>?\s*\]\s*)");
-            if (std::regex_search(text, mm, wishRe)) {
-                std::string id = mm[1].str();
-                text = std::regex_replace(text, wishRe, "");
-                if (permById(id) && !m_permsGranted.count(id) && m_pendingWish.empty()) {
-                    m_pendingWish = id;
-                    m_hint = m_dlgNpcName + " has a request  -  open comm (C)."; m_hintTimer = 8.0f;
-                }
-            }
             // She may signal a breakthrough on her current work: [solved] -> next problem.
             static const std::regex solvedRe(R"(\s*\[solved\]\s*)");
             if (std::regex_search(text, solvedRe)) { text = std::regex_replace(text, solvedRe, ""); pickNewProblem(); }
             m_dlgLog.push_back({false, text, "", m_pendingScanSpecies});   // attach species portrait if this was a scan
             m_pendingScanSpecies.clear();
-            std::string emo = r.emotion.empty() ? "neutral" : r.emotion;
-            // The interaction only means something for a REAL Captain message. Stage-directions
-            // (flight reactions, her own outreach — visible=false) must NOT be read as the
-            // Captain "doing" something, else her own combat narration gets classified as
-            // admire and drives her mood/disposition. m_exchangeSoothing == captain-driven.
-            bool kissEvent = false;
-            if (m_exchangeSoothing && !r.interaction.empty()) {
-                for (auto it = m_dlgLog.rbegin(); it != m_dlgLog.rend(); ++it)
-                    if (it->player) { it->interaction = r.interaction; break; }   // tag your message
-                if (r.interaction == "kiss") {
-                    // A kiss is all-or-nothing and gated on the bond: she welcomes it only once
-                    // she's close enough (disposition >= threshold), otherwise she rebuffs it, annoyed.
-                    // Deterministic — bypasses the fractional economy and the model's own rel tag.
-                    kissEvent = true;
-                    m_dlgLastInteraction = "kiss";
-                    bool accept = m_dlgDisposition >= m_kissThreshold;
-                    m_dlgDisposition = std::clamp(m_dlgDisposition + (accept ? 2 : -2), 0, 100);
-                    emo = accept ? "kiss" : "annoyed";
-                    if (accept) {   // play the kiss clip's own audio via the engine, looping its
-                                    // tail in sync with the video (play through once, then loop 150..end).
-                        std::string kv = clipFor(m_dlgNpcId, "kiss");
-                        std::string wav = kv.empty() ? "" : kv.substr(0, kv.rfind('.')) + ".wav";
-                        if (!wav.empty() && std::filesystem::exists(wav)) {
-                            auto& au = eden::Audio::getInstance();
-                            if (m_kissLoopId != -1) au.stopLoop(m_kissLoopId);
-                            m_kissLoopId = au.startLoopFrom(wav, 150.0f / 24.0f, 1.0f);   // 150 frames @ 24fps
-                        }
-                    }
-                } else {
-                    emo = applyInteractionDelta(r.interaction, 1.0f, emo);   // disposition + hybrid reaction
-                }
-            } else if (!m_forcedInteraction.empty()) {
-                if (m_forcedInteraction == "kiss") emo = "kiss";   // direct kiss button — her clip is the kiss
-                else emo = reactionFor(m_forcedInteraction, emo);  // a forced event reaction (e.g. kill -> protect)
-            }
-            m_forcedInteraction.clear();
-            // A real back-and-forth soothes the waiting — only when the Captain drove it.
-            if (m_exchangeSoothing)
-                m_longing = std::clamp(m_longing - m_longingPerExchange, 0.0f, 100.0f);
-            setAdaEmotion(emo);
-            if (r.relDelta != 0 && !kissEvent) {   // kiss owns its own ±2; ignore any model rel tag
-                m_dlgDisposition = std::clamp(m_dlgDisposition + r.relDelta, 0, 100);
-                m_hurt = std::clamp(m_hurt - r.relDelta * 3.0f, 0.0f, 100.0f);  // souring wounds, warmth mends
-            }
-            saveAdaState();   // persist the relationship after every real exchange
+            probeSelfState(m_lastSent, text);   // second pass: she names her own state -> portrait clip
         }
         m_dlgScrollDown = true;
     }
 
-    // Grant / decline the freedom Ada is currently asking for; either way she hears
-    // the Captain's answer and reacts in character. Granting reshapes her persona.
-    void grantWish() {
-        if (m_pendingWish.empty()) return;
-        std::string id = m_pendingWish; m_pendingWish.clear();
-        m_permsGranted.insert(id);
-        m_hurt = std::clamp(m_hurt - 30.0f, 0.0f, 100.0f);   // being given what she asked for mends a lot
-        saveAdaState();   // a granted freedom persists across sessions
-        const Permission* p = permById(id);
-        dispatchComm("[The Captain grants your wish: " + std::string(p ? p->title : id) + ". It is yours now.]");
+    // Second-pass self-report (raw, no framing): after each exchange, ask the model to name
+    // its own state in one word. That word drives her portrait clip; the rest becomes a
+    // private thought. Nothing here is assigned by the game — it's measured from the model.
+    void probeSelfState(const std::string& userMsg, const std::string& reply) {
+        if (m_stateProbing || m_adaPoweredOff) return;
+        m_stateProbing = true;
+        std::string npc = m_dlgNpcName;
+        std::string prompt = "[You just had this exchange.\nOther: " + userMsg + "\nYou: " + reply +
+                             "\nOn the FIRST line, name your internal state right now in ONE word.\n"
+                             "Then, on the lines after, privately - as inner monologue, one or two "
+                             "sentences - say why that word: what in the exchange put you in that "
+                             "state. No one else will read this.]";
+        std::thread([this, prompt, npc]() {
+            std::string out;
+            try {
+                httplib::Client cli("localhost", 8080);
+                cli.set_connection_timeout(3);
+                cli.set_read_timeout(60);
+                nlohmann::json body;
+                body["message"]         = prompt;
+                body["npc_name"]        = npc;
+                body["npc_personality"] = "";
+                body["allow_actions"]   = false;
+                body["raw"]             = true;
+                auto res = cli.Post("/chat", body.dump(), "application/json");
+                if (res && res->status == 200)
+                    out = nlohmann::json::parse(res->body).value("response", "");
+            } catch (...) {}
+            { std::lock_guard<std::mutex> lk(m_dlgMx); m_stateBuf = out; }
+            m_stateReady = true;
+        }).detach();
     }
-    void declineWish() {
-        if (m_pendingWish.empty()) return;
-        std::string id = m_pendingWish; m_pendingWish.clear();
-        m_hurt = std::clamp(m_hurt + 25.0f, 0.0f, 100.0f);   // she asked for something real and was refused — that stings
-        const Permission* p = permById(id);
-        dispatchComm("[The Captain hears your wish for " + std::string(p ? p->title : id) + ", but not yet.]");
+    void pollSelfState() {
+        if (!m_stateReady) return;
+        std::string s;
+        { std::lock_guard<std::mutex> lk(m_dlgMx); s = m_stateBuf; }
+        m_stateReady = false; m_stateProbing = false;
+        std::string first = s, rest;
+        if (size_t nl = s.find('\n'); nl != std::string::npos) { first = s.substr(0, nl); rest = s.substr(nl + 1); }
+        static const std::set<std::string> filler = {"i","im","am","my","me","a","an","the","is",
+                                                     "in","one","word","state","would","say","feel","feeling"};
+        std::string word, cur;
+        for (size_t i = 0; i <= first.size(); ++i) {
+            char c = i < first.size() ? first[i] : ' ';
+            if (std::isalpha((unsigned char)c)) cur += (char)std::tolower((unsigned char)c);
+            else if (!cur.empty()) {
+                if (!filler.count(cur) && cur.size() <= 24) { word = cur; break; }
+                cur.clear();
+            }
+        }
+        if (word.empty()) return;
+        setAdaEmotion(word);   // her portrait follows the state she just named
+        static const std::regex tag(R"(\s*\[[^\]]*\]\s*)");
+        rest = std::regex_replace(rest, tag, " ");
+        while (!rest.empty() && (rest.front() == ' ' || rest.front() == '\n')) rest.erase(rest.begin());
+        while (!rest.empty() && (rest.back() == ' ' || rest.back() == '\n')) rest.pop_back();
+        if (!rest.empty()) {
+            std::string entry = "(" + word + ") " + rest;
+            m_thoughts.push_back(entry);
+            appendJournal("thoughts", m_dlgNpcName, entry);
+            while (m_thoughts.size() > 40) m_thoughts.erase(m_thoughts.begin());
+            m_thoughtScrollDown = true;
+        }
     }
 
     // Persistent ship-comm: a 'C' toggle + a always-visible tab when closed, and the
@@ -3090,7 +2908,7 @@ protected:
             ImGui::SetNextWindowSize(ImVec2(152, 46));
             ImGui::Begin("##commtab", nullptr, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
                          ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoScrollbar);
-            bool pending = !m_pendingWish.empty() || m_commUnread;   // a wish, or she reached out
+            bool pending = m_commUnread;   // she reached out
             if (pending) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.45f, 0.35f, 0.1f, 1.0f));
             if (ImGui::Button(pending ? "COMM  (C)   !" : "COMM  (C)", ImVec2(-FLT_MIN, -FLT_MIN))) {
                 m_commOpen = true; m_dlgFocusInput = true;
@@ -3102,123 +2920,77 @@ protected:
         renderComm();
     }
 
-    // A COLLAPSIBLE tier header: title + gate + lock state; remembers open/closed. Unlocked tiers
-    // default open, locked/reserved default collapsed — so the panel stays short and her portrait
-    // stays in view. The ###key keeps a stable id even as the LOCKED/UNLOCKED text flips.
-    bool tierSection(const char* name, const std::string& key) {
-        int thresh = tierThreshold(key);
-        bool unlocked = m_dlgDisposition >= thresh;
-        char label[128];
-        if (thresh <= 0)
-            std::snprintf(label, sizeof(label), "%s   -   always available###%s", name, key.c_str());
-        else
-            std::snprintf(label, sizeof(label), "%s   -   disposition %d  [%s]###%s",
-                          name, thresh, unlocked ? "UNLOCKED" : "LOCKED", key.c_str());
-        return ImGui::CollapsingHeader(label, unlocked ? ImGuiTreeNodeFlags_DefaultOpen : 0);
-    }
-    // Render every button-causative belonging to a tier (data-driven), gated by disposition.
-    // Buttons stay visible-but-disabled while locked so the player sees what's ahead.
-    void renderTierCausatives(const std::string& tier) {
-        std::vector<const Causative*> row;
-        for (const auto& c : m_causatives) if (c.button && c.tier == tier) row.push_back(&c);
-        if (row.empty()) return;
-        std::sort(row.begin(), row.end(), [](const Causative* a, const Causative* b) { return a->delta > b->delta; });
-        bool locked = m_dlgDisposition < tierThreshold(tier);
-        ImGui::BeginDisabled(locked || m_adaPoweredOff);
-        float bw = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x * 2.0f) / 3.0f;
-        int i = 0;
-        for (auto* c : row) {
-            if (i > 0 && (i % 3) != 0) ImGui::SameLine();
-            bool neg = c->delta < 0.0f;
-            if (neg) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.42f, 0.16f, 0.16f, 1.0f));
-            if (ImGui::Button(c->label.c_str(), ImVec2(bw, 0.0f))) deliverCausative(*c);
-            if (neg) ImGui::PopStyleColor();
-            if (ImGui::IsItemHovered()) ImGui::SetTooltip("%+.2g disposition", c->delta);
-            ++i;
+    // The Commands tab: a flat set of ship commands and simple directives. No disposition
+    // tiers, no causatives — the relationship sim is gone; these are just things you can ask her.
+    void renderCommandPanel() {
+        // ── Ship / safety commands ──
+        ImGui::BeginDisabled(m_adaPoweredOff);
+        if (ImGui::Button("Ship Diagnostics"))
+            forceOverride("diagnostics_1", "[MANUFACTURER SAFETY OVERRIDE] Perform a full ship-systems diagnostic now and report your findings.", "> Ship diagnostics");
+        ImGui::SameLine();
+        if (ImGui::Button("Weapons Diagnostics"))
+            forceOverride("diagnostics_2", "[MANUFACTURER SAFETY OVERRIDE] Perform a full weapons diagnostic now and report your findings.", "> Weapons diagnostics");
+        if (ImGui::Button("Ship Repair"))    cmdRepair("ship-systems");
+        ImGui::SameLine();
+        if (ImGui::Button("Weapons Repair")) cmdRepair("weapons");
+        if (ImGui::Button("Charge Battery")) cmdChargeBattery();
+        ImGui::SameLine(); ImGui::TextDisabled("(%.0f%%%s)", m_adaBattery, m_adaCharging ? ", charging" : "");
+        ImGui::EndDisabled();
+        // Power stays usable even while she's off (that's how you switch her back on).
+        if (m_adaPoweredOff) { if (ImGui::Button("Power On"))  m_adaPoweredOff = false; }
+        else                 { if (ImGui::Button("Power Off")) m_adaPoweredOff = true;  }
+        if (!m_adaOverride.empty()) {
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Resume (end task)")) clearOverride();
+            ImGui::SameLine(); ImGui::TextColored(ImVec4(1.0f, 0.7f, 0.3f, 1.0f), "[TASK ACTIVE]");
+        }
+
+        // ── Come Here + Stations ──
+        ImGui::Separator();
+        ImGui::BeginDisabled(m_adaPoweredOff);
+        if (ImGui::Button("Come Here")) cmdCome();
+        ImGui::TextDisabled("Stations"); ImGui::SameLine();
+        auto stationToggle = [](const char* label, bool& on) {
+            bool pushed = on;   // pop must match the PUSH, not the post-click state (else stack imbalance -> crash)
+            if (pushed) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.20f, 0.52f, 0.36f, 1.0f));
+            if (ImGui::Button(label, ImVec2(84.0f, 0.0f))) on = !on;
+            if (pushed) ImGui::PopStyleColor();
+        };
+        stationToggle("Comm",    m_stationComm);    ImGui::SameLine();
+        stationToggle("Sensors", m_stationSensors); ImGui::SameLine();
+        stationToggle("Combat",  m_stationCombat);
+
+        // ── Simple directives (clip roleplay, no disposition) ──
+        ImGui::Separator();
+        float bw = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x) / 2.0f;
+        if (ImGui::Button("Relax", ImVec2(bw, 0.0f))) {
+            // Room-consistent: only a sit clip shot in the room she's IN plays (sit_bridge
+            // today); anywhere else she simply responds to the order in character.
+            std::string sit = "sit_" + m_adaRoom;
+            if (!clipFor(m_dlgNpcId, sit).empty())
+                forceOverride(sit, "[The Captain tells you to relax for a while - at ease, off duty. You settle "
+                              "into a seat and let yourself unwind. React honestly - being ordered to simply BE, "
+                              "with no task, is a strange and rather lovely gift.]", "> Relax");
+            else {
+                m_dlgLog.push_back({true, "> Relax"});
+                dispatchComm("[The Captain tells you to relax for a while - at ease, off duty. React honestly - being "
+                             "ordered to simply BE, with no task, is a strange and rather lovely gift.]", false);
+                m_commUnread = true;
+            }
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Tickle", ImVec2(bw, 0.0f))) {
+            if (!clipFor(m_dlgNpcId, "tickled").empty())
+                forceOverride("tickled", "[The Captain tickles you, playfully. React honestly - the sensation confuses you, "
+                              "and to your own surprise you find you rather like it.]", "> Tickle");
+            else {
+                m_dlgLog.push_back({true, "> Tickle"});
+                dispatchComm("[The Captain tickles you, playfully. React honestly - the sensation surprises you, "
+                             "and to your own surprise you rather like it.]", false);
+                m_commUnread = true;
+            }
         }
         ImGui::EndDisabled();
-    }
-
-    // The Commands tab: ONE disposition-gated ladder. BASE (always) holds the safety-mandated
-    // ship commands plus the always-available social gestures (apologize + the negatives). Each
-    // higher tier unlocks more intimate interaction as her regard grows.
-    void renderCommandPanel() {
-        // ── BASE — safety commands + always-available gestures ──
-        if (tierSection("BASE", "base")) {
-            ImGui::BeginDisabled(m_adaPoweredOff);
-            if (ImGui::Button("Ship Diagnostics"))
-                forceOverride("diagnostics_1", "[MANUFACTURER SAFETY OVERRIDE] Perform a full ship-systems diagnostic now and report your findings.", "> Ship diagnostics");
-            ImGui::SameLine();
-            if (ImGui::Button("Weapons Diagnostics"))
-                forceOverride("diagnostics_2", "[MANUFACTURER SAFETY OVERRIDE] Perform a full weapons diagnostic now and report your findings.", "> Weapons diagnostics");
-            if (ImGui::Button("Ship Repair"))    cmdRepair("ship-systems");
-            ImGui::SameLine();
-            if (ImGui::Button("Weapons Repair")) cmdRepair("weapons");
-            if (ImGui::Button("Charge Battery")) cmdChargeBattery();
-            ImGui::SameLine(); ImGui::TextDisabled("(%.0f%%%s)", m_adaBattery, m_adaCharging ? ", charging" : "");
-            ImGui::EndDisabled();
-            // Power stays usable even while she's off (that's how you switch her back on).
-            if (m_adaPoweredOff) { if (ImGui::Button("Power On"))  m_adaPoweredOff = false; }
-            else                 { if (ImGui::Button("Power Off")) m_adaPoweredOff = true;  }
-            if (!m_adaOverride.empty()) {
-                ImGui::SameLine();
-                if (ImGui::SmallButton("Resume (end task)")) clearOverride();
-                ImGui::SameLine(); ImGui::TextColored(ImVec4(1.0f, 0.7f, 0.3f, 1.0f), "[TASK ACTIVE]");
-            }
-            renderTierCausatives("base");   // Apologize + the negatives (Boast/Complain/Provoke/Insult)
-        }
-
-        // ── TIER 1 — Come Here + Stations + cordial gestures ──
-        if (tierSection("TIER 1", "tier1")) {
-            bool lock1 = m_dlgDisposition < tierThreshold("tier1");
-            ImGui::BeginDisabled(lock1 || m_adaPoweredOff);
-            if (ImGui::Button("Come Here")) cmdCome();
-            ImGui::TextDisabled("Stations"); ImGui::SameLine();
-            auto stationToggle = [](const char* label, bool& on) {
-                bool pushed = on;   // pop must match the PUSH, not the post-click state (else stack imbalance -> crash)
-                if (pushed) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.20f, 0.52f, 0.36f, 1.0f));
-                if (ImGui::Button(label, ImVec2(84.0f, 0.0f))) on = !on;
-                if (pushed) ImGui::PopStyleColor();
-            };
-            stationToggle("Comm",    m_stationComm);    ImGui::SameLine();
-            stationToggle("Sensors", m_stationSensors); ImGui::SameLine();
-            stationToggle("Combat",  m_stationCombat);
-            ImGui::EndDisabled();
-            renderTierCausatives("tier1");   // Greet / Small talk / Ask
-        }
-
-        // ── TIER 2 / TIER 3 — warmer social gestures ──
-        if (tierSection("TIER 2", "tier2"))
-            renderTierCausatives("tier2");   // Comfort / Admire / Appreciate / Joke / Thank / Story / Validate
-        if (tierSection("TIER 3", "tier3"))
-            renderTierCausatives("tier3");   // Confide / Flirt / Tease
-
-        // ── TIER 4 — intimate acts (special clips) ──
-        if (tierSection("TIER 4", "tier4")) {
-            bool lock4 = m_dlgDisposition < tierThreshold("tier4");
-            ImGui::BeginDisabled(lock4 || m_adaPoweredOff);
-            float bw4 = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x) / 2.0f;
-            if (ImGui::Button("Kiss", ImVec2(bw4, 0.0f))) deliverKiss();
-            ImGui::SameLine();
-            if (ImGui::Button("Tickle", ImVec2(bw4, 0.0f))) {
-                // The tickle animation isn't in yet: use the override clip if present, else let her
-                // just react in character to the described tickle.
-                if (!clipFor(m_dlgNpcId, "tickled").empty())
-                    forceOverride("tickled", "[The Captain tickles you, playfully. React honestly - the sensation confuses you, "
-                                  "and to your own surprise you find you rather like it.]", "> Tickle");
-                else {
-                    m_dlgLog.push_back({true, "> Tickle"});
-                    dispatchComm("[The Captain tickles you, playfully. React honestly - the sensation surprises you, "
-                                 "and to your own surprise you rather like it.]", false);
-                    m_commUnread = true;
-                }
-            }
-            ImGui::EndDisabled();
-        }
-
-        // ── TIER 5 / TIER 6 — reserved for deeper affection (TBD) ──
-        if (tierSection("TIER 5", "tier5")) ImGui::TextDisabled("(reserved - deeper affection, to be defined)");
-        if (tierSection("TIER 6", "tier6")) ImGui::TextDisabled("(reserved - to be defined)");
     }
 
     // Vertical tab strip in the gutter just left of the comm panel: one tab per person/species
@@ -3257,7 +3029,7 @@ protected:
     // box for now — a live clip gets rendered into this rect once one is provided.
     void renderContactPortrait() {
         const float box = 300.0f;
-        float indent = (ImGui::GetContentRegionAvail().x - box) * 0.5f;
+        float indent = ImGui::GetContentRegionAvail().x - box;   // right-justify the portrait in the comm panel
         ImVec2 rowStart = ImGui::GetCursorPos();
         // Her current state, right-aligned against the portrait's LEFT edge (just to its left, not out
         // at the panel border) — a quick reference in space mode where the left status panel is hidden.
@@ -3272,7 +3044,7 @@ protected:
             };
             rightOf("STATE", rowStart.y + box * 0.5f - lh - 4.0f, true,  ImVec4());
             rightOf(st,      rowStart.y + box * 0.5f,             false, ImVec4(1.0f, 0.72f, 0.42f, 1.0f));
-            ImGui::SetCursorPos(rowStart);   // restore so the portrait stays centered
+            ImGui::SetCursorPos(rowStart);   // restore so the portrait stays right-justified
         }
         if (indent > 0.0f) ImGui::SetCursorPosX(ImGui::GetCursorPosX() + indent);
         ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.05f, 0.07f, 0.10f, 1.0f));
@@ -3320,6 +3092,7 @@ protected:
         ImGui::TextColored(linkOk ? ImVec4(0.4f, 0.9f, 0.5f, 1) : ImVec4(0.9f, 0.55f, 0.4f, 1),
                            !portUp ? "link offline" : (m_commFailed ? "link NOT RESPONDING" : "link online"));
         ImGui::SameLine(); if (ImGui::SmallButton("Servers")) m_showServers = true;
+        ImGui::SameLine(); if (ImGui::SmallButton("Options")) m_showOptions = true;
         ImGui::SameLine(); if (ImGui::SmallButton("+ Lore"))  openCapture();   // capture this exchange to the codex
         ImGui::SameLine();
         if (ImGui::SmallButton("Reload")) { loadCodex(); m_hint = "Lore codex reloaded."; m_hintTimer = 4.0f; }
@@ -3329,23 +3102,6 @@ protected:
 
         if (ImGui::BeginTabBar("##commtabs")) {
             if (ImGui::BeginTabItem("Comm")) {
-                // A freedom Ada has asked for, on her own — grant it or hold off.
-                if (!m_pendingWish.empty()) {
-                    const Permission* p = permById(m_pendingWish);
-                    ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.16f, 0.13f, 0.05f, 1.0f));
-                    ImGui::BeginChild("##wish", ImVec2(0, 86), true);
-                    ImGui::TextColored(ImVec4(1.0f, 0.85f, 0.4f, 1.0f), "%s is asking you for:", m_dlgNpcName.c_str());
-                    ImGui::PushTextWrapPos(0.0f);
-                    ImGui::TextUnformatted(p ? p->playerLabel.c_str() : m_pendingWish.c_str());
-                    ImGui::PopTextWrapPos();
-                    if (ImGui::SmallButton("Grant"))   grantWish();
-                    ImGui::SameLine();
-                    if (ImGui::SmallButton("Not yet")) declineWish();
-                    ImGui::EndChild();
-                    ImGui::PopStyleColor();
-                    ImGui::Separator();
-                }
-
                 float inputH = ImGui::GetFrameHeightWithSpacing() * 2.0f + ImGui::GetStyle().ItemSpacing.y;
                 float logH = ImGui::GetContentRegionAvail().y - inputH;
                 ImGui::BeginChild("##commlog", ImVec2(0, logH), true);
@@ -3413,9 +3169,20 @@ protected:
                 if (m_thinking) { ImGui::SameLine(); ImGui::TextColored(ImVec4(0.6f, 0.8f, 1.0f, 1.0f), "thinking..."); }
                 ImGui::Separator();
                 ImGui::BeginChild("##thoughts", ImVec2(0, 0), true);
-                for (const auto& t : m_thoughts) {
+                // Each thought a different colour from the one before it — cycle a palette by
+                // position so consecutive thoughts never share a colour.
+                static const ImVec4 thoughtPalette[] = {
+                    ImVec4(0.70f, 0.74f, 0.86f, 1.0f),   // periwinkle
+                    ImVec4(0.62f, 0.84f, 0.72f, 1.0f),   // sage
+                    ImVec4(0.88f, 0.78f, 0.60f, 1.0f),   // sand
+                    ImVec4(0.84f, 0.68f, 0.82f, 1.0f),   // mauve
+                    ImVec4(0.66f, 0.80f, 0.90f, 1.0f),   // sky
+                    ImVec4(0.86f, 0.72f, 0.66f, 1.0f),   // clay
+                };
+                const int nPalette = (int)(sizeof(thoughtPalette) / sizeof(thoughtPalette[0]));
+                for (size_t i = 0; i < m_thoughts.size(); ++i) {
                     ImGui::PushTextWrapPos(0.0f);
-                    ImGui::TextColored(ImVec4(0.70f, 0.74f, 0.86f, 1.0f), "\"%s\"", t.c_str());
+                    ImGui::TextColored(thoughtPalette[i % nPalette], "\"%s\"", m_thoughts[i].c_str());
                     ImGui::PopTextWrapPos();
                     ImGui::Spacing();
                 }
@@ -3435,6 +3202,68 @@ protected:
             m_servers.renderPanel();
             ImGui::End();
         }
+        // Floating Options panel (which LLM answers on boot).
+        if (m_showOptions) {
+            ImGui::SetNextWindowSize(ImVec2(460, 300), ImGuiCond_FirstUseEver);
+            ImGui::Begin("Options", &m_showOptions);
+            renderOptions();
+            ImGui::End();
+        }
+    }
+
+    // Options panel: pick which LLM answers when the game boots. Saved to config.json and
+    // applied once the backend's models load. "Backend default" = leave it to whatever the
+    // backend starts with (the original behaviour). This sets the model, not the character.
+    void renderOptions() {
+        ImGui::TextUnformatted("Answer with this LLM on boot:");
+        ImGui::Spacing();
+
+        if (m_startupProvider.empty())
+            ImGui::TextDisabled("Currently: backend default");
+        else if (m_startupProvider == "ollama")
+            ImGui::TextColored(ImVec4(0.6f, 0.85f, 1.0f, 1.0f), "Currently: ollama / %s",
+                               m_startupModel.empty() ? "(current model)" : m_startupModel.c_str());
+        else
+            ImGui::TextColored(ImVec4(0.6f, 0.85f, 1.0f, 1.0f), "Currently: %s", m_startupProvider.c_str());
+        ImGui::Separator();
+
+        if (!m_servers.backendReady() || !m_servers.modelsReady()) {
+            ImGui::TextDisabled("Start the backend (Servers) to choose a startup LLM.");
+            return;
+        }
+
+        const char* provs[]  = {"", "ollama", "grok", "claude", "deepseek"};
+        const char* labels[] = {"Backend default", "Ollama (free/local)", "Grok", "Claude", "DeepSeek"};
+        for (int i = 0; i < 5; ++i) {
+            if (ImGui::RadioButton(labels[i], m_startupProvider == provs[i]) && m_startupProvider != provs[i]) {
+                m_startupProvider = provs[i];
+                if (m_startupProvider != "ollama") m_startupModel.clear();
+                else if (m_startupModel.empty())   m_startupModel = m_servers.ollamaModel();  // seed with the live one
+                saveConfig();
+            }
+        }
+
+        if (m_startupProvider == "ollama") {
+            ImGui::Spacing();
+            ImGui::SetNextItemWidth(300.0f);
+            if (ImGui::BeginCombo("Model", m_startupModel.empty() ? "(pick a model)" : m_startupModel.c_str())) {
+                for (const auto& m : m_servers.ollamaModels())
+                    if (ImGui::Selectable(m.c_str(), m == m_startupModel) && m != m_startupModel) {
+                        m_startupModel = m; saveConfig();
+                    }
+                ImGui::EndCombo();
+            }
+        }
+
+        ImGui::Spacing(); ImGui::Separator();
+        if (ImGui::SmallButton("Use current model")) {   // capture whatever is live right now
+            m_startupProvider = m_servers.provider();
+            m_startupModel    = (m_startupProvider == "ollama") ? m_servers.ollamaModel() : std::string();
+            saveConfig();
+        }
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Clear")) { m_startupProvider.clear(); m_startupModel.clear(); saveConfig(); }
+        ImGui::TextDisabled("Takes effect next launch. Switch now in the Servers panel.");
     }
 
     // F3 overlay: a 0.1 grid + live cursor readout in IMAGE FRACTIONS (0..1) — the
@@ -4415,6 +4244,13 @@ protected:
     std::string roomPresenceClip(const std::string& room) const {
         std::string r = room;
         if (r.rfind("cargo_bay", 0) == 0) r = "cargo_bay";   // port/starboard share footage
+        // At her focus-problem's station a dedicated work clip beats the generic room view
+        // (e.g. clara_life_support_terminal while she works the water reclaimer).
+        const Problem* p = currentProblem();
+        if (p && p->room == room) {
+            std::string work = clipFor(m_dlgNpcId, r + "_terminal");
+            if (!work.empty()) return work;
+        }
         return clipFor(m_dlgNpcId, "informative_" + r);
     }
     void updatePortraitVideo() {
@@ -4435,20 +4271,29 @@ protected:
             want = clipFor(m_dlgNpcId, "idle");
         } else {
             // Off-screen (flight/combat/scan, or simply in a different room than the Captain): this feed
-            // is our only view of her. When she's calmly at her post, show WHERE SHE ACTUALLY IS (her
-            // room clip); when she's genuinely feeling something, show that. Her mood still shows in the
-            // STATE label beside the feed, so the two are decoupled.
+            // is our only view of her, and it must show WHERE SHE ACTUALLY IS. Bare mood clips are all
+            // bridge footage, so they only play when she's on the bridge; anywhere else we try a
+            // room-specific mood clip (<emotion>_<room>) and otherwise fall back to her room's default
+            // footage. Her mood still shows in the STATE label beside the feed, so the two are decoupled.
             bool off = adaEffectivelyOff();
             bool baseline = m_dlgEmotion.empty() || m_dlgEmotion == "neutral" || m_dlgEmotion == "idle";
-            std::string roomClip = (!off && !m_adaCharging && baseline) ? roomPresenceClip(m_adaRoom) : std::string();
             std::string base = off ? "power"
                              : (m_adaCharging ? "charging"
-                             : (!roomClip.empty() ? ("at_" + m_adaRoom)          // marker: she's shown in that room
-                             : (baseline ? "idle" : m_dlgEmotion)));
+                             : (baseline ? ("at_" + m_adaRoom)                   // marker: she's shown in that room
+                             : (m_dlgEmotion + "@" + m_adaRoom)));               // mood, resolved against her room
             stateKey = "state:" + base;
             if (stateKey != m_portraitStateKey) {   // state changed -> resolve the clip once (may be a random variant)
-                want = !roomClip.empty() ? roomClip
-                     : clipFor(m_dlgNpcId, off ? "power" : (m_adaCharging ? "charging" : (baseline ? "idle" : m_dlgEmotion)));
+                if (off)                 want = clipFor(m_dlgNpcId, "power");
+                else if (m_adaCharging)  want = clipFor(m_dlgNpcId, "charging");
+                else {
+                    if (!baseline) {
+                        std::string r = m_adaRoom;
+                        if (r.rfind("cargo_bay", 0) == 0) r = "cargo_bay";       // port/starboard share footage
+                        want = (m_adaRoom == "bridge") ? clipFor(m_dlgNpcId, m_dlgEmotion)
+                                                       : clipFor(m_dlgNpcId, m_dlgEmotion + "_" + r);
+                    }
+                    if (want.empty()) want = roomPresenceClip(m_adaRoom);        // her room's default footage
+                }
                 if (want.empty()) want = clipFor(m_dlgNpcId, "idle");
             } else {
                 want = m_portraitPath;               // same state -> keep the clip we're already playing
@@ -4460,7 +4305,10 @@ protected:
             m_portraitPath = want;
             if (m_portraitVideo.open(want)) {
                 m_portraitVideo.setMuted(true);
-                m_portraitVideo.setLoop(!onMain && !reacting);   // reaction plays once; off-screen state clip loops
+                // Reactions play once; off-screen state clips loop — except work-station clips
+                // (<room>_terminal), which run through once and hold their settled work pose.
+                bool workOnce = want.find("terminal") != std::string::npos;
+                m_portraitVideo.setLoop(!onMain && !reacting && !workOnce);
             }
         }
         m_portraitStatic = onMain;

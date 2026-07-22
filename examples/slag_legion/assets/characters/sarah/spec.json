@@ -1,0 +1,12 @@
+{
+  "_comment": "Sarah — a room-baked android (composite:false: her clip IS the full-frame room view, no chroma key). One clip for now (default.mp4) plays for every state until named state clips are added.",
+
+  "identity": { "name": "Sarah", "model": "SARAH", "being_type": 4 },
+
+  "capabilities": {
+    "composite": false,
+    "chroma": "none",
+    "audio": false,
+    "clip_playback": { "default_intro_skip": 0 }
+  }
+}

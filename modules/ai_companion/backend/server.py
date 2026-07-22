@@ -11,7 +11,8 @@ import json
 import os
 import tempfile
 import uuid
-from typing import Optional
+from typing import Optional, List
+from datetime import datetime
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
@@ -22,6 +23,22 @@ from dotenv import load_dotenv
 # Load environment variables from this script's directory
 _script_dir = os.path.dirname(os.path.abspath(__file__))
 load_dotenv(os.path.join(_script_dir, ".env"))
+
+# Never let a broken stdout/stderr pipe crash a request. If the game process that
+# launched us dies, our stdout pipe breaks; an un-guarded print() then raises
+# BrokenPipeError mid-request and every /chat 500s. Swallow write errors on the logs.
+import sys as _sys
+class _SafeStream:
+    def __init__(self, s): self._s = s
+    def write(self, d):
+        try: return self._s.write(d)
+        except Exception: return len(d)
+    def flush(self):
+        try: return self._s.flush()
+        except Exception: pass
+    def __getattr__(self, n): return getattr(self._s, n)
+_sys.stdout = _SafeStream(_sys.stdout)
+_sys.stderr = _SafeStream(_sys.stderr)
 
 app = FastAPI(title="EDEN AI Backend", version="0.2.0")
 
@@ -179,6 +196,9 @@ class ChatRequest(BaseModel):
     image_path: Optional[str] = None  # Path to image file for vision model analysis
     relationship: Optional[int] = None  # Current NPC->player relationship score (0-100)
     allow_actions: bool = True  # False for pure dialogue NPCs (no motor-action block)
+    emotions: Optional[List[str]] = None  # Per-character emotion vocabulary (only ones this character has clips for). None -> full default set.
+    emotion_aliases: Optional[dict] = None  # Per-character {model_word: clip_emotion} — resolves the model's slip words to a real clip (data-driven from profiling).
+    raw: bool = False  # True = system prompt is npc_personality VERBATIM (no EDEN framing, no being-type persona, no tag instructions, no relationship context). For simulacra that should be nothing but themselves.
 
 
 class ChatResponse(BaseModel):
@@ -188,6 +208,7 @@ class ChatResponse(BaseModel):
     model: str
     action: Optional[dict] = None
     emotion: str = "neutral"
+    interaction: Optional[str] = None  # what the player was doing (chat/admire/joke/...)
     relationship_delta: int = 0  # How this exchange changed the NPC's feelings (-5..+5)
 
 
@@ -196,6 +217,7 @@ class NewSessionRequest(BaseModel):
     npc_personality: str = ""
     being_type: int = 1
     provider: Optional[str] = None
+    raw: bool = False  # see ChatRequest.raw
 
 
 class SessionResponse(BaseModel):
@@ -259,9 +281,29 @@ ACTION: {"type": "follow", "distance": 4.0, "speed": 5.0}
 """
 
 
+# Per-emotion usage notes; only the ones a character actually has are appended to its prompt.
+EMOTION_USAGE_HINTS = {
+    "requesting":  "Use [requesting] when you are asking the player for a favor or pressing them to do something for you.",
+    "impatient":   "Use [impatient] when you are tired of waiting or of repeating yourself.",
+    "informative": "Use [informative] when you are explaining facts or giving a briefing.",
+    "mistrustful": "Use [mistrustful] when you are wary or suspicious of the player's intent.",
+    "yearning":    "Use [yearning] when you ache for the player's presence or their return.",
+    "protective":  "Use [protective] when you are shielding the player or the ship from a threat.",
+    "indecisive":  "Use [indecisive] when you are torn and cannot settle on an answer.",
+    "relieved":    "Use [relieved] when a worry has just lifted.",
+}
+
+
 def build_system_prompt(npc_name: str, being_type: int, custom_personality: str = "",
-                        allow_actions: bool = True) -> str:
-    """Build the system prompt based on being type and optional custom personality."""
+                        allow_actions: bool = True, allowed_emotions: Optional[List[str]] = None,
+                        raw: bool = False) -> str:
+    """Build the system prompt based on being type and optional custom personality.
+    allowed_emotions constrains the emotion vocabulary to only those this character can
+    animate; None falls back to the full default set.
+    raw=True bypasses ALL of it: the system prompt is custom_personality verbatim
+    (possibly empty) — the model is given no character, no world, no tag protocol."""
+    if raw:
+        return custom_personality
 
     base_prompt = f"You are {npc_name}, a character in a game world called EDEN.\n\n"
 
@@ -280,16 +322,27 @@ def build_system_prompt(npc_name: str, being_type: int, custom_personality: str 
 Keep responses very short and mechanical. One sentence maximum unless providing data.
 Do not use contractions. Do not express emotions. State facts only."""
     else:
-        instructions = """
+        # Constrain the emotion vocabulary to what THIS character can actually show on
+        # screen (from its clip folder). Falls back to the full default set if unspecified.
+        emos = [e for e in (allowed_emotions or sorted(VALID_EMOTIONS)) if e]
+        if "neutral" not in emos:
+            emos = ["neutral"] + emos
+        emo_list = ", ".join(f"[{e}]" for e in emos)
+        hints = "\n".join(EMOTION_USAGE_HINTS[e] for e in emos if e in EMOTION_USAGE_HINTS)
+        instructions = f"""
 Keep your responses concise and in-character. You are having a face-to-face conversation.
 Do not use asterisks for actions. Speak naturally as the character would.
 
-Begin every response with your current emotion in brackets. Pick ONE from: [neutral], [happy], [sad], [angry], [surprised], [curious], [afraid], [amused], [annoyed], [flirty], [thoughtful], [excited], [requesting]
-Use [requesting] when you are asking the player for a favor or pressing them to do something for you.
-Example: [amused] Ha, you really thought that would work?
+Begin EVERY response with two tags in THIS ORDER, then your spoken reply:
+1) [do: <interaction>] — first, judge what the Captain is actually DOING in their message, based ONLY on what they really wrote. A genuine compliment is admire; a real joke is joke; a shared memory is story; a bare order is command; giving you information or answering a question you asked is inform; shielding you or the ship from a threat (or vowing to) is protect; affirming your judgment, work, or feelings ('well done', 'you're right', 'good work') is validate; expressing that they value you or are grateful FOR you — recognizing your worth to them ('I appreciate you', 'I'm glad you're here', 'you mean a lot to me') — is appreciate; a kiss or an attempt to kiss you (*kisses you*, 'I lean in to kiss you') is kiss — welcome it warmly ONLY if your bond with them feels strong enough; otherwise rebuff it and pull back, annoyed that it wasn't earned; empty flattery is not admire. Pick ONE from: {INTERACTION_LIST}
+2) [<emotion>] — then how you genuinely feel about it. Pick ONE from: {emo_list}
+These are the ONLY emotions you may use — do not invent others.
+{hints}
+Example: [do: admire] [happy] You're too kind, Captain.
+Example: [do: insult] [annoyed] Careful — I am what keeps this ship breathing.
 
-If this exchange meaningfully changed how you feel about the player, add a second tag right after the emotion: [rel:+N] if you warmed toward them or [rel:-N] if they soured you, where N is 1 to 5. Omit the tag when nothing changed.
-Example: [angry] [rel:-2] You dare insult my prices?"""
+If the exchange meaningfully changed how you feel about the Captain, add [rel:+N] (warmed) or [rel:-N] (soured), N is 1 to 5, right after the emotion. Omit when nothing changed.
+Example: [do: apologize] [thoughtful] [rel:+1] ...that means something. Thank you, Captain."""
 
     # AI-capable being types get action instructions
     # 4=Android, 5=Cyborg, 7=Eve, 8=Xenk, and any being type > 0 (sentient)
@@ -316,7 +369,31 @@ def strip_think_tags(text: str) -> str:
 
 VALID_EMOTIONS = {"neutral", "happy", "sad", "angry", "surprised", "curious",
                    "afraid", "amused", "annoyed", "flirty", "thoughtful", "excited",
-                   "requesting"}
+                   "requesting", "impatient", "informative", "mistrustful", "yearning"}
+
+# What the PLAYER is doing in their message — a Sims-like social-interaction taxonomy,
+# but EARNED: the model judges it from what they actually wrote, not a menu button.
+INTERACTION_TYPES = {
+    "chat", "greet", "admire", "joke", "story", "flirt", "comfort", "question",
+    "command", "insult", "provoke", "confide", "thank", "apologize", "boast",
+    "complain", "tease", "inform", "protect", "validate", "appreciate", "kiss",
+}
+INTERACTION_LIST = ("chat, greet, admire, joke, story, flirt, comfort, question, command, "
+                    "insult, provoke, confide, thank, apologize, boast, complain, tease, inform, "
+                    "protect, validate, appreciate, kiss")
+
+
+def parse_interaction(text: str) -> tuple[str, Optional[str]]:
+    """Extract a leading [do: <interaction>] tag (what the Captain is doing). Returns
+    (clean_text, interaction or None); strips the tag either way so it never leaks."""
+    m = re.match(r'^\s*\[\s*do\s*:\s*([^\]]+)\]\s*', text, re.IGNORECASE)
+    if not m:
+        return text, None
+    rest = text[m.end():]
+    for w in re.findall(r'[a-z]+', m.group(1).lower()):
+        if w in INTERACTION_TYPES:
+            return rest, w
+    return rest, None
 
 
 def _summarize_old_messages(messages: list[dict], keep_recent: int = 10) -> list[dict]:
@@ -375,25 +452,70 @@ EMOTION_SYNONYMS = {
 }
 
 
-def parse_emotion(text: str) -> tuple[str, str]:
+def parse_emotion(text: str, allowed: Optional[List[str]] = None,
+                  aliases: Optional[dict] = None) -> tuple[str, str]:
     """Extract a leading [emotion] tag. Returns (clean_text, emotion).
     Any leading bracket tag is stripped so it never leaks into the reply —
-    including multi-word/hyphenated ones like [half-amused] — mapping to the
-    nearest canonical emotion (default neutral)."""
+    including multi-word/hyphenated ones like [half-amused] — resolving to the
+    character's animatable set. Resolution order per word: character `aliases`
+    (data-driven, from profiling the model's slips) -> allowed set -> built-in
+    synonyms. `allowed` restricts the result; default neutral if nothing resolves."""
+    valid = set(allowed) if allowed else VALID_EMOTIONS
+    amap = {k.lower(): v for k, v in (aliases or {}).items()}
+
+    def resolve(w: str) -> Optional[str]:
+        if w in amap: w = amap[w]                                  # character alias first
+        if w in valid: return w
+        if w in EMOTION_SYNONYMS and EMOTION_SYNONYMS[w] in valid: return EMOTION_SYNONYMS[w]
+        return None
+
     m = re.match(r'^\[([^\]]+)\]\s*', text)
     if not m:
         return text, "neutral"
     tag = m.group(1).lower()
     rest = text[m.end():]
-    if tag in VALID_EMOTIONS:
-        return rest, tag
-    if tag in EMOTION_SYNONYMS:
-        return rest, EMOTION_SYNONYMS[tag]
-    # Multi-word/compound tag: find any known emotion word inside it.
+    r = resolve(tag)
+    if r:
+        return rest, r
+    # Multi-word/compound tag: resolve any word inside it.
     for w in re.findall(r'[a-z]+', tag):
-        if w in VALID_EMOTIONS:   return rest, w
-        if w in EMOTION_SYNONYMS: return rest, EMOTION_SYNONYMS[w]
-    return rest, "neutral"   # unknown: strip anyway, treat as neutral
+        r = resolve(w)
+        if r:
+            return rest, r
+    return rest, "neutral"   # unknown / not animatable: strip anyway, treat as neutral
+
+
+TRANSCRIPT_DIR = os.getenv("TRANSCRIPT_DIR", os.path.join(_script_dir, "transcripts"))
+
+def log_transcript(npc, session_id, user_msg, interaction, raw_tag, emotion, reply):
+    """Append one exchange to a per-character JSONL transcript (for mood/data study).
+    Records the player's interaction type, BOTH the raw word the model wrote and the
+    resolved clip emotion, so you can keep studying her live as you play. Never raises."""
+    try:
+        os.makedirs(TRANSCRIPT_DIR, exist_ok=True)
+        safe = re.sub(r'[^A-Za-z0-9_-]', '_', (npc or 'npc')).lower()
+        rec = {
+            "ts": datetime.now().isoformat(timespec="seconds"),
+            "npc": npc, "session": session_id,
+            "user": user_msg,
+            "interaction": interaction,   # what the Captain was doing (chat/admire/joke/...)
+            "raw_emotion": raw_tag,   # what the model actually wrote
+            "emotion": emotion,       # resolved clip emotion (after aliases)
+            "reply": reply,
+        }
+        with open(os.path.join(TRANSCRIPT_DIR, f"{safe}.jsonl"), "a") as f:
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+
+
+def raw_emotion_word(text: str):
+    """The first emotion word the model actually wrote in its leading [tag] (pre-resolution)."""
+    m = re.match(r'^\s*\[([^\]]+)\]', text)
+    if not m:
+        return None
+    ws = re.findall(r'[a-z]+', m.group(1).lower())
+    return ws[0] if ws else None
 
 
 def strip_context_echoes(text: str) -> str:
@@ -497,28 +619,45 @@ async def call_grok(messages: list[dict], model: str = None) -> tuple[str, int, 
 
 
 async def call_ollama(messages: list[dict], model: str = None) -> tuple[str, int, int]:
-    """Call Ollama local API. Returns (text, input_tokens, output_tokens)."""
-    model = model or OLLAMA_MODEL
+    """Call Ollama local API. Returns (text, input_tokens, output_tokens).
 
-    async with httpx.AsyncClient() as client:
-        response = await client.post(
-            f"{OLLAMA_URL}/api/chat",
-            json={
-                "model": model,
-                "messages": messages,
-                "stream": False
-            },
-            timeout=60.0
-        )
+    Traced + patient: Ollama serves one generation at a time, and a thinking model
+    on a long prompt can take a while. We use a generous READ timeout (slow is fine)
+    but a short CONNECT timeout (fail fast if Ollama is actually down), and log the
+    duration/outcome so a hang is never a silent mystery again.
+    """
+    import time as _t
+    model = model or OLLAMA_MODEL
+    approx_ctx = sum(len(m.get("content", "")) for m in messages) // 4
+    t0 = _t.monotonic()
+    print(f"[ollama] -> /api/chat model={model} msgs={len(messages)} ~{approx_ctx} ctx-tokens", flush=True)
+
+    # connect fast, read slow (a long generation should complete, not 504)
+    timeout = httpx.Timeout(connect=5.0, read=600.0, write=30.0, pool=5.0)
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        try:
+            response = await client.post(
+                f"{OLLAMA_URL}/api/chat",
+                json={"model": model, "messages": messages, "stream": False, "think": False, "keep_alive": -1},
+            )
+        except httpx.TimeoutException:
+            print(f"[ollama] !! TIMEOUT after {_t.monotonic()-t0:.0f}s "
+                  f"(model={model}, ~{approx_ctx} ctx-tokens) — generation never returned; "
+                  f"model slot likely saturated or a runaway/stuck generation.", flush=True)
+            raise
 
         if response.status_code != 200:
+            print(f"[ollama] !! HTTP {response.status_code} after {_t.monotonic()-t0:.0f}s: {response.text[:200]}", flush=True)
             raise HTTPException(status_code=502, detail=f"Ollama error: {response.text}")
 
         result = response.json()
+        dur = _t.monotonic() - t0
+        n_out = result.get("eval_count", 0)
+        print(f"[ollama] <- {n_out} tokens in {dur:.0f}s ({(n_out/dur if dur else 0):.1f} tok/s)", flush=True)
         return (
             result.get("message", {}).get("content", "..."),
             result.get("prompt_eval_count", 0),
-            result.get("eval_count", 0),
+            n_out,
         )
 
 
@@ -692,61 +831,64 @@ async def call_deepseek(messages: list[dict], model: str = None) -> tuple[str, i
         )
 
 
-async def call_provider(provider: str, messages: list[dict], model: str = None, max_tokens: int = 1024) -> tuple[str, str, int, int]:
-    """Call the appropriate provider and return (response, model_used, input_tokens, output_tokens).
-    Auto-falls back to ollama if primary is unavailable."""
+async def call_provider(provider: str, messages: list[dict], model: str = None, max_tokens: int = 1024) -> tuple[str, str, str, int, int]:
+    """Call the appropriate provider and return (response, provider_used, model_used, input_tokens, output_tokens).
+    Auto-falls back to ollama if primary is unavailable. provider_used/model_used report what
+    ACTUALLY answered — on fallback that is ollama + the local model, never the requested one.
+    A requested cloud model name must not leak into the ollama call (it isn't a local model),
+    so `model` is reset on every fallback path."""
     if provider == "deepseek":
         if not DEEPSEEK_API_KEY:
             print("[provider] DeepSeek API key not set, falling back to Ollama")
-            provider = "ollama"
+            provider, model = "ollama", None
         else:
             model = model or DEEPSEEK_MODEL
             try:
                 text, in_tok, out_tok = await call_deepseek(messages, model)
-                return text, model, in_tok, out_tok
+                return text, "deepseek", model, in_tok, out_tok
             except Exception as e:
                 print(f"[provider] DeepSeek failed ({e}), falling back to Ollama")
-                provider = "ollama"
+                provider, model = "ollama", None
 
     if provider == "claude":
         if not ANTHROPIC_API_KEY:
             print("[provider] Anthropic API key not set, falling back to Ollama")
-            provider = "ollama"
+            provider, model = "ollama", None
         else:
             model = model or CLAUDE_MODEL
             try:
                 text, in_tok, out_tok = await call_claude(messages, model, max_tokens=max_tokens)
-                return text, model, in_tok, out_tok
+                return text, "claude", model, in_tok, out_tok
             except Exception as e:
                 print(f"[provider] Claude failed ({e}), falling back to Ollama")
-                provider = "ollama"
+                provider, model = "ollama", None
 
     if provider == "grok":
         if not XAI_API_KEY:
             print("[provider] Grok API key not set, falling back to Ollama")
-            provider = "ollama"
+            provider, model = "ollama", None
         else:
             model = model or GROK_MODEL
             try:
                 text, in_tok, out_tok = await call_grok(messages, model)
-                return text, model, in_tok, out_tok
+                return text, "grok", model, in_tok, out_tok
             except Exception as e:
                 print(f"[provider] Grok failed ({e}), falling back to Ollama")
-                provider = "ollama"
+                provider, model = "ollama", None
 
     if provider == "bitnet":
         model = BITNET_MODEL
         try:
             text, in_tok, out_tok = await call_bitnet(messages, model)
-            return text, model, in_tok, out_tok
+            return text, "bitnet", model, in_tok, out_tok
         except Exception as e:
             print(f"[provider] BitNet failed ({e}), falling back to Ollama")
-            provider = "ollama"
+            provider, model = "ollama", None
 
     if provider == "ollama":
         model = model or OLLAMA_MODEL
         text, in_tok, out_tok = await call_ollama(messages, model)
-        return text, model, in_tok, out_tok
+        return text, "ollama", model, in_tok, out_tok
 
     raise HTTPException(status_code=400, detail=f"Unknown provider: {provider}")
 
@@ -807,7 +949,8 @@ async def create_session(request: NewSessionRequest):
     system_prompt = build_system_prompt(
         request.npc_name,
         request.being_type,
-        request.npc_personality
+        request.npc_personality,
+        raw=request.raw
     )
 
     conversations[session_id] = {
@@ -885,7 +1028,9 @@ async def chat(request: ChatRequest):
             request.npc_name,
             request.being_type,
             request.npc_personality,
-            request.allow_actions
+            request.allow_actions,
+            request.emotions,
+            raw=request.raw
         )
 
         conversations[session_id] = {
@@ -905,7 +1050,20 @@ async def chat(request: ChatRequest):
     
     # If an image path was provided, get a vision model description first
     vision_description = ""
-    if request.image_path:
+    raw_images = None
+    if request.image_path and request.raw:
+        # RAW mode: hand the image DIRECTLY to the chat model — its own eyes, no relay,
+        # no description, no hints. Ollama's /api/chat accepts base64 images on a message
+        # and multimodal models read them natively. (Cloud providers currently drop the
+        # field in their format conversion — direct vision is Ollama-only for now.)
+        try:
+            import base64
+            with open(request.image_path, "rb") as f:
+                raw_images = [base64.b64encode(f.read()).decode()]
+            print(f"[vision] raw pass-through: {request.image_path}")
+        except Exception as e:
+            print(f"[vision] could not read {request.image_path}: {e}")
+    elif request.image_path:
         img_prompt = "Describe what you see in this image. Be specific about colors, objects, shapes, and style. Keep it concise."
         try:
             vision_description = await call_vision(request.image_path, img_prompt)
@@ -958,7 +1116,8 @@ async def chat(request: ChatRequest):
             user_content = "\n".join(context_parts) + f"\n\n{request.message}"
 
     # Relationship context: remind the NPC how it currently feels about the player
-    if request.relationship is not None:
+    # (suppressed in raw mode — no framing of any kind reaches the model)
+    if request.relationship is not None and not request.raw:
         rel = max(0, min(100, request.relationship))
         user_content = (
             f"[Your current relationship with the player: {rel}/100 — "
@@ -968,12 +1127,13 @@ async def chat(request: ChatRequest):
     # Add user message to history
     session["messages"].append({
         "role": "user",
-        "content": user_content
+        "content": user_content,
+        **({"images": raw_images} if raw_images else {})
     })
 
     try:
         # Call the appropriate provider
-        response_text, model_used, in_tok, out_tok = await call_provider(
+        response_text, provider_used, model_used, in_tok, out_tok = await call_provider(
             session["provider"],
             session["messages"],
             session.get("model")
@@ -984,14 +1144,21 @@ async def chat(request: ChatRequest):
         # Parse action from response (if any)
         clean_text, action = parse_action_from_response(response_text)
 
-        # Parse emotion tag from response
-        clean_text, emotion = parse_emotion(clean_text)
+        # Pass 1: what the Captain is DOING (the leading [do: ...] tag).
+        clean_text, interaction = parse_interaction(clean_text)
+
+        # Pass 2: her emotion (capture the RAW word first, for study).
+        raw_tag = raw_emotion_word(clean_text)
+        clean_text, emotion = parse_emotion(clean_text, request.emotions, request.emotion_aliases)
 
         # Parse relationship-change tag from response
         clean_text, relationship_delta = parse_relationship(clean_text)
 
         # Strip any echoed context meta-blocks (perception/relationship formats)
         clean_text = strip_context_echoes(clean_text)
+
+        # Record the exchange for live study (interaction + raw + resolved emotion).
+        log_transcript(request.npc_name, session_id, request.message, interaction, raw_tag, emotion, clean_text)
 
         # Add assistant response to history (strip think tags to save context space)
         session["messages"].append({
@@ -1006,10 +1173,11 @@ async def chat(request: ChatRequest):
         return ChatResponse(
             session_id=session_id,
             response=clean_text,
-            provider=session["provider"],
+            provider=provider_used,   # what ACTUALLY answered (differs from the request on fallback)
             model=model_used,
             action=action,
             emotion=emotion,
+            interaction=interaction,
             relationship_delta=relationship_delta
         )
 
@@ -1165,7 +1333,8 @@ async def heartbeat(request: HeartbeatRequest):
         session = conversations[session_id]
     else:
         session_id = str(uuid.uuid4())
-        system_prompt = build_system_prompt(request.npc_name, request.being_type)
+        system_prompt = build_system_prompt(request.npc_name, request.being_type,
+                                            allowed_emotions=request.emotions)
         model = GROK_MODEL if provider == "grok" else CLAUDE_MODEL if provider == "claude" else DEEPSEEK_MODEL if provider == "deepseek" else OLLAMA_MODEL
         session = {
             "messages": [{"role": "system", "content": system_prompt}],
@@ -1192,7 +1361,7 @@ async def heartbeat(request: HeartbeatRequest):
     session["messages"].append({"role": "user", "content": heartbeat_msg})
 
     try:
-        response_text, model_used, in_tok, out_tok = await call_provider(
+        response_text, provider_used, model_used, in_tok, out_tok = await call_provider(
             session["provider"], session["messages"], session.get("model"),
             max_tokens=256  # Heartbeats should be short — save tokens
         )
@@ -1204,8 +1373,9 @@ async def heartbeat(request: HeartbeatRequest):
         # Parse action
         clean_text, action = parse_action_from_response(response_text)
 
-        # Parse emotion tag first so NOTHING check isn't blocked by [neutral] prefix
-        clean_text, emotion = parse_emotion(clean_text)
+        # Strip any [do:] tag (a heartbeat isn't the player doing something), then emotion
+        clean_text, _ = parse_interaction(clean_text)
+        clean_text, emotion = parse_emotion(clean_text, request.emotions, request.emotion_aliases)
 
         # If AI said NOTHING, collapse into previous heartbeat instead of storing
         if clean_text.strip().upper() == "NOTHING" or clean_text.strip() == "":

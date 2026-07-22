@@ -287,6 +287,20 @@ public:
         }).detach();
     }
 
+    // ── read access for the Options panel / startup selection ──
+    bool modelsReady() const { return m_modelsFetched; }
+    std::string provider() const { return m_provider; }
+    std::string ollamaModel() const { return m_ollamaModel; }
+    const std::vector<std::string>& ollamaModels() const { return m_ollamaModels; }
+
+    // Apply a saved "boot with this LLM" choice: point at the provider, and for Ollama the
+    // specific model. Backend confirms asynchronously, same as a manual switch in the panel.
+    void applyStartupChoice(const std::string& prov, const std::string& model) {
+        if (prov.empty()) return;
+        switchProvider(prov);
+        if (prov == "ollama" && !model.empty()) switchModel(model);
+    }
+
 private:
     static bool isPortOpen(int port) {
         int s = socket(AF_INET, SOCK_STREAM, 0);

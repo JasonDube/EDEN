@@ -1008,7 +1008,7 @@
 > *Prompt: Bioluminescent alien with translucent skin, glowing veins visible, elegant light-filled architecture*
 
 ### Aeon Continuum — republic_9 (Matter Conversion)
-- **Physical:** Quantum-entangled particles existing in multiple states simultaneously.
+- **Physical:** Translucent humanoid figures that manifest as several overlapping, slightly-offset copies of one body at once — a central form ringed by faint echo-selves caught mid-motion, as if seen across many moments simultaneously. They glow with pale blue-violet light and trail drifting particle-motes, every echoed face serene and identical.
 - **Culture:** Republic where laws are determined through predictive models.
 - **Homeworld:** Artificial temporal anchor points
 - **Building style:** Temporally anchored structures

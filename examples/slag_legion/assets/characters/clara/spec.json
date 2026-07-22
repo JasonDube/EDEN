@@ -51,7 +51,22 @@
     "dominant_reactions": { "appreciate": "warmed" },
 
     "_gated_clips": ["ecstasy", "sexy", "excited_show", "meditative_1", "looking_viewport", "port_window", "port_window_2", "terminal", "terminal_2", "greeting"],
-    "_room_clips": ["informative_bridge", "informative_captains_quarters", "informative_cargo_bay", "informative_engine_room", "informative_galley", "informative_science_lab", "seated_captains_quarters", "terminal_engine_room"]
+    "_room_clips": ["informative_bridge", "informative_captains_quarters", "informative_cargo_bay", "informative_engine_room", "informative_galley", "informative_science_lab", "seated_captains_quarters", "terminal_engine_room"],
+
+    "_idle_pool_note": "Resting-state variety: when she settles into idle on the bridge, ONE of these clips is picked at random and kept until she leaves idle (no hopping between replies). Keys resolve like emotions (clara_<key>.mp4). Add clips freely.",
+    "idle_pool": ["idle_2", "port_terminal", "starboard_viewport"],
+
+    "_clip_playback_note": "Per-clip transport, matched by SUBSTRING of the clip filename (first hit wins). These frame numbers are properties of HER footage, so they live here, not in code. intro_skip = frames dropped at open (default_intro_skip hides the intro fade on unlisted clips). loop_from/loop_to = play through once, then A-B loop that frame range (omit loop_to for clip end); no loop_from = play once and hold the last frame. unmute = the clip carries its own audio (plays even though capabilities.audio is false; kiss audio instead goes through the engine SFX path with kiss.wav).",
+    "clip_playback": {
+      "default_intro_skip": 25,
+      "clips": {
+        "kiss":       { "intro_skip": 0, "loop_from": 150 },
+        "tickled":    { "intro_skip": 0, "loop_from": 149, "unmute": true },
+        "sit_bridge": { "intro_skip": 0, "loop_from": 520, "loop_to": 697 },
+        "sexy":       { "intro_skip": 0 },
+        "validated":  { "intro_skip": 50 }
+      }
+    }
   },
 
   "commerce": { "price_credits": 420000, "tier": "companion", "warranty_years": 7 }
