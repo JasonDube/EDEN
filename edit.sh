@@ -17,12 +17,12 @@ if [ ! -t 1 ] && [ -z "$EDEN_IN_TERM" ]; then
 fi
 
 set -e
-echo "Building terrain editor..."
+echo "Building TED (TerrainEDitor)..."
 cmake --build "$ROOT/build" --target terrain_editor -j
 set +e
 
 cd "$ROOT/build/examples/terrain_editor"   # run from here so it finds shaders/ and levels/
-echo "Launching editor..."
+echo "Launching TED..."
 # Show the console LIVE and mirror it to a log file (fresh each run) so it can
 # also be inspected afterward.
 ./terrain_editor 2>&1 | tee "$ROOT/editor_console.log"

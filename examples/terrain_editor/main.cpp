@@ -144,7 +144,7 @@ enum class TransformMode { Select, Move, Rotate, Scale };
 
 class TerrainEditor : public VulkanApplicationBase, public AIBehaviorHost, public MachineHost {
 public:
-    TerrainEditor() : VulkanApplicationBase(1280, 720, "EDEN - Terrain Editor") {}
+    TerrainEditor() : VulkanApplicationBase(1280, 720, "TED (TerrainEDitor)") {}
 
     // ── AIBehaviorHost interface ──
     std::vector<std::unique_ptr<SceneObject>>& getSceneObjects() override { return m_sceneObjects; }
@@ -471,7 +471,7 @@ protected:
         m_camera.setCollisionRadius(1.5f);
         m_camera.setNoClip(true);  // Editor mode starts with noclip enabled
 
-        std::cout << "Terrain Editor Controls:\n";
+        std::cout << "TED (TerrainEDitor) Controls:\n";
         std::cout << "  Right-click + drag - Look around\n";
         std::cout << "  WASD - Move camera\n";
         std::cout << "  Space - Jump (walk mode) / Up (fly mode)\n";
@@ -4727,8 +4727,25 @@ private:
     }
 
     void initImGui() {
-        m_imguiManager.init(getContext(), getSwapchain(), getWindow().getHandle(),
-                           "imgui_terrain_editor.ini");
+        // Window layout/docking persists via ImGui's ini. Use an ABSOLUTE path:
+        // a relative name resolves against the launch cwd, so icon vs script vs
+        // KMS boots each read a DIFFERENT ini and the layout appears to reset.
+        namespace fs = std::filesystem;
+        const char* home = getenv("HOME");
+        std::string iniPath = "imgui_terrain_editor.ini";  // fallback: old behavior
+        if (home) {
+            fs::path dir = fs::path(home) / ".eden";
+            std::error_code ec;
+            fs::create_directories(dir, ec);
+            fs::path ini = dir / "imgui_ted.ini";
+            // One-time migration: adopt the legacy cwd ini so the current layout
+            // carries over instead of resetting.
+            if (!fs::exists(ini) && fs::exists("imgui_terrain_editor.ini")) {
+                fs::copy_file("imgui_terrain_editor.ini", ini, ec);
+            }
+            iniPath = ini.string();
+        }
+        m_imguiManager.init(getContext(), getSwapchain(), getWindow().getHandle(), iniPath);
     }
 
     void loadSplashTexture() {

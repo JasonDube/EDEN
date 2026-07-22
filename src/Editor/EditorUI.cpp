@@ -191,7 +191,7 @@ void EditorUI::renderMenuBar() {
         }
 
         if (ImGui::BeginMenu("Window")) {
-            ImGui::MenuItem("Terrain Editor", nullptr, &m_showTerrainEditor);
+            ImGui::MenuItem("TED (terrain)", nullptr, &m_showTerrainEditor);
             ImGui::MenuItem("Terrain Info", nullptr, &m_showTerrainInfo);
             ImGui::MenuItem("Sky Settings", nullptr, &m_showSkySettings);
             ImGui::MenuItem("Water Settings", nullptr, &m_showWaterSettings);
@@ -254,7 +254,7 @@ void EditorUI::renderMainWindow() {
     ImGui::SetNextWindowPos(ImVec2(10, 30), ImGuiCond_FirstUseEver);
     ImGui::SetNextWindowSize(ImVec2(280, 340), ImGuiCond_FirstUseEver);
 
-    ImGui::Begin("Terrain Editor");
+    ImGui::Begin("TED");
 
     ImGui::Text("FPS: %.1f", m_fps);
     ImGui::Separator();
