@@ -1,6 +1,7 @@
 #include <eden/EntityScriptAPI.hpp>
 #include <eden/Entity.hpp>
 #include <eden/Transform.hpp>
+#include "Editor/SceneObject.hpp"   // getLocalBounds() — feet-aware ground snap
 #include <cmath>
 
 namespace eden {
@@ -18,12 +19,16 @@ void setCurrentScriptEntity(Entity* e) {
 
 static thread_local SceneObject* t_currentScriptObject = nullptr;
 static std::function<void(SceneObject&, const char*)> s_playAnimHook;
+static std::function<float(float, float)> s_groundHeightFn;   // host: terrain height at (x,z)
 static glm::vec3 s_playerPos{0.0f};   // set by the host each frame
 
 void setCurrentScriptObject(SceneObject* o) { t_currentScriptObject = o; }
 SceneObject* currentScriptObject() { return t_currentScriptObject; }
 void setScriptPlayAnimHook(std::function<void(SceneObject&, const char*)> hook) {
     s_playAnimHook = std::move(hook);
+}
+void setScriptGroundHeightHook(std::function<float(float, float)> hook) {
+    s_groundHeightFn = std::move(hook);
 }
 void setScriptPlayerPosition(float x, float y, float z) { s_playerPos = {x, y, z}; }
 
@@ -104,6 +109,30 @@ void self_move_toward_player(float step) {
     if (d < 1.0e-4f) return;
     float m = (step < d) ? step : d;             // don't overshoot past the player
     t->translate(dx / d * m, 0.0f, dz / d * m);  // horizontal step
+}
+
+// --- Terrain ground verbs ---
+
+float self_ground_y() {
+    auto* t = currentScriptTransform();
+    if (!t) return 0.0f;
+    glm::vec3 s = t->getPosition();
+    if (eden::s_groundHeightFn) return eden::s_groundHeightFn(s.x, s.z);
+    return s.y;   // no terrain hook -> leave height as-is
+}
+
+void self_snap_to_ground() {
+    auto* t = currentScriptTransform();
+    if (!t || !eden::s_groundHeightFn) return;
+    glm::vec3 s = t->getPosition();
+    float ground = eden::s_groundHeightFn(s.x, s.z);
+    // Place the model's BOTTOM on the ground, not its origin — a centered-origin
+    // model (feet at local -Y) would otherwise sink. Uses the object's local
+    // bounds + scale when we have the SceneObject; falls back to origin-on-ground.
+    float feetOffset = 0.0f;
+    if (auto* o = eden::currentScriptObject())
+        feetOffset = -o->getLocalBounds().min.y * t->getScale().y;
+    t->setPosition(s.x, ground + feetOffset, s.z);
 }
 
 } // extern "C"

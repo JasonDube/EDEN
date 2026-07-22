@@ -455,6 +455,12 @@ protected:
             obj.setCurrentAnimation(anim);
         });
 
+        // self_snap_to_ground / self_ground_y: keep scripted ground creatures on
+        // the terrain surface (companion following over the planet's hills).
+        eden::setScriptGroundHeightHook([this](float x, float z) {
+            return m_terrain.getHeightAt(x, z);
+        });
+
         initGroveVM();
         loadEditorConfig();
 

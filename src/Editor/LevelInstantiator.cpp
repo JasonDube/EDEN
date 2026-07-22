@@ -181,6 +181,13 @@ void LevelInstantiator::spawnObjects(const LevelData& data, const SpawnContext& 
             obj->setSkinnedModelHandle(handle);
             obj->setVertexCount(static_cast<uint32_t>(mesh.vertices.size()));
 
+            // Local bounds from the mesh (skinned models had none, so ground-snap
+            // and picking saw a zero-size box centered on the origin — which sank a
+            // centered-origin model to its waist).
+            glm::vec3 bmin(1e30f), bmax(-1e30f);
+            for (const auto& v : mesh.vertices) { bmin = glm::min(bmin, v.position); bmax = glm::max(bmax, v.position); }
+            if (!mesh.vertices.empty()) obj->setLocalBounds(AABB{bmin, bmax});
+
             // Store animation info and play
             auto animNames = ctx.skinnedRenderer.getAnimationNames(handle);
             obj->setAnimationNames(animNames);

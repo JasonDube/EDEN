@@ -42,6 +42,12 @@ void setScriptPlayerPosition(float x, float y, float z);
 // self_play_anim every tick).
 void setScriptPlayAnimHook(std::function<void(SceneObject&, const char*)> hook);
 
+// Host hook for the ground-height verbs: the app owns the terrain, so it supplies
+// "surface height at (x, z)". Lets a walking script (e.g. a companion following
+// over hills) stay on the terrain instead of floating/sinking. No hook set =
+// ground verbs leave Y unchanged.
+void setScriptGroundHeightHook(std::function<float(float x, float z)> hook);
+
 } // namespace eden
 
 extern "C" {
@@ -61,4 +67,7 @@ extern "C" {
     float self_dist_to_player();               // feet to the player
     void  self_face_player();                  // turn (yaw) to look at the player
     void  self_move_toward_player(float step); // step `step` feet toward the player
+    // Terrain: keep a ground creature on the surface as it moves over hills.
+    float self_ground_y();                     // terrain height at this entity's (x,z)
+    void  self_snap_to_ground();               // set this entity's Y to the ground
 }
