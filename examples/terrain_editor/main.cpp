@@ -2594,10 +2594,11 @@ protected:
         }
 
         TerrainPushConstants pushConstants{};
-        // In play mode, override fog with a tight battle-render range so the world
-        // visibly compresses to ~150m around the camera (smooth fade to black).
-        // EDEN OS is exempt — its silo is bigger than that fade and must stay clear.
-        if (m_isPlayMode && !m_isEdenOSLevel) {
+        // The tight black "battle-render" fog (compresses the world to ~150m) is a
+        // TABLETOP thing — only apply it in RTS/battle mode. Walking a world
+        // first-person (m_playRTSCamera == false) uses the level's own fog so you
+        // can actually see the terrain and navigate. EDEN OS is exempt too.
+        if (m_isPlayMode && !m_isEdenOSLevel && m_playRTSCamera) {
             pushConstants.fogColor = glm::vec4(0.0f, 0.0f, 0.0f, 1.0f);
             pushConstants.fogStart = 75.0f;
             pushConstants.fogEnd   = 150.0f;
@@ -2701,16 +2702,18 @@ protected:
 
                 if (m_isPlayMode && objPtr->isDoor() && objPtr->getBuildingType() != "filesystem" && objPtr->getBuildingType() != "wall_widget") continue;
 
-                // The 150m cull is the tabletop game's battle fog; EDEN OS is a
-                // large silo (~160m across, ~256m tall) that must draw in full.
-                // SIZE-AWARE: measure to the object's bounding sphere, not its
-                // pivot — a mountain's pivot can be >150m away while its slopes
-                // fill the screen (invisible model with working collision).
+                // Distance-cull objects to match how far the terrain is visible.
+                // In RTS/battle mode that's the tight 150m battle fog; walking a
+                // world first-person it's the level's fog end, so distant objects
+                // stay visible as far as the ground does. SIZE-AWARE: measure to the
+                // object's bounding sphere, not its pivot — a mountain's pivot can be
+                // far while its slopes fill the screen (invisible model, live collision).
                 if (m_isPlayMode && !m_isEdenOSLevel) {
                     auto* so = const_cast<SceneObject*>(objPtr.get());
                     AABB wb = so->getWorldBounds();
                     glm::vec3 d = wb.getCenter() - camPos;
-                    float reach = 150.0f + 0.5f * glm::length(wb.getSize());
+                    float cullBase = m_playRTSCamera ? 150.0f : m_editorUI.getFogEnd();
+                    float reach = cullBase + 0.5f * glm::length(wb.getSize());
                     if (glm::dot(d, d) > reach * reach) continue;
                 }
 
