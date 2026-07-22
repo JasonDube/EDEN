@@ -412,6 +412,10 @@ protected:
         loadBuildingTextures();
         m_textureBrowser.init(getContext());
         m_imageReferences.init(getContext());
+        // Eyedropper in the Image References window feeds the terrain Paint color.
+        m_imageReferences.setColorPickCallback([this](const glm::vec3& c) {
+            m_editorUI.setPaintColor(c);
+        });
         // TEMP RESTORE (akelba plumbing): load the global hotbar inventory for ALL
         // levels, not just the EDEN OS background level. The hotbar holds the
         // placeable items (pipes, machines) you drop with number keys / RMB. This

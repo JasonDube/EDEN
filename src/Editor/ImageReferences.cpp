@@ -9,6 +9,7 @@
 #include <filesystem>
 #include <algorithm>
 #include <cstring>
+#include <cstdio>
 #include <iostream>
 
 namespace eden {
@@ -60,6 +61,7 @@ ImageReferences::RefImage ImageReferences::uploadImage(const unsigned char* rgba
     img.filepath = path;
     img.width = width;
     img.height = height;
+    img.pixels.assign(rgba, rgba + static_cast<size_t>(width) * height * 4);  // for the eyedropper
 
     VkDevice device = m_context->getDevice();
     VkDeviceSize imageSize = width * height * 4;
@@ -232,6 +234,20 @@ void ImageReferences::render(bool* open) {
                         img.panY = 0.0f;
                     }
                 }
+                ImGui::SameLine();
+                // Eyedropper: sample a color off this image for the terrain Paint brush.
+                // NOTE: gate push AND pop on the SAME captured value — the button
+                // toggles m_eyedropper, so reading it after would mismatch the stack.
+                const bool eyeOn = m_eyedropper;
+                if (eyeOn) {
+                    ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.20f, 0.55f, 0.34f, 1.0f));
+                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.24f, 0.65f, 0.40f, 1.0f));
+                }
+                if (ImGui::SmallButton(eyeOn ? "Eyedropper: ON" : "Eyedropper"))
+                    m_eyedropper = !m_eyedropper;
+                if (eyeOn) ImGui::PopStyleColor(2);
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("Click the image to sample its color into the Paint brush");
 
                 // Canvas area for the image
                 ImVec2 canvasPos = ImGui::GetCursorScreenPos();
@@ -272,15 +288,40 @@ void ImageReferences::render(bool* open) {
 
                 drawList->PopClipRect();
 
-                // Pan with middle mouse button OR left mouse button
+                // Pan with middle mouse button OR left mouse button. In eyedropper
+                // mode, left is reserved for sampling, so only middle pans.
                 if (isHovered && ImGui::IsMouseDragging(ImGuiMouseButton_Middle)) {
                     ImVec2 delta = ImGui::GetIO().MouseDelta;
                     img.panX += delta.x;
                     img.panY += delta.y;
-                } else if (isActive && ImGui::IsMouseDragging(ImGuiMouseButton_Left)) {
+                } else if (!m_eyedropper && isActive && ImGui::IsMouseDragging(ImGuiMouseButton_Left)) {
                     ImVec2 delta = ImGui::GetIO().MouseDelta;
                     img.panX += delta.x;
                     img.panY += delta.y;
+                }
+
+                // Eyedropper: map cursor -> pixel, preview the color, sample on click.
+                if (m_eyedropper && isHovered && !img.pixels.empty() && displayW > 0 && displayH > 0) {
+                    ImVec2 m = ImGui::GetIO().MousePos;
+                    float u = (m.x - imgX) / displayW;
+                    float v = (m.y - imgY) / displayH;
+                    if (u >= 0.0f && u < 1.0f && v >= 0.0f && v < 1.0f) {
+                        int px = std::clamp(int(u * img.width),  0, img.width  - 1);
+                        int py = std::clamp(int(v * img.height), 0, img.height - 1);
+                        const unsigned char* p = &img.pixels[(size_t(py) * img.width + px) * 4];
+                        glm::vec3 col(p[0] / 255.0f, p[1] / 255.0f, p[2] / 255.0f);
+
+                        ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+                        // Live swatch + RGB just off the cursor.
+                        ImVec2 s0(m.x + 16.0f, m.y + 4.0f), s1(s0.x + 26.0f, s0.y + 26.0f);
+                        drawList->AddRectFilled(s0, s1, IM_COL32(p[0], p[1], p[2], 255), 2.0f);
+                        drawList->AddRect(s0, s1, IM_COL32(255, 255, 255, 255), 2.0f, 0, 1.5f);
+                        char rgb[32]; std::snprintf(rgb, sizeof(rgb), "%d,%d,%d", p[0], p[1], p[2]);
+                        drawList->AddText(ImVec2(s1.x + 4.0f, s0.y + 6.0f), IM_COL32(240, 240, 240, 255), rgb);
+
+                        if (ImGui::IsMouseClicked(ImGuiMouseButton_Left) && m_onPick)
+                            m_onPick(col);
+                    }
                 }
 
                 // Zoom with mouse wheel (zoom toward cursor)

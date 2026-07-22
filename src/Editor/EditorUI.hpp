@@ -156,6 +156,9 @@ public:
     float getBrushStrength() const { return m_brushStrength; }
     float getBrushFalloff() const { return m_brushFalloff; }
     glm::vec3 getPaintColor() const { return m_paintColor; }
+    // Set the paint color (e.g. sampled from a reference image via the eyedropper).
+    // Drops the swatch selection since it's now a custom color.
+    void setPaintColor(const glm::vec3& c) { m_paintColor = c; m_selectedSwatch = -1; }
     int getSelectedTexture() const { return m_selectedTexture; }
     BrushShape getBrushShape() const { return m_brushShape; }
     float getBrushShapeAspectRatio() const { return m_brushShapeAspectRatio; }

@@ -2,6 +2,8 @@
 
 #include <string>
 #include <vector>
+#include <functional>
+#include <glm/glm.hpp>
 #include <vulkan/vulkan.h>
 
 namespace eden {
@@ -22,12 +24,19 @@ public:
     // Load an image from file (called from file dialog or drag-drop)
     bool loadImage(const std::string& path);
 
+    // Eyedropper: when the user picks a color off a reference image (in eyedropper
+    // mode), this is invoked with the sampled RGB in 0..1. Wire it to the terrain
+    // paint color. No callback set = the eyedropper still previews but does nothing
+    // on click.
+    void setColorPickCallback(std::function<void(const glm::vec3&)> cb) { m_onPick = std::move(cb); }
+
 private:
     struct RefImage {
         std::string name;
         std::string filepath;
         int width = 0;
         int height = 0;
+        std::vector<unsigned char> pixels;   // RGBA CPU copy, for eyedropper sampling
 
         // Per-image pan/zoom
         float zoom = 1.0f;
@@ -49,6 +58,8 @@ private:
     VulkanContext* m_context = nullptr;
     std::vector<RefImage> m_images;
     int m_selectedTab = 0;
+    bool m_eyedropper = false;                       // sampling mode toggle
+    std::function<void(const glm::vec3&)> m_onPick;  // -> set terrain paint color
 };
 
 } // namespace eden
