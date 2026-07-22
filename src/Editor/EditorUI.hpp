@@ -4,6 +4,7 @@
 #include <eden/Camera.hpp>
 #include <eden/SkyParameters.hpp>
 #include <eden/ICharacterController.hpp>
+#include "TextEditor.h"   // syntax-highlighting code editor for the Script Editor
 #include <glm/glm.hpp>
 #include <vector>
 #include <string>
@@ -429,6 +430,9 @@ public:
     bool getNoOutdoorTerrain() const { return m_noOutdoorTerrain; }
     void setNoOutdoorTerrain(bool v) { m_noOutdoorTerrain = v; }
     // Build (floors/walls) panel visibility, toggled from the Window menu.
+    // Monospace font for the Script Editor's code view (set once from the host).
+    void setMonoFont(ImFont* f) { m_monoFont = f; }
+
     bool getShowBuild() const { return m_showBuild; }
     void setShowBuild(bool v) { m_showBuild = v; }
 
@@ -548,6 +552,7 @@ private:
     void renderAINodesWindow();
     void renderTechTreeWindow();
     void renderGroveEditor();
+    void renderConsole();   // in-app console window (captured stdout/stderr)
     void renderZonesWindow();
     void handleObjectClick(int objectIndex);  // Multi-select logic
 
@@ -725,8 +730,17 @@ private:
     bool m_showServerManager = false;
     bool m_showVideoEditor = false;
 
+    // In-app console (captured stdout/stderr) — replaces the separate terminal.
+    bool m_showConsole = false;
+    bool m_consoleAutoScroll = true;
+    std::vector<std::string> m_consoleLines;
+    uint64_t m_consoleVersion = 0;
+
     // Grove script editor state
-    char m_groveSource[16384] = "";  // 16KB source buffer
+    char m_groveSource[16384] = "";  // 16KB source buffer (kept in sync with m_codeEditor)
+    TextEditor m_codeEditor;         // the Script Editor widget: colors + copy/paste/undo
+    std::string m_codeEditorFile;    // file the editor's language def is set for
+    ImFont* m_monoFont = nullptr;    // monospace font for the code editor
     std::string m_groveOutput;
     std::string m_groveCurrentFile;  // Current .grove file path (empty = unsaved)
     int m_groveErrorLine = 0;

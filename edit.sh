@@ -1,38 +1,27 @@
 #!/usr/bin/env bash
 # Build and run the EDEN terrain/level editor (author levels here, then play them
 # with play.sh). Levels save to build/examples/terrain_editor/levels/.
+#
+# The console now lives INSIDE the editor (Window > Console (log)), so the desktop
+# icon launches WITHOUT a separate terminal window. All output still mirrors to
+# editor_console.log for crash post-mortems (symbolize a backtrace with
+# addr2line -f -C -e ./terrain_editor <offset>).
 ROOT="$(cd "$(dirname "$0")" && pwd)"
+LOG="$ROOT/editor_console.log"
 
-# When launched without a controlling terminal (e.g. the desktop icon), relaunch
-# inside a terminal window so the console is visible LIVE — the desktop icon
-# otherwise has nowhere to print. EDEN_IN_TERM guards against re-exec looping.
-if [ ! -t 1 ] && [ -z "$EDEN_IN_TERM" ]; then
-    export EDEN_IN_TERM=1
-    if   command -v cosmic-term >/dev/null 2>&1; then exec cosmic-term -e "$0" "$@"
-    elif command -v konsole     >/dev/null 2>&1; then exec konsole --hold -e "$0" "$@"
-    elif command -v foot        >/dev/null 2>&1; then exec foot "$0" "$@"
-    elif command -v xterm       >/dev/null 2>&1; then exec xterm -e "$0" "$@"
-    fi
-    # No terminal emulator found — fall through to file-log-only mode below.
-fi
-
-set -e
-echo "Building TED (TerrainEDitor)..."
-cmake --build "$ROOT/build" --target terrain_editor -j
-set +e
+# Build (best-effort). Fresh log each launch. If the build fails, we still try to
+# run the last good binary rather than leaving the icon doing nothing.
+echo "Building TED (TerrainEDitor)..." > "$LOG"
+cmake --build "$ROOT/build" --target terrain_editor -j >> "$LOG" 2>&1
+echo "Launching TED..." >> "$LOG"
 
 cd "$ROOT/build/examples/terrain_editor"   # run from here so it finds shaders/ and levels/
-echo "Launching TED..."
-# Show the console LIVE and mirror it to a log file (fresh each run) so it can
-# also be inspected afterward.
-./terrain_editor 2>&1 | tee "$ROOT/editor_console.log"
-code=${PIPESTATUS[0]}
 
-echo
-echo "=== Editor exited (code $code). Full console saved to editor_console.log ==="
-# Keep the window open so exit/crash output stays readable when launched from the
-# icon (cosmic-term/foot close when the command exits).
-if [ -n "$EDEN_IN_TERM" ]; then
-    echo "Press Enter to close this window..."
-    read -r _
+# When run from a real terminal (a dev doing ./edit.sh), also show output live.
+# From the icon (no controlling terminal), it goes to the log + the in-app Console
+# — no extra terminal window.
+if [ -t 1 ]; then
+    ./terrain_editor 2>&1 | tee -a "$LOG"
+else
+    ./terrain_editor >> "$LOG" 2>&1
 fi

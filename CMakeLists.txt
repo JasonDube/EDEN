@@ -206,7 +206,8 @@ set(EDEN_SOURCES
 )
 
 # Create static library
-add_library(eden STATIC ${EDEN_SOURCES})
+add_library(eden STATIC ${EDEN_SOURCES}
+    third_party/ImGuiColorTextEdit/TextEditor.cpp)   # syntax-highlighting code editor
 
 # Include directories
 target_include_directories(eden PUBLIC
@@ -221,6 +222,8 @@ target_include_directories(eden PUBLIC
 target_include_directories(eden PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src
 )
+target_include_directories(eden PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/ImGuiColorTextEdit)
 
 # Tracy profiler integration
 set(TRACY_DIR "$ENV{HOME}/Desktop/tracy")

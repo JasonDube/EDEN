@@ -65,6 +65,7 @@
 #include <eden/Audio.hpp>
 #include <eden/PhysicsWorld.hpp>
 #include <eden/EntityScriptAPI.hpp>
+#include "Editor/ConsoleCapture.hpp"
 #include <eden/ScriptLibrary.hpp>
 #include <eden/Transform.hpp>
 #include <eden/ICharacterController.hpp>
@@ -407,6 +408,7 @@ protected:
                 // std::cout << "[EdenTerminal] No mono font found, using default" << std::endl;
             }
         }
+        m_editorUI.setMonoFont(m_monoFont);   // code editor uses the monospace font
 
         loadSplashTexture();
         loadGroveLogoTexture();
@@ -30754,6 +30756,7 @@ static void crashHandler(int sig) {
 }
 
 int main(int argc, char* argv[]) {
+    eden::ConsoleCapture::get().install();   // tee stdout/stderr into the in-app Console
     signal(SIGSEGV, crashHandler);
     signal(SIGABRT, crashHandler);
     signal(SIGFPE, crashHandler);

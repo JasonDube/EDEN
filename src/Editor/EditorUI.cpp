@@ -1,4 +1,5 @@
 #include "EditorUI.hpp"
+#include "ConsoleCapture.hpp"
 #include "SceneObject.hpp"
 #include "Renderer/ProceduralSkybox.hpp"
 #include "Renderer/TerrainPipeline.hpp"
@@ -100,6 +101,8 @@ void EditorUI::render() {
     if (m_showGroveEditor) {
         renderGroveEditor();
     }
+
+    renderConsole();   // in-app console (self-gates on m_showConsole)
 
     if (m_showZones) {
         renderZonesWindow();
@@ -209,6 +212,9 @@ void EditorUI::renderMenuBar() {
             ImGui::MenuItem("Building Textures", nullptr, &m_showBuildingTextures);
             ImGui::MenuItem("Texture Browser", nullptr, &m_showTextureBrowser);
             ImGui::MenuItem("Image References", nullptr, &m_showImageReferences);
+            ImGui::MenuItem("Console (log)", nullptr, &m_showConsole);
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("The stdout/stderr log, in-app — no separate terminal window.");
             ImGui::MenuItem("Terminal", "Ctrl+`", &m_showTerminal);
             ImGui::MenuItem("Servers", nullptr, &m_showServerManager);
             ImGui::MenuItem("Video Editor", nullptr, &m_showVideoEditor);
@@ -3255,6 +3261,7 @@ void EditorUI::setGroveSource(const std::string& source) {
     size_t len = std::min(source.size(), sizeof(m_groveSource) - 1);
     memcpy(m_groveSource, source.c_str(), len);
     m_groveSource[len] = '\0';
+    m_codeEditor.SetText(source);   // load into the syntax-highlighting editor
     m_groveModified = false;
 }
 
@@ -3263,6 +3270,16 @@ void EditorUI::renderGroveEditor() {
     if (!ImGui::Begin("Script Editor", &m_showGroveEditor)) {
         ImGui::End();
         return;
+    }
+
+    // Keep the char buffer (getGroveSource() + the Save/Compile/Run buttons below)
+    // in sync with what's live in the code editor.
+    {
+        std::string cur = m_codeEditor.GetText();
+        size_t len = std::min(cur.size(), sizeof(m_groveSource) - 1);
+        memcpy(m_groveSource, cur.c_str(), len);
+        m_groveSource[len] = '\0';
+        if (m_codeEditor.IsTextChanged()) m_groveModified = true;
     }
 
     // Language is decided by the current file's extension: .hd = HEIDIC (compiled),
@@ -3370,16 +3387,36 @@ void EditorUI::renderGroveEditor() {
 
     ImGui::Separator();
 
-    // Code editor
+    // Code editor — syntax highlighting + copy/cut/paste/undo/redo/find, line
+    // numbers. The HEIDIC language def colors keywords, types, strings, numbers,
+    // comments, and the self_*/input_* API. Set the def when the file changes.
     float outputHeight = 100.0f;
-    ImGui::InputTextMultiline("##grove_source", m_groveSource, sizeof(m_groveSource),
-        ImVec2(-1, ImGui::GetContentRegionAvail().y - outputHeight),
-        ImGuiInputTextFlags_AllowTabInput | ImGuiInputTextFlags_CallbackEdit,
-        [](ImGuiInputTextCallbackData* data) -> int {
-            auto* self = static_cast<EditorUI*>(data->UserData);
-            self->m_groveModified = true;
-            return 0;
-        }, this);
+    if (m_codeEditorFile != m_groveCurrentFile) {
+        m_codeEditorFile = m_groveCurrentFile;
+        m_codeEditor.SetLanguageDefinition(TextEditor::LanguageDefinition::HEIDIC());
+    }
+    ImVec2 edPos = ImGui::GetCursorScreenPos();
+    ImVec2 edSize(ImGui::GetContentRegionAvail().x,
+                  ImGui::GetContentRegionAvail().y - outputHeight);
+    if (m_monoFont) ImGui::PushFont(m_monoFont);   // crisp, aligned code
+    m_codeEditor.Render("##grove_source", edSize, /*border=*/true);
+    if (m_monoFont) ImGui::PopFont();
+
+    // Auto-copy on MOUSE RELEASE (terminal / Claude-Code style): finish a
+    // drag-select and the selection is on the clipboard — no Ctrl+C needed.
+    if (ImGui::IsMouseReleased(ImGuiMouseButton_Left) && m_codeEditor.HasSelection()) {
+        std::string sel = m_codeEditor.GetSelectedText();
+        if (!sel.empty()) ImGui::SetClipboardText(sel.c_str());
+    }
+
+    // Right-click inside the editor pastes the clipboard at the cursor.
+    if (ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
+        ImVec2 m = ImGui::GetIO().MousePos;
+        if (m.x >= edPos.x && m.x <= edPos.x + edSize.x &&
+            m.y >= edPos.y && m.y <= edPos.y + edSize.y) {
+            m_codeEditor.Paste();
+        }
+    }
 
     ImGui::Separator();
 
@@ -3856,6 +3893,7 @@ std::vector<std::pair<const char*, bool*>> EditorUI::uiPrefBoolEntries() {
         {"show_terminal",            &m_showTerminal},
         {"show_server_manager",      &m_showServerManager},
         {"show_video_editor",        &m_showVideoEditor},
+        {"show_console",             &m_showConsole},
     };
 }
 
@@ -3898,6 +3936,50 @@ std::string EditorUI::uiPrefsSnapshot() {
     s += buf;
     for (auto& [name, flag] : uiPrefBoolEntries()) s += *flag ? '1' : '0';
     return s;
+}
+
+void EditorUI::renderConsole() {
+    if (!m_showConsole) return;
+    ImGui::SetNextWindowSize(ImVec2(760, 320), ImGuiCond_FirstUseEver);
+    if (!ImGui::Begin("Console", &m_showConsole)) { ImGui::End(); return; }
+
+    if (ImGui::SmallButton("Clear")) ConsoleCapture::get().clear();
+    ImGui::SameLine();
+    if (ImGui::SmallButton("Copy all")) {
+        std::string all;
+        for (const auto& l : m_consoleLines) { all += l; all += '\n'; }
+        ImGui::SetClipboardText(all.c_str());
+    }
+    ImGui::SameLine();
+    ImGui::Checkbox("Auto-scroll", &m_consoleAutoScroll);
+    ImGui::SameLine();
+    ImGui::TextDisabled("(%zu lines)", m_consoleLines.size());
+    ImGui::Separator();
+
+    // Re-copy the captured lines only when they actually changed.
+    if (ConsoleCapture::get().version() != m_consoleVersion)
+        m_consoleLines = ConsoleCapture::get().snapshot(&m_consoleVersion);
+
+    ImGui::BeginChild("##consolelog", ImVec2(0, 0), false, ImGuiWindowFlags_HorizontalScrollbar);
+    if (m_monoFont) ImGui::PushFont(m_monoFont);
+    for (const auto& l : m_consoleLines) {
+        ImVec4 col(0.82f, 0.82f, 0.82f, 1.0f);
+        if (l.find("error") != std::string::npos || l.find("Error") != std::string::npos ||
+            l.find("ERROR") != std::string::npos || l.find("FAIL") != std::string::npos ||
+            l.find("CRASH") != std::string::npos || l.find("failed") != std::string::npos)
+            col = ImVec4(1.0f, 0.42f, 0.42f, 1.0f);
+        else if (l.find("warn") != std::string::npos || l.find("Warn") != std::string::npos)
+            col = ImVec4(1.0f, 0.80f, 0.35f, 1.0f);
+        else if (!l.empty() && l[0] == '[')          // "[Tag] ..." status lines
+            col = ImVec4(0.55f, 0.80f, 1.0f, 1.0f);
+        ImGui::PushStyleColor(ImGuiCol_Text, col);
+        ImGui::TextUnformatted(l.c_str());
+        ImGui::PopStyleColor();
+    }
+    if (m_monoFont) ImGui::PopFont();
+    if (m_consoleAutoScroll) ImGui::SetScrollHereY(1.0f);   // pin to bottom
+    ImGui::EndChild();
+    ImGui::End();
 }
 
 } // namespace eden
