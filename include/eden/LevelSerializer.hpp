@@ -211,6 +211,8 @@ struct LevelData {
     glm::ivec2 terrainMaxChunk{0, 0};
     bool terrainWrapWorld = false;
     bool terrainStretchTex = false;   // single texture stretched across the whole terrain
+    bool terrainProceduralHeights = false;  // seeded-FBM planet heights at generation
+    uint32_t terrainNoiseSeed = 0;          // planet seed (0 = legacy/unseeded domain)
 };
 
 // Binary terrain file format header

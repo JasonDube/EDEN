@@ -7,6 +7,25 @@
 
 namespace eden {
 
+// Seed -> noise-domain offset. Shifting where we sample the (fixed) noise field
+// makes each seed a different planet from the same generator. Seed 0 = (0,0),
+// preserving the pre-seed behavior of every existing noise path. SplitMix64-style
+// integer hash so nearby seeds land far apart in the domain.
+static glm::vec2 noiseSeedOffset(uint32_t seed) {
+    if (seed == 0) return glm::vec2(0.0f);
+    uint64_t z = (uint64_t)seed + 0x9E3779B97F4A7C15ull;
+    z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ull;
+    z = (z ^ (z >> 27)) * 0x94D049BB133111EBull;
+    z ^= (z >> 31);
+    // Two independent 16-bit halves -> +/-50k world units of domain offset.
+    // NOTE: subtract in SIGNED int — (z & 0xFFFF) - 32768 in uint64_t underflows
+    // for halves < 32768 (half of all seeds), exploding the offset and NaN-ing
+    // the perlin lattice (int overflow in floor cast) => invisible flat terrain.
+    float ox = (float)((int)(z       & 0xFFFF) - 32768) * (100000.0f / 65536.0f);
+    float oz = (float)((int)((z >> 16) & 0xFFFF) - 32768) * (100000.0f / 65536.0f);
+    return glm::vec2(ox, oz);
+}
+
 TerrainChunk::TerrainChunk(glm::ivec2 coord, const TerrainConfig& config)
     : m_coord(coord)
     , m_resolution(config.chunkResolution)
@@ -63,8 +82,16 @@ void TerrainChunk::generate(const TerrainConfig& config) {
             float worldX = worldOffsetX + x * tileSize;
             float worldZ = worldOffsetZ + z * tileSize;
 
-            // Start with flat terrain - use Ridged brush to paint spiky areas
+            // Flat by default (sculpt-first worlds); seeded FBM for planets.
             float height = 0.0f;
+            if (config.proceduralHeights) {
+                glm::vec2 off = noiseSeedOffset(config.noiseSeed);
+                height = Noise::fbmNormalized(
+                    (worldX + off.x) * config.noiseScale,
+                    (worldZ + off.y) * config.noiseScale,
+                    config.noiseOctaves,
+                    config.noisePersistence) * config.heightScale;
+            }
 
             // Edge flattening for seamless wrapping
             if (config.wrapWorld && config.useFixedBounds) {
@@ -1048,10 +1075,12 @@ float Terrain::getHeightAt(float worldX, float worldZ) const {
         return -100000.0f;
     }
 
-    // Fall back to noise (infinite/streaming terrain only)
+    // Fall back to noise (infinite/streaming terrain only). Same seed offset as
+    // chunk generation so the fallback agrees with generated chunks.
+    glm::vec2 off = noiseSeedOffset(m_config.noiseSeed);
     float height = Noise::fbmNormalized(
-        worldX * m_config.noiseScale,
-        worldZ * m_config.noiseScale,
+        (worldX + off.x) * m_config.noiseScale,
+        (worldZ + off.y) * m_config.noiseScale,
         m_config.noiseOctaves,
         m_config.noisePersistence
     );

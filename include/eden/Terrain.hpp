@@ -81,6 +81,14 @@ struct TerrainConfig {
     glm::ivec2 maxChunk{15, 15};    // Maximum chunk coordinate (32x32 = 1024 chunks)
     bool wrapWorld = false;         // If true, world wraps at edges (planet mode)
 
+    // Procedural planet heights: generate chunks with seeded FBM noise instead of
+    // flat (sculpt-first) ground. The seed offsets the noise sampling domain, so
+    // every seed is a different planet from the same generator. Used by the
+    // "World (wrappable planet)" New Level template; the wrap-edge flattening in
+    // TerrainChunk::generate keeps the planet seam smooth.
+    bool proceduralHeights = false;
+    uint32_t noiseSeed = 0;
+
     // If true, terrain UVs are normalized 0..1 across the WHOLE terrain bounds so a
     // single texture STRETCHES to fit the entire terrain once, instead of tiling every
     // 10 world units. Used by the 500x500 "Terrain Cell" template (one painted ground

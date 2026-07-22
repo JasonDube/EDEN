@@ -10,6 +10,8 @@
 #include <nlohmann/json.hpp>
 #include <fstream>
 #include <cmath>
+#include <algorithm>
+#include <cstdio>
 #include <cstring>
 #include <algorithm>
 #include <set>
@@ -210,6 +212,17 @@ void EditorUI::renderMenuBar() {
             ImGui::MenuItem("Terminal", "Ctrl+`", &m_showTerminal);
             ImGui::MenuItem("Servers", nullptr, &m_showServerManager);
             ImGui::MenuItem("Video Editor", nullptr, &m_showVideoEditor);
+            ImGui::Separator();
+            // UI font size — typeable field + -/+ steppers (0.05 per click).
+            // Discrete steps on purpose: a live-drag slider re-rasterizes the
+            // 1.92 font atlas every frame (flicker) and the old FontGlobalScale
+            // path asserts >1.0. Persisted to ted_prefs.ini.
+            ImGui::SetNextItemWidth(140.0f);
+            float fs = m_uiFontScale;
+            if (ImGui::InputFloat("UI font size", &fs, 0.05f, 0.10f, "%.2f",
+                                  ImGuiInputTextFlags_EnterReturnsTrue)) {
+                m_uiFontScale = std::max(0.5f, std::min(2.5f, fs));
+            }
             ImGui::Separator();
             if (ImGui::MenuItem("Show All")) {
                 m_showTerrainEditor = true;
@@ -3782,6 +3795,75 @@ void EditorUI::renderBuildingTextureWindow() {
     }
 
     ImGui::End();
+}
+
+// ---- UI preferences (font scale + open panels) ----------------------------
+// Tiny key=value ini, one entry per line. Unknown keys are ignored so old and
+// new builds can share the file.
+
+std::vector<std::pair<const char*, bool*>> EditorUI::uiPrefBoolEntries() {
+    return {
+        {"show_terrain_editor",      &m_showTerrainEditor},
+        {"show_terrain_info",        &m_showTerrainInfo},
+        {"show_sky_settings",        &m_showSkySettings},
+        {"show_water_settings",      &m_showWaterSettings},
+        {"show_level_settings",      &m_showLevelSettings},
+        {"show_build",               &m_showBuild},
+        {"show_character_controller",&m_showCharacterController},
+        {"show_models",              &m_showModels},
+        {"show_ai_nodes",            &m_showAINodes},
+        {"show_tech_tree",           &m_showTechTree},
+        {"show_script_editor",       &m_showGroveEditor},
+        {"show_zones",               &m_showZones},
+        {"show_mind_map",            &m_showMindMap},
+        {"show_building_textures",   &m_showBuildingTextures},
+        {"show_texture_browser",     &m_showTextureBrowser},
+        {"show_image_references",    &m_showImageReferences},
+        {"show_terminal",            &m_showTerminal},
+        {"show_server_manager",      &m_showServerManager},
+        {"show_video_editor",        &m_showVideoEditor},
+    };
+}
+
+void EditorUI::loadUiPrefs(const std::string& path) {
+    std::ifstream f(path);
+    if (!f.is_open()) return;   // first run: keep code defaults
+    auto entries = uiPrefBoolEntries();
+    std::string line;
+    while (std::getline(f, line)) {
+        auto eq = line.find('=');
+        if (eq == std::string::npos || line.empty() || line[0] == '#') continue;
+        std::string key = line.substr(0, eq), val = line.substr(eq + 1);
+        // "ui_font_scale_main" = style.FontScaleMain (absolute). The short-lived
+        // "ui_font_scale" key held the deprecated FontGlobalScale and is ignored.
+        if (key == "ui_font_scale_main") {
+            try { m_uiFontScale = std::stof(val); } catch (...) {}
+            m_uiFontScale = std::max(0.5f, std::min(2.5f, m_uiFontScale));
+            continue;
+        }
+        for (auto& [name, flag] : entries)
+            if (key == name) { *flag = (val == "1"); break; }
+    }
+}
+
+void EditorUI::saveUiPrefs(const std::string& path) {
+    std::ofstream f(path, std::ios::trunc);
+    if (!f.is_open()) return;
+    f << "# TED UI prefs (font scale + open panels); docking layout lives in imgui_ted.ini\n";
+    char buf[32];
+    std::snprintf(buf, sizeof(buf), "%.2f", m_uiFontScale);
+    f << "ui_font_scale_main=" << buf << "\n";
+    for (auto& [name, flag] : uiPrefBoolEntries())
+        f << name << "=" << (*flag ? 1 : 0) << "\n";
+}
+
+std::string EditorUI::uiPrefsSnapshot() {
+    std::string s;
+    char buf[32];
+    std::snprintf(buf, sizeof(buf), "%.2f", m_uiFontScale);
+    s += buf;
+    for (auto& [name, flag] : uiPrefBoolEntries()) s += *flag ? '1' : '0';
+    return s;
 }
 
 } // namespace eden

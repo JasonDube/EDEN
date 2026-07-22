@@ -420,6 +420,18 @@ public:
     bool getShowBuild() const { return m_showBuild; }
     void setShowBuild(bool v) { m_showBuild = v; }
 
+    // UI font scale (ImGui 1.92 style.FontScaleMain). Owned here so the
+    // Window-menu control, the Agents-panel control, and the prefs file all
+    // share one value.
+    float& uiFontScale() { return m_uiFontScale; }
+
+    // UI preferences (font scale + which panels are open), persisted to a tiny
+    // key=value ini (~/.eden/ted_prefs.ini) so the editor opens the way it was
+    // left. Layout/docking itself is ImGui's ini; this covers what it doesn't.
+    void loadUiPrefs(const std::string& path);
+    void saveUiPrefs(const std::string& path);
+    std::string uiPrefsSnapshot();   // change-detection key for autosave
+
     // Character controller settings
     CameraMode getCameraMode() const { return m_cameraMode; }
     void setCameraMode(CameraMode mode) { m_cameraMode = mode; }
@@ -667,7 +679,13 @@ private:
     // Window visibility
     bool m_showCharacterController = false;
     bool m_showLevelSettings = false;
-    bool m_showBuild = true;           // Build (floors/walls) panel — on by default
+    bool m_showBuild = false;          // Build (floors/walls) panel — opt-in via Window menu (persisted in ted_prefs.ini)
+    // UI font scale = ImGui 1.92 style.FontScaleMain (ABSOLUTE — the old
+    // io.FontGlobalScale is deprecated and ASSERTS if set >1 alongside
+    // FontScaleMain; never write it). 1.2 == the old 1.5 * 0.8 look.
+    float m_uiFontScale = 1.2f;
+    // The persisted panel-visibility set (name -> flag), shared by save/load/snapshot.
+    std::vector<std::pair<const char*, bool*>> uiPrefBoolEntries();
     bool m_noOutdoorTerrain = false;   // interior levels skip terrain in-game
     bool m_showTerrainEditor = true;
     bool m_showSkySettings = true;

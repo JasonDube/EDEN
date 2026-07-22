@@ -41,6 +41,8 @@ void LevelInstantiator::applyTerrain(const LevelData& data,
         tcfg.maxChunk        = data.terrainMaxChunk;
         tcfg.wrapWorld       = data.terrainWrapWorld;
         tcfg.stretchTexToBounds = data.terrainStretchTex;
+        tcfg.proceduralHeights = data.terrainProceduralHeights;
+        tcfg.noiseSeed       = data.terrainNoiseSeed;
         context.waitIdle();
         chunkManager.releaseAllChunkBuffers(terrain);
         terrain.reconfigure(tcfg);

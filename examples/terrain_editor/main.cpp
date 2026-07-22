@@ -78,6 +78,7 @@
 #include <nlohmann/json.hpp>
 #include <fstream>
 #include <filesystem>
+#include <random>
 
 #include <imgui.h>
 #include <imgui_impl_glfw.h>
@@ -1943,7 +1944,10 @@ protected:
     std::vector<AgentPanel> m_agentPanels;
     int m_activeAgentTab = 0;        // which agent tab is showing in the single chat panel
     bool m_wasCursorToggle = false;  // edge-detect for the Left-Alt cursor toggle
-    float m_uiFontScale = 0.8f;      // ImGui FontGlobalScale (adjustable in the Agents panel)
+    // UI font scale moved into EditorUI (m_editorUI.uiFontScale()) so the
+    // Window-menu slider, Agents-panel slider, and ted_prefs.ini share it.
+    std::string m_uiPrefsPath;           // ~/.eden/ted_prefs.ini ("" = don't persist)
+    std::string m_uiPrefsLastSnapshot;   // change detection for autosave
 
     // Rebuild the panel list from the live agent avatars, preserving each panel's
     // history/session by name. Removes panels whose agent has despawned.
@@ -2101,8 +2105,13 @@ protected:
             ImGui::EndChild();
 
             // Footer: adjustable UI font size (fixes oversized text after a DPI/desktop change).
+            // Same typeable+stepper control as Window menu; shares the persisted value.
             ImGui::SetNextItemWidth(160.0f);
-            ImGui::SliderFloat("UI font", &m_uiFontScale, 0.5f, 1.5f, "%.2f");
+            float fs = m_editorUI.uiFontScale();
+            if (ImGui::InputFloat("UI font", &fs, 0.05f, 0.10f, "%.2f",
+                                  ImGuiInputTextFlags_EnterReturnsTrue)) {
+                m_editorUI.uiFontScale() = std::max(0.5f, std::min(2.5f, fs));
+            }
         }
         ImGui::End();
     }
@@ -2184,7 +2193,26 @@ protected:
         ImGui_ImplVulkan_NewFrame();
         ImGui_ImplGlfw_NewFrame();
         ImGui::NewFrame();
-        ImGui::GetIO().FontGlobalScale = m_uiFontScale; // adjustable UI text size
+        // Adjustable UI text size. ImGui 1.92: FontScaleMain is THE font scale;
+        // io.FontGlobalScale is deprecated and ASSERTS (abort) if >1 while
+        // FontScaleMain != 1 — never write it. Overrides ImGuiManager's init
+        // value (1.5 / EDEN_UI_SCALE) with the user's persisted preference.
+        ImGui::GetStyle().FontScaleMain = m_editorUI.uiFontScale();
+
+        // Autosave UI prefs (font scale + open panels) when they change, checked
+        // once a second — survives crashes, unlike a save-on-exit-only approach.
+        if (!m_uiPrefsPath.empty()) {
+            static double s_lastPrefsCheck = 0.0;
+            double now = ImGui::GetTime();
+            if (now - s_lastPrefsCheck > 1.0) {
+                s_lastPrefsCheck = now;
+                std::string snap = m_editorUI.uiPrefsSnapshot();
+                if (snap != m_uiPrefsLastSnapshot) {
+                    m_uiPrefsLastSnapshot = snap;
+                    m_editorUI.saveUiPrefs(m_uiPrefsPath);
+                }
+            }
+        }
 
         // Create dockspace over the entire viewport for side docking
         ImGuiViewport* viewport = ImGui::GetMainViewport();
@@ -4756,6 +4784,10 @@ private:
                 fs::copy_file("imgui_terrain_editor.ini", ini, ec);
             }
             iniPath = ini.string();
+            // UI prefs (font scale + open panels) live beside the layout ini.
+            m_uiPrefsPath = (dir / "ted_prefs.ini").string();
+            m_editorUI.loadUiPrefs(m_uiPrefsPath);
+            m_uiPrefsLastSnapshot = m_editorUI.uiPrefsSnapshot();
         }
         m_imguiManager.init(getContext(), getSwapchain(), getWindow().getHandle(), iniPath);
     }
@@ -23438,9 +23470,10 @@ private:
         if (m_isPlayMode) return;   // play mode uses F5+Tab building
         if (!m_editorUI.getShowBuild()) return;   // toggled from the Window menu
         ImGui::SetNextWindowSize(ImVec2(230, 0), ImGuiCond_FirstUseEver);
-        // Clear default spot (right of the Models panel). Re-applied each time the
-        // panel is toggled on from the Window menu, so it can't get lost off-screen.
-        ImGui::SetNextWindowPos(ImVec2(270, 60), ImGuiCond_Appearing);
+        // Default spot (right of the Models panel) — FIRST run only. Anything
+        // stronger (Cond_Appearing) forcibly re-floats the window every launch,
+        // stomping the user's saved dock position from imgui_ted.ini.
+        ImGui::SetNextWindowPos(ImVec2(270, 60), ImGuiCond_FirstUseEver);
         if (ImGui::Begin("Build")) {
             ImGui::Checkbox("Show 5-ft grid (U)", &m_showTerrainGrid);
             ImGui::Checkbox("Grid on selected pieces", &m_showPieceGrid);
@@ -23511,6 +23544,20 @@ private:
             ImGui::TextDisabled("Or a sculptable outdoor terrain cell:");
             if (ImGui::Button("Terrain Cell (500x500 sculptable)", ImVec2(220, 0))) {
                 newTerrainCellLevel();
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::Spacing();
+            ImGui::TextDisabled("Or an akelba-class planet (wrappable):");
+            ImGui::SetNextItemWidth(120);
+            ImGui::InputInt("Seed##planetSeed", &m_newPlanetSeed, 0, 0);
+            if (m_newPlanetSeed < 0) m_newPlanetSeed = -m_newPlanetSeed;
+            ImGui::SameLine();
+            if (ImGui::Button("Random##planetSeed")) {
+                std::random_device rd;
+                m_newPlanetSeed = 1 + (int)(rd() % 999999u);   // short enough to retype
+            }
+            if (ImGui::Button("World (2.5 mi wrappable planet)", ImVec2(220, 0))) {
+                newPlanetLevel((uint32_t)m_newPlanetSeed);
                 ImGui::CloseCurrentPopup();
             }
             // NOTE: "Resize terrain (keep objects)" was removed — it regenerated the
@@ -23669,6 +23716,64 @@ private:
         m_terrain.update(m_camera.getPosition());
         std::cout << "[Focus] Camera framed on '" << obj->getName() << "' at ("
                   << center.x << ", " << center.y << ", " << center.z << ")" << std::endl;
+    }
+
+    // An akelba-class planet: the classic 32x32-chunk (-16..15) wrappable world
+    // TED boots with, but with SEEDED procedural FBM heights — every seed is a
+    // different planet from the same generator. Walk off one edge, arrive at the
+    // other (the wrap-edge flattening in TerrainChunk::generate smooths the seam).
+    // This is the space game's landable-body template: a celestial body = this
+    // config + a seed. akelba itself was the hand-sculpted first of its class.
+    void newPlanetLevel(uint32_t seed) {
+        // Wipe the scene FIRST: newLevel() ends by resetToDefaults()-ing every
+        // loaded chunk (zeroing heightmaps). Called after generation, it silently
+        // flattened the freshly-noised planet — so it must run before the swap.
+        newLevel();
+
+        TerrainConfig tcfg = m_terrain.getConfig();
+        tcfg.chunkResolution = 64;
+        tcfg.tileSize        = 2.0f;      // 126 units/chunk -> 4032 across (2.5 mi)
+        tcfg.viewDistance    = 16;
+        tcfg.heightScale     = 200.0f;
+        tcfg.noiseScale      = 0.003f;
+        tcfg.noiseOctaves    = 5;
+        tcfg.noisePersistence = 0.45f;
+        tcfg.useFixedBounds  = true;
+        tcfg.minChunk        = {-16, -16};
+        tcfg.maxChunk        = {15, 15};
+        tcfg.wrapWorld       = true;
+        tcfg.stretchTexToBounds = false;
+        tcfg.proceduralHeights  = true;
+        tcfg.noiseSeed          = seed;
+
+        // Same swap sequence as rebuildTerrainAndNewLevel: free GPU buffers,
+        // reconfigure, re-preload (preload has graceful VRAM-exhaustion fallback).
+        getContext().waitIdle();
+        m_chunkManager->releaseAllChunkBuffers(m_terrain);
+        m_terrain.reconfigure(tcfg);
+        m_chunkManager->preloadAllChunks(m_terrain, nullptr);
+        for (auto& [coord, chunk] : m_terrain.getAllChunks()) {
+            if (chunk->needsUpload()) m_chunkManager->uploadChunk(*chunk);
+        }
+
+        // (scene already wiped above; newLevel also cleared test-level state)
+
+        // Frame the planet from above its center (world spans -2016..2016).
+        float camY = tcfg.heightScale * 2.0f;
+        m_camera.setPosition({0.0f, camY, 0.0f});
+        m_camera.setPitch(-55.0f);
+        m_orbitTarget = glm::vec3(0.0f);
+        m_terrain.update(m_camera.getPosition());
+
+        // Diagnostic: prove the generated terrain is non-flat right in the console.
+        // If these are all ~equal (or nan), generation failed; if they vary but the
+        // screen looks flat, the problem is in rendering/upload.
+        std::cout << "New planet: seed " << seed << " (32x32 chunks, 4032 units square, wrapWorld)\n"
+                  << "  sample heights: (0,0)=" << m_terrain.getHeightAt(0.0f, 0.0f)
+                  << "  (500,500)=" << m_terrain.getHeightAt(500.0f, 500.0f)
+                  << "  (-700,300)=" << m_terrain.getHeightAt(-700.0f, 300.0f)
+                  << "  (1200,-900)=" << m_terrain.getHeightAt(1200.0f, -900.0f)
+                  << std::endl;
     }
 
     // A rock-solid starting point: a huge flat floor slab (1 mile x 1 mile, 50 ft
@@ -29596,6 +29701,7 @@ private:
     bool m_newLevelPopup = false;
     int  m_newLevelWidthFeet = 50;   // X extent of a new map (feet)
     int  m_newLevelDepthFeet = 50;   // Z extent of a new map (feet) — can differ (non-square)
+    int  m_newPlanetSeed = 1;        // seed for the "World (wrappable planet)" template
 
     // Edit-mode building: the play-mode build tools (hslab/vslab/...) surfaced in
     // the edit-mode editor too, so there's one editor. Toggled via the Build panel.
