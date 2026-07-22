@@ -1052,19 +1052,36 @@ float Terrain::getHeightAt(float worldX, float worldZ) const {
     if (it != m_chunks.end()) {
         auto& chunk = it->second;
         glm::vec3 chunkPos = chunk->getWorldPosition();
-        int localX = static_cast<int>((worldX - chunkPos.x) / chunk->getTileSize());
-        int localZ = static_cast<int>((worldZ - chunkPos.z) / chunk->getTileSize());
-
-        // Check if this vertex is a hole — return very low height so player falls through
         int res = chunk->getResolution();
-        localX = std::clamp(localX, 0, res - 1);
-        localZ = std::clamp(localZ, 0, res - 1);
-        int idx = localZ * res + localX;
-        if (idx < static_cast<int>(chunk->m_holemap.size()) && chunk->m_holemap[idx] > 0.5f) {
+        float ts = chunk->getTileSize();
+        float fx = (worldX - chunkPos.x) / ts;
+        float fz = (worldZ - chunkPos.z) / ts;
+        int x0 = static_cast<int>(std::floor(fx));
+        int z0 = static_cast<int>(std::floor(fz));
+        float tx = fx - static_cast<float>(x0);
+        float tz = fz - static_cast<float>(z0);
+        auto cl = [res](int v) { return std::clamp(v, 0, res - 1); };
+        int x1 = cl(x0 + 1), z1 = cl(z0 + 1);
+        x0 = cl(x0); z0 = cl(z0);
+
+        // Hole test on the nearest vertex — holes make the player fall through.
+        int hx = cl(static_cast<int>(std::floor(fx + 0.5f)));
+        int hz = cl(static_cast<int>(std::floor(fz + 0.5f)));
+        int hidx = hz * res + hx;
+        if (hidx < static_cast<int>(chunk->m_holemap.size()) && chunk->m_holemap[hidx] > 0.5f) {
             return -100000.0f;
         }
 
-        return chunk->getHeightAtLocal(localX, localZ);
+        // Bilinear interpolation across the 4 surrounding vertices → a smooth,
+        // continuous ground height. Truncating to one vertex made the height a
+        // stair-step (flat per 2-unit tile, jump at each edge), so walking hopped.
+        float h00 = chunk->getHeightAtLocal(x0, z0);
+        float h10 = chunk->getHeightAtLocal(x1, z0);
+        float h01 = chunk->getHeightAtLocal(x0, z1);
+        float h11 = chunk->getHeightAtLocal(x1, z1);
+        float h0 = h00 + (h10 - h00) * tx;
+        float h1 = h01 + (h11 - h01) * tx;
+        return h0 + (h1 - h0) * tz;
     }
 
     // Outside the loaded chunks. For a fixed-size world there is simply no terrain
