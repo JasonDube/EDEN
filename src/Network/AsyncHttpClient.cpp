@@ -339,6 +339,19 @@ void AsyncHttpClient::sendGet(const std::string& path, ResponseCallback callback
     }
 }
 
+void AsyncHttpClient::sendPost(const std::string& path, const std::string& jsonBody, ResponseCallback callback) {
+    Request request;
+    request.method = "POST";
+    request.path = path;
+    request.body = jsonBody;
+    request.callback = callback;
+
+    {
+        std::lock_guard<std::mutex> lock(m_requestMutex);
+        m_requestQueue.push(std::move(request));
+    }
+}
+
 void AsyncHttpClient::pollResponses() {
     std::queue<CompletedRequest> toProcess;
 

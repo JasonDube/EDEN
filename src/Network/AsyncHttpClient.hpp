@@ -140,6 +140,9 @@ public:
     // Generic GET request
     void sendGet(const std::string& path, ResponseCallback callback);
 
+    // Generic JSON POST (used for /preload and /unload VRAM management).
+    void sendPost(const std::string& path, const std::string& jsonBody, ResponseCallback callback);
+
     // Process completed requests (call from main thread)
     void pollResponses();
 

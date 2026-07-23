@@ -2889,6 +2889,7 @@ static std::pair<std::string, std::string> agentProviderFromModel(const std::str
     if (n.find("grok")     != std::string::npos) return {"grok",     "Grok"};
     if (n.find("deepseek") != std::string::npos) return {"deepseek", "DeepSeek"};
     if (n.find("gemma")    != std::string::npos) return {"gemma",    "Gemma"};
+    if (n.find("heretic")  != std::string::npos) return {"heretic",  "Heretic"};
     if (n.find("qwen")     != std::string::npos ||
         n.find("ollama")   != std::string::npos) return {"ollama",   "Qwen"};
     return {"", "Agent"};
@@ -3040,7 +3041,7 @@ std::string FilesystemBrowser::deployAgentInCurrentFolder() {
             std::string ext = entry.path().extension().string();
             std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
             if (ext != ".glb" && ext != ".gltf") continue;
-            const char* kw[] = {"claude","grok","deepseek","qwen","ollama","gemma",
+            const char* kw[] = {"claude","grok","deepseek","qwen","ollama","gemma","heretic",
                                 "robot","bot","agent","overseer"};
             bool isAgent = false;
             for (const char* k : kw) if (lower.find(k) != std::string::npos) { isAgent = true; break; }

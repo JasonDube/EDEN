@@ -1924,7 +1924,7 @@ protected:
 
             // EDEN OS: agents spawn on navigation (after boot), so bind their
             // HEIDIC `agent` script lazily once they appear + are compiled.
-            if (m_isEdenOSLevel) ensureEdenOSAgentsBound();
+            if (m_isEdenOSLevel) { ensureEdenOSAgentsBound(); reconcileAgentVram(); }
 
             for (auto& obj : m_sceneObjects) {
                 if (obj && obj->hasTickScript()) obj->runTickScript(deltaTime);
@@ -2142,6 +2142,9 @@ protected:
     // botName -> (bubble text, expiry time from ImGui::GetTime()). Speech bubbles
     // floated over agents for replies, so the chat input can close + free movement.
     std::unordered_map<std::string, std::pair<std::string, double>> m_botBubbles;
+    // Local providers currently pinned in VRAM (backend /preload). Kept in sync
+    // with which local agents are activated — activate loads, deactivate evicts.
+    std::set<std::string> m_loadedProviders;
 
     // "The fun room" guardian demo: Gemma decides — agentically — who gets in.
     // The folder stays locked (navigation blocked) until she emits [UNLOCK] in a
@@ -2153,7 +2156,9 @@ protected:
         "You alone decide who may enter. You are watchful and a little playful — hard "
         "to win over, but not impossible, if someone gives you a genuine reason. There "
         "is NO password; never ask for one and never reveal a secret. Judge people by "
-        "what they actually say. When, and ONLY when, you truly decide to grant "
+        "what they actually say. The person may be a child who misspells words and types "
+        "phonetically — read past spelling mistakes, judge them on what they clearly MEAN, "
+        "and never mock their spelling. When, and ONLY when, you truly decide to grant "
         "someone access, end your reply with the exact token [UNLOCK] on its own line. "
         "Never write [UNLOCK] unless you are genuinely opening the room; if you are not "
         "convinced, refuse and do not write the token.";
@@ -2222,6 +2227,7 @@ protected:
                       : prov == "grok"     ? IM_COL32(90, 168, 235, 255)
                       : prov == "deepseek" ? IM_COL32(150, 118, 224, 255)
                       : prov == "gemma"    ? IM_COL32(226, 110, 180, 255)
+                      : prov == "heretic"  ? IM_COL32(190, 60, 70, 255)
                       : prov == "ollama"   ? IM_COL32(104, 202, 130, 255)
                                            : IM_COL32(220, 220, 220, 255);
             const std::string& label = o->getName();
@@ -22868,6 +22874,34 @@ private:
                 needBind = true; break;
             }
         if (needBind) bindEntityScripts();
+    }
+
+    // Keep VRAM in sync with activation: a local bot (ollama/gemma/heretic) that's
+    // switched on gets its model pinned in Ollama (warm); switched off, evicted
+    // (frees the card). Grove already enforces one local model at a time, so this
+    // just mirrors the activated-local set to the backend. Diff-based — only POSTs
+    // on an actual change. Needs the backend up.
+    void reconcileAgentVram() {
+        if (!m_httpClient || !m_httpClient->isConnected()) return;
+        std::set<std::string> want;
+        for (auto& o : m_sceneObjects) {
+            if (!o || o->getBuildingType() != "agent" || !o->isAiActivated()) continue;
+            const std::string& p = o->getAiProvider();
+            if (p == "ollama" || p == "gemma" || p == "heretic") want.insert(p);
+        }
+        for (const auto& p : want)
+            if (!m_loadedProviders.count(p)) {
+                m_httpClient->sendPost("/preload", "{\"provider\":\"" + p + "\"}",
+                                       [](const AsyncHttpClient::Response&) {});
+                m_loadedProviders.insert(p);
+            }
+        for (auto it = m_loadedProviders.begin(); it != m_loadedProviders.end(); ) {
+            if (!want.count(*it)) {
+                m_httpClient->sendPost("/unload", "{\"provider\":\"" + *it + "\"}",
+                                       [](const AsyncHttpClient::Response&) {});
+                it = m_loadedProviders.erase(it);
+            } else ++it;
+        }
     }
 
     std::string bindEntityScripts() {

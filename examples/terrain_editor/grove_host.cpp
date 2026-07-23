@@ -2485,6 +2485,22 @@ static void groveSyncBotServer(GroveContext* ctx) {
         if (ctx->groveOutputAccum) ctx->groveOutputAccum->append(" — last bot off, stopping server");
     }
 }
+// Local models hold VRAM; remote APIs don't.
+static bool groveIsLocalProvider(const std::string& p) {
+    return p == "ollama" || p == "gemma" || p == "heretic";
+}
+// Evict-to-fit: only ONE local model can be resident at a time on the card, so
+// keep `keepName` and switch OFF every other activated local agent. Remote
+// agents are untouched (they cost no VRAM). The host reconciler then loads the
+// survivor and unloads the rest in Ollama.
+static void groveKeepOneLocal(GroveContext* ctx, const std::string& keepName) {
+    for (auto& o : *ctx->sceneObjects) {
+        if (!o || o->getBuildingType() != "agent") continue;
+        if (!groveIsLocalProvider(o->getAiProvider())) continue;
+        if (o->isAiActivated() && o->getName() != keepName)
+            o->setAiActivated(false);
+    }
+}
 static std::string groveAgentArgName(const GroveValue* args, uint32_t argc) {
     if (argc >= 1 && args[0].tag == GROVE_STRING) {
         auto& sv = args[0].data.string_val;
@@ -2497,6 +2513,7 @@ static int32_t groveActivateBot(const GroveValue* args, uint32_t argc, GroveValu
     auto* ctx = static_cast<GroveContext*>(ud);
     std::string name = groveAgentArgName(args, argc);
     int n = groveSetAgentsActivated(ctx, name, true);
+    if (n) groveKeepOneLocal(ctx, name); // evict other local models to fit VRAM
     if (ctx->groveOutputAccum)
         ctx->groveOutputAccum->append(n ? (name + " activated") : ("no agent named '" + name + "'"));
     if (n) groveSyncBotServer(ctx);
@@ -2518,8 +2535,15 @@ static int32_t groveDeactivateBot(const GroveValue* args, uint32_t argc, GroveVa
 static int32_t groveActivateAllBots(const GroveValue* args, uint32_t argc, GroveValue* result, void* ud) {
     auto* ctx = static_cast<GroveContext*>(ud);
     int n = groveSetAgentsActivated(ctx, "", true);
+    // Can't hold every local model in VRAM — keep the first activated local one.
+    std::string firstLocal;
+    for (auto& o : *ctx->sceneObjects)
+        if (o && o->getBuildingType() == "agent" && groveIsLocalProvider(o->getAiProvider())) {
+            firstLocal = o->getName(); break;
+        }
+    if (!firstLocal.empty()) groveKeepOneLocal(ctx, firstLocal);
     if (ctx->groveOutputAccum)
-        ctx->groveOutputAccum->append("activated " + std::to_string(n) + " bot(s)");
+        ctx->groveOutputAccum->append("activated " + std::to_string(n) + " bot(s) (one local model kept for VRAM)");
     groveSyncBotServer(ctx);
     result->tag = GROVE_BOOL; result->data.bool_val = n > 0 ? 1 : 0;
     return 0;

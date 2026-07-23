@@ -61,6 +61,11 @@ OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen3.5:9b")
 # Override GEMMA_MODEL in .env to a shorter name (e.g. after `ollama cp`).
 GEMMA_MODEL = os.getenv("GEMMA_MODEL",
     "hf.co/yuxinlu1/gemma-4-12B-agentic-fable5-composer2.5-v2-3.5x-tau2-GGUF:Q4_K_M")
+# The "Heretic" agent — a large uncensored 27B ablation model served by Ollama.
+# Adult/experimental; not a kid-facing bot. Pull:
+#   ollama pull hf.co/DavidAU/Qwen3.6-27B-Fable-Fusion-711-Uncensored-Heretic-NM-DAU-NEO-MAX-MTP-GGUF:IQ3_M
+HERETIC_MODEL = os.getenv("HERETIC_MODEL",
+    "hf.co/DavidAU/Qwen3.6-27B-Fable-Fusion-711-Uncensored-Heretic-NM-DAU-NEO-MAX-MTP-GGUF:IQ3_M")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 CLAUDE_MODEL = os.getenv("CLAUDE_MODEL", "claude-sonnet-4-5-20250929")
@@ -362,7 +367,13 @@ You will periodically receive [HEARTBEAT] messages with your surroundings. These
 If something new or interesting appears, comment briefly (1 sentence) and optionally include an ACTION.
 If nothing noteworthy changed, respond with exactly: NOTHING""" if being_type > 0 else ""
 
-    return base_prompt + personality + "\n" + instructions + action_block + heartbeat_block
+    # Everyone reads past typos — some players are kids or fast typers. (raw=True
+    # returned early above, so simulacra personas are unaffected.)
+    spelling_note = ("\n\nThe person talking to you may type quickly, misspell words, or spell "
+                     "phonetically. Read past spelling mistakes and typos and respond to what "
+                     "they clearly MEAN. Never mock or correct their spelling.")
+
+    return base_prompt + personality + "\n" + instructions + action_block + heartbeat_block + spelling_note
 
 
 import re
@@ -919,12 +930,70 @@ async def call_provider(provider: str, messages: list[dict], model: str = None, 
             print(f"[provider] Gemma model '{gmodel}' failed ({e}), falling back to Ollama default")
             provider, model = "ollama", None
 
+    if provider == "heretic":
+        hmodel = model or HERETIC_MODEL
+        try:
+            text, in_tok, out_tok = await call_ollama(messages, hmodel)
+            return text, "heretic", hmodel, in_tok, out_tok
+        except Exception as e:
+            print(f"[provider] Heretic model '{hmodel}' failed ({e}), falling back to Ollama default")
+            provider, model = "ollama", None
+
     if provider == "ollama":
         model = model or OLLAMA_MODEL
         text, in_tok, out_tok = await call_ollama(messages, model)
         return text, "ollama", model, in_tok, out_tok
 
     raise HTTPException(status_code=400, detail=f"Unknown provider: {provider}")
+
+
+# --- VRAM management: pin/evict a bot's local model in Ollama --------------
+# Only local providers (ollama/gemma/heretic) hold a model in GPU memory; the
+# rest are remote APIs. activate_bot preloads (warm, keep_alive=-1); deactivate_bot
+# unloads (keep_alive=0) so a big model like Heretic frees the card.
+_LOCAL_PROVIDER_MODELS = {
+    "ollama": lambda: OLLAMA_MODEL,
+    "gemma": lambda: GEMMA_MODEL,
+    "heretic": lambda: HERETIC_MODEL,
+}
+
+def _local_model_for(provider: str):
+    fn = _LOCAL_PROVIDER_MODELS.get((provider or "").lower())
+    return fn() if fn else None
+
+class VramRequest(BaseModel):
+    provider: str
+
+@app.post("/preload")
+async def preload_model(req: VramRequest):
+    """Load + pin a local provider's model in VRAM (no-op for remote providers)."""
+    model = _local_model_for(req.provider)
+    if not model:
+        return {"ok": True, "loaded": False, "reason": "remote provider — no local model"}
+    try:
+        async with httpx.AsyncClient(timeout=None) as client:
+            # Empty prompt just loads the model; keep_alive=-1 keeps it resident.
+            await client.post(f"{OLLAMA_URL}/api/generate",
+                              json={"model": model, "prompt": "", "keep_alive": -1})
+        print(f"[vram] preloaded {req.provider} -> {model}")
+        return {"ok": True, "loaded": True, "model": model}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+@app.post("/unload")
+async def unload_model(req: VramRequest):
+    """Evict a local provider's model from VRAM (keep_alive=0)."""
+    model = _local_model_for(req.provider)
+    if not model:
+        return {"ok": True, "unloaded": False}
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            await client.post(f"{OLLAMA_URL}/api/generate",
+                              json={"model": model, "prompt": "", "keep_alive": 0})
+        print(f"[vram] unloaded {req.provider} -> {model}")
+        return {"ok": True, "unloaded": True, "model": model}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
 
 
 @app.get("/health")
@@ -978,7 +1047,7 @@ async def create_session(request: NewSessionRequest):
     """Create a new conversation session."""
     session_id = str(uuid.uuid4())
     provider = request.provider or DEFAULT_PROVIDER
-    model = GROK_MODEL if provider == "grok" else CLAUDE_MODEL if provider == "claude" else DEEPSEEK_MODEL if provider == "deepseek" else GEMMA_MODEL if provider == "gemma" else OLLAMA_MODEL
+    model = GROK_MODEL if provider == "grok" else CLAUDE_MODEL if provider == "claude" else DEEPSEEK_MODEL if provider == "deepseek" else GEMMA_MODEL if provider == "gemma" else HERETIC_MODEL if provider == "heretic" else OLLAMA_MODEL
 
     system_prompt = build_system_prompt(
         request.npc_name,
@@ -1056,7 +1125,7 @@ async def chat(request: ChatRequest):
     # Create session if needed
     if request.session_id is None or request.session_id not in conversations:
         session_id = str(uuid.uuid4())
-        model = GROK_MODEL if provider == "grok" else CLAUDE_MODEL if provider == "claude" else DEEPSEEK_MODEL if provider == "deepseek" else GEMMA_MODEL if provider == "gemma" else OLLAMA_MODEL
+        model = GROK_MODEL if provider == "grok" else CLAUDE_MODEL if provider == "claude" else DEEPSEEK_MODEL if provider == "deepseek" else GEMMA_MODEL if provider == "gemma" else HERETIC_MODEL if provider == "heretic" else OLLAMA_MODEL
         
         system_prompt = build_system_prompt(
             request.npc_name,
@@ -1369,7 +1438,7 @@ async def heartbeat(request: HeartbeatRequest):
         session_id = str(uuid.uuid4())
         system_prompt = build_system_prompt(request.npc_name, request.being_type,
                                             allowed_emotions=request.emotions)
-        model = GROK_MODEL if provider == "grok" else CLAUDE_MODEL if provider == "claude" else DEEPSEEK_MODEL if provider == "deepseek" else GEMMA_MODEL if provider == "gemma" else OLLAMA_MODEL
+        model = GROK_MODEL if provider == "grok" else CLAUDE_MODEL if provider == "claude" else DEEPSEEK_MODEL if provider == "deepseek" else GEMMA_MODEL if provider == "gemma" else HERETIC_MODEL if provider == "heretic" else OLLAMA_MODEL
         session = {
             "messages": [{"role": "system", "content": system_prompt}],
             "provider": provider,
