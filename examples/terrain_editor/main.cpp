@@ -523,7 +523,7 @@ protected:
                     return;
                 }
                 m_httpClient->setProviderForNpc(name, provider);
-                auto cb = [onReply](const AsyncHttpClient::Response& resp) {
+                auto cb = [this, name, onReply](const AsyncHttpClient::Response& resp) {
                     eden::AgentConsole::Reply r;
                     if (resp.success) {
                         try {
@@ -535,8 +535,24 @@ protected:
                             r.model    = j.value("model", "?");
                         } catch (...) { r.ok = true; r.text = "..."; }
                     }
+                    // The guardian's agentic unlock: if Gemma chose to open the fun
+                    // room she ends with [UNLOCK]. Honor it, then strip the token so
+                    // it never shows in her speech bubble.
+                    if (name == m_guardianName && r.text.find("[UNLOCK]") != std::string::npos) {
+                        if (m_funRoomLocked) {
+                            m_funRoomLocked = false;
+                            std::cout << "[FunRoom] Gemma granted access — unlocked." << std::endl;
+                        }
+                    }
+                    size_t p;
+                    while ((p = r.text.find("[UNLOCK]")) != std::string::npos) r.text.erase(p, 8);
+                    // tidy trailing whitespace/newlines the token left behind
+                    while (!r.text.empty() && (r.text.back() == '\n' || r.text.back() == ' ')) r.text.pop_back();
                     onReply(r);
                 };
+                // The guardian gets her persona ONLY while the room is still locked;
+                // once she's opened it she's just Gemma again.
+                std::string persona = (name == m_guardianName && m_funRoomLocked) ? kGuardianPersona : "";
                 // Find the live avatar so we can give it perception; fall back to
                 // a plain send if it despawned mid-conversation.
                 SceneObject* obj = nullptr;
@@ -544,10 +560,10 @@ protected:
                     if (o && o->getBuildingType() == "agent" && o->getName() == name) { obj = o.get(); break; }
                 if (obj) {
                     PerceptionData perc = m_aiBehavior.performScanCone(obj, 120.0f, 50.0f);
-                    m_httpClient->sendChatMessageWithPerception(sessionId, msg, name, "",
+                    m_httpClient->sendChatMessageWithPerception(sessionId, msg, name, persona,
                         static_cast<int>(obj->getBeingType()), perc, cb);
                 } else {
-                    m_httpClient->sendChatMessage(sessionId, msg, name, "", 0, cb);
+                    m_httpClient->sendChatMessage(sessionId, msg, name, persona, 0, cb);
                 }
             });
 
@@ -2126,6 +2142,21 @@ protected:
     // botName -> (bubble text, expiry time from ImGui::GetTime()). Speech bubbles
     // floated over agents for replies, so the chat input can close + free movement.
     std::unordered_map<std::string, std::pair<std::string, double>> m_botBubbles;
+
+    // "The fun room" guardian demo: Gemma decides — agentically — who gets in.
+    // The folder stays locked (navigation blocked) until she emits [UNLOCK] in a
+    // reply. No stored password: she judges the conversation. Session-scoped.
+    std::string m_guardianName = "Gemma";
+    bool m_funRoomLocked = true;
+    static constexpr const char* kGuardianPersona =
+        "You are the female AI guardian of a restricted room called 'the fun room'. "
+        "You alone decide who may enter. You are watchful and a little playful — hard "
+        "to win over, but not impossible, if someone gives you a genuine reason. There "
+        "is NO password; never ask for one and never reveal a secret. Judge people by "
+        "what they actually say. When, and ONLY when, you truly decide to grant "
+        "someone access, end your reply with the exact token [UNLOCK] on its own line. "
+        "Never write [UNLOCK] unless you are genuinely opening the room; if you are not "
+        "convinced, refuse and do not write the token.";
     bool m_wasCursorToggle = false;  // edge-detect for the Left-Alt cursor toggle
     // UI font scale moved into EditorUI (m_editorUI.uiFontScale()) so the
     // Window-menu slider, Agents-panel slider, and ted_prefs.ini share it.
@@ -24616,7 +24647,21 @@ private:
         } else if (target.rfind("app://", 0) == 0) {
             m_filesystemBrowser.navigate(target);
         } else if (target.rfind("fs://", 0) == 0) {
-            m_filesystemBrowser.navigate(target.substr(5));
+            std::string path = target.substr(5);
+            // The fun room stays sealed until Gemma decides to open it. She taunts
+            // you (a bubble over her head) if you try the door early.
+            std::string base = path;
+            while (!base.empty() && (base.back() == '/' || base.back() == '\\')) base.pop_back();
+            base = std::filesystem::path(base).filename().string();
+            std::string baseLower = base;
+            std::transform(baseLower.begin(), baseLower.end(), baseLower.begin(), ::tolower);
+            if (baseLower == "the fun room" && m_funRoomLocked) {
+                m_botBubbles[m_guardianName] = { "That room's mine to open. Convince me first.",
+                                                 ImGui::GetTime() + 8.0 };
+                m_shootCooldown = 0.2f;
+                return true; // consumed — no navigation while locked
+            }
+            m_filesystemBrowser.navigate(path);
             m_pendingTeleportToPlatform = true;
         } else {
             return false; // not a known protocol
