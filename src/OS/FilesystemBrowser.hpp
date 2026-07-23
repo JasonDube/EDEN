@@ -235,6 +235,11 @@ private:
     void spawnAgentAvatar(const glm::vec3& pos, const std::string& modelPath,
                           const std::string& territory);
 
+    // A physical server rack (buildingType "ai_server") whose switch/light the
+    // host drives from ServerManager. serverIndex is the ServerManager slot it
+    // controls (0=Ollama, 1=AI Backend), stored on targetLevel "server://N".
+    void spawnServerRack(const glm::vec3& pos, const std::string& name, int serverIndex);
+
     ModelRenderer* m_modelRenderer = nullptr;
     std::vector<std::unique_ptr<SceneObject>>* m_sceneObjects = nullptr;
     Terrain* m_terrain = nullptr;

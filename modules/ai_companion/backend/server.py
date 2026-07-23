@@ -56,6 +56,11 @@ XAI_API_KEY = os.getenv("XAI_API_KEY", "")
 GROK_MODEL = os.getenv("GROK_MODEL", "grok-2-latest")
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen3.5:9b")
+# The "Gemma" agent's brain — a local GGUF served by Ollama. Pull it with:
+#   ollama pull hf.co/yuxinlu1/gemma-4-12B-agentic-fable5-composer2.5-v2-3.5x-tau2-GGUF:Q4_K_M
+# Override GEMMA_MODEL in .env to a shorter name (e.g. after `ollama cp`).
+GEMMA_MODEL = os.getenv("GEMMA_MODEL",
+    "hf.co/yuxinlu1/gemma-4-12B-agentic-fable5-composer2.5-v2-3.5x-tau2-GGUF:Q4_K_M")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 CLAUDE_MODEL = os.getenv("CLAUDE_MODEL", "claude-sonnet-4-5-20250929")
@@ -363,8 +368,25 @@ If nothing noteworthy changed, respond with exactly: NOTHING""" if being_type > 
 import re
 
 def strip_think_tags(text: str) -> str:
-    """Remove <think>...</think> blocks from reasoning models (e.g. qwen3.5)."""
-    return re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL).strip()
+    """Strip a reasoning model's hidden thinking so only the final answer remains.
+
+    Handles two formats:
+      - <think>...</think> blocks (qwen3.5)
+      - harmony/channel style (the Gemma-4 agentic fine-tune), which wraps a
+        hidden "thought" channel before the answer, e.g.
+        "<|channel>thought\n<channel|>the real answer". We keep the text after
+        the LAST channel delimiter (the final channel = the answer), then scrub
+        any stray channel/harmony tokens.
+    """
+    text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL)
+    if '<|channel' in text or '<channel|' in text or '<|message' in text:
+        # Everything after the final channel delimiter is the answer.
+        text = re.split(r'<\|?channel\|?>', text)[-1]
+        # Drop a leading channel-role word (thought/final/analysis/answer).
+        text = re.sub(r'^\s*(thought|final|analysis|answer)\b\s*', '', text, flags=re.IGNORECASE)
+    # Scrub any residual harmony tokens regardless of format.
+    text = re.sub(r'<\|?/?(channel|message|end|start|assistant|return)\|?>', '', text)
+    return text.strip()
 
 
 VALID_EMOTIONS = {"neutral", "happy", "sad", "angry", "surprised", "curious",
@@ -885,6 +907,18 @@ async def call_provider(provider: str, messages: list[dict], model: str = None, 
             print(f"[provider] BitNet failed ({e}), falling back to Ollama")
             provider, model = "ollama", None
 
+    if provider == "gemma":
+        # Local GGUF served by Ollama, but reported as its own provider so the
+        # stamp reads "gemma". Falls back to the default Ollama model if the
+        # Gemma model isn't pulled yet.
+        gmodel = model or GEMMA_MODEL
+        try:
+            text, in_tok, out_tok = await call_ollama(messages, gmodel)
+            return text, "gemma", gmodel, in_tok, out_tok
+        except Exception as e:
+            print(f"[provider] Gemma model '{gmodel}' failed ({e}), falling back to Ollama default")
+            provider, model = "ollama", None
+
     if provider == "ollama":
         model = model or OLLAMA_MODEL
         text, in_tok, out_tok = await call_ollama(messages, model)
@@ -944,7 +978,7 @@ async def create_session(request: NewSessionRequest):
     """Create a new conversation session."""
     session_id = str(uuid.uuid4())
     provider = request.provider or DEFAULT_PROVIDER
-    model = GROK_MODEL if provider == "grok" else CLAUDE_MODEL if provider == "claude" else DEEPSEEK_MODEL if provider == "deepseek" else OLLAMA_MODEL
+    model = GROK_MODEL if provider == "grok" else CLAUDE_MODEL if provider == "claude" else DEEPSEEK_MODEL if provider == "deepseek" else GEMMA_MODEL if provider == "gemma" else OLLAMA_MODEL
 
     system_prompt = build_system_prompt(
         request.npc_name,
@@ -1022,7 +1056,7 @@ async def chat(request: ChatRequest):
     # Create session if needed
     if request.session_id is None or request.session_id not in conversations:
         session_id = str(uuid.uuid4())
-        model = GROK_MODEL if provider == "grok" else CLAUDE_MODEL if provider == "claude" else DEEPSEEK_MODEL if provider == "deepseek" else OLLAMA_MODEL
+        model = GROK_MODEL if provider == "grok" else CLAUDE_MODEL if provider == "claude" else DEEPSEEK_MODEL if provider == "deepseek" else GEMMA_MODEL if provider == "gemma" else OLLAMA_MODEL
         
         system_prompt = build_system_prompt(
             request.npc_name,
@@ -1335,7 +1369,7 @@ async def heartbeat(request: HeartbeatRequest):
         session_id = str(uuid.uuid4())
         system_prompt = build_system_prompt(request.npc_name, request.being_type,
                                             allowed_emotions=request.emotions)
-        model = GROK_MODEL if provider == "grok" else CLAUDE_MODEL if provider == "claude" else DEEPSEEK_MODEL if provider == "deepseek" else OLLAMA_MODEL
+        model = GROK_MODEL if provider == "grok" else CLAUDE_MODEL if provider == "claude" else DEEPSEEK_MODEL if provider == "deepseek" else GEMMA_MODEL if provider == "gemma" else OLLAMA_MODEL
         session = {
             "messages": [{"role": "system", "content": system_prompt}],
             "provider": provider,

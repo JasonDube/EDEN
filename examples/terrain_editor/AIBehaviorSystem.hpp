@@ -203,6 +203,11 @@ public:
                 && bt != eden::BeingType::EVE && bt != eden::BeingType::ROBOT)
                 continue;
 
+            // EDEN OS agent robots own their facing in HEIDIC (the `agent`
+            // @entity script), which only faces you when the backend is online —
+            // making a still robot a "servers down" tell. Don't let C++ fight it.
+            if (obj->getBuildingType() == "agent") continue;
+
             // Skip if NPC is doing a motor action
             if (m_aiActionActive && m_host.getCurrentInteractObject() == obj.get()) continue;
 

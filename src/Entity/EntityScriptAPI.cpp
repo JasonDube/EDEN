@@ -32,6 +32,13 @@ void setScriptGroundHeightHook(std::function<float(float, float)> hook) {
 }
 void setScriptPlayerPosition(float x, float y, float z) { s_playerPos = {x, y, z}; }
 
+// Whether the shared bot server (AI Backend) is actually up. The host refreshes
+// this each frame; agent_online() ANDs it with the per-bot switch so a robot
+// only "comes alive" once its server is genuinely ready, not the instant you
+// flip it on (there's a boot delay). One server powers all bots.
+static bool s_backendOnline = false;
+void setScriptBackendOnline(bool online) { s_backendOnline = online; }
+
 // Player input, refreshed by the host each play-mode frame.
 static struct { float moveX, moveZ, jump, run, mouseDx, mouseDy; } s_input{};
 void setScriptInput(float mx, float mz, float j, float r, float dx, float dy) {
@@ -80,6 +87,17 @@ void self_play_anim(const char* name) {
     auto* o = eden::currentScriptObject();
     // The host-installed hook owns renderer access and already-playing dedup.
     if (o && eden::s_playAnimHook) eden::s_playAnimHook(*o, name);
+}
+
+// --- Agent/world state verbs ---
+
+// 1.0 when THIS agent is switched on AND its server is actually up, else 0.0.
+// The tick wrapper sets the current script object before each call, so this
+// reads the bound robot's own switch (activate_bot) and ANDs it with the shared
+// server status. A robot that isn't facing you is either off or still booting.
+float agent_online() {
+    auto* o = eden::currentScriptObject();
+    return (eden::s_backendOnline && o && o->isAiActivated()) ? 1.0f : 0.0f;
 }
 
 // --- Player-relative verbs (horizontal XZ plane, feet) ---

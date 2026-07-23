@@ -2450,8 +2450,97 @@ static int32_t groveServerList(const GroveValue*, uint32_t, GroveValue* result, 
 }
 
 
+// ─── EDEN OS agent activation ───
+// Real-time commands that players (via the agent CLI) AND robots (via their own
+// grove scripts) can call to switch deployed agent bots on/off. Agents start
+// OFF; an activated bot turns to face you (HEIDIC agent_online()) and accepts
+// chat. Per-bot verbs take a name; the *_all verbs hit every deployed agent.
+static int groveSetAgentsActivated(GroveContext* ctx, const std::string& name, bool on) {
+    int n = 0;
+    for (auto& obj : *ctx->sceneObjects) {
+        if (!obj || obj->getBuildingType() != "agent") continue;
+        if (!name.empty() && obj->getName() != name) continue;
+        obj->setAiActivated(on);
+        n++;
+    }
+    return n;
+}
+
+// One shared server (the AI Backend :8080, which pulls Ollama up as a
+// dependency) powers ALL bots, so reference-count: start it the moment ANY bot
+// is switched on, stop it only when the LAST bot goes off. Called after every
+// activate/deactivate. (Claude/Grok/DeepSeek are remote APIs riding this same
+// backend — there's no separate per-bot server to toggle.)
+static void groveSyncBotServer(GroveContext* ctx) {
+    if (!ctx->serverManager) return;
+    bool anyOn = false;
+    for (auto& obj : *ctx->sceneObjects)
+        if (obj && obj->getBuildingType() == "agent" && obj->isAiActivated()) { anyOn = true; break; }
+    bool running = ctx->serverManager->isServerRunning(ServerManager::IDX_BACKEND);
+    if (anyOn && !running) {
+        ctx->serverManager->start(ServerManager::IDX_BACKEND);
+        if (ctx->groveOutputAccum) ctx->groveOutputAccum->append(" — starting server…");
+    } else if (!anyOn && running) {
+        ctx->serverManager->stop(ServerManager::IDX_BACKEND);
+        if (ctx->groveOutputAccum) ctx->groveOutputAccum->append(" — last bot off, stopping server");
+    }
+}
+static std::string groveAgentArgName(const GroveValue* args, uint32_t argc) {
+    if (argc >= 1 && args[0].tag == GROVE_STRING) {
+        auto& sv = args[0].data.string_val;
+        if (sv.ptr && sv.len > 0) return std::string(sv.ptr, sv.len);
+    }
+    return "";
+}
+// activate_bot(name) — bring one named agent online.
+static int32_t groveActivateBot(const GroveValue* args, uint32_t argc, GroveValue* result, void* ud) {
+    auto* ctx = static_cast<GroveContext*>(ud);
+    std::string name = groveAgentArgName(args, argc);
+    int n = groveSetAgentsActivated(ctx, name, true);
+    if (ctx->groveOutputAccum)
+        ctx->groveOutputAccum->append(n ? (name + " activated") : ("no agent named '" + name + "'"));
+    if (n) groveSyncBotServer(ctx);
+    result->tag = GROVE_BOOL; result->data.bool_val = n > 0 ? 1 : 0;
+    return 0;
+}
+// deactivate_bot(name) — switch one named agent off.
+static int32_t groveDeactivateBot(const GroveValue* args, uint32_t argc, GroveValue* result, void* ud) {
+    auto* ctx = static_cast<GroveContext*>(ud);
+    std::string name = groveAgentArgName(args, argc);
+    int n = groveSetAgentsActivated(ctx, name, false);
+    if (ctx->groveOutputAccum)
+        ctx->groveOutputAccum->append(n ? (name + " deactivated") : ("no agent named '" + name + "'"));
+    if (n) groveSyncBotServer(ctx);
+    result->tag = GROVE_BOOL; result->data.bool_val = n > 0 ? 1 : 0;
+    return 0;
+}
+// activate_all_bots() — bring every deployed agent online.
+static int32_t groveActivateAllBots(const GroveValue* args, uint32_t argc, GroveValue* result, void* ud) {
+    auto* ctx = static_cast<GroveContext*>(ud);
+    int n = groveSetAgentsActivated(ctx, "", true);
+    if (ctx->groveOutputAccum)
+        ctx->groveOutputAccum->append("activated " + std::to_string(n) + " bot(s)");
+    groveSyncBotServer(ctx);
+    result->tag = GROVE_BOOL; result->data.bool_val = n > 0 ? 1 : 0;
+    return 0;
+}
+// deactivate_all_bots() — switch every deployed agent off.
+static int32_t groveDeactivateAllBots(const GroveValue* args, uint32_t argc, GroveValue* result, void* ud) {
+    auto* ctx = static_cast<GroveContext*>(ud);
+    int n = groveSetAgentsActivated(ctx, "", false);
+    if (ctx->groveOutputAccum)
+        ctx->groveOutputAccum->append("deactivated " + std::to_string(n) + " bot(s)");
+    groveSyncBotServer(ctx);
+    result->tag = GROVE_BOOL; result->data.bool_val = n > 0 ? 1 : 0;
+    return 0;
+}
+
 void registerGroveHostFunctions(GroveVm* vm, GroveContext* ctx) {
     grove_register_fn(vm, "log", groveLogFn, ctx->groveOutputAccum);
+    grove_register_fn(vm, "activate_bot", groveActivateBot, ctx);
+    grove_register_fn(vm, "deactivate_bot", groveDeactivateBot, ctx);
+    grove_register_fn(vm, "activate_all_bots", groveActivateAllBots, ctx);
+    grove_register_fn(vm, "deactivate_all_bots", groveDeactivateAllBots, ctx);
     grove_register_fn(vm, "terrain_height", groveTerrainHeightFn, ctx);
     grove_register_fn(vm, "sin", groveSinFn, ctx);
     grove_register_fn(vm, "cos", groveCosFn, ctx);

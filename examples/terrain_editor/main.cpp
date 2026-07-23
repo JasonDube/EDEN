@@ -54,6 +54,7 @@
 
 // OS / Filesystem
 #include "OS/FilesystemBrowser.hpp"
+#include "OS/AgentConsole.hpp"
 
 #include <eden/Window.hpp>
 #include <eden/Camera.hpp>
@@ -502,6 +503,90 @@ protected:
 
         stampStartup("AI backend client started (async)");
 
+        // Wire the EDEN OS agent CLI to the backend. This is the ONLY chat glue
+        // the god file owns now — the console UI/transcript live in AgentConsole.
+        // Mirrors the old sendAgentPanelMessage: route to the agent's own model,
+        // attach perception (the robot's field of view) so it can reference what
+        // it sees, then hand the parsed reply back to the console.
+        m_agentConsole.setSendFn(
+            [this](const std::string& name, const std::string& provider,
+                   const std::string& sessionId, const std::string& msg,
+                   eden::AgentConsole::ReplyCb onReply) {
+                if (!m_httpClient || !m_httpClient->isConnected()) {
+                    // Switched on but the shared server isn't answering yet —
+                    // activate_bot kicks it off, but boot takes a few seconds.
+                    eden::AgentConsole::Reply r;
+                    r.ok = true;
+                    r.text = "[server starting] the bot server isn't up yet — give it a few seconds, then try again.";
+                    r.provider = "none"; r.model = "offline";
+                    onReply(r);
+                    return;
+                }
+                m_httpClient->setProviderForNpc(name, provider);
+                auto cb = [onReply](const AsyncHttpClient::Response& resp) {
+                    eden::AgentConsole::Reply r;
+                    if (resp.success) {
+                        try {
+                            auto j = nlohmann::json::parse(resp.body);
+                            r.ok = true;
+                            if (j.contains("session_id")) r.sessionId = j["session_id"].get<std::string>();
+                            r.text     = j.value("response", "...");
+                            r.provider = j.value("provider", "?");
+                            r.model    = j.value("model", "?");
+                        } catch (...) { r.ok = true; r.text = "..."; }
+                    }
+                    onReply(r);
+                };
+                // Find the live avatar so we can give it perception; fall back to
+                // a plain send if it despawned mid-conversation.
+                SceneObject* obj = nullptr;
+                for (const auto& o : m_sceneObjects)
+                    if (o && o->getBuildingType() == "agent" && o->getName() == name) { obj = o.get(); break; }
+                if (obj) {
+                    PerceptionData perc = m_aiBehavior.performScanCone(obj, 120.0f, 50.0f);
+                    m_httpClient->sendChatMessageWithPerception(sessionId, msg, name, "",
+                        static_cast<int>(obj->getBeingType()), perc, cb);
+                } else {
+                    m_httpClient->sendChatMessage(sessionId, msg, name, "", 0, cb);
+                }
+            });
+
+        // Is the named agent switched on? (gates chat + the CLI status line)
+        m_agentConsole.setIsActiveFn([this](const std::string& name) -> bool {
+            for (const auto& o : m_sceneObjects)
+                if (o && o->getBuildingType() == "agent" && o->getName() == name)
+                    return o->isAiActivated();
+            return false;
+        });
+
+        // Real-time CLI commands → routed through Grove so players (this CLI) and
+        // robots (their own grove scripts) share one command vocabulary. Per-bot
+        // verbs target the SELECTED bot by name; *_all verbs hit everyone.
+        m_agentConsole.setCommandFn(
+            [this](const std::string& selected, const std::string& input, std::string& out) -> bool {
+                // First whitespace-delimited token is the verb.
+                std::string verb = input.substr(0, input.find_first_of(" \t"));
+                bool perBot = (verb == "activate_bot" || verb == "deactivate_bot");
+                bool allBot = (verb == "activate_all_bots" || verb == "deactivate_all_bots");
+                if (!perBot && !allBot) return false;   // not a command → treat as chat
+                if (!m_groveVm) { out = "(grove unavailable)"; return true; }
+                // Build the grove call; quote the selected bot's name for per-bot verbs.
+                std::string src = perBot ? (verb + "(\"" + selected + "\")") : (verb + "()");
+                m_groveOutputAccum.clear();
+                int32_t rc = grove_eval(m_groveVm, src.c_str());
+                out = !m_groveOutputAccum.empty() ? m_groveOutputAccum
+                    : (rc == 0 ? std::string("ok") : std::string("command failed"));
+                return true;
+            });
+
+        // Reply/thinking display: float the text as a speech bubble over the bot
+        // (so the chat input can close and the player can move). "…" persists
+        // while thinking; a real reply lingers ~14s.
+        m_agentConsole.setBubbleFn([this](const std::string& name, const std::string& text) {
+            double ttl = (text == "...") ? 40.0 : 14.0;   // thinking lingers; reply ~14s
+            m_botBubbles[name] = { text, ImGui::GetTime() + ttl };
+        });
+
         // Initialize MCP Server
         initMCPServer();
         stampStartup("MCP server");
@@ -548,18 +633,33 @@ protected:
         if (m_bootEdenOS) {
             std::cout << "[EDEN] --eden-os: EDEN OS silo will build on first frame" << std::endl;
         } else {
-            // Auto-load default level on startup
+            // Auto-load on startup. The default is a LIGHTWEIGHT worktable (near-
+            // instant) unless the user has explicitly pinned a specific level via
+            // File → Set as Default (which writes ~/.eden/default_project.txt).
+            // Heavy levels (e.g. red_planet, ~7s to load) are opened on demand via
+            // File → Load — we don't pay that cost on every launch anymore.
             const char* home = getenv("HOME");
-            if (home) {
-                std::string defaultLevel = getDefaultLevelPath();
-                if (std::filesystem::exists(defaultLevel)) {
-                    stampStartup("init done — starting default-level load (chunks next)");
-                    std::cout << "[EDEN] Auto-loading default level: " << defaultLevel << std::endl;
-                    loadLevel(defaultLevel);
-                    preloadAdjacentLevels();
-                    m_bootLevelLoaded = true;   // loadLevel already preloaded chunks; skip the onBeforeMainLoop duplicate
-                    stampStartup("default level + adjacent loaded");
-                }
+            std::string defaultLevel = home ? getDefaultLevelPath() : "";
+            bool haveHeavyDefault = !defaultLevel.empty() && std::filesystem::exists(defaultLevel);
+
+            // Startup screen: present the splash NOW so the window shows it during
+            // the (otherwise silent, black) load that follows. The last-presented
+            // frame stays on screen while the thread blocks in the load below.
+            renderLoadingScreen();
+
+            if (haveHeavyDefault) {
+                stampStartup("init done — starting default-level load (chunks next)");
+                std::cout << "[EDEN] Auto-loading default level: " << defaultLevel << std::endl;
+                loadLevel(defaultLevel);
+                preloadAdjacentLevels();
+                m_bootLevelLoaded = true;   // loadLevel already preloaded chunks; skip the onBeforeMainLoop duplicate
+                stampStartup("default level + adjacent loaded");
+            } else {
+                stampStartup("init done — booting lightweight worktable");
+                std::cout << "[EDEN] Booting lightweight worktable (fast). Open a level via File → Load." << std::endl;
+                newFoundationLevel();       // single-chunk empty workspace — near-instant
+                m_bootLevelLoaded = true;   // skip the onBeforeMainLoop 1024-chunk default preload
+                stampStartup("worktable ready");
             }
         }
         stampStartup("onInit complete");
@@ -1802,6 +1902,13 @@ protected:
 
             glm::vec3 p = m_camera.getPosition();          // the player (self_*_player verbs)
             eden::setScriptPlayerPosition(p.x, p.y, p.z);
+            // Shared bot-server status: a bot comes alive (agent_online) only when
+            // switched on AND the backend it rides is actually up.
+            eden::setScriptBackendOnline(m_httpClient && m_httpClient->isConnected());
+
+            // EDEN OS: agents spawn on navigation (after boot), so bind their
+            // HEIDIC `agent` script lazily once they appear + are compiled.
+            if (m_isEdenOSLevel) ensureEdenOSAgentsBound();
 
             for (auto& obj : m_sceneObjects) {
                 if (obj && obj->hasTickScript()) obj->runTickScript(deltaTime);
@@ -2009,198 +2116,22 @@ protected:
         updateEditorMode(deltaTime);
     }
 
-    // ── Multi-agent chat panels (EDEN OS) ───────────────────────────────────
-    // One always-open chat window per deployed Agent avatar, stacked down the
-    // right edge, each with an on/off toggle and its own session. Talk to any of
-    // the four without the open/close dance. Free the cursor (hold Left-Alt) to
-    // type. Provider routing is per-panel (already registered by name).
-    struct AgentPanel {
-        struct Msg { std::string sender; std::string text; bool isPlayer; };
-        std::string name;
-        std::string provider;
-        std::string sessionId;
-        std::vector<Msg> history;
-        char input[512] = {0};
-        bool active = true;
-        bool waiting = false;
-        bool scrollToBottom = false;
-        int beingType = 0;
-        SceneObject* obj = nullptr; // re-resolved each frame; may be null if despawned
-    };
-    std::vector<AgentPanel> m_agentPanels;
-    int m_activeAgentTab = 0;        // which agent tab is showing in the single chat panel
+    // ── Agent chat (EDEN OS) ────────────────────────────────────────────────
+    // Click a robot to select it; a transparent CLI opens bottom-left. All the
+    // UI + transcript live in eden::AgentConsole (src/OS/AgentConsole.hpp) —
+    // OUT of this god file. The host only wires its send callback (in onInit)
+    // and calls select()/render(). See renderAgentNameTags() for the floating
+    // labels that tell the four robots apart.
+    eden::AgentConsole m_agentConsole;
+    // botName -> (bubble text, expiry time from ImGui::GetTime()). Speech bubbles
+    // floated over agents for replies, so the chat input can close + free movement.
+    std::unordered_map<std::string, std::pair<std::string, double>> m_botBubbles;
     bool m_wasCursorToggle = false;  // edge-detect for the Left-Alt cursor toggle
     // UI font scale moved into EditorUI (m_editorUI.uiFontScale()) so the
     // Window-menu slider, Agents-panel slider, and ted_prefs.ini share it.
     std::string m_uiPrefsPath;           // ~/.eden/ted_prefs.ini ("" = don't persist)
     std::string m_uiPrefsLastSnapshot;   // change detection for autosave
 
-    // Rebuild the panel list from the live agent avatars, preserving each panel's
-    // history/session by name. Removes panels whose agent has despawned.
-    void syncAgentPanels() {
-        // Drop panels whose agent no longer exists.
-        m_agentPanels.erase(std::remove_if(m_agentPanels.begin(), m_agentPanels.end(),
-            [this](const AgentPanel& p) {
-                for (const auto& o : m_sceneObjects)
-                    if (o && o->getBuildingType() == "agent" && o->getName() == p.name) return false;
-                return true;
-            }), m_agentPanels.end());
-        // Add/refresh a panel for each live agent.
-        for (const auto& o : m_sceneObjects) {
-            if (!o || o->getBuildingType() != "agent") continue;
-            AgentPanel* found = nullptr;
-            for (auto& p : m_agentPanels) if (p.name == o->getName()) { found = &p; break; }
-            if (!found) {
-                AgentPanel p;
-                p.name = o->getName();
-                m_agentPanels.push_back(std::move(p));
-                found = &m_agentPanels.back();
-            }
-            found->obj = o.get();
-            found->provider = o->getAiProvider();
-            found->beingType = static_cast<int>(o->getBeingType());
-        }
-    }
-
-    void sendAgentPanelMessage(AgentPanel& p) {
-        if (!m_httpClient || p.input[0] == '\0') return;
-        std::string msg = p.input;
-        p.input[0] = '\0';
-        p.history.push_back({p.name, msg, true});
-        p.waiting = true;
-        p.scrollToBottom = true;
-        m_httpClient->setProviderForNpc(p.name, p.provider); // ensure this panel's model
-
-        std::string name = p.name; // callback finds the panel by name (vector may realloc)
-        auto cb = [this, name](const AsyncHttpClient::Response& resp) {
-            AgentPanel* pp = nullptr;
-            for (auto& q : m_agentPanels) if (q.name == name) { pp = &q; break; }
-            if (!pp) return;
-            pp->waiting = false;
-            if (resp.success) {
-                try {
-                    auto j = nlohmann::json::parse(resp.body);
-                    if (j.contains("session_id")) pp->sessionId = j["session_id"].get<std::string>();
-                    std::string response = j.value("response", "...");
-                    std::string provider = j.value("provider", "?");
-                    std::string model = j.value("model", "?");
-                    pp->history.push_back({name, response + "  [" + provider + " / " + model + "]", false});
-                } catch (...) {
-                    pp->history.push_back({name, "...", false});
-                }
-            } else {
-                pp->history.push_back({name, "(no response)", false});
-            }
-            pp->scrollToBottom = true;
-        };
-
-        if (p.obj) {
-            PerceptionData perc = m_aiBehavior.performScanCone(p.obj, 120.0f, 50.0f);
-            m_httpClient->sendChatMessageWithPerception(p.sessionId, msg, p.name, "", p.beingType, perc, cb);
-        } else {
-            m_httpClient->sendChatMessage(p.sessionId, msg, p.name, "", p.beingType, cb);
-        }
-    }
-
-    static ImVec4 providerColor(const std::string& prov) {
-        return prov == "claude"   ? ImVec4(0.91f, 0.56f, 0.29f, 1.0f)
-             : prov == "grok"     ? ImVec4(0.35f, 0.66f, 0.92f, 1.0f)
-             : prov == "deepseek" ? ImVec4(0.59f, 0.46f, 0.88f, 1.0f)
-             : prov == "ollama"   ? ImVec4(0.41f, 0.79f, 0.51f, 1.0f)
-                                  : ImVec4(0.80f, 0.80f, 0.80f, 1.0f);
-    }
-
-    // ONE chat panel on the right; a left gutter of provider-colored tabs picks
-    // which agent you're talking to (like the slag_legion comm panel).
-    void renderAgentPanels() {
-        if (!m_isEdenOSLevel) return;
-        syncAgentPanels();
-        if (m_agentPanels.empty()) return;
-        if (m_activeAgentTab >= static_cast<int>(m_agentPanels.size())) m_activeAgentTab = 0;
-        if (m_activeAgentTab < 0) m_activeAgentTab = 0;
-
-        float W = static_cast<float>(getWindow().getWidth());
-        float H = static_cast<float>(getWindow().getHeight());
-        const float pw = 400.0f, ph = 480.0f, pad = 12.0f;
-        ImGui::SetNextWindowPos(ImVec2(W - pw - pad, (H - ph) * 0.5f), ImGuiCond_FirstUseEver);
-        ImGui::SetNextWindowSize(ImVec2(pw, ph), ImGuiCond_FirstUseEver);
-        if (ImGui::Begin("Agents###agentspanel", nullptr, ImGuiWindowFlags_NoSavedSettings)) {
-            float footerH = ImGui::GetFrameHeightWithSpacing();
-            float bodyH = ImGui::GetContentRegionAvail().y - footerH;
-            if (bodyH < 60.0f) bodyH = 60.0f;
-            // Left tab gutter — a single provider-colored initial per agent
-            // (C/G/D/Q); hover for the full name.
-            ImGui::BeginChild("##agenttabs", ImVec2(30.0f, bodyH), true);
-            for (size_t i = 0; i < m_agentPanels.size(); ++i) {
-                auto& p = m_agentPanels[i];
-                ImVec4 col = providerColor(p.provider);
-                if (!p.active) col = ImVec4(col.x * 0.5f, col.y * 0.5f, col.z * 0.5f, 1.0f);
-                ImGui::PushStyleColor(ImGuiCol_Text, col);
-                char letter = p.name.empty() ? '?' : p.name[0];
-                if (letter >= 'a' && letter <= 'z') letter -= 32; // uppercase
-                std::string lbl = std::string(1, letter) + "##tab" + std::to_string(i);
-                if (ImGui::Selectable(lbl.c_str(), static_cast<int>(i) == m_activeAgentTab))
-                    m_activeAgentTab = static_cast<int>(i);
-                ImGui::PopStyleColor();
-                if (ImGui::IsItemHovered())
-                    ImGui::SetTooltip("%s%s", p.name.c_str(), p.active ? "" : " (off)");
-            }
-            ImGui::EndChild();
-            ImGui::SameLine();
-
-            // Right — the selected agent's chat.
-            ImGui::BeginChild("##agentchat", ImVec2(0, bodyH), false);
-            auto& p = m_agentPanels[m_activeAgentTab];
-            ImVec4 col = providerColor(p.provider);
-            ImGui::TextColored(col, "%s", p.name.c_str());
-            ImGui::SameLine();
-            ImGui::TextDisabled("[%s]", p.provider.empty() ? "default" : p.provider.c_str());
-            ImGui::SameLine(ImGui::GetContentRegionAvail().x - 44.0f);
-            ImGui::Checkbox("On##active", &p.active);
-            ImGui::Separator();
-
-            if (p.active) {
-                float inputH = ImGui::GetFrameHeightWithSpacing();
-                float histH = ImGui::GetContentRegionAvail().y - inputH;
-                if (histH < 30.0f) histH = 30.0f;
-                ImGui::BeginChild("##hist", ImVec2(0, histH), true);
-                for (const auto& m : p.history) {
-                    if (m.isPlayer) {
-                        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.6f, 0.9f, 0.6f, 1.0f));
-                        ImGui::TextWrapped("[You]: %s", m.text.c_str());
-                    } else {
-                        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.55f, 0.82f, 1.0f, 1.0f));
-                        ImGui::TextWrapped("[%s]: %s", m.sender.c_str(), m.text.c_str());
-                    }
-                    ImGui::PopStyleColor();
-                    ImGui::Spacing();
-                }
-                if (p.waiting) ImGui::TextDisabled("thinking...");
-                if (p.scrollToBottom) { ImGui::SetScrollHereY(1.0f); p.scrollToBottom = false; }
-                ImGui::EndChild();
-
-                ImGui::SetNextItemWidth(-52.0f);
-                bool enter = ImGui::InputText("##in_active", p.input, sizeof(p.input),
-                                              ImGuiInputTextFlags_EnterReturnsTrue);
-                ImGui::SameLine();
-                bool send = ImGui::Button("Send##active");
-                if (enter || send) sendAgentPanelMessage(p);
-            } else {
-                ImGui::TextDisabled("(this agent is off)");
-            }
-            ImGui::EndChild();
-
-            // Footer: adjustable UI font size (fixes oversized text after a DPI/desktop change).
-            // Same typeable+stepper control as Window menu; shares the persisted value.
-            ImGui::SetNextItemWidth(160.0f);
-            float fs = m_editorUI.uiFontScale();
-            if (ImGui::InputFloat("UI font", &fs, 0.05f, 0.10f, "%.2f",
-                                  ImGuiInputTextFlags_EnterReturnsTrue)) {
-                m_editorUI.uiFontScale() = std::max(0.5f, std::min(2.5f, fs));
-            }
-        }
-        ImGui::End();
-    }
 
     // Target reticle at the aim/cursor point: screen center while flying (mouse
     // captured), or the live mouse position when the cursor is freed (Left-Alt).
@@ -2259,6 +2190,7 @@ protected:
             ImU32 col = prov == "claude"   ? IM_COL32(233, 143, 74, 255)
                       : prov == "grok"     ? IM_COL32(90, 168, 235, 255)
                       : prov == "deepseek" ? IM_COL32(150, 118, 224, 255)
+                      : prov == "gemma"    ? IM_COL32(226, 110, 180, 255)
                       : prov == "ollama"   ? IM_COL32(104, 202, 130, 255)
                                            : IM_COL32(220, 220, 220, 255);
             const std::string& label = o->getName();
@@ -2270,6 +2202,140 @@ protected:
             dl->AddRectFilled(p0, p1, IM_COL32(0, 0, 0, 175), 4.0f);
             dl->AddRect(p0, p1, col, 4.0f);
             dl->AddText(ImVec2(sx - ts.x * 0.5f, sy - ts.y * 0.5f), col, label.c_str());
+        }
+    }
+
+    // Parse the ServerManager slot a server-rack object controls from its
+    // targetLevel ("server://N"). Returns -1 if it isn't a tagged server.
+    int serverIndexOf(const SceneObject* o) const {
+        const std::string& t = o->getTargetLevel();
+        const std::string pfx = "server://";
+        if (t.rfind(pfx, 0) != 0) return -1;
+        try { return std::stoi(t.substr(pfx.size())); } catch (...) { return -1; }
+    }
+
+    // Floating status light + label over each server rack: green=running,
+    // amber=starting, red=stopped, bright-red=error. This is the "switch panel"
+    // readout — click the rack (handled in updatePlayMode) to toggle it.
+    void renderServerStatus() {
+        if (!m_isEdenOSLevel) return;
+        float w = static_cast<float>(getWindow().getWidth());
+        float h = static_cast<float>(getWindow().getHeight());
+        if (w <= 0.0f || h <= 0.0f) return;
+        glm::mat4 vp = m_camera.getProjectionMatrix(w / h, 0.1f, 5000.0f) * m_camera.getViewMatrix();
+        auto* dl = ImGui::GetForegroundDrawList();
+        const auto& servers = m_serverManager.servers();
+        for (const auto& o : m_sceneObjects) {
+            if (!o || o->getBuildingType() != "ai_server") continue;
+            int idx = serverIndexOf(o.get());
+            if (idx < 0 || idx >= static_cast<int>(servers.size())) continue;
+            auto st = servers[idx].status;
+            ImU32 lightCol = st == ServerEntry::Running  ? IM_COL32( 70, 220,  90, 255)
+                           : st == ServerEntry::Starting ? IM_COL32(240, 190,  60, 255)
+                           : st == ServerEntry::Error    ? IM_COL32(240,  70,  60, 255)
+                                                         : IM_COL32(150,  55,  55, 255); // stopped (dim red)
+            const char* word = st == ServerEntry::Running  ? "RUNNING"
+                             : st == ServerEntry::Starting ? "STARTING"
+                             : st == ServerEntry::Error    ? "ERROR" : "STOPPED";
+
+            glm::vec3 pos = const_cast<SceneObject*>(o.get())->getTransform().getPosition();
+            glm::vec4 clip = vp * glm::vec4(pos.x, pos.y + 5.0f, pos.z, 1.0f); // above the rack
+            if (clip.w <= 0.0f) continue;
+            glm::vec3 ndc = glm::vec3(clip) / clip.w;
+            if (ndc.z < -1.0f || ndc.z > 1.0f) continue;
+            float sx = (ndc.x + 1.0f) * 0.5f * w;
+            float sy = (1.0f - ndc.y) * 0.5f * h;
+
+            std::string label = o->getName() + "  [" + word + "]";
+            ImVec2 ts = ImGui::CalcTextSize(label.c_str());
+            float padX = 8.0f, padY = 4.0f, dotR = 5.0f, dotGap = 10.0f;
+            float boxW = ts.x + padX * 2.0f + dotR * 2.0f + dotGap;
+            ImVec2 p0(sx - boxW * 0.5f, sy - ts.y * 0.5f - padY);
+            ImVec2 p1(sx + boxW * 0.5f, sy + ts.y * 0.5f + padY);
+            dl->AddRectFilled(p0, p1, IM_COL32(0, 0, 0, 190), 4.0f);
+            dl->AddRect(p0, p1, lightCol, 4.0f);
+            // Status light, then the label to its right.
+            float lx = p0.x + padX + dotR;
+            float ly = (p0.y + p1.y) * 0.5f;
+            dl->AddCircleFilled(ImVec2(lx, ly), dotR, lightCol, 16);
+            if (st == ServerEntry::Running) // subtle glow when live
+                dl->AddCircle(ImVec2(lx, ly), dotR + 2.0f, IM_COL32(70, 220, 90, 120), 16, 1.5f);
+            dl->AddText(ImVec2(lx + dotR + dotGap - 2.0f, ly - ts.y * 0.5f), IM_COL32(230, 230, 235, 255), label.c_str());
+        }
+    }
+
+    // Word-wrap `s` to `maxW` pixels using the current font (foreground draw
+    // lists don't wrap). Returns the lines.
+    std::vector<std::string> wrapToWidth(const std::string& s, float maxW) {
+        std::vector<std::string> lines;
+        std::string cur;
+        size_t i = 0;
+        while (i < s.size()) {
+            size_t sp = s.find(' ', i);
+            std::string word = s.substr(i, sp == std::string::npos ? std::string::npos : sp - i);
+            std::string test = cur.empty() ? word : cur + " " + word;
+            if (!cur.empty() && ImGui::CalcTextSize(test.c_str()).x > maxW) {
+                lines.push_back(cur);
+                cur = word;
+            } else {
+                cur = test;
+            }
+            if (sp == std::string::npos) break;
+            i = sp + 1;
+        }
+        if (!cur.empty()) lines.push_back(cur);
+        if (lines.empty()) lines.push_back("");
+        return lines;
+    }
+
+    // Speech bubbles over agents: the "…" thinking state and the reply. Lets the
+    // chat input close (movement freed) while the answer floats over the robot.
+    void renderBotBubbles() {
+        if (!m_isEdenOSLevel || m_botBubbles.empty()) return;
+        double now = ImGui::GetTime();
+        for (auto it = m_botBubbles.begin(); it != m_botBubbles.end(); )
+            it = (it->second.second <= now) ? m_botBubbles.erase(it) : std::next(it);
+        if (m_botBubbles.empty()) return;
+
+        float w = static_cast<float>(getWindow().getWidth());
+        float h = static_cast<float>(getWindow().getHeight());
+        if (w <= 0.0f || h <= 0.0f) return;
+        glm::mat4 vp = m_camera.getProjectionMatrix(w / h, 0.1f, 5000.0f) * m_camera.getViewMatrix();
+        auto* dl = ImGui::GetForegroundDrawList();
+        const float maxW = 300.0f, padX = 9.0f, padY = 6.0f;
+
+        for (const auto& o : m_sceneObjects) {
+            if (!o || o->getBuildingType() != "agent") continue;
+            auto bit = m_botBubbles.find(o->getName());
+            if (bit == m_botBubbles.end()) continue;
+
+            glm::vec3 pos = const_cast<SceneObject*>(o.get())->getTransform().getPosition();
+            glm::vec4 clip = vp * glm::vec4(pos.x, pos.y + 9.5f, pos.z, 1.0f); // above the name tag
+            if (clip.w <= 0.0f) continue;
+            glm::vec3 ndc = glm::vec3(clip) / clip.w;
+            if (ndc.z < -1.0f || ndc.z > 1.0f) continue;
+            float sx = (ndc.x + 1.0f) * 0.5f * w;
+            float sy = (1.0f - ndc.y) * 0.5f * h;
+
+            auto lines = wrapToWidth(bit->second.first, maxW);
+            float lineH = ImGui::GetTextLineHeight();
+            float boxW = 0.0f;
+            for (auto& ln : lines) boxW = std::max(boxW, ImGui::CalcTextSize(ln.c_str()).x);
+            boxW += padX * 2.0f;
+            float boxH = lineH * lines.size() + padY * 2.0f;
+            // Bubble sits with its bottom just above the head point.
+            ImVec2 p0(sx - boxW * 0.5f, sy - boxH - 8.0f);
+            ImVec2 p1(sx + boxW * 0.5f, sy - 8.0f);
+            dl->AddRectFilled(p0, p1, IM_COL32(18, 20, 26, 235), 6.0f);
+            dl->AddRect(p0, p1, IM_COL32(120, 150, 210, 255), 6.0f);
+            // Little tail pointing down at the head.
+            dl->AddTriangleFilled(ImVec2(sx - 7, p1.y - 1), ImVec2(sx + 7, p1.y - 1),
+                                  ImVec2(sx, p1.y + 8), IM_COL32(18, 20, 26, 235));
+            float ty = p0.y + padY;
+            for (auto& ln : lines) {
+                dl->AddText(ImVec2(p0.x + padX, ty), IM_COL32(232, 234, 240, 255), ln.c_str());
+                ty += lineH;
+            }
         }
     }
 
@@ -2338,7 +2404,17 @@ protected:
             renderPlayModeUI();
             renderUVViewer();
             renderAgentNameTags();
-            renderAgentPanels();
+            renderServerStatus();
+            renderBotBubbles();
+            if (m_isEdenOSLevel) {
+                // Bottom-left agent CLI, kept left of the centered hotbar.
+                float sw = static_cast<float>(getWindow().getWidth());
+                float sh = static_cast<float>(getWindow().getHeight());
+                constexpr float slotSize = 48.0f, slotGap = 4.0f;
+                float hotbarW = TOOLBAR_SLOT_COUNT * slotSize + (TOOLBAR_SLOT_COUNT - 1) * slotGap;
+                float hotbarLeftX = (sw - hotbarW) * 0.5f;
+                m_agentConsole.render(sw, sh, hotbarLeftX);
+            }
             renderReticle();
         } else {
             m_editorUI.render();
@@ -8455,6 +8531,11 @@ private:
                 endConversation();
                 wasEscapeDown = escapeDown;
                 return; // Don't process other shortcuts this frame
+            } else if (m_agentConsole.isOpen()) {
+                // Close the agent chat input (don't fall through to exitPlayMode).
+                m_agentConsole.close();
+                wasEscapeDown = escapeDown;
+                return;
             } else if (m_isPlayMode) {
                 exitPlayMode();
             }
@@ -12688,6 +12769,44 @@ private:
                 return closestHit;
             };
 
+            // EDEN OS: aim at a deployed agent robot and click to open its CLI
+            // console (bottom-left). Agents aren't in raycastFS's type list, so
+            // this is a separate crosshair ray; when one is hit we consume the
+            // click so the filesystem-interaction path below is skipped.
+            bool agentClicked = false;
+            if (m_isEdenOSLevel && leftPressed && !m_framePlacementMode) {
+                glm::vec3 arO, arD;
+                doCrosshairRay(arO, arD);
+                // Closest agent OR server rack along the crosshair ray.
+                SceneObject* agentHit = nullptr;
+                SceneObject* serverHit = nullptr;
+                float best = 250.0f;
+                for (auto& obj : m_sceneObjects) {
+                    if (!obj || !obj->isVisible()) continue;
+                    const auto& bt = obj->getBuildingType();
+                    bool isAgent = (bt == "agent"), isServer = (bt == "ai_server");
+                    if (!isAgent && !isServer) continue;
+                    float d = obj->getWorldBounds().intersect(arO, arD);
+                    if (d > 0.0f && d < best) {
+                        best = d;
+                        agentHit = isAgent ? obj.get() : nullptr;
+                        serverHit = isServer ? obj.get() : nullptr;
+                    }
+                }
+                if (agentHit) {
+                    m_agentConsole.select(agentHit->getName(), agentHit->getAiProvider());
+                    agentClicked = true;
+                } else if (serverHit) {
+                    // Flip the physical switch: toggle its ServerManager slot.
+                    int idx = serverIndexOf(serverHit);
+                    if (idx >= 0 && idx < static_cast<int>(m_serverManager.servers().size())) {
+                        if (m_serverManager.isServerRunning(idx)) m_serverManager.stop(idx);
+                        else                                       m_serverManager.start(idx);
+                    }
+                    agentClicked = true; // consume the click
+                }
+            }
+
             // Wall brush mode — click+drag on platform floor to draw walls
             m_wallBrushPreviewValid = false;
             if (m_wallBrushMode && m_filesystemBrowser.isActive() && !ImGui::GetIO().WantCaptureMouse) {
@@ -13114,7 +13233,7 @@ private:
             }
 
             // Mouse just pressed — start potential drag or immediate action
-            if (leftPressed && !m_framePlacementMode && m_shootCooldown <= 0.0f) {
+            if (leftPressed && !agentClicked && !m_framePlacementMode && m_shootCooldown <= 0.0f) {
                 glm::vec3 rayO, rayD;
                 doCrosshairRay(rayO, rayD);
                 SceneObject* hit = raycastFS(rayO, rayD);
@@ -22694,6 +22813,32 @@ private:
     // it unbinds everything first (old function pointers dangle after a library
     // reload), then rebinds from the fresh handle. Returns a human-readable
     // summary for the Script Editor's output box / console.
+    // EDEN OS agents deploy on navigation, long after boot — so there's nothing
+    // to bind when the level first loads. Each play frame: make sure the level
+    // script is compiled (once), then rebind whenever an agent has appeared that
+    // still needs its `agent` @entity function. Keeps the robots "alive" without
+    // the user having to open the Script Editor and hit Compile.
+    bool m_edenOSAutoCompiled = false;
+    void ensureEdenOSAgentsBound() {
+        namespace fs = std::filesystem;
+        if (m_currentLevelScriptPath.empty()) {
+            if (m_currentLevelPath.empty()) return;
+            m_currentLevelScriptPath = ensureLevelScript(m_currentLevelPath);
+        }
+        fs::path so = fs::path(m_currentLevelScriptPath).replace_extension(".so");
+        if (!fs::exists(so)) {
+            // First EDEN OS run with no compiled library — build it once.
+            if (!m_edenOSAutoCompiled) { m_edenOSAutoCompiled = true; compileScriptFile(m_currentLevelScriptPath); }
+            return;
+        }
+        bool needBind = false;
+        for (auto& o : m_sceneObjects)
+            if (o && o->getBuildingType() == "agent" && !o->getEntityScript().empty() && !o->hasTickScript()) {
+                needBind = true; break;
+            }
+        if (needBind) bindEntityScripts();
+    }
+
     std::string bindEntityScripts() {
         // 1) Unbind ALL tick scripts (and the player controller) before touching
         //    the library.

@@ -36,6 +36,11 @@ SceneObject* currentScriptObject();
 // once per frame before ticking scripts (in play mode it's the camera).
 void setScriptPlayerPosition(float x, float y, float z);
 
+// Whether the shared bot server (AI Backend) is up. Host refreshes each frame;
+// agent_online() ANDs it with the per-bot switch so a robot only comes alive
+// once its server is genuinely ready.
+void setScriptBackendOnline(bool online);
+
 // Player input, set by the host once per frame (play mode) so scripted
 // controllers can read WASD / jump / run / mouse-look. moveX/moveZ are -1..1
 // (strafe / forward), buttons are 0 or 1, mouse deltas are pixels this frame.
@@ -69,6 +74,8 @@ extern "C" {
     // Animation: play the named clip (looped) on this object's skinned model.
     // Safe to call every tick — switching only happens when the name changes.
     void self_play_anim(const char* name);
+    // World/agent state (not tied to "self").
+    float agent_online();                      // 1.0 if THIS agent is switched on AND its server is up
     // Player-relative verbs (horizontal / XZ plane, in feet). "self" is this entity.
     float self_dist_to_player();               // feet to the player
     void  self_face_player();                  // turn (yaw) to look at the player

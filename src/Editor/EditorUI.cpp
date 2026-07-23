@@ -3394,6 +3394,7 @@ void EditorUI::renderGroveEditor() {
     if (m_codeEditorFile != m_groveCurrentFile) {
         m_codeEditorFile = m_groveCurrentFile;
         m_codeEditor.SetLanguageDefinition(TextEditor::LanguageDefinition::HEIDIC());
+        m_codeEditor.SetShowWhitespaces(false); // hide the space/tab dots (library defaults on)
     }
     ImVec2 edPos = ImGui::GetCursorScreenPos();
     ImVec2 edSize(ImGui::GetContentRegionAvail().x,

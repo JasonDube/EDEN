@@ -784,7 +784,7 @@ void FilesystemBrowser::clearFilesystemObjects() {
     while (it != m_sceneObjects->end()) {
         const auto& bt = (*it) ? (*it)->getBuildingType() : "";
         if (*it && (bt == "filesystem" || bt == "filesystem_wall" || bt == "filesystem_void" ||
-                    bt == "filesystem_void_filler" || bt == "agent" ||
+                    bt == "filesystem_void_filler" || bt == "agent" || bt == "ai_server" ||
                     bt == "image_desc" || bt == "platform_wall" || bt == "platform_slab" ||
                     bt == "wall_frame" || bt == "wall_widget")) {
             uint32_t handle = (*it)->getBufferHandle();
@@ -2854,6 +2854,12 @@ void FilesystemBrowser::spawnObjects(const std::string& dirPath) {
             pos.z += std::sin(ang) * radius;
             spawnAgentAvatar(pos, agentModels[i], dirPath);
         }
+        // The two server racks that power the agents: Ollama (local LLM) and the
+        // AI Backend (shared router). Click their switches to start/stop; the
+        // lights show live status. Placed behind the agent ring.
+        glm::vec3 sp = center; sp.y = baseY;
+        spawnServerRack(sp + glm::vec3(-9.0f, 0.0f, 22.0f), "Ollama", 0);      // IDX_OLLAMA
+        spawnServerRack(sp + glm::vec3( 9.0f, 0.0f, 22.0f), "AI Backend", 1);  // IDX_BACKEND
     }
 
     // Spawn default cleaner bot in home directory (only if no deployed bot took the slot)
@@ -2882,6 +2888,7 @@ static std::pair<std::string, std::string> agentProviderFromModel(const std::str
     if (n.find("claude")   != std::string::npos) return {"claude",   "Claude"};
     if (n.find("grok")     != std::string::npos) return {"grok",     "Grok"};
     if (n.find("deepseek") != std::string::npos) return {"deepseek", "DeepSeek"};
+    if (n.find("gemma")    != std::string::npos) return {"gemma",    "Gemma"};
     if (n.find("qwen")     != std::string::npos ||
         n.find("ollama")   != std::string::npos) return {"ollama",   "Qwen"};
     return {"", "Agent"};
@@ -2960,7 +2967,42 @@ void FilesystemBrowser::spawnAgentAvatar(const glm::vec3& pos, const std::string
     obj->setDescription(displayName);
     obj->setAiProvider(provider);                 // per-avatar LLM (main.cpp registers it with the chat client)
     obj->setTargetLevel("agent://" + territory);  // its assigned folder
+    obj->setEntityScript("agent");                // HEIDIC @entity behavior (face player on approach); bound on Compile
     obj->getTransform().setPosition(pos);
+    m_sceneObjects->push_back(std::move(obj));
+}
+
+void FilesystemBrowser::spawnServerRack(const glm::vec3& pos, const std::string& name, int serverIndex) {
+    if (!m_sceneObjects || !m_modelRenderer) return;
+
+    // Procedural rack cabinet: a tall dark cube, scaled at the vertices (like the
+    // agent avatars) so its click AABB matches without depending on transform
+    // scale. ~4ft wide, 8ft tall, 3ft deep. The green/red status light + label
+    // are drawn by the host, which owns ServerManager status.
+    glm::vec4 body(0.13f, 0.14f, 0.17f, 1.0f); // charcoal
+    auto mesh = PrimitiveMeshBuilder::createCube(1.0f, body);
+    glm::vec3 s(4.0f, 8.0f, 3.0f);
+    glm::vec3 bmin(FLT_MAX), bmax(-FLT_MAX);
+    for (auto& v : mesh.vertices) {
+        v.position *= s;
+        bmin = glm::min(bmin, v.position);
+        bmax = glm::max(bmax, v.position);
+    }
+    uint32_t handle = m_modelRenderer->createModel(mesh.vertices, mesh.indices, nullptr, 0, 0);
+
+    auto obj = std::make_unique<SceneObject>(name);
+    obj->setBufferHandle(handle);
+    obj->setIndexCount(static_cast<uint32_t>(mesh.indices.size()));
+    obj->setVertexCount(static_cast<uint32_t>(mesh.vertices.size()));
+    obj->setLocalBounds({bmin, bmax});
+    obj->setMeshData(mesh.vertices, mesh.indices);
+    obj->setPrimitiveType(PrimitiveType::Cube);
+    obj->setBuildingType("ai_server");
+    obj->setDescription(name + " server");
+    obj->setTargetLevel("server://" + std::to_string(serverIndex)); // which ServerManager slot
+    glm::vec3 p = pos;
+    p.y = pos.y + (bmax.y - bmin.y) * 0.5f; // feet on the floor (mesh is centered)
+    obj->getTransform().setPosition(p);
     m_sceneObjects->push_back(std::move(obj));
 }
 
@@ -2998,7 +3040,7 @@ std::string FilesystemBrowser::deployAgentInCurrentFolder() {
             std::string ext = entry.path().extension().string();
             std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
             if (ext != ".glb" && ext != ".gltf") continue;
-            const char* kw[] = {"claude","grok","deepseek","qwen","ollama",
+            const char* kw[] = {"claude","grok","deepseek","qwen","ollama","gemma",
                                 "robot","bot","agent","overseer"};
             bool isAgent = false;
             for (const char* k : kw) if (lower.find(k) != std::string::npos) { isAgent = true; break; }
