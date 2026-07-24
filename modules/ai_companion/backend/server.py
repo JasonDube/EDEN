@@ -717,7 +717,7 @@ async def call_ollama(messages: list[dict], model: str = None) -> tuple[str, int
             response = await client.post(
                 f"{OLLAMA_URL}/api/chat",
                 json={"model": model, "messages": messages, "stream": False, "think": False,
-                      "keep_alive": -1, "options": {"num_ctx": 8192}},  # Ollama defaults to ~4k; give NPCs real memory
+                      "keep_alive": "30m", "options": {"num_ctx": 8192}},  # Ollama defaults to ~4k; give NPCs real memory
             )
         except httpx.TimeoutException:
             print(f"[ollama] !! TIMEOUT after {_t.monotonic()-t0:.0f}s "
@@ -1020,7 +1020,7 @@ async def preload_model(req: VramRequest):
         async with httpx.AsyncClient(timeout=None) as client:
             # Empty prompt just loads the model; keep_alive=-1 keeps it resident.
             await client.post(f"{OLLAMA_URL}/api/generate",
-                              json={"model": model, "prompt": "", "keep_alive": -1})
+                              json={"model": model, "prompt": "", "keep_alive": "30m"})
         print(f"[vram] preloaded {req.provider} -> {model}")
         return {"ok": True, "loaded": True, "model": model}
     except Exception as e:

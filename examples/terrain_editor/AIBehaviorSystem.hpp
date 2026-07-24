@@ -53,6 +53,11 @@ struct AIBehaviorHost {
     // Model renderer — for expression texture updates
     virtual void updateNPCTexture(eden::SceneObject* npc) = 0;
 
+    // Cinematic kiss beat: the host takes over the camera (close two-shot on the
+    // NPC) and leans the NPC in for the duration, then restores control. Default
+    // no-op so hosts that don't support it just ignore the action.
+    virtual void startKissCutscene(eden::SceneObject* npc) {}
+
     // Grove scripting (optional — return false if not supported)
     virtual bool evalGroveScript(const std::string& script, std::string& output, std::string& error) { return false; }
 
@@ -624,25 +629,13 @@ public:
                       << " (remaining followers: " << m_aiFollowers.size() << ")" << std::endl;
         }
         else if (actionType == "kiss") {
-            // Romance beat: turn to face the player, then show a "kiss" expression/
-            // clip if the model has one. The turn is the visible beat for now;
-            // add a "kiss" animation/expression named "kiss" and it plays here.
-            glm::vec3 playerPos = m_host.getCamera().getPosition();
-            glm::vec3 npcPos = npc->getTransform().getPosition();
-            glm::vec3 toPlayer = playerPos - npcPos;
-            toPlayer.y = 0.0f;
-            if (glm::length(toPlayer) > 0.01f) {
-                toPlayer = glm::normalize(toPlayer);
-                m_aiActionActive = true;
-                m_aiActionType = "turn_to";           // reuse the existing turn animation
-                m_aiActionDuration = 1.0f;
-                m_aiActionTimer = 0.0f;
-                m_aiActionStartYaw = npc->getEulerRotation().y;
-                m_aiActionTargetYaw = glm::degrees(atan2(toPlayer.x, toPlayer.z));
-            }
+            // Romance beat: hand it to the host, which locks the camera to a close
+            // two-shot and leans the NPC in (hides the fact that we can't animate a
+            // full-body kiss). Also swap to a "kiss" expression/clip if one exists.
             if (npc->getExpressionCount() > 0 && npc->setExpressionByName("kiss"))
                 m_host.updateNPCTexture(npc);
-            std::cout << "[AI Action] kiss — facing player (add a 'kiss' clip/expression to animate)" << std::endl;
+            m_host.startKissCutscene(npc);
+            std::cout << "[AI Action] kiss — cinematic beat" << std::endl;
         }
         else if (actionType == "set_expression") {
             std::string exprName = action.value("expression", "");

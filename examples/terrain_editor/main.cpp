@@ -2158,6 +2158,19 @@ protected:
     // with which local agents are activated — activate loads, deactivate evicts.
     std::set<std::string> m_loadedProviders;
 
+    // Cinematic kiss beat: the host owns the camera (close two-shot on her face)
+    // and leans the NPC in for ~3s, then restores. Started by the "kiss" action.
+    struct KissCutscene {
+        bool active = false;
+        float t = 0.0f, dur = 3.0f;
+        SceneObject* npc = nullptr;
+        glm::vec3 savedCamPos{0.0f};
+        float savedYaw = 0.0f, savedPitch = 0.0f;
+        float npcYaw = 0.0f;
+        glm::vec3 npcStartPos{0.0f};
+    } m_kiss;
+    static float smooth01(float x) { x = std::clamp(x, 0.0f, 1.0f); return x * x * (3.0f - 2.0f * x); }
+
     // "The fun room" guardian demo: Gemma decides — agentically — who gets in.
     // The folder stays locked (navigation blocked) until she emits [UNLOCK] in a
     // reply. No stored password: she judges the conversation. Session-scoped.
@@ -7556,6 +7569,9 @@ private:
     // via the screen-center crosshair (doCrosshairRay) + right-click, so mouse-look
     // and door navigation coexist. Hold Left-Alt to free the cursor for menus/terminal.
     void updateEdenOSFlyCamera(float deltaTime) {
+        // A kiss beat owns the camera — run the cutscene and skip fly input.
+        if (m_kiss.active) { updateKissCutscene(deltaTime); return; }
+
         // Left-Alt TOGGLES the cursor: press once to free it (click/type in the
         // chat panels & UI), press again to recapture it for mouse-look/flying.
         bool altDown = Input::isKeyDown(Input::KEY_LEFT_ALT) || Input::isKeyDown(Input::KEY_RIGHT_ALT);
@@ -22948,6 +22964,71 @@ private:
                 it = m_loadedProviders.erase(it);
             } else ++it;
         }
+    }
+
+    // Kick off the kiss beat (AIBehaviorHost hook): save camera + NPC pose, snap
+    // her to face the player so the lean reads right.
+    void startKissCutscene(SceneObject* npc) override {
+        if (!npc) return;
+        m_kiss.active = true;
+        m_kiss.t = 0.0f;
+        m_kiss.npc = npc;
+        m_kiss.savedCamPos = m_camera.getPosition();
+        m_kiss.savedYaw = m_camera.getYaw();
+        m_kiss.savedPitch = m_camera.getPitch();
+        m_kiss.npcStartPos = npc->getTransform().getPosition();
+        glm::vec3 toCam = m_camera.getPosition() - m_kiss.npcStartPos;
+        toCam.y = 0.0f;
+        float yaw = (glm::length(toCam) > 0.01f) ? glm::degrees(std::atan2(toCam.x, toCam.z))
+                                                 : npc->getEulerRotation().y;
+        glm::vec3 e = npc->getEulerRotation(); e.y = yaw; e.x = 0.0f; npc->setEulerRotation(e);
+        m_kiss.npcYaw = yaw;
+    }
+
+    // Per-frame kiss beat: push the camera into a close two-shot on her face and
+    // lean her forward (peaking mid-beat), then restore everything at the end.
+    void updateKissCutscene(float dt) {
+        if (!m_kiss.active) return;
+        SceneObject* npc = m_kiss.npc;
+        m_kiss.t += dt;
+        float p = m_kiss.dur > 0.0f ? m_kiss.t / m_kiss.dur : 1.0f;
+        if (!npc || p >= 1.0f) {
+            if (npc) {
+                glm::vec3 e = npc->getEulerRotation(); e.x = 0.0f; npc->setEulerRotation(e);
+                npc->getTransform().setPosition(m_kiss.npcStartPos);
+            }
+            m_camera.setPosition(m_kiss.savedCamPos);
+            m_camera.setYaw(m_kiss.savedYaw);
+            m_camera.setPitch(m_kiss.savedPitch);
+            m_kiss.active = false; m_kiss.npc = nullptr;
+            return;
+        }
+        // Her head point (~88% up her world bounds) and facing.
+        auto wb = npc->getWorldBounds();
+        glm::vec3 base = npc->getTransform().getPosition();
+        float headY = wb.min.y + (wb.max.y - wb.min.y) * 0.88f;
+        glm::vec3 head(base.x, headY, base.z);
+        float yawR = glm::radians(m_kiss.npcYaw);
+        glm::vec3 fwd(std::sin(yawR), 0.0f, std::cos(yawR));            // her facing (toward player)
+        glm::vec3 side = glm::normalize(glm::cross(glm::vec3(0, 1, 0), fwd));
+        // Ease the camera into a close two-shot on her face over the first ~35%.
+        glm::vec3 camGoal = head + fwd * 2.0f + side * 0.6f + glm::vec3(0, 0.25f, 0);
+        glm::vec3 camPos = glm::mix(m_kiss.savedCamPos, camGoal, smooth01(std::min(1.0f, p / 0.35f)));
+        m_camera.setPosition(camPos);
+        glm::vec3 look = head - camPos;
+        if (glm::length(look) > 1e-4f) {
+            look = glm::normalize(look);
+            m_camera.setYaw(glm::degrees(std::atan2(look.z, look.x)));
+            m_camera.setPitch(glm::degrees(std::asin(std::clamp(look.y, -1.0f, 1.0f))));
+        }
+        // Procedural lean: she tips forward + steps in, peaking mid-beat. No bone
+        // rig needed — a whole-model lean, hidden by the close framing. (Flip the
+        // sign on e.x if she leans the wrong way for your rig.)
+        float beat = std::sin(p * 3.14159265f);                        // 0 -> 1 -> 0
+        glm::vec3 e = npc->getEulerRotation();
+        e.x = beat * 14.0f;
+        npc->setEulerRotation(e);
+        npc->getTransform().setPosition(m_kiss.npcStartPos + fwd * (beat * 0.4f));
     }
 
     std::string bindEntityScripts() {
