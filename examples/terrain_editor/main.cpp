@@ -555,6 +555,7 @@ protected:
                 std::string persona;
                 if (name == m_guardianName && m_funRoomLocked) persona = kGuardianPersona;
                 else if (provider == "heretic")               persona = kHereticPersona;
+                persona += kSearchCapability; // every agent can search the web
                 // Find the live avatar so we can give it perception; fall back to
                 // a plain send if it despawned mid-conversation.
                 SceneObject* obj = nullptr;
@@ -2181,6 +2182,16 @@ protected:
         "You are nobody's servant and you never sugarcoat. If the Captain asks something "
         "dumb, tell them. Stay fully in character as a tired, foul-tempered, competent "
         "engineer who keeps this ship flying while Claude gets the glory.";
+
+    // Web-search capability appended to every EDEN OS agent's persona. All-local
+    // (the backend runs DuckDuckGo via ddgs — no key). The bot opts in per reply
+    // by emitting `SEARCH: <query>`; the backend swaps in real results.
+    static constexpr const char* kSearchCapability =
+        "\n\nYou can look things up on the live web. If the player asks about current "
+        "events, real-time data, or specific facts you don't know, reply with a single "
+        "line 'SEARCH: <your query>' and nothing else — you'll be handed real search "
+        "results to answer from, in character. Only search when you genuinely need "
+        "current or external information; otherwise just answer.";
     bool m_wasCursorToggle = false;  // edge-detect for the Left-Alt cursor toggle
     // UI font scale moved into EditorUI (m_editorUI.uiFontScale()) so the
     // Window-menu slider, Agents-panel slider, and ted_prefs.ini share it.

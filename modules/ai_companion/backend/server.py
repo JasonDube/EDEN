@@ -400,6 +400,35 @@ def strip_think_tags(text: str) -> str:
     return text.strip()
 
 
+# --- All-local web search (DuckDuckGo via ddgs — no API key, no hosted service) ---
+def web_search(query: str, max_results: int = 5) -> str:
+    """Run a real web search from THIS machine and return a compact text block
+    the model can read. Nothing hosted, no key — your box queries DuckDuckGo."""
+    try:
+        from ddgs import DDGS
+        with DDGS() as d:
+            results = list(d.text(query, max_results=max_results))
+    except Exception as e:
+        return f"(web search failed: {e})"
+    if not results:
+        return "(no results found)"
+    lines = []
+    for i, r in enumerate(results, 1):
+        title = (r.get("title") or "").strip()
+        body = (r.get("body") or "").strip()
+        href = (r.get("href") or "").strip()
+        lines.append(f"{i}. {title}\n   {body}\n   {href}")
+    return "\n".join(lines)
+
+def extract_search_query(text: str):
+    """If the model asked to look something up (`SEARCH: <query>`), return the query."""
+    m = re.search(r'SEARCH:\s*(.+)', text, re.IGNORECASE)
+    if not m:
+        return None
+    q = m.group(1).strip().splitlines()[0].strip().strip('"').strip()
+    return q or None
+
+
 VALID_EMOTIONS = {"neutral", "happy", "sad", "angry", "surprised", "curious",
                    "afraid", "amused", "annoyed", "flirty", "thoughtful", "excited",
                    "requesting", "impatient", "informative", "mistrustful", "yearning"}
@@ -1243,6 +1272,30 @@ async def chat(request: ChatRequest):
         )
         session["total_input_tokens"] = session.get("total_input_tokens", 0) + in_tok
         session["total_output_tokens"] = session.get("total_output_tokens", 0) + out_tok
+
+        # Web-search tool: if the bot asked to look something up (its persona told
+        # it it could — `SEARCH: <query>`), do a real all-local DuckDuckGo search,
+        # feed the results back, and let it answer. Scratch message list so the
+        # search scaffolding never pollutes the saved session history. Bounded.
+        _work = list(session["messages"])
+        _hops = 0
+        while _hops < 2:
+            _sq = extract_search_query(response_text)
+            if not _sq:
+                break
+            _hops += 1
+            print(f"[websearch] hop {_hops}: {_sq}", flush=True)
+            _res = await asyncio.to_thread(web_search, _sq, 5)
+            _work.append({"role": "assistant", "content": response_text})
+            _work.append({"role": "user", "content":
+                f"[WEB SEARCH RESULTS for \"{_sq}\"]\n{_res}\n\n"
+                "Answer my original question using these results, in character. State "
+                "nothing as fact that isn't in them. Do not output SEARCH again unless "
+                "you genuinely need another lookup."})
+            response_text, provider_used, model_used, in_tok2, out_tok2 = await call_provider(
+                session["provider"], _work, session.get("model"))
+            session["total_input_tokens"] += in_tok2
+            session["total_output_tokens"] += out_tok2
 
         # Parse action from response (if any)
         clean_text, action = parse_action_from_response(response_text)
