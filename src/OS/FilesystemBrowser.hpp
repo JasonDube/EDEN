@@ -247,6 +247,10 @@ private:
 
     ModelRenderer* m_modelRenderer = nullptr;
     SkinnedModelRenderer* m_skinnedRenderer = nullptr;
+    // Bridge viewport: reserve this slot on a ring's first level as a permanent
+    // window (never filled with a mount) so its position is STABLE for floor
+    // fixtures. -1 = no reservation this ring; set only for home's folder ring.
+    int m_reservedViewportSlot = -1;
     std::vector<std::unique_ptr<SceneObject>>* m_sceneObjects = nullptr;
     Terrain* m_terrain = nullptr;
 

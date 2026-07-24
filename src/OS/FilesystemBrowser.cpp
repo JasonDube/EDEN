@@ -1003,10 +1003,19 @@ int FilesystemBrowser::spawnGalleryRing(const std::vector<EntryInfo>& items,
     bool isDoorType = (cat == FileCategory::Folder);
 
     for (int placed = 0; placed < totalItems; ) {
-        int itemsThisLevel = std::min(gallerySides(), totalItems - placed);
+        // Reserve the bridge viewport slot on this ring's FIRST level (home only);
+        // one fewer item fits there, and items flow AROUND the reserved slot.
+        bool reserveHere = (m_reservedViewportSlot >= 0 && level == startLevel &&
+                            m_reservedViewportSlot < gallerySides());
+        int capacity = gallerySides() - (reserveHere ? 1 : 0);
+        int itemsThisLevel = std::min(capacity, totalItems - placed);
         float levelY = baseY + level * GALLERY_WALL_HEIGHT;
 
+        int ringItem = 0;   // cursor into this ring's items (skips the reserved slot)
         for (int s = 0; s < gallerySides(); ++s) {
+            bool isReserved = (reserveHere && s == m_reservedViewportSlot);
+            int myItem = -1;
+            if (!isReserved && ringItem < itemsThisLevel) { myItem = placed + ringItem; ++ringItem; }
             float angle = s * segmentAngle;
             float wallX = center.x + radius * cosf(angle);
             float wallZ = center.z + radius * sinf(angle);
@@ -1044,16 +1053,20 @@ int FilesystemBrowser::spawnGalleryRing(const std::vector<EntryInfo>& items,
             wallObj->getTransform().setScale({segmentWidth, GALLERY_WALL_HEIGHT, 0.15f});
             wallObj->setEulerRotation({0.0f, yawDeg, 0.0f});
 
-            // Tag occupied walls with the item's path so context menus can find it
-            if (s < itemsThisLevel) {
-                wallObj->setTargetLevel("fs://" + items[placed + s].fullPath);
+            // Reserved slot = the bridge window (hidden, no mount); otherwise tag
+            // occupied walls with the item's path so context menus can find it.
+            if (isReserved) {
+                wallObj->setDescription("viewport");
+                wallObj->setVisible(false);
+            } else if (myItem >= 0) {
+                wallObj->setTargetLevel("fs://" + items[myItem].fullPath);
             }
 
             m_sceneObjects->push_back(std::move(wallObj));
 
-            // Spawn item on this wall segment
-            if (s < itemsThisLevel) {
-                int idx = placed + s;
+            // Spawn the item (mount) on this wall segment
+            if (myItem >= 0) {
+                int idx = myItem;
                 const auto& item = items[idx];
 
                 float inset = 2.4f;
@@ -1872,7 +1885,12 @@ void FilesystemBrowser::spawnAppRing(const glm::vec3& center, float baseY) {
         wallObj->getTransform().setScale({segmentWidth, GALLERY_WALL_HEIGHT, 0.15f});
         wallObj->setEulerRotation({0.0f, yawDeg, 0.0f});
 
+        // Reserved slot = the bridge window out to space (hidden, no app placed).
+        bool isViewport = (s == m_reservedViewportSlot);
+        if (isViewport) { wallObj->setDescription("viewport"); wallObj->setVisible(false); }
+
         m_sceneObjects->push_back(std::move(wallObj));
+        if (isViewport) continue;   // don't place any app door on the window slot
 
         // Place Forge door on segment 0
         if (s == 0) {
@@ -2683,8 +2701,14 @@ void FilesystemBrowser::spawnObjects(const std::string& dirPath) {
     // so the Void door is always available on the app ring
     spawnVoid(center, 0.0f /*unused — void picks its own location*/, overflowItems);
 
-    // Spawn app launcher ring at level 0 (base of silo, just below platform)
-    spawnAppRing(center, ringBaseY);
+    // Bridge: reserve a FIXED slot on home's APP ring (the purple bottom ring /
+    // hotbar) as the space window — stable position, always empty. Slot 10 of 20
+    // is opposite the apps (slots 0-4: Forge/Home/Trash/Basement/Void). Tunable.
+    const char* homeEnvVP = getenv("HOME");
+    m_reservedViewportSlot = (homeEnvVP && dirPath == std::string(homeEnvVP)) ? gallerySides() / 2 : -1;
+    spawnAppRing(center, ringBaseY);   // reserves the viewport slot on the app ring
+    m_reservedViewportSlot = -1;       // folder/image/video/model rings don't reserve
+
     spawnLevel = spawnGalleryRing(folders, center, ringBaseY, spawnLevel);
     spawnLevel = spawnGalleryRing(images,  center, ringBaseY, spawnLevel);
     spawnLevel = spawnGalleryRing(videos,  center, ringBaseY, spawnLevel);
@@ -2864,16 +2888,9 @@ void FilesystemBrowser::spawnObjects(const std::string& dirPath) {
         spawnServerRack(sp + glm::vec3( 9.0f, 0.0f, 22.0f), "AI Backend", 1);  // IDX_BACKEND
     }
 
-    // Spawn default cleaner bot in home directory (only if no deployed bot took the slot)
-    if (!spawnedDeployedBot) {
-        const char* homeEnv = getenv("HOME");
-        if (homeEnv && dirPath == std::string(homeEnv)) {
-            m_cleanerBot.init(m_sceneObjects, m_modelRenderer);
-            glm::vec3 botPos = center;
-            botPos.y = baseY;
-            m_cleanerBot.spawn(botPos, m_modelRenderer);
-        }
-    }
+    // (Removed) The default model-less CleanerBot in home spawned an ugly blue
+    // placeholder cube on the bridge floor. Deploy a CleanerBot with a real model
+    // via the Assign-Algobot flow if you want the file-tidying bot.
 
 }
 

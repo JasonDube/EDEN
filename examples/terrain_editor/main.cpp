@@ -2843,8 +2843,11 @@ protected:
         float ambientLevel = 0.08f + dayFactor * 0.32f; // 0.08 at night, 0.4 at day
         float sunHeight = std::max(sunY, 0.05f); // Keep sun slightly above horizon for fill
 
-        // Update skybox for day/night — blend from night sky to blue daytime
-        if (m_skybox) {
+        // Update skybox for day/night — blend from night sky to blue daytime.
+        // SKIP in EDEN OS: the ship is in space (no day/night), and this cycle
+        // would overwrite the starfield/space params set in spawnEdenOSFromHome
+        // (zeroing stars during in-game daytime).
+        if (m_skybox && !m_isEdenOSLevel) {
             auto& sky = m_skybox->getParameters();
             // Night colors (original purple/dark theme)
             glm::vec3 nightZenith{0.02f, 0.008f, 0.04f};
@@ -24836,6 +24839,21 @@ private:
         Input::setMouseCaptured(true);
         m_camera.setNoClip(true); // fly freely, no terrain/wall collision
 
+        // The ship floats in space: full-sphere starfield + nebula for the view
+        // out the bridge. Edit-mode sky tools (Escape) tweak this live; NEXT step
+        // is loading these from an authored sector .eden so you can design the
+        // "outside" in TED and swap it as you travel between sectors.
+        if (m_skybox) {
+            auto& sky = m_skybox->getParameters();
+            sky.spaceMode      = true;                       // stars on the full sphere
+            sky.zenithColor    = glm::vec3(0.010f, 0.010f, 0.028f);
+            sky.starDensity    = 0.14f;                      // a richer field than the sparse default
+            sky.starBrightness = 1.3f;
+            sky.starTwinkle    = 0.15f;                      // a little life
+            sky.nebulaIntensity = 0.35f;
+            m_skybox->updateParameters(sky);
+        }
+
         std::cout << "[EDEN] EDEN OS silo built from " << homePath << std::endl;
     }
 
@@ -24925,6 +24943,9 @@ private:
             bool isSiloObj = (bt == "filesystem" || bt == "filesystem_wall" ||
                               bt == "platform_slab" || bt == "eden_app_ring");
             if (isSiloObj) {
+                // A wall marked "viewport" (the bridge window out to space) stays
+                // hidden regardless of zone.
+                if (obj->getDescription() == "viewport") { obj->setVisible(false); continue; }
                 obj->setVisible(m_playerZone == PlayerZone::Silo);
                 continue;
             }
