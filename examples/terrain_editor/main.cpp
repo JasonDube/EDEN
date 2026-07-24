@@ -1987,6 +1987,19 @@ protected:
             }
         }
 
+        // L: spawn a dot inhabitant on the current terrain (editor or play). (J/K
+        // aren't in the Input enum; L is otherwise only a terminal key, excluded by
+        // the text-input guard below.)
+        if (Input::isKeyPressed(Input::KEY_L) &&
+            !ImGui::GetIO().WantTextInput && !ImGui::GetIO().WantCaptureKeyboard) {
+            spawnInhabitant();
+        }
+        // Inhabitants wander (and stay grounded) only when the game is playing, and
+        // not in EDEN OS (which has no terrain to sample).
+        if (m_isPlayMode && !m_isEdenOSLevel) {
+            updateInhabitants(deltaTime);
+        }
+
         // Poll for AI backend responses
         if (m_httpClient) {
             m_httpClient->pollResponses();
@@ -29013,6 +29026,90 @@ private:
         }
     }
 
+    // Spawn the dot as an INHABITANT (feet on the terrain, tagged so it wanders in
+    // play mode). Reuses importSkinnedModel's loading/grounding/idle, then tags +
+    // uniquely names the new object(s). First species = the dot (only rig with
+    // walk + idle right now).
+    void spawnInhabitant() {
+        std::string dot = std::string(CMAKE_SOURCE_DIR) + "/agent_test/heretic.glb";
+        if (!std::filesystem::exists(dot)) {
+            std::cerr << "[Inhabitant] model missing: " << dot << std::endl;
+            return;
+        }
+        size_t before = m_sceneObjects.size();
+        importSkinnedModel(dot);   // grounds feet, plays idle, pushes + selects
+        for (size_t i = before; i < m_sceneObjects.size(); ++i) {
+            auto* o = m_sceneObjects[i].get();
+            if (!o || !o->isSkinned()) continue;
+            o->setBuildingType("inhabitant");
+            o->setName("Inhabitant_" + std::to_string(++m_inhabitantCounter));
+            m_inhabitants.erase(o->getName()); // fresh state, seeded lazily in update
+        }
+        std::cout << "[Inhabitant] spawned dot inhabitant" << std::endl;
+    }
+
+    // Bring inhabitants to life: a lazy wander (idle a beat → pick a nearby point →
+    // stroll to it → idle) with the body kept stuck to the terrain surface every
+    // frame, so movement never leaves the ground. Runs in play mode only.
+    void updateInhabitants(float deltaTime) {
+        auto frand = [](float a, float b) {
+            return a + (b - a) * (static_cast<float>(rand()) / static_cast<float>(RAND_MAX));
+        };
+        for (auto& objPtr : m_sceneObjects) {
+            if (!objPtr || objPtr->getBuildingType() != "inhabitant") continue;
+            SceneObject* obj = objPtr.get();
+            InhabitantState& st = m_inhabitants[obj->getName()];
+
+            glm::vec3 pos = obj->getTransform().getPosition();
+            if (!st.init) {
+                st.footLift = pos.y - m_terrain.getHeightAt(pos.x, pos.z);
+                st.home = pos;
+                st.target = pos;
+                st.walking = false;
+                st.timer = frand(1.0f, 3.0f);
+                st.init = true;
+            }
+
+            auto play = [&](const char* name) {
+                if (st.clip != name) {
+                    m_skinnedModelRenderer->playAnimation(obj->getSkinnedModelHandle(), name, true);
+                    obj->setCurrentAnimation(name);
+                    st.clip = name;
+                }
+            };
+
+            st.timer -= deltaTime;
+            if (st.walking) {
+                glm::vec3 to = st.target - pos; to.y = 0.0f;
+                float dist = glm::length(to);
+                if (dist < 0.6f || st.timer <= 0.0f) {   // arrived, or gave up
+                    st.walking = false;
+                    st.timer = frand(2.0f, 5.0f);
+                    play("idle");
+                } else {
+                    glm::vec3 dir = to / dist;
+                    pos += dir * 1.6f * deltaTime;        // gentle stroll (m/s)
+                    // Face the way we're walking (model forward = +Z; flip +180 if she moonwalks).
+                    float yaw = glm::degrees(std::atan2(dir.x, dir.z));
+                    obj->setEulerRotation({0.0f, yaw, 0.0f});
+                    play("walk");
+                }
+            } else if (st.timer <= 0.0f) {
+                // Pick a new spot within a small patch around home and head there.
+                float ang = frand(0.0f, 6.2831853f);
+                float r   = frand(2.0f, 8.0f);
+                st.target = st.home + glm::vec3(std::cos(ang) * r, 0.0f, std::sin(ang) * r);
+                st.walking = true;
+                st.timer = 12.0f;                         // max seconds to reach before giving up
+                play("walk");
+            }
+
+            // Stick to the ground wherever she ends up this frame.
+            pos.y = m_terrain.getHeightAt(pos.x, pos.z) + st.footLift;
+            obj->getTransform().setPosition(pos);
+        }
+    }
+
     void importLimeModel(const std::string& path) {
         auto result = LimeLoader::load(path);
         if (!result.success) {
@@ -31000,6 +31097,22 @@ private:
     bool m_edenGravity = false;   // false = zero-g free-flight (default); true = walk w/ gravity+collision
     static constexpr float kEdenGravity = 20.0f; // world gravity when EDEN OS gravity mode is on
     static constexpr float kEdenEyeOffset = 1.15f; // camera above the character body centre (eye 1.65 − half 0.5)
+
+    // ── Inhabitants (species creatures on a terrain biome) ──────────────────
+    // First step of the ark/zookeeper game: a creature that lives on a terrain,
+    // wanders a patch, and stays stuck to the ground as it moves. Press K to spawn
+    // the dot as an inhabitant; they come alive (wander) in play mode.
+    struct InhabitantState {
+        bool init = false;          // lazily seeded from the object's current pose
+        float footLift = 0.0f;      // origin-to-feet offset, so feet stay on the terrain
+        glm::vec3 home{0.0f};       // wander around here
+        glm::vec3 target{0.0f};     // current walk goal
+        bool walking = false;
+        float timer = 0.0f;         // countdown to the next state change
+        std::string clip;           // current anim clip (avoid re-triggering every frame)
+    };
+    std::unordered_map<std::string, InhabitantState> m_inhabitants; // keyed by object name
+    int m_inhabitantCounter = 0;
     enum class PlayerZone { Silo, Basement, Outside, Void };
     PlayerZone m_playerZone = PlayerZone::Outside;
     float m_testFloorSize = 100.0f;
