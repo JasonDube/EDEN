@@ -9851,57 +9851,11 @@ private:
             }
         }
 
-        // Shift+Number: copy selected object/folder to hotbar (original stays on wall)
-        if (m_isPlayMode && !ImGui::GetIO().WantTextInput && !m_quickChatMode && !m_inConversation &&
-            (Input::isKeyDown(Input::KEY_LEFT_SHIFT) || Input::isKeyDown(Input::KEY_RIGHT_SHIFT))) {
-            static const int slotKeys[10] = {
-                Input::KEY_1, Input::KEY_2, Input::KEY_3, Input::KEY_4, Input::KEY_5,
-                Input::KEY_6, Input::KEY_7, Input::KEY_8, Input::KEY_9, Input::KEY_0
-            };
-            for (int i = 0; i < 10; i++) {
-                if (!Input::isKeyPressed(slotKeys[i])) continue;
-                if (!m_filesystemBrowser.isActive()) break;
-
-                // Find selected filesystem object (including doors/folders)
-                SceneObject* selectedFS = nullptr;
-                int count = 0;
-                for (auto& obj : m_sceneObjects) {
-                    if (!obj || !obj->isSelected()) continue;
-                    const auto& bt = obj->getBuildingType();
-                    if (bt == "filesystem" || bt == "filesystem_void" || bt == "wall_widget") {
-                        selectedFS = obj.get();
-                        count++;
-                    }
-                }
-                if (count != 1 || !selectedFS) break;
-
-                std::string target = selectedFS->getTargetLevel();
-                std::string path;
-                if (target.rfind("fs://", 0) == 0 && target.size() > 5)
-                    path = target.substr(5);
-
-                if (path.empty()) break;
-
-                // Put a copy into the hotbar slot
-                destroySlotThumbnail(i);
-                m_toolbarSlots[i].occupied = true;
-                m_toolbarSlots[i].filePath = path;
-                m_toolbarSlots[i].targetLevel = target; // preserve link
-                m_toolbarSlots[i].texturePath = selectedFS->getTexturePath(); // preserve door image
-                std::string name = path;
-                auto slashPos = name.rfind('/');
-                if (slashPos != std::string::npos)
-                    name = name.substr(slashPos + 1);
-                m_toolbarSlots[i].displayName = name;
-                m_activeToolbarSlot = i;
-
-                createSlotThumbnail(i);
-                saveInventorySlot(i);
-                selectedFS->setSelected(false);
-                std::cout << "[FS] Copied '" << name << "' to hotbar slot " << i << std::endl;
-                break;
-            }
-        }
+        // (Copy-grab intentionally removed.) The hotbar grab is now MOVE-only:
+        // plain Number cuts the mount and paste relocates the real file. Shift used
+        // to mean "copy-grab" here, but in EDEN OS Shift is the fly-cam descend key,
+        // so holding it to copy also sank you through the floor. One clear behavior
+        // beats a conflicting modifier; re-add copy on a free key if it's ever missed.
 
         // Number keys 1-0: toolbar slot selection + pick up filesystem objects (not when Shift held)
         // Skip pickup when in wire mode with a file_slot selected — number keys assign to file_slot there
@@ -10033,6 +9987,7 @@ private:
                             }
                             destroySlotThumbnail(i);
                             m_toolbarSlots[i].occupied = true;
+                            m_toolbarSlots[i].isCut = true;        // plain number = CUT/MOVE: paste renames source
                             m_toolbarSlots[i].filePath = path;
                             m_toolbarSlots[i].targetLevel = selectedFS->getTargetLevel(); // preserve link
                             std::string name = path;
@@ -10179,8 +10134,19 @@ private:
                                                 do { dst = destDir / (stem + "_" + std::to_string(n++) + ext); } while (fs::exists(dst));
                                             }
                                             std::error_code ec;
-                                            if (fs::is_directory(src)) fs::copy(src, dst, fs::copy_options::recursive, ec);
-                                            else                       fs::copy_file(src, dst, ec);
+                                            if (m_toolbarSlots[i].isCut) {           // CUT → move (source disappears)
+                                                fs::rename(src, dst, ec);
+                                                if (ec) {                            // cross-device? copy then delete
+                                                    ec.clear();
+                                                    if (fs::is_directory(src)) fs::copy(src, dst, fs::copy_options::recursive, ec);
+                                                    else                       fs::copy_file(src, dst, ec);
+                                                    if (!ec) fs::remove_all(src);
+                                                }
+                                            } else if (fs::is_directory(src)) {      // COPY → duplicate (source stays)
+                                                fs::copy(src, dst, fs::copy_options::recursive, ec);
+                                            } else {
+                                                fs::copy_file(src, dst, ec);
+                                            }
                                             if (ec) std::cerr << "[FS] hotbar paste copy failed: " << srcPath
                                                               << " -> " << dst.string() << ": " << ec.message() << std::endl;
                                             else copied = true;
@@ -10402,8 +10368,19 @@ private:
                                                 do { dst = destDir / (stem + "_" + std::to_string(n++) + ext); } while (fs::exists(dst));
                                             }
                                             std::error_code ec;
-                                            if (fs::is_directory(src)) fs::copy(src, dst, fs::copy_options::recursive, ec);
-                                            else                       fs::copy_file(src, dst, ec);
+                                            if (m_toolbarSlots[i].isCut) {           // CUT → move (source disappears)
+                                                fs::rename(src, dst, ec);
+                                                if (ec) {                            // cross-device? copy then delete
+                                                    ec.clear();
+                                                    if (fs::is_directory(src)) fs::copy(src, dst, fs::copy_options::recursive, ec);
+                                                    else                       fs::copy_file(src, dst, ec);
+                                                    if (!ec) fs::remove_all(src);
+                                                }
+                                            } else if (fs::is_directory(src)) {      // COPY → duplicate (source stays)
+                                                fs::copy(src, dst, fs::copy_options::recursive, ec);
+                                            } else {
+                                                fs::copy_file(src, dst, ec);
+                                            }
                                             if (ec) std::cerr << "[FS] hotbar drop copy failed: " << srcPath << " -> " << dst.string() << ": " << ec.message() << std::endl;
                                             else copied = true;
                                         }
@@ -10435,24 +10412,34 @@ private:
         // Number key / RMB / Q in play mode: pick up selected salvage OR throw/place hotbar item
         // RMB = place active slot on surface (like Ctrl+Number)
         // Q = throw active slot (like Number without Ctrl)
-        if (m_isPlayMode && !m_filesystemBrowser.isActive() && !ImGui::GetIO().WantTextInput
+        // NOTE: in EDEN OS the filesystem browser is ALWAYS active (it's the silo
+        // mode), so we can't gate this whole block on !isActive() or Q would never
+        // throw there. Instead: Q throws in BOTH worlds; RMB surface-placement and
+        // the number-key throw fallback stay OUT of the silo (in EDEN OS number keys
+        // mean "paste held mount onto the frame you're aiming at", handled above).
+        bool siloActive = m_filesystemBrowser.isActive();
+        if (m_isPlayMode && !ImGui::GetIO().WantTextInput
             && !m_quickChatMode && !m_inConversation && !m_playModeCursorVisible) {
 
             // Check for RMB/Q shortcuts before number keys
             int rmbqSlot = -1;
             bool rmbqForceCtrl = false;
             bool altHeldForRMB = Input::isKeyDown(Input::KEY_LEFT_ALT) || Input::isKeyDown(Input::KEY_RIGHT_ALT);
-            if (Input::isMouseButtonPressed(Input::MOUSE_RIGHT) && !altHeldForRMB && !m_showCPsInGame) {
+            if (!siloActive && Input::isMouseButtonPressed(Input::MOUSE_RIGHT) && !altHeldForRMB && !m_showCPsInGame) {
                 rmbqSlot = m_activeToolbarSlot;
-                rmbqForceCtrl = true;  // RMB = surface placement
+                rmbqForceCtrl = true;  // RMB = surface placement (terrain worlds only)
             } else if (Input::isKeyPressed(Input::KEY_Q)) {
-                rmbqSlot = m_activeToolbarSlot;  // Q = throw
+                rmbqSlot = m_activeToolbarSlot;  // Q = throw (works in EDEN OS too)
             }
 
             static const int throwKeys[10] = {
                 Input::KEY_1, Input::KEY_2, Input::KEY_3, Input::KEY_4, Input::KEY_5,
                 Input::KEY_6, Input::KEY_7, Input::KEY_8, Input::KEY_9, Input::KEY_0
             };
+            // In the silo, number keys are reserved for frame-paste — only Q/RMB act here.
+            if (siloActive && rmbqSlot < 0) {
+                // fall through: nothing to throw/place this frame
+            } else
             for (int i = 0; i < 10; i++) {
                 if (rmbqSlot >= 0) {
                     if (i != rmbqSlot) continue;  // skip to the active slot
@@ -30450,6 +30437,8 @@ private:
     // Toolbar / hotbar (Minecraft-style inventory bar)
     struct ToolbarSlot {
         bool occupied = false;
+        bool isCut = false;        // true = grabbed as a MOVE (plain number) → paste renames the
+                                   //        source; false = COPY (Shift+number) → paste duplicates
         std::string filePath;      // stripped fs:// path
         std::string displayName;   // filename
         std::string targetLevel;   // preserved link target (e.g. "fs:///path" or "home://silo")
