@@ -2009,10 +2009,28 @@ protected:
                 spawnFood();
             }
         }
-        // Inhabitants wander (and stay grounded) only when the game is playing, and
-        // not in EDEN OS (which has no terrain to sample).
+        // Y: release a lion (play mode only — editor Y is object-snap). Predators
+        // hunt inhabitants; the tribe flees them.
+        if (m_isPlayMode && Input::isKeyPressed(Input::KEY_Y) &&
+            !ImGui::GetIO().WantTextInput && !ImGui::GetIO().WantCaptureKeyboard) {
+            spawnLion();
+        }
+        // The sim runs only when the game is playing, and not in EDEN OS (no terrain).
         if (m_isPlayMode && !m_isEdenOSLevel) {
             updateInhabitants(deltaTime);
+            updatePredators(deltaTime);
+            // Remove any inhabitants a predator caught this frame (deferred so we
+            // never mutate m_sceneObjects mid-loop).
+            for (const std::string& name : m_pendingKills) {
+                for (int i = 0; i < static_cast<int>(m_sceneObjects.size()); ++i) {
+                    if (m_sceneObjects[i] && m_sceneObjects[i]->getName() == name) {
+                        deleteObject(i);
+                        break;
+                    }
+                }
+                m_inhabitants.erase(name);
+            }
+            m_pendingKills.clear();
         }
 
         // Poll for AI backend responses
@@ -29155,9 +29173,13 @@ private:
                 }
                 return found;
             };
-            glm::vec3 waterPos(0.0f), foodPos(0.0f);
+            glm::vec3 waterPos(0.0f), foodPos(0.0f), predPos(0.0f);
             bool haveWater = nearestOf("water", waterPos);
             bool haveFood  = nearestOf("food",  foodPos);
+            // FEAR overrides every need: a predator within range means run.
+            bool havePred  = nearestOf("predator", predPos);
+            constexpr float kFearR = 8.0f;
+            bool fleeing = havePred && dist2D(pos, predPos) < kFearR;
 
             // Head to a resource and use it. Thirst wins ties (it kills faster).
             auto seekAndUse = [&](const glm::vec3& rp, float& need, bool& using_, float drain) {
@@ -29177,7 +29199,16 @@ private:
                 }
             };
 
-            if (st.seekingWater && haveWater) {
+            if (fleeing) {
+                // Run directly away from the predator, faster than a stroll (panic).
+                st.drinking = false; st.eating = false; st.greeting = false;
+                st.walking = false;
+                glm::vec3 away = pos - predPos; away.y = 0.0f;
+                glm::vec3 dir = away / std::max(glm::length(away), 1e-4f);
+                pos += dir * 2.4f * deltaTime;
+                faceToward(pos + dir);
+                play("walk");
+            } else if (st.seekingWater && haveWater) {
                 st.eating = false;
                 seekAndUse(waterPos, st.thirst, st.drinking, 0.55f);
             } else if (st.seekingFood && haveFood) {
@@ -29230,7 +29261,8 @@ private:
             }
 
             // Dominant state, for the tag above the head.
-            if (st.drinking)          st.stateTag = "#drinking";
+            if (fleeing)              st.stateTag = "#fleeing";
+            else if (st.drinking)     st.stateTag = "#drinking";
             else if (st.eating)       st.stateTag = "#eating";
             else if (st.seekingWater) st.stateTag = "#thirsty";
             else if (st.seekingFood)  st.stateTag = "#hungry";
@@ -29293,6 +29325,103 @@ private:
         obj->getTransform().setScale(s);
         m_sceneObjects.push_back(std::move(obj));
         std::cout << "[Food] placed a food source" << std::endl;
+    }
+
+    // Release a lion (placeholder tan box, low + long) that hunts inhabitants.
+    // Press Y in play mode. Swap in a real Meshy lion later — behaviour is the point.
+    void spawnLion() {
+        if (!m_modelRenderer) return;
+        glm::vec4 tan(0.78f, 0.58f, 0.30f, 1.0f);
+        glm::vec3 p = m_camera.getPosition() + m_camera.getFront() * 8.0f;
+        auto mesh = PrimitiveMeshBuilder::createCube(1.0f, tan);
+        uint32_t handle = m_modelRenderer->createModel(mesh.vertices, mesh.indices, nullptr, 0, 0);
+        auto obj = std::make_unique<SceneObject>("Lion_" + std::to_string(++m_lionCounter));
+        obj->setBufferHandle(handle);
+        obj->setIndexCount(static_cast<uint32_t>(mesh.indices.size()));
+        obj->setVertexCount(static_cast<uint32_t>(mesh.vertices.size()));
+        obj->setLocalBounds(mesh.bounds);
+        obj->setMeshData(mesh.vertices, mesh.indices);
+        obj->setPrimitiveType(PrimitiveType::Cube);
+        obj->setPrimitiveSize(1.0f);
+        obj->setPrimitiveColor(tan);
+        obj->setBuildingType("predator");
+        glm::vec3 s(1.2f, 1.1f, 2.4f);         // low and long
+        p.y = m_terrain.getHeightAt(p.x, p.z) + s.y * 0.5f;
+        obj->getTransform().setPosition(p);
+        obj->getTransform().setScale(s);
+        m_sceneObjects.push_back(std::move(obj));
+        std::cout << "[Lion] released a predator" << std::endl;
+    }
+
+    // The lion's brain: rest after a kill, otherwise stalk the nearest inhabitant
+    // (faster than they walk) and take it on contact; wander if none is near.
+    void updatePredators(float deltaTime) {
+        auto frand = [](float a, float b) {
+            return a + (b - a) * (static_cast<float>(rand()) / static_cast<float>(RAND_MAX));
+        };
+        auto dist2D = [](const glm::vec3& a, const glm::vec3& b) {
+            float dx = a.x - b.x, dz = a.z - b.z; return std::sqrt(dx * dx + dz * dz);
+        };
+        constexpr float kSenseR = 22.0f;   // notices prey within this
+        constexpr float kKillR  = 1.4f;    // takes prey this close
+
+        for (auto& objPtr : m_sceneObjects) {
+            if (!objPtr || objPtr->getBuildingType() != "predator") continue;
+            SceneObject* lion = objPtr.get();
+            PredatorState& st = m_predators[lion->getName()];
+            glm::vec3 pos = lion->getTransform().getPosition();
+            if (!st.init) {
+                st.footLift = pos.y - m_terrain.getHeightAt(pos.x, pos.z);
+                st.home = pos; st.target = pos; st.timer = frand(1.0f, 3.0f);
+                st.init = true;
+            }
+            auto face = [&](const glm::vec3& tp) {
+                glm::vec3 f = tp - pos; f.y = 0.0f;
+                if (glm::length(f) > 1e-3f)
+                    lion->setEulerRotation({0.0f, glm::degrees(std::atan2(f.x, f.z)), 0.0f});
+            };
+
+            st.timer -= deltaTime;
+            st.fedCd -= deltaTime;
+
+            // Nearest living inhabitant.
+            SceneObject* prey = nullptr; float pd = 1e9f; glm::vec3 preyPos(0.0f);
+            for (auto& o2 : m_sceneObjects) {
+                if (!o2 || o2->getBuildingType() != "inhabitant") continue;
+                float d = dist2D(pos, o2->getTransform().getPosition());
+                if (d < pd) { pd = d; prey = o2.get(); preyPos = o2->getTransform().getPosition(); }
+            }
+
+            if (st.fedCd <= 0.0f && prey && pd < kSenseR) {
+                // HUNT: run it down.
+                if (pd < kKillR) {
+                    m_pendingKills.push_back(prey->getName());   // caught — removed after the loop
+                    st.fedCd = frand(20.0f, 40.0f);              // digest; the tribe gets a reprieve
+                    st.prowling = false; st.timer = frand(2.0f, 4.0f);
+                } else {
+                    glm::vec3 to = preyPos - pos; to.y = 0.0f;
+                    glm::vec3 dir = to / std::max(glm::length(to), 1e-4f);
+                    pos += dir * 2.6f * deltaTime;              // faster than the 1.6 stroll
+                    face(preyPos);
+                }
+            } else {
+                // PROWL: amble around home (slower when fed/resting).
+                float speed = (st.fedCd > 0.0f) ? 0.6f : 1.3f;
+                if (!st.prowling && st.timer <= 0.0f) {
+                    float ang = frand(0.0f, 6.2831853f), r = frand(4.0f, 14.0f);
+                    st.target = st.home + glm::vec3(std::cos(ang) * r, 0.0f, std::sin(ang) * r);
+                    st.prowling = true; st.timer = 15.0f;
+                } else if (st.prowling) {
+                    glm::vec3 to = st.target - pos; to.y = 0.0f;
+                    float dist = glm::length(to);
+                    if (dist < 0.8f || st.timer <= 0.0f) { st.prowling = false; st.timer = frand(2.0f, 5.0f); }
+                    else { glm::vec3 dir = to / dist; pos += dir * speed * deltaTime; face(st.target); }
+                }
+            }
+
+            pos.y = m_terrain.getHeightAt(pos.x, pos.z) + st.footLift;
+            lion->getTransform().setPosition(pos);
+        }
     }
 
     // Float each inhabitant's dominant-state tag (#thirsty, #content, …) over its
@@ -31345,6 +31474,23 @@ private:
     int m_foodCounter = 0;
     glm::vec3 m_tribeCenter{0.0f};  // shared home the tribe clusters around
     int m_tribeCount = 0;           // running count for the centre's average
+
+    // ── Predators (the lion) ────────────────────────────────────────────────
+    // A hunter that stalks inhabitants and turns the watering hole into a risk —
+    // also a population valve for the rat cage. Inhabitants flee it (fear beats
+    // thirst/hunger).
+    struct PredatorState {
+        bool init = false;
+        float footLift = 0.0f;
+        glm::vec3 home{0.0f};
+        glm::vec3 target{0.0f};
+        bool prowling = false;   // has a wander target
+        float timer = 0.0f;
+        float fedCd = 0.0f;      // resting/digesting after a kill — won't hunt
+    };
+    std::unordered_map<std::string, PredatorState> m_predators; // keyed by object name
+    int m_lionCounter = 0;
+    std::vector<std::string> m_pendingKills; // inhabitants caught this frame, removed after the loops
     enum class PlayerZone { Silo, Basement, Outside, Void };
     PlayerZone m_playerZone = PlayerZone::Outside;
     float m_testFloorSize = 100.0f;
