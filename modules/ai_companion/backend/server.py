@@ -61,11 +61,14 @@ OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen3.5:9b")
 # Override GEMMA_MODEL in .env to a shorter name (e.g. after `ollama cp`).
 GEMMA_MODEL = os.getenv("GEMMA_MODEL",
     "hf.co/yuxinlu1/gemma-4-12B-agentic-fable5-composer2.5-v2-3.5x-tau2-GGUF:Q4_K_M")
-# The "Heretic" agent — a large uncensored 27B ablation model served by Ollama.
-# Adult/experimental; not a kid-facing bot. Pull:
-#   ollama pull hf.co/DavidAU/Qwen3.6-27B-Fable-Fusion-711-Uncensored-Heretic-NM-DAU-NEO-MAX-MTP-GGUF:IQ3_M
+# The "Heretic" agent — an uncensored (abliterated) model served by Ollama.
+# Adult/experimental; not a kid-facing bot. Repointed 2026-07-23 from the DavidAU
+# Qwen3.6-27B (which won't load in this Ollama — unsupported arch/MTP) to the
+# abliterated agentic Gemma: fits the card, fast, uncensored, and it actually
+# runs. Won a head-to-head on uncensored willingness + speed. Pull:
+#   ollama pull hf.co/mradermacher/Huihui-gemma-4-12B-agentic-fable5-abliterated-i1-GGUF:Q4_K_M
 HERETIC_MODEL = os.getenv("HERETIC_MODEL",
-    "hf.co/DavidAU/Qwen3.6-27B-Fable-Fusion-711-Uncensored-Heretic-NM-DAU-NEO-MAX-MTP-GGUF:IQ3_M")
+    "hf.co/mradermacher/Huihui-gemma-4-12B-agentic-fable5-abliterated-i1-GGUF:Q4_K_M")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 CLAUDE_MODEL = os.getenv("CLAUDE_MODEL", "claude-sonnet-4-5-20250929")
@@ -298,6 +301,7 @@ EMOTION_USAGE_HINTS = {
     "informative": "Use [informative] when you are explaining facts or giving a briefing.",
     "mistrustful": "Use [mistrustful] when you are wary or suspicious of the player's intent.",
     "yearning":    "Use [yearning] when you ache for the player's presence or their return.",
+    "hurt":        "Use [hurt] when the player's words wound you — an insult, a betrayal, being dismissed or belittled.",
     "protective":  "Use [protective] when you are shielding the player or the ship from a threat.",
     "indecisive":  "Use [indecisive] when you are torn and cannot settle on an answer.",
     "relieved":    "Use [relieved] when a worry has just lifted.",
@@ -431,7 +435,8 @@ def extract_search_query(text: str):
 
 VALID_EMOTIONS = {"neutral", "happy", "sad", "angry", "surprised", "curious",
                    "afraid", "amused", "annoyed", "flirty", "thoughtful", "excited",
-                   "requesting", "impatient", "informative", "mistrustful", "yearning"}
+                   "requesting", "impatient", "informative", "mistrustful", "yearning",
+                   "hurt"}
 
 # What the PLAYER is doing in their message — a Sims-like social-interaction taxonomy,
 # but EARNED: the model judges it from what they actually wrote, not a menu button.
