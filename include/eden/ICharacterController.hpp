@@ -89,6 +89,15 @@ public:
                                      float jumpVelocity = 8.0f,
                                      float maxStairHeight = 0.6f) = 0;
 
+    // Collision-aware free flight: move by a full 3D velocity with no gravity and
+    // no stair/floor snapping, but still blocked by static geometry. Used for the
+    // EDEN OS zero-g flycam so the player can't pass through walls/floors/ceilings.
+    // Default fallback is a plain no-collision move (physics backends override it).
+    virtual glm::vec3 moveFly(float deltaTime, const glm::vec3& velocity) {
+        setPosition(getPosition() + velocity * deltaTime);
+        return getPosition();
+    }
+
     // Getters
     virtual glm::vec3 getPosition() const = 0;
     virtual glm::vec3 getLinearVelocity() const = 0;

@@ -2792,6 +2792,31 @@ void FilesystemBrowser::spawnObjects(const std::string& dirPath) {
         }
     }
 
+    // Lid: a solid cap just above the top platform so you can't fly up out of the
+    // silo into space. Tagged eden_os_lid — visible in the Silo zone and given
+    // collision by the host's rebuildEdenOSCollision().
+    {
+        float radius = galleryRadius();
+        glm::vec4 lidColor = m_siloConfig.wallColor;
+        auto mesh = PrimitiveMeshBuilder::createCube(1.0f, lidColor);
+        uint32_t handle = m_modelRenderer->createModel(mesh.vertices, mesh.indices, nullptr, 0, 0);
+
+        auto obj = std::make_unique<SceneObject>("FSLid");
+        obj->setBufferHandle(handle);
+        obj->setIndexCount(mesh.indices.size());
+        obj->setVertexCount(mesh.vertices.size());
+        obj->setLocalBounds(mesh.bounds);
+        obj->setMeshData(mesh.vertices, mesh.indices);
+        obj->setPrimitiveType(PrimitiveType::Cube);
+        obj->setPrimitiveSize(1.0f);
+        obj->setPrimitiveColor(lidColor);
+        obj->setBuildingType("eden_os_lid");
+        obj->setAABBCollision(true);
+        obj->getTransform().setPosition({center.x, m_platformY + 4.0f, center.z});
+        obj->getTransform().setScale({2.0f * radius + 12.0f, 1.0f, 2.0f * radius + 12.0f});
+        m_sceneObjects->push_back(std::move(obj));
+    }
+
     // Silo floor is now the basement ceiling (solid) — spawned in spawnBasement()
 
     // Build platform grid in the basement (walls, frames on basement walls/floor)

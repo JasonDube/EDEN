@@ -1689,6 +1689,7 @@ protected:
         bool hadPending = m_filesystemBrowser.hasPendingNavigation();
         if (hadPending) syncExcludedPaths(); // ensure hotbar/frame files are excluded before rebuild
         m_filesystemBrowser.processNavigation();
+        if (hadPending && m_isEdenOSLevel) rebuildEdenOSCollision(); // silo changed → rebuild collision
         m_filesystemBrowser.setPlayerPosition(m_camera.getPosition());
         m_filesystemBrowser.updateAnimations(deltaTime);
 
@@ -7625,7 +7626,52 @@ private:
             m_camera.processMouse(d.x, -d.y);
         }
 
-        // WASD flies horizontally relative to facing; Space/Shift are vertical.
+        // G toggles gravity: zero-g free-flight (default) <-> walking with gravity and
+        // silo collision. Zero-g is the ship's natural state; press G to "engage the
+        // deck plates" and walk the floor. Blocked while typing.
+        if (Input::isKeyPressed(Input::KEY_G) &&
+            !ImGui::GetIO().WantTextInput && !ImGui::GetIO().WantCaptureKeyboard) {
+            m_edenGravity = !m_edenGravity;
+            if (m_edenGravity) {
+                if (m_characterController) {
+                    m_characterController->setPosition(m_camera.getPosition() - glm::vec3(0, kEdenEyeOffset, 0));
+                    m_characterController->setGravity(kEdenGravity); // things fall now
+                }
+                m_camera.setNoClip(false);
+                m_camera.setMovementMode(MovementMode::Walk);
+                m_screenMessage = "Gravity ON — walking";
+            } else {
+                if (m_characterController) m_characterController->setGravity(0.0f); // thrown things float
+                m_camera.setNoClip(true); // back to free spirit-flight
+                m_screenMessage = "Zero-G — free flight";
+            }
+            m_screenMessageTimer = 2.0f;
+        }
+
+        // Gravity mode: walk via the character controller (gravity + silo collision).
+        if (m_edenGravity && m_characterController &&
+            !ImGui::GetIO().WantTextInput && !ImGui::GetIO().WantCaptureKeyboard) {
+            glm::vec3 fwd = m_camera.getFront(); fwd.y = 0.0f;
+            glm::vec3 rgt = m_camera.getRight(); rgt.y = 0.0f;
+            if (glm::length(fwd) > 1e-4f) fwd = glm::normalize(fwd);
+            if (glm::length(rgt) > 1e-4f) rgt = glm::normalize(rgt);
+            glm::vec3 desired(0.0f);
+            const float speed = 8.0f;  // human walking pace
+            if (Input::isKeyDown(Input::KEY_W)) desired += fwd;
+            if (Input::isKeyDown(Input::KEY_S)) desired -= fwd;
+            if (Input::isKeyDown(Input::KEY_D)) desired += rgt;
+            if (Input::isKeyDown(Input::KEY_A)) desired -= rgt;
+            if (glm::length(desired) > 1e-3f) desired = glm::normalize(desired) * speed;
+            bool jump = Input::isKeyPressed(Input::KEY_SPACE);
+            float jumpVel = m_editorUI.getCharacterJumpVelocity();
+            glm::vec3 charPos = m_characterController->extendedUpdate(deltaTime, desired, jump, jumpVel);
+            m_camera.setPosition(charPos + glm::vec3(0, kEdenEyeOffset, 0));
+            return; // walking handled — skip the zero-g fly block
+        }
+
+        // Zero-g: fly in 6DOF but SOLID — the player is a physics body, so walls,
+        // floors, ceilings and the viewport still block you (no clipping through).
+        // WASD moves horizontally relative to facing; Space/Shift are vertical.
         if (!ImGui::GetIO().WantTextInput && !ImGui::GetIO().WantCaptureKeyboard) {
             glm::vec3 fwd = m_camera.getFront(); fwd.y = 0.0f;
             glm::vec3 rgt = m_camera.getRight(); rgt.y = 0.0f;
@@ -7638,11 +7684,19 @@ private:
             if (Input::isKeyDown(Input::KEY_A)) move -= rgt;
             if (Input::isKeyDown(Input::KEY_SPACE)) move += glm::vec3(0, 1, 0);
             if (Input::isKeyDown(Input::KEY_LEFT_SHIFT)) move -= glm::vec3(0, 1, 0);
+            glm::vec3 vel(0.0f);
             if (glm::length(move) > 1e-3f) {
                 move = glm::normalize(move);
                 float speed = 45.0f; // silo is ~256m tall — brisk but controllable
                 if (Input::isKeyDown(Input::KEY_LEFT_CONTROL)) speed *= 3.0f;
-                m_camera.setPosition(m_camera.getPosition() + move * speed * deltaTime);
+                vel = move * speed;
+            }
+            if (m_characterController) {
+                glm::vec3 charPos = m_characterController->moveFly(deltaTime, vel);
+                m_camera.setPosition(charPos + glm::vec3(0, kEdenEyeOffset, 0));
+            } else {
+                // No physics backend — fall back to the old free (clipping) flight.
+                m_camera.setPosition(m_camera.getPosition() + vel * deltaTime);
             }
         }
     }
@@ -24978,6 +25032,46 @@ private:
                   << siloDiameter << "m)" << std::endl;
     }
 
+    // Static collision for the silo, so thrown objects land and (in gravity mode)
+    // the player stands on the floor and is blocked by the walls. The silo rebuilds
+    // live on every navigation, so this clears the old bodies and rebuilds from the
+    // current geometry. Walls include the hidden "viewport" frame — it's a real
+    // panel (just invisible), so it seals the window instead of it being open to
+    // space. Navigation is right-click teleport (not walk-through-doors), so solid
+    // wall panels everywhere are exactly what we want.
+    std::vector<uint32_t> m_edenCollisionBodies;
+    void rebuildEdenOSCollision() {
+        if (!m_characterController) return;
+        for (uint32_t id : m_edenCollisionBodies) m_characterController->removeStaticBody(id);
+        m_edenCollisionBodies.clear();
+        if (!m_isEdenOSLevel) return;
+
+        for (auto& obj : m_sceneObjects) {
+            if (!obj) continue;
+            const std::string& bt = obj->getBuildingType();
+            bool collidable = (bt == "filesystem_wall" ||   // silo + app-ring walls + viewport
+                               bt == "eden_app_ring" ||
+                               bt == "eden_os_lid" ||         // top cap — no flying out the top
+                               bt == "eden_basement_ceil" || // shared silo floor
+                               bt == "eden_basement" ||       // basement floor
+                               bt == "eden_basement_wall");
+            if (!collidable) continue;
+
+            AABB lb = obj->getLocalBounds();
+            glm::vec3 scale = obj->getTransform().getScale();
+            glm::vec3 halfExt = (lb.max - lb.min) * 0.5f * scale;
+            glm::vec3 centerOffset = (lb.min + lb.max) * 0.5f * scale;
+            halfExt = glm::max(halfExt, glm::vec3(0.05f));
+            glm::vec3 pos = obj->getTransform().getPosition();
+            glm::quat rot = obj->getTransform().getRotation();
+            glm::vec3 center = pos + rot * centerOffset;
+            m_edenCollisionBodies.push_back(
+                m_characterController->addStaticBoxWithId(halfExt, center, rot));
+        }
+        std::cout << "[EDEN] silo collision: " << m_edenCollisionBodies.size()
+                  << " static bodies" << std::endl;
+    }
+
     void spawnEdenOSFromHome() {
         m_isEdenOSLevel = true;
         m_terrain.getConfigMutable().heightScale = 0.0f; // EDEN OS has no terrain
@@ -25002,18 +25096,24 @@ private:
         // Now the silo dimensions (ringBaseY/platformY/radius) are known — wrap it
         // in the ship's exterior hull for the view from Outside.
         spawnShipExterior();
+        rebuildEdenOSCollision(); // so thrown items land + the player can walk (gravity mode)
 
         // Spawn on the platform at the top of the silo, offset off-center.
         float spawnY = m_filesystemBrowser.getPlatformY() + 1.7f;
         glm::vec3 galleryCam(spawnPos.x + 10.0f, spawnY, spawnPos.z);
         m_camera.setPosition(galleryCam);
-        if (m_characterController) m_characterController->setPosition(galleryCam);
+        // The camera rides kEdenEyeOffset above the character body, so seat the body
+        // that far below the intended eye position.
+        if (m_characterController)
+            m_characterController->setPosition(galleryCam - glm::vec3(0, kEdenEyeOffset, 0));
         m_playerZone = PlayerZone::Silo;
         updateZoneVisibility();
 
         // Start in mouse-look (creative flycam); Left-Alt frees the cursor for UI.
         m_playModeCursorVisible = false;
         Input::setMouseCaptured(true);
+        m_edenGravity = false;    // always boot in zero-g (free-flight)
+        if (m_characterController) m_characterController->setGravity(0.0f); // thrown things float in zero-g
         m_camera.setNoClip(true); // fly freely, no terrain/wall collision
 
         // The ship floats in space: full-sphere starfield + nebula for the view
@@ -25118,7 +25218,8 @@ private:
 
             // Silo interior objects (gallery rings, file objects)
             bool isSiloObj = (bt == "filesystem" || bt == "filesystem_wall" ||
-                              bt == "platform_slab" || bt == "eden_app_ring");
+                              bt == "platform_slab" || bt == "eden_app_ring" ||
+                              bt == "eden_os_lid");
             if (isSiloObj) {
                 // A wall marked "viewport" (the bridge window out to space) stays
                 // hidden regardless of zone.
@@ -26423,6 +26524,11 @@ private:
         m_playModeDebug = false;
         m_freeCamMode = false;
         m_freeCamVelocity = glm::vec3(0);
+
+        // EDEN OS zero-g may have zeroed world gravity — restore it so the editor
+        // and any other level behave normally.
+        if (m_characterController) m_characterController->setGravity(kEdenGravity);
+        m_edenGravity = false;
 
         // Enable noclip for editor mode (can go below terrain)
         m_camera.setNoClip(true);
@@ -30880,6 +30986,9 @@ private:
     bool m_isSpaceLevel = false;
     bool m_isEdenOSLevel = false;
     float m_shipSpinYaw = 0.0f;   // slow yaw of the ship's exterior hull in space
+    bool m_edenGravity = false;   // false = zero-g free-flight (default); true = walk w/ gravity+collision
+    static constexpr float kEdenGravity = 20.0f; // world gravity when EDEN OS gravity mode is on
+    static constexpr float kEdenEyeOffset = 1.15f; // camera above the character body centre (eye 1.65 − half 0.5)
     enum class PlayerZone { Silo, Basement, Outside, Void };
     PlayerZone m_playerZone = PlayerZone::Outside;
     float m_testFloorSize = 100.0f;

@@ -671,6 +671,35 @@ glm::vec3 JoltCharacter::extendedUpdate(float deltaTime,
     return getPosition();
 }
 
+glm::vec3 JoltCharacter::moveFly(float deltaTime, const glm::vec3& velocity) {
+    if (!m_character) return getPosition();
+
+    // Full 3D velocity — no gravity term, so the character coasts where pushed.
+    m_character->SetLinearVelocity(toJolt(velocity));
+
+    // Flight settings: no floor-snap, no stair-step (those are for walking).
+    JPH::CharacterVirtual::ExtendedUpdateSettings updateSettings;
+    updateSettings.mStickToFloorStepDown = JPH::Vec3::sZero();
+    updateSettings.mWalkStairsStepUp     = JPH::Vec3::sZero();
+
+    JPH::BroadPhaseLayerFilter broadPhaseFilter;
+    JPH::ObjectLayerFilter objectLayerFilter;
+    JPH::IgnoreMultipleBodiesFilter bodyFilter;
+    JPH::ShapeFilter shapeFilter;
+
+    m_character->ExtendedUpdate(
+        deltaTime,
+        JPH::Vec3::sZero(),   // zero gravity — free flight
+        updateSettings,
+        broadPhaseFilter,
+        objectLayerFilter,
+        bodyFilter,
+        shapeFilter,
+        *m_tempAllocator
+    );
+    return getPosition();
+}
+
 glm::vec3 JoltCharacter::getPosition() const {
     if (!m_character) return glm::vec3(0);
     return toGlm(m_character->GetPosition());
@@ -709,6 +738,12 @@ void JoltCharacter::setPosition(const glm::vec3& position) {
 void JoltCharacter::setLinearVelocity(const glm::vec3& velocity) {
     if (!m_character) return;
     m_character->SetLinearVelocity(toJolt(velocity));
+}
+
+void JoltCharacter::setGravity(float gravity) {
+    m_gravity = gravity;                         // character's own (kinematic) gravity
+    if (m_physicsSystem)                          // AND the world, so thrown dynamic bodies float at 0
+        m_physicsSystem->SetGravity(JPH::Vec3(0, -gravity, 0));
 }
 
 void JoltCharacter::setMaxSlopeAngle(float degrees) {

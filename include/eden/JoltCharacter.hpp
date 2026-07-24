@@ -242,6 +242,8 @@ public:
                              float jumpVelocity = 8.0f,
                              float maxStairHeight = 0.6f) override;
 
+    glm::vec3 moveFly(float deltaTime, const glm::vec3& velocity) override;
+
     // Getters
     glm::vec3 getPosition() const override;
     glm::vec3 getLinearVelocity() const override;
@@ -253,7 +255,7 @@ public:
     // Setters
     void setPosition(const glm::vec3& position) override;
     void setLinearVelocity(const glm::vec3& velocity) override;
-    void setGravity(float gravity) override { m_gravity = gravity; }
+    void setGravity(float gravity) override; // updates the character AND the Jolt world (thrown bodies)
     void setMaxSlopeAngle(float degrees) override;
 
     // Raycast against the physics world (uses ICharacterController::RaycastResult)
