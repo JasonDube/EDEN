@@ -705,7 +705,8 @@ async def call_ollama(messages: list[dict], model: str = None) -> tuple[str, int
         try:
             response = await client.post(
                 f"{OLLAMA_URL}/api/chat",
-                json={"model": model, "messages": messages, "stream": False, "think": False, "keep_alive": -1},
+                json={"model": model, "messages": messages, "stream": False, "think": False,
+                      "keep_alive": -1, "options": {"num_ctx": 8192}},  # Ollama defaults to ~4k; give NPCs real memory
             )
         except httpx.TimeoutException:
             print(f"[ollama] !! TIMEOUT after {_t.monotonic()-t0:.0f}s "

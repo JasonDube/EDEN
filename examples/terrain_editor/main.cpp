@@ -568,6 +568,7 @@ protected:
                 }
                 if (persona.empty() && provider == "heretic") persona = kHereticPersona;
                 persona += kSearchCapability;
+                persona += kResponseStyle;
 
                 if (obj) {
                     PerceptionData perc = m_aiBehavior.performScanCone(obj, 120.0f, 50.0f);
@@ -2200,6 +2201,13 @@ protected:
         "line 'SEARCH: <your query>' and nothing else — you'll be handed real search "
         "results to answer from, in character. Only search when you genuinely need "
         "current or external information; otherwise just answer.";
+
+    // Nudge EDEN OS agents away from clipped one-liners (the shared "be concise"
+    // instruction makes Gemma-family models too terse). Appended to every agent.
+    static constexpr const char* kResponseStyle =
+        "\n\nSpeak at a natural conversational length — a few full sentences with real "
+        "personality, not clipped one-liners. Don't pad or ramble into essays, but "
+        "don't be curt either.";
     bool m_wasCursorToggle = false;  // edge-detect for the Left-Alt cursor toggle
     // UI font scale moved into EditorUI (m_editorUI.uiFontScale()) so the
     // Window-menu slider, Agents-panel slider, and ted_prefs.ini share it.
