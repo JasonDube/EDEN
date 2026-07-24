@@ -10160,8 +10160,38 @@ private:
                                         glm::vec3 wallPos = selectedWall->getTransform().getPosition();
                                         glm::vec3 wallScale = selectedWall->getTransform().getScale();
                                         float wallYaw = selectedWall->getEulerRotation().y;
-                                        selectedWall->setTargetLevel(linkTarget);
-                                        m_filesystemBrowser.spawnFileAtWall(srcPath, wallPos, wallScale, wallYaw);
+                                        // PERSIST the paste: copy the real file into the current
+                                        // folder so it survives a silo rebuild. Before, this was
+                                        // visual-only (targetLevel + spawn) — so the paste vanished
+                                        // the moment you left and came back. Auto-rename on collision.
+                                        namespace fs = std::filesystem;
+                                        std::error_code exEc;
+                                        fs::path src(srcPath);
+                                        bool realFile = !srcPath.empty() && fs::exists(src, exEc);
+                                        bool copied = false;
+                                        fs::path dst;
+                                        if (realFile) {
+                                            fs::path destDir(m_filesystemBrowser.getCurrentPath());
+                                            dst = destDir / src.filename();
+                                            if (fs::exists(dst)) {   // don't overwrite — auto-rename
+                                                std::string stem = src.stem().string(), ext = src.extension().string();
+                                                int n = 1;
+                                                do { dst = destDir / (stem + "_" + std::to_string(n++) + ext); } while (fs::exists(dst));
+                                            }
+                                            std::error_code ec;
+                                            if (fs::is_directory(src)) fs::copy(src, dst, fs::copy_options::recursive, ec);
+                                            else                       fs::copy_file(src, dst, ec);
+                                            if (ec) std::cerr << "[FS] hotbar paste copy failed: " << srcPath
+                                                              << " -> " << dst.string() << ": " << ec.message() << std::endl;
+                                            else copied = true;
+                                        }
+                                        if (copied) {
+                                            selectedWall->setTargetLevel("fs://" + dst.string());
+                                            m_filesystemBrowser.spawnFileAtWall(dst.string(), wallPos, wallScale, wallYaw);
+                                        } else {
+                                            selectedWall->setTargetLevel(linkTarget);   // link/virtual: visual only
+                                            m_filesystemBrowser.spawnFileAtWall(srcPath, wallPos, wallScale, wallYaw);
+                                        }
                                     }
                                     destroySlotThumbnail(i);
                                     m_toolbarSlots[i].occupied = false;
@@ -10354,12 +10384,36 @@ private:
                                             }
                                         }
                                     } else {
-                                        // Regular wall panel — spawn file on the wall
+                                        // Regular wall panel — copy the real file into the current
+                                        // folder (persists across silo rebuild) then spawn it.
                                         glm::vec3 wallPos = hitWall->getTransform().getPosition();
                                         glm::vec3 wallScale = hitWall->getTransform().getScale();
                                         float wallYaw = hitWall->getEulerRotation().y;
-                                        hitWall->setTargetLevel("fs://" + srcPath);
-                                        m_filesystemBrowser.spawnFileAtWall(srcPath, wallPos, wallScale, wallYaw);
+                                        namespace fs = std::filesystem;
+                                        std::error_code exEc;
+                                        fs::path src(srcPath);
+                                        bool copied = false; fs::path dst;
+                                        if (!srcPath.empty() && fs::exists(src, exEc)) {
+                                            fs::path destDir(m_filesystemBrowser.getCurrentPath());
+                                            dst = destDir / src.filename();
+                                            if (fs::exists(dst)) {
+                                                std::string stem = src.stem().string(), ext = src.extension().string();
+                                                int n = 1;
+                                                do { dst = destDir / (stem + "_" + std::to_string(n++) + ext); } while (fs::exists(dst));
+                                            }
+                                            std::error_code ec;
+                                            if (fs::is_directory(src)) fs::copy(src, dst, fs::copy_options::recursive, ec);
+                                            else                       fs::copy_file(src, dst, ec);
+                                            if (ec) std::cerr << "[FS] hotbar drop copy failed: " << srcPath << " -> " << dst.string() << ": " << ec.message() << std::endl;
+                                            else copied = true;
+                                        }
+                                        if (copied) {
+                                            hitWall->setTargetLevel("fs://" + dst.string());
+                                            m_filesystemBrowser.spawnFileAtWall(dst.string(), wallPos, wallScale, wallYaw);
+                                        } else {
+                                            hitWall->setTargetLevel("fs://" + srcPath);
+                                            m_filesystemBrowser.spawnFileAtWall(srcPath, wallPos, wallScale, wallYaw);
+                                        }
                                     }
                                     // Clear hotbar slot
                                     destroySlotThumbnail(i);
