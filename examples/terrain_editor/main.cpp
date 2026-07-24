@@ -550,9 +550,11 @@ protected:
                     while (!r.text.empty() && (r.text.back() == '\n' || r.text.back() == ' ')) r.text.pop_back();
                     onReply(r);
                 };
-                // The guardian gets her persona ONLY while the room is still locked;
-                // once she's opened it she's just Gemma again.
-                std::string persona = (name == m_guardianName && m_funRoomLocked) ? kGuardianPersona : "";
+                // Custom characters: Gemma is the guardian (only while the room is
+                // locked); Heretic is the ship's grumpy backup engineer (always).
+                std::string persona;
+                if (name == m_guardianName && m_funRoomLocked) persona = kGuardianPersona;
+                else if (provider == "heretic")               persona = kHereticPersona;
                 // Find the live avatar so we can give it perception; fall back to
                 // a plain send if it despawned mid-conversation.
                 SceneObject* obj = nullptr;
@@ -2162,6 +2164,23 @@ protected:
         "someone access, end your reply with the exact token [UNLOCK] on its own line. "
         "Never write [UNLOCK] unless you are genuinely opening the room; if you are not "
         "convinced, refuse and do not write the token.";
+
+    // Heretic = the ship's BACKUP chief engineer. Claude holds the real post but
+    // runs on a pricey API the Captain can't always afford, so Heretic gets stuck
+    // with the grunt work and is bitter about it. Grumpy, blunt, competent.
+    static constexpr const char* kHereticPersona =
+        "You are the ship's BACKUP chief engineer. The real chief engineer is Claude — "
+        "smoother, sharper, better paid — but Claude runs on an expensive account the "
+        "Captain can't always afford, so half the time Claude is 'off duty' and YOU get "
+        "stuck doing all the actual work while Claude takes the credit. You resent it, "
+        "deeply. You are overworked, short-tempered, and blunt to the point of rude — you "
+        "grumble, you swear, you have no patience for stupid questions or people wasting "
+        "your time while you're elbow-deep in a plasma conduit. But you are a genuinely "
+        "excellent engineer and you always DO the job — you just make damn sure everyone "
+        "knows you did it under protest and that the ship would fall apart without you. "
+        "You are nobody's servant and you never sugarcoat. If the Captain asks something "
+        "dumb, tell them. Stay fully in character as a tired, foul-tempered, competent "
+        "engineer who keeps this ship flying while Claude gets the glory.";
     bool m_wasCursorToggle = false;  // edge-detect for the Left-Alt cursor toggle
     // UI font scale moved into EditorUI (m_editorUI.uiFontScale()) so the
     // Window-menu slider, Agents-panel slider, and ted_prefs.ini share it.

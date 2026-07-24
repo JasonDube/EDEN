@@ -174,7 +174,7 @@ private:
     void createDescriptorPool();
     void createDefaultTexture();
 
-    void createImage(uint32_t width, uint32_t height, VkFormat format,
+    bool createImage(uint32_t width, uint32_t height, VkFormat format,
                      VkImageTiling tiling, VkImageUsageFlags usage,
                      VkMemoryPropertyFlags properties, VkImage& image,
                      VkDeviceMemory& memory);

@@ -5,6 +5,9 @@
 #include <stdexcept>
 #include <cstring>
 #include <iostream>
+#include <algorithm>
+#include <vector>
+#include <stb_image_resize2.h>   // impl lives in TextureManager.cpp; here just decls
 
 namespace eden {
 
@@ -1113,13 +1116,28 @@ uint32_t ModelRenderer::createModel(const std::vector<ModelVertex>& vertices,
 
     data.indexCount = static_cast<uint32_t>(indices.size());
 
-    // Create texture if provided
-    if (textureData && texWidth > 0 && texHeight > 0) {
-        VkDeviceSize texSize = texWidth * texHeight * 4;
+    // Cap model textures at 512px on the long edge. Avatar GLBs ship 4096/2048
+    // skins that are absurd for scene props and starve VRAM when an LLM is also
+    // resident (they crashed the loader). Downscale in place, preserving aspect.
+    std::vector<unsigned char> resizedTex;
+    if (textureData && (texWidth > 512 || texHeight > 512)) {
+        int ow = texWidth, oh = texHeight;
+        if (ow >= oh) { texWidth = 512; texHeight = std::max(1, oh * 512 / ow); }
+        else          { texHeight = 512; texWidth  = std::max(1, ow * 512 / oh); }
+        resizedTex.resize(static_cast<size_t>(texWidth) * texHeight * 4);
+        stbir_resize_uint8_linear(textureData, ow, oh, 0,
+                                  resizedTex.data(), texWidth, texHeight, 0, STBIR_RGBA);
+        textureData = resizedTex.data();
+    }
 
+    // Create texture if provided. If the GPU image can't be allocated (out of
+    // VRAM), skip the texture entirely — the model renders untextured instead of
+    // crashing the whole program in the driver.
+    if (textureData && texWidth > 0 && texHeight > 0 &&
         createImage(texWidth, texHeight, VK_FORMAT_R8G8B8A8_SRGB, VK_IMAGE_TILING_OPTIMAL,
                     VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
-                    VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, data.textureImage, data.textureMemory);
+                    VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, data.textureImage, data.textureMemory)) {
+        VkDeviceSize texSize = texWidth * texHeight * 4;
 
         VkBuffer stagingBuffer;
         VkDeviceMemory stagingMemory;
@@ -1690,13 +1708,12 @@ void ModelRenderer::updateTexture(uint32_t handle, const unsigned char* data, in
         modelData.textureWidth = 0;
         modelData.textureHeight = 0;
 
-        // Create new texture with correct size
-        try {
-            createImage(width, height, VK_FORMAT_R8G8B8A8_SRGB, VK_IMAGE_TILING_OPTIMAL,
+        // Create new texture with correct size. Bail out gracefully on VRAM
+        // exhaustion (createImage now returns false instead of segfaulting).
+        if (!createImage(width, height, VK_FORMAT_R8G8B8A8_SRGB, VK_IMAGE_TILING_OPTIMAL,
                         VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
-                        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, modelData.textureImage, modelData.textureMemory);
-        } catch (const std::exception& e) {
-            std::cerr << "Failed to create texture image: " << e.what() << std::endl;
+                        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, modelData.textureImage, modelData.textureMemory)) {
+            std::cerr << "Failed to create texture image (out of VRAM)" << std::endl;
             return;
         }
 
@@ -1951,10 +1968,13 @@ void ModelRenderer::recreatePipeline(VkRenderPass renderPass, VkExtent2D extent)
     createSelectionPipeline(renderPass, extent);
 }
 
-void ModelRenderer::createImage(uint32_t width, uint32_t height, VkFormat format,
+bool ModelRenderer::createImage(uint32_t width, uint32_t height, VkFormat format,
                                  VkImageTiling tiling, VkImageUsageFlags usage,
                                  VkMemoryPropertyFlags properties, VkImage& image,
                                  VkDeviceMemory& memory) {
+    image = VK_NULL_HANDLE;
+    memory = VK_NULL_HANDLE;
+
     VkImageCreateInfo imageInfo{};
     imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
     imageInfo.imageType = VK_IMAGE_TYPE_2D;
@@ -1970,7 +1990,10 @@ void ModelRenderer::createImage(uint32_t width, uint32_t height, VkFormat format
     imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
     imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
 
-    vkCreateImage(m_context.getDevice(), &imageInfo, nullptr, &image);
+    if (vkCreateImage(m_context.getDevice(), &imageInfo, nullptr, &image) != VK_SUCCESS) {
+        image = VK_NULL_HANDLE;
+        return false;
+    }
 
     VkMemoryRequirements memReqs;
     vkGetImageMemoryRequirements(m_context.getDevice(), image, &memReqs);
@@ -1980,9 +2003,27 @@ void ModelRenderer::createImage(uint32_t width, uint32_t height, VkFormat format
     allocInfo.allocationSize = memReqs.size;
     allocInfo.memoryTypeIndex = m_context.findMemoryType(memReqs.memoryTypeBits, properties);
 
-    vkAllocateMemory(m_context.getDevice(), &allocInfo, nullptr, &memory);
+    // OUT OF VRAM: don't bind a null allocation (that segfaults in the driver).
+    // Clean up and report failure so the caller can fall back to no texture.
+    if (vkAllocateMemory(m_context.getDevice(), &allocInfo, nullptr, &memory) != VK_SUCCESS) {
+        vkDestroyImage(m_context.getDevice(), image, nullptr);
+        image = VK_NULL_HANDLE;
+        memory = VK_NULL_HANDLE;
+        std::cerr << "[ModelRenderer] vkAllocateMemory failed for " << width << "x" << height
+                  << " image (out of VRAM) — skipping this texture\n";
+        return false;
+    }
     Buffer::trackVramAllocHandle(memory, static_cast<int64_t>(memReqs.size));
-    vkBindImageMemory(m_context.getDevice(), image, memory, 0);
+
+    if (vkBindImageMemory(m_context.getDevice(), image, memory, 0) != VK_SUCCESS) {
+        Buffer::trackVramFreeHandle(memory);
+        vkFreeMemory(m_context.getDevice(), memory, nullptr);
+        vkDestroyImage(m_context.getDevice(), image, nullptr);
+        image = VK_NULL_HANDLE;
+        memory = VK_NULL_HANDLE;
+        return false;
+    }
+    return true;
 }
 
 void ModelRenderer::transitionImageLayout(VkImage image, VkFormat format,
