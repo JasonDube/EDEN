@@ -2815,6 +2815,38 @@ void FilesystemBrowser::spawnObjects(const std::string& dirPath) {
         obj->getTransform().setPosition({center.x, m_platformY + 4.0f, center.z});
         obj->getTransform().setScale({2.0f * radius + 12.0f, 1.0f, 2.0f * radius + 12.0f});
         m_sceneObjects->push_back(std::move(obj));
+
+        // Rim wall: close the open band between the top of the content panels
+        // (~platformY − 8) and the lid, so you can't slip out sideways at the top.
+        float segAngle = 2.0f * M_PI / gallerySides();
+        float segWidth = 2.0f * radius * sinf(segAngle / 2.0f);
+        float rimCenterY = m_platformY - 2.0f;   // spans ~platformY−8.25 .. +4.25
+        float rimHeight  = 12.5f;
+        for (int s = 0; s < gallerySides(); ++s) {
+            float angle = s * segAngle;
+            float wx = center.x + radius * cosf(angle);
+            float wz = center.z + radius * sinf(angle);
+            float yawDeg = -angle * 180.0f / M_PI + 90.0f;
+
+            auto rm = PrimitiveMeshBuilder::createCube(1.0f, lidColor);
+            uint32_t rh = m_modelRenderer->createModel(rm.vertices, rm.indices, nullptr, 0, 0);
+
+            auto ro = std::make_unique<SceneObject>("FSRim_" + std::to_string(s));
+            ro->setBufferHandle(rh);
+            ro->setIndexCount(rm.indices.size());
+            ro->setVertexCount(rm.vertices.size());
+            ro->setLocalBounds(rm.bounds);
+            ro->setMeshData(rm.vertices, rm.indices);
+            ro->setPrimitiveType(PrimitiveType::Cube);
+            ro->setPrimitiveSize(1.0f);
+            ro->setPrimitiveColor(lidColor);
+            ro->setBuildingType("eden_os_lid");
+            ro->setAABBCollision(true);
+            ro->getTransform().setPosition({wx, rimCenterY, wz});
+            ro->getTransform().setScale({segWidth, rimHeight, 0.15f});
+            ro->setEulerRotation({0.0f, yawDeg, 0.0f});
+            m_sceneObjects->push_back(std::move(ro));
+        }
     }
 
     // Silo floor is now the basement ceiling (solid) — spawned in spawnBasement()
