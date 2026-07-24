@@ -29044,8 +29044,15 @@ private:
             o->setBuildingType("inhabitant");
             o->setName("Inhabitant_" + std::to_string(++m_inhabitantCounter));
             m_inhabitants.erase(o->getName()); // fresh state, seeded lazily in update
+            // Fold this one into the shared tribe centre (running average) so the
+            // group clusters around a common home instead of scattering.
+            glm::vec3 p = o->getTransform().getPosition();
+            m_tribeCenter = (m_tribeCenter * static_cast<float>(m_tribeCount) + p)
+                            / static_cast<float>(m_tribeCount + 1);
+            m_tribeCount++;
         }
-        std::cout << "[Inhabitant] spawned dot inhabitant" << std::endl;
+        std::cout << "[Inhabitant] spawned dot inhabitant (tribe of "
+                  << m_tribeCount << ")" << std::endl;
     }
 
     // Bring inhabitants to life: a lazy wander (idle a beat → pick a nearby point →
@@ -29055,18 +29062,30 @@ private:
         auto frand = [](float a, float b) {
             return a + (b - a) * (static_cast<float>(rand()) / static_cast<float>(RAND_MAX));
         };
+        auto dist2D = [](const glm::vec3& a, const glm::vec3& b) {
+            float dx = a.x - b.x, dz = a.z - b.z;
+            return std::sqrt(dx * dx + dz * dz);
+        };
+
+        // Snapshot the tribe so each member can sense its neighbours this frame.
+        std::vector<std::pair<SceneObject*, glm::vec3>> mob;
         for (auto& objPtr : m_sceneObjects) {
-            if (!objPtr || objPtr->getBuildingType() != "inhabitant") continue;
-            SceneObject* obj = objPtr.get();
+            if (objPtr && objPtr->getBuildingType() == "inhabitant")
+                mob.push_back({objPtr.get(), objPtr->getTransform().getPosition()});
+        }
+
+        constexpr float kNoticeR  = 2.5f;   // greet a neighbour once this close
+        constexpr float kPersonal = 1.1f;   // don't crowd nearer than this
+
+        for (auto& entry : mob) {
+            SceneObject* obj = entry.first;
+            glm::vec3 pos = entry.second;
             InhabitantState& st = m_inhabitants[obj->getName()];
 
-            glm::vec3 pos = obj->getTransform().getPosition();
             if (!st.init) {
                 st.footLift = pos.y - m_terrain.getHeightAt(pos.x, pos.z);
-                st.home = pos;
-                st.target = pos;
-                st.walking = false;
-                st.timer = frand(1.0f, 3.0f);
+                st.home = pos; st.target = pos;
+                st.walking = false; st.timer = frand(1.0f, 3.0f);
                 st.init = true;
             }
 
@@ -29077,30 +29096,63 @@ private:
                     st.clip = name;
                 }
             };
+            auto faceToward = [&](const glm::vec3& tp) {
+                glm::vec3 f = tp - pos; f.y = 0.0f;
+                if (glm::length(f) > 1e-3f)
+                    obj->setEulerRotation({0.0f, glm::degrees(std::atan2(f.x, f.z)), 0.0f});
+            };
 
-            st.timer -= deltaTime;
-            if (st.walking) {
+            // Nearest OTHER inhabitant, for noticing + spacing.
+            SceneObject* near = nullptr; float nd = 1e9f; glm::vec3 nearPos(0.0f);
+            for (auto& other : mob) {
+                if (other.first == obj) continue;
+                float d = dist2D(pos, other.second);
+                if (d < nd) { nd = d; near = other.first; nearPos = other.second; }
+            }
+
+            st.timer   -= deltaTime;
+            st.greetCd -= deltaTime;
+
+            // NOTICE: a neighbour wanders close → stop, turn to them, share a beat.
+            if (!st.greeting && st.greetCd <= 0.0f && near && nd < kNoticeR) {
+                st.greeting = true; st.walking = false;
+                st.timer = frand(1.2f, 2.4f);
+                faceToward(nearPos);
+                play("idle");
+            }
+
+            if (st.greeting) {
+                if (st.timer <= 0.0f) {                    // done greeting
+                    st.greeting = false;
+                    st.greetCd = frand(4.0f, 8.0f);
+                    st.timer   = frand(0.4f, 1.2f);
+                }
+                // hold position while greeting
+            } else if (st.walking) {
                 glm::vec3 to = st.target - pos; to.y = 0.0f;
                 float dist = glm::length(to);
-                if (dist < 0.6f || st.timer <= 0.0f) {   // arrived, or gave up
+                if (dist < 0.6f || st.timer <= 0.0f) {     // arrived, or gave up
                     st.walking = false;
                     st.timer = frand(2.0f, 5.0f);
                     play("idle");
                 } else {
                     glm::vec3 dir = to / dist;
-                    pos += dir * 1.6f * deltaTime;        // gentle stroll (m/s)
-                    // Face the way we're walking (model forward = +Z; flip +180 if she moonwalks).
-                    float yaw = glm::degrees(std::atan2(dir.x, dir.z));
-                    obj->setEulerRotation({0.0f, yaw, 0.0f});
+                    glm::vec3 stepPos = pos + dir * 1.6f * deltaTime;   // gentle stroll (m/s)
+                    // SPACING: take the step unless it would crowd the nearest neighbour
+                    // (still allow it if we're already too close and moving away).
+                    bool crowding = near && dist2D(stepPos, nearPos) < kPersonal
+                                         && dist2D(stepPos, nearPos) < nd;
+                    if (!crowding) pos = stepPos;
+                    faceToward(st.target);
                     play("walk");
                 }
             } else if (st.timer <= 0.0f) {
-                // Pick a new spot within a small patch around home and head there.
+                // CLUSTER: wander around the shared tribe centre, not a private home,
+                // so the group stays loosely together.
                 float ang = frand(0.0f, 6.2831853f);
-                float r   = frand(2.0f, 8.0f);
-                st.target = st.home + glm::vec3(std::cos(ang) * r, 0.0f, std::sin(ang) * r);
-                st.walking = true;
-                st.timer = 12.0f;                         // max seconds to reach before giving up
+                float r   = frand(1.5f, 7.0f);
+                st.target = m_tribeCenter + glm::vec3(std::cos(ang) * r, 0.0f, std::sin(ang) * r);
+                st.walking = true; st.timer = 12.0f;
                 play("walk");
             }
 
@@ -31105,14 +31157,18 @@ private:
     struct InhabitantState {
         bool init = false;          // lazily seeded from the object's current pose
         float footLift = 0.0f;      // origin-to-feet offset, so feet stay on the terrain
-        glm::vec3 home{0.0f};       // wander around here
+        glm::vec3 home{0.0f};       // (kept for reference; wander now centres on the tribe)
         glm::vec3 target{0.0f};     // current walk goal
         bool walking = false;
         float timer = 0.0f;         // countdown to the next state change
         std::string clip;           // current anim clip (avoid re-triggering every frame)
+        bool greeting = false;      // paused, facing a neighbour it just noticed
+        float greetCd = 0.0f;       // cooldown before it will greet again
     };
     std::unordered_map<std::string, InhabitantState> m_inhabitants; // keyed by object name
     int m_inhabitantCounter = 0;
+    glm::vec3 m_tribeCenter{0.0f};  // shared home the tribe clusters around
+    int m_tribeCount = 0;           // running count for the centre's average
     enum class PlayerZone { Silo, Basement, Outside, Void };
     PlayerZone m_playerZone = PlayerZone::Outside;
     float m_testFloorSize = 100.0f;
