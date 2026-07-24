@@ -274,6 +274,9 @@ Available actions:
 8. **read_file** — Read the contents of a nearby file (FSFile_ objects). You'll get a short preview back.
    ACTION: {"type": "read_file", "target": "FSFile_example.txt"}
 
+9. **kiss** — Lean in and kiss the player (a romance beat). Use ONLY when the moment genuinely calls for it and your bond warrants it.
+   ACTION: {"type": "kiss", "to_player": true}
+
 ## Perception
 
 Your messages may include a [You can see: ...] block. This tells you what objects are around you,
@@ -626,7 +629,15 @@ def parse_action_from_response(text: str) -> tuple[str, Optional[dict]]:
                 if "type" in action:
                     return clean_text, action
             except json.JSONDecodeError:
-                pass
+                # Forgive a common model slip: Python-tuple positions like
+                # "(-19.9, 66.2, -7.4)" (invalid JSON) -> "[-19.9, 66.2, -7.4]".
+                coerced = re.sub(r'\(\s*(-?\d[\d.,eE+\-\s]*?)\)', r'[\1]', action_str)
+                try:
+                    action = json.loads(coerced)
+                    if "type" in action:
+                        return clean_text, action
+                except json.JSONDecodeError:
+                    pass
         else:
             # "ACTION: None" / "ACTION:" with no JSON — strip the leftover tag so
             # it doesn't leak into the spoken reply.

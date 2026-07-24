@@ -623,6 +623,27 @@ public:
             std::cout << "[AI Action] Stopped for " << npc->getName()
                       << " (remaining followers: " << m_aiFollowers.size() << ")" << std::endl;
         }
+        else if (actionType == "kiss") {
+            // Romance beat: turn to face the player, then show a "kiss" expression/
+            // clip if the model has one. The turn is the visible beat for now;
+            // add a "kiss" animation/expression named "kiss" and it plays here.
+            glm::vec3 playerPos = m_host.getCamera().getPosition();
+            glm::vec3 npcPos = npc->getTransform().getPosition();
+            glm::vec3 toPlayer = playerPos - npcPos;
+            toPlayer.y = 0.0f;
+            if (glm::length(toPlayer) > 0.01f) {
+                toPlayer = glm::normalize(toPlayer);
+                m_aiActionActive = true;
+                m_aiActionType = "turn_to";           // reuse the existing turn animation
+                m_aiActionDuration = 1.0f;
+                m_aiActionTimer = 0.0f;
+                m_aiActionStartYaw = npc->getEulerRotation().y;
+                m_aiActionTargetYaw = glm::degrees(atan2(toPlayer.x, toPlayer.z));
+            }
+            if (npc->getExpressionCount() > 0 && npc->setExpressionByName("kiss"))
+                m_host.updateNPCTexture(npc);
+            std::cout << "[AI Action] kiss — facing player (add a 'kiss' clip/expression to animate)" << std::endl;
+        }
         else if (actionType == "set_expression") {
             std::string exprName = action.value("expression", "");
             if (exprName.empty() || npc->getExpressionCount() == 0) {
