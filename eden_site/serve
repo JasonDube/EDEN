@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# serve the EDEN OS website
+cd "$(dirname "$0")"
+echo "EDEN OS -> http://localhost:8091   (Ctrl-C to stop)"
+exec eui serve.ex
