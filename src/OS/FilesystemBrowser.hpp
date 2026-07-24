@@ -77,6 +77,17 @@ public:
     // silo center (on the floor) right now. Returns a short status message.
     std::string deployAgentInCurrentFolder();
     float getBasementHeight() const { return basementHeight(); }
+    float getGalleryRadius() const { return galleryRadius(); }
+
+    // Build a filename label texture (same look as the void file cubes) for
+    // callers outside the browser — e.g. the hotbar's thrown default cube.
+    // Returns LABEL_SIZE x LABEL_SIZE RGBA; sizeOut receives LABEL_SIZE.
+    std::vector<unsigned char> makeLabelTexture(const std::string& name, int& sizeOut);
+
+    // The overflow "void" (Menger-sponge) structure spins slowly in space.
+    // Right-clicking it pauses the spin so files hold still to be read; a
+    // rebuild (re-navigation) starts it turning again.
+    void pauseVoidSpin() { m_voidSpinPaused = true; }
     float getBasementFloorY() const { return m_basementBaseY - basementHeight(); }
     float getCeilingTopY() const { return m_basementBaseY - 0.5f; } // top surface of basement ceiling slab
     bool hasVoid() const { return m_hasVoid; }
@@ -420,6 +431,7 @@ private:
     float m_voidRotAngleX = 0.0f;
     float m_voidRotAngleY = 0.0f;
     float m_voidRotAngleZ = 0.0f;
+    bool  m_voidSpinPaused = false; // right-clicking the void freezes it to read files
     struct VoidFileObj {
         SceneObject* obj;
         glm::vec3 localOffset; // position relative to voidCenter

@@ -708,7 +708,7 @@ void FilesystemBrowser::updateAnimations(float deltaTime) {
     if (m_hasVoid && m_sceneObjects) {
         m_voidPulseTimer += deltaTime * 3.0f; // 3 Hz pulse
         float distToVoid = glm::length(m_playerPos - m_voidCenter);
-        if (distToVoid > 150.0f) {
+        if (distToVoid > 150.0f && !m_voidSpinPaused) {
             m_voidRotAngleX += m_voidRotSpeed.x * deltaTime;
             m_voidRotAngleY += m_voidRotSpeed.y * deltaTime;
             m_voidRotAngleZ += m_voidRotSpeed.z * deltaTime;
@@ -2398,6 +2398,7 @@ void FilesystemBrowser::spawnVoid(const glm::vec3& center, float topY,
     };
     m_voidRotSpeed = {randSpeed(), randSpeed(), randSpeed()};
     m_voidRotAngleX = m_voidRotAngleY = m_voidRotAngleZ = 0.0f;
+    m_voidSpinPaused = false; // a fresh structure spins again
 
     // Subdivide twice: 27 → keep 20 → each 20 subdivides → keep 20 = 400 positions
     std::vector<VoidCube> cubes;
@@ -3266,6 +3267,17 @@ void FilesystemBrowser::renderLabel(std::vector<unsigned char>& pixels,
                 std::swap(pixels[ti + c], pixels[bi + c]);
         }
     }
+}
+
+std::vector<unsigned char> FilesystemBrowser::makeLabelTexture(const std::string& name, int& sizeOut) {
+    std::vector<unsigned char> pixels;
+    // Strip any path, keep just the filename for the label.
+    std::string base = name;
+    size_t slash = base.find_last_of("/\\");
+    if (slash != std::string::npos) base = base.substr(slash + 1);
+    renderLabel(pixels, base, FileCategory::Other, colorForCategory(FileCategory::Other));
+    sizeOut = LABEL_SIZE;
+    return pixels;
 }
 
 // ── Image Focus Mode ────────────────────────────────────────────────────

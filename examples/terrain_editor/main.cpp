@@ -1692,6 +1692,17 @@ protected:
         m_filesystemBrowser.setPlayerPosition(m_camera.getPosition());
         m_filesystemBrowser.updateAnimations(deltaTime);
 
+        // The ship's exterior turns slowly in space, so its scale reads as you fly
+        // toward it. Spins about its own vertical axis (through the silo centre).
+        if (m_isEdenOSLevel) {
+            m_shipSpinYaw += 3.0f * deltaTime;                 // ~3 deg/s — a stately drift
+            if (m_shipSpinYaw >= 360.0f) m_shipSpinYaw -= 360.0f;
+            for (auto& o : m_sceneObjects) {
+                if (o && o->getBuildingType() == "eden_os_exterior")
+                    o->setEulerRotation({0.0f, m_shipSpinYaw, 0.0f});
+            }
+        }
+
         // Register each deployed Agent avatar's provider with the chat client, so
         // its /chat requests use that avatar's model (Claude/Grok/DeepSeek/Ollama).
         if (m_isEdenOSLevel && m_httpClient) {
@@ -10577,10 +10588,42 @@ private:
                 }
 
                 // Priority 2: Throw or place from occupied hotbar slot
-                if (!m_toolbarSlots[i].occupied || !m_toolbarSlots[i].is3DModel) continue;
-                if (m_toolbarSlots[i].gpuHandle == 0) continue;
+                if (!m_toolbarSlots[i].occupied) continue;
 
                 bool ctrlHeld = rmbqForceCtrl || Input::isKeyDown(Input::KEY_LEFT_CONTROL) || Input::isKeyDown(Input::KEY_RIGHT_CONTROL);
+
+                // Non-model mounts (folders, images, videos, plain files) carry no mesh of
+                // their own — on a frame they're drawn by presentation, but a thrown object
+                // needs a real body. Give it a default cube just-in-time so Q can chuck it.
+                // (Plain throw only; Ctrl place-into-frame stays model-only.)
+                if (!m_toolbarSlots[i].is3DModel) {
+                    if (ctrlHeld) continue;  // don't cube-ify a frame placement
+                    auto cube = PrimitiveMeshBuilder::createCube(0.6f, glm::vec4(0.55f, 0.62f, 0.75f, 1.0f));
+                    // Write the filename on the cube, same look as the void file cubes.
+                    int lblSize = 0;
+                    std::vector<unsigned char> lbl =
+                        m_filesystemBrowser.makeLabelTexture(m_toolbarSlots[i].displayName, lblSize);
+                    if (m_toolbarSlots[i].imguiDescriptor) {
+                        ImGui_ImplVulkan_RemoveTexture(m_toolbarSlots[i].imguiDescriptor);
+                        m_toolbarSlots[i].imguiDescriptor = VK_NULL_HANDLE;
+                    }
+                    if (m_toolbarSlots[i].gpuHandle != 0)
+                        m_modelRenderer->destroyModel(m_toolbarSlots[i].gpuHandle);
+                    m_toolbarSlots[i].gpuHandle       = m_modelRenderer->createModel(
+                        cube.vertices, cube.indices, lbl.data(), lblSize, lblSize);
+                    m_toolbarSlots[i].modelIndexCount = static_cast<uint32_t>(cube.indices.size());
+                    m_toolbarSlots[i].modelBounds     = cube.bounds;
+                    m_toolbarSlots[i].modelScale      = glm::vec3(1.0f);
+                    m_toolbarSlots[i].meshVertices    = cube.vertices;
+                    m_toolbarSlots[i].meshIndices     = cube.indices;
+                    m_toolbarSlots[i].textureData     = std::move(lbl); // persist the label
+                    m_toolbarSlots[i].textureWidth    = lblSize;
+                    m_toolbarSlots[i].textureHeight   = lblSize;
+                    if (m_toolbarSlots[i].baseModelName.empty())
+                        m_toolbarSlots[i].baseModelName = m_toolbarSlots[i].displayName;
+                    m_toolbarSlots[i].is3DModel = true;
+                }
+                if (m_toolbarSlots[i].gpuHandle == 0) continue;
 
                 glm::vec3 camPos = m_camera.getPosition();
                 glm::vec3 camFront = m_camera.getFront();
@@ -13747,11 +13790,13 @@ private:
                 SceneObject* fsHit = raycastFS(rayO, rayD);
 
                 if (fsHit && fsHit->getBuildingType() == "filesystem_void") {
-                    // Void file objects → teleport to sponge
+                    // Void file objects → teleport to sponge, and freeze its spin
+                    // so the files hold still to be read.
                     glm::vec3 vc = m_filesystemBrowser.getVoidCenter();
                     glm::vec3 aboveVoid(vc.x, vc.y + 74.0f, vc.z);
                     m_camera.setPosition(aboveVoid);
                     if (m_characterController) m_characterController->setPosition(aboveVoid);
+                    m_filesystemBrowser.pauseVoidSpin();
                     m_playerZone = PlayerZone::Outside;
                     updateZoneVisibility();
                     m_shootCooldown = 0.2f;
@@ -13765,14 +13810,18 @@ private:
                     float anyDist = std::numeric_limits<float>::max();
                     for (auto& obj : m_sceneObjects) {
                         if (!obj) continue;
-                        // Check filesystem objects, void objects, and the silo model
+                        // Hittable from outside: the silo model, the ship hull, any
+                        // filesystem/void object, AND the solid void filler mesh — so
+                        // clicking ANYWHERE on the sponge works, not just a tiny cube.
                         const auto& bt = obj->getBuildingType();
                         const auto& mp = obj->getModelPath();
                         bool isSilo = (!mp.empty() && mp.find("silo") != std::string::npos && mp.find(".lime") != std::string::npos);
-                        bool isFS = (bt == "filesystem" || bt == "filesystem_void");
-                        if (!isSilo && !isFS) continue;
+                        bool isShip = (bt == "eden_os_exterior");
+                        bool isVoid = (bt == "filesystem_void" || bt == "filesystem_void_filler");
+                        bool isFS = (bt == "filesystem" || isVoid);
+                        if (!isSilo && !isShip && !isFS) continue;
                         float dist = obj->getWorldBounds().intersect(rayO, rayD);
-                        float maxRange = (isSilo || bt == "filesystem_void") ? 2000.0f : 200.0f;
+                        float maxRange = (isSilo || isShip || isVoid) ? 2000.0f : 200.0f;
                         if (dist >= 0 && dist < maxRange && dist < anyDist) {
                             anyDist = dist;
                             anyHit = obj.get();
@@ -13782,14 +13831,18 @@ private:
                         const auto& bt = anyHit->getBuildingType();
                         const auto& mp = anyHit->getModelPath();
                         bool isSilo = (!mp.empty() && mp.find("silo") != std::string::npos);
-                        if (bt == "filesystem_void" && m_filesystemBrowser.hasVoid()) {
+                        bool isVoid = (bt == "filesystem_void" || bt == "filesystem_void_filler");
+                        if (isVoid && m_filesystemBrowser.hasVoid()) {
+                            // Anywhere on the sponge → fly there and freeze its spin.
                             glm::vec3 vc = m_filesystemBrowser.getVoidCenter();
                             glm::vec3 aboveVoid(vc.x, vc.y + 74.0f, vc.z);
                             m_camera.setPosition(aboveVoid);
                             if (m_characterController) m_characterController->setPosition(aboveVoid);
+                            m_filesystemBrowser.pauseVoidSpin();
                             // Stay in Outside zone — sponge is an outdoor object
                             updateZoneVisibility();
-                        } else if (isSilo) {
+                        } else if (isSilo || bt == "eden_os_exterior") {
+                            // Click the ship (or silo) → drop back onto the silo floor.
                             handleTargetNavigation("home://silo");
                         }
                         m_shootCooldown = 0.2f;
@@ -24846,6 +24899,68 @@ private:
     // level's terrain (which loadLevel() chokes on). Mirrors the F9 enter path:
     // load persistent OS objects if present, spawn basement, then navigate(home)
     // which rebuilds all silo geometry from the current directory contents.
+    // The ship's exterior hull. When you leave the silo through the Exit mount you
+    // drop into the Outside zone and look back at this: a generation ship whose
+    // cylindrical body mirrors the silo interior. Spawned centred on the silo,
+    // diameter-fit so the body encloses the rings, tower + engines overhanging the
+    // ends. Tagged "eden_os_exterior" → updateZoneVisibility shows it only from
+    // Outside/Void (backface culling would hide it from inside anyway, but this is
+    // explicit). Decorative: no physics body.
+    void spawnShipExterior() {
+        if (!m_modelRenderer) return;
+        std::string shipPath = std::string(CMAKE_SOURCE_DIR) +
+            "/examples/terrain_editor/assets/models/eden_os_ship.glb";
+        if (!std::filesystem::exists(shipPath)) {
+            std::cerr << "[EDEN] ship exterior model not found: " << shipPath << std::endl;
+            return;
+        }
+        auto result = GLBLoader::load(shipPath);
+        if (!result.success || result.meshes.empty()) {
+            std::cerr << "[EDEN] failed to load ship exterior: " << result.error << std::endl;
+            return;
+        }
+
+        // Fit the model's diameter to the silo's, with a small margin so the hull
+        // clears the outermost rings. Model is authored normalised + origin-centred.
+        glm::vec3 combinedMin(FLT_MAX), combinedMax(-FLT_MAX);
+        for (const auto& mesh : result.meshes) {
+            combinedMin = glm::min(combinedMin, mesh.bounds.min);
+            combinedMax = glm::max(combinedMax, mesh.bounds.max);
+        }
+        glm::vec3 msize = combinedMax - combinedMin;
+        float modelDiameter = std::max(msize.x, msize.z);
+        if (modelDiameter < 1e-4f) modelDiameter = 1.0f;
+        float siloDiameter = 2.0f * m_filesystemBrowser.getGalleryRadius();
+        float scale = (siloDiameter * 1.15f) / modelDiameter;   // 15% margin
+
+        // Centre on the silo, vertically centred on its mid-height so the body
+        // wraps the rings and the tower/engines overhang top and bottom.
+        glm::vec3 siloCenter = m_filesystemBrowser.getSpawnOrigin();
+        float siloMidY = (m_filesystemBrowser.getRingBaseY() +
+                          m_filesystemBrowser.getPlatformY()) * 0.5f;
+        glm::vec3 modelCenter = (combinedMin + combinedMax) * 0.5f;
+        glm::vec3 shipPos(siloCenter.x - modelCenter.x * scale,
+                          siloMidY     - modelCenter.y * scale,
+                          siloCenter.z - modelCenter.z * scale);
+
+        int count = 0;
+        for (const auto& mesh : result.meshes) {
+            auto obj = GLBLoader::createSceneObject(mesh, *m_modelRenderer);
+            if (!obj) continue;
+            obj->setName("EdenShipExterior_" + std::to_string(++count));
+            obj->setBuildingType("eden_os_exterior");
+            obj->setModelPath(shipPath);
+            obj->getTransform().setScale(glm::vec3(scale));
+            obj->getTransform().setPosition(shipPos);
+            obj->setAABBCollision(false);            // decorative — no collision
+            obj->setVisible(false);                  // updateZoneVisibility reveals it Outside
+            m_sceneObjects.push_back(std::move(obj));
+        }
+        std::cout << "[EDEN] ship exterior: " << count << " mesh(es), scale " << scale
+                  << ", diameter ~" << (modelDiameter * scale) << "m (silo "
+                  << siloDiameter << "m)" << std::endl;
+    }
+
     void spawnEdenOSFromHome() {
         m_isEdenOSLevel = true;
         m_terrain.getConfigMutable().heightScale = 0.0f; // EDEN OS has no terrain
@@ -24866,6 +24981,10 @@ private:
         syncExcludedPaths(); // keep hotbar files out of the gallery
         m_filesystemBrowser.navigate(homePath);
         m_filesystemBrowser.processNavigation(); // rebuild silo from live folder now
+
+        // Now the silo dimensions (ringBaseY/platformY/radius) are known — wrap it
+        // in the ship's exterior hull for the view from Outside.
+        spawnShipExterior();
 
         // Spawn on the platform at the top of the silo, offset off-center.
         float spawnY = m_filesystemBrowser.getPlatformY() + 1.7f;
@@ -25015,6 +25134,12 @@ private:
             // Void objects stay visible from outside and void zones
             bool isVoidObj = (bt == "filesystem_void" || bt == "filesystem_void_filler");
             if (isVoidObj) {
+                obj->setVisible(m_playerZone == PlayerZone::Outside || m_playerZone == PlayerZone::Void);
+                continue;
+            }
+
+            // Ship exterior hull — only seen once you've left the silo.
+            if (bt == "eden_os_exterior") {
                 obj->setVisible(m_playerZone == PlayerZone::Outside || m_playerZone == PlayerZone::Void);
                 continue;
             }
@@ -30737,6 +30862,7 @@ private:
     bool m_isTestLevel = false;
     bool m_isSpaceLevel = false;
     bool m_isEdenOSLevel = false;
+    float m_shipSpinYaw = 0.0f;   // slow yaw of the ship's exterior hull in space
     enum class PlayerZone { Silo, Basement, Outside, Void };
     PlayerZone m_playerZone = PlayerZone::Outside;
     float m_testFloorSize = 100.0f;
