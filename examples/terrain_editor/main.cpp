@@ -1994,6 +1994,12 @@ protected:
             !ImGui::GetIO().WantTextInput && !ImGui::GetIO().WantCaptureKeyboard) {
             spawnInhabitant();
         }
+        // U: drop a water source (thirsty inhabitants path to it). Terminal-only key,
+        // excluded here by the text-input guard.
+        if (Input::isKeyPressed(Input::KEY_U) &&
+            !ImGui::GetIO().WantTextInput && !ImGui::GetIO().WantCaptureKeyboard) {
+            spawnWater();
+        }
         // Inhabitants wander (and stay grounded) only when the game is playing, and
         // not in EDEN OS (which has no terrain to sample).
         if (m_isPlayMode && !m_isEdenOSLevel) {
@@ -2548,6 +2554,7 @@ protected:
             renderPlayModeUI();
             renderUVViewer();
             renderAgentNameTags();
+            renderInhabitantTags();
             renderServerStatus();
             renderBotBubbles();
             if (m_isEdenOSLevel) {
@@ -29086,6 +29093,9 @@ private:
                 st.footLift = pos.y - m_terrain.getHeightAt(pos.x, pos.z);
                 st.home = pos; st.target = pos;
                 st.walking = false; st.timer = frand(1.0f, 3.0f);
+                // Stagger thirst so the tribe doesn't all get parched in lockstep.
+                st.thirst = frand(0.0f, 0.4f);
+                st.thirstRate = frand(0.010f, 0.030f);
                 st.init = true;
             }
 
@@ -29113,52 +29123,151 @@ private:
             st.timer   -= deltaTime;
             st.greetCd -= deltaTime;
 
-            // NOTICE: a neighbour wanders close → stop, turn to them, share a beat.
-            if (!st.greeting && st.greetCd <= 0.0f && near && nd < kNoticeR) {
-                st.greeting = true; st.walking = false;
-                st.timer = frand(1.2f, 2.4f);
-                faceToward(nearPos);
-                play("idle");
+            // NEED: thirst climbs; hysteresis so they commit to a full drink once
+            // they set out (seek from THIRSTY, don't quit until SATED).
+            constexpr float kThirsty = 0.65f, kSated = 0.15f;
+            st.thirst = std::min(1.0f, st.thirst + st.thirstRate * deltaTime);
+            if (st.thirst > kThirsty) st.seekingWater = true;
+            if (st.thirst < kSated)   st.seekingWater = false;
+
+            // Nearest water source (an object tagged "water").
+            glm::vec3 waterPos(0.0f); bool haveWater = false; float wdist = 1e9f;
+            for (auto& objPtr : m_sceneObjects) {
+                if (!objPtr || objPtr->getBuildingType() != "water") continue;
+                glm::vec3 wp = objPtr->getTransform().getPosition();
+                float d = dist2D(pos, wp);
+                if (d < wdist) { wdist = d; waterPos = wp; haveWater = true; }
             }
 
-            if (st.greeting) {
-                if (st.timer <= 0.0f) {                    // done greeting
-                    st.greeting = false;
-                    st.greetCd = frand(4.0f, 8.0f);
-                    st.timer   = frand(0.4f, 1.2f);
-                }
-                // hold position while greeting
-            } else if (st.walking) {
-                glm::vec3 to = st.target - pos; to.y = 0.0f;
-                float dist = glm::length(to);
-                if (dist < 0.6f || st.timer <= 0.0f) {     // arrived, or gave up
-                    st.walking = false;
-                    st.timer = frand(2.0f, 5.0f);
+            if (st.seekingWater && haveWater) {
+                // Thirst overrides socialising — a parched creature won't stop to chat.
+                st.greeting = false;
+                float d = dist2D(pos, waterPos);
+                if (d < 1.6f) {                              // at the water → drink
+                    st.drinking = true;
+                    st.thirst = std::max(0.0f, st.thirst - 0.55f * deltaTime);
+                    faceToward(waterPos);
                     play("idle");
-                } else {
-                    glm::vec3 dir = to / dist;
-                    glm::vec3 stepPos = pos + dir * 1.6f * deltaTime;   // gentle stroll (m/s)
-                    // SPACING: take the step unless it would crowd the nearest neighbour
-                    // (still allow it if we're already too close and moving away).
-                    bool crowding = near && dist2D(stepPos, nearPos) < kPersonal
-                                         && dist2D(stepPos, nearPos) < nd;
-                    if (!crowding) pos = stepPos;
-                    faceToward(st.target);
+                } else {                                     // walk to the water
+                    st.drinking = false;
+                    glm::vec3 to = waterPos - pos; to.y = 0.0f;
+                    glm::vec3 dir = to / std::max(glm::length(to), 1e-4f);
+                    pos += dir * 1.6f * deltaTime;
+                    faceToward(waterPos);
                     play("walk");
                 }
-            } else if (st.timer <= 0.0f) {
-                // CLUSTER: wander around the shared tribe centre, not a private home,
-                // so the group stays loosely together.
-                float ang = frand(0.0f, 6.2831853f);
-                float r   = frand(1.5f, 7.0f);
-                st.target = m_tribeCenter + glm::vec3(std::cos(ang) * r, 0.0f, std::sin(ang) * r);
-                st.walking = true; st.timer = 12.0f;
-                play("walk");
+            } else {
+                st.drinking = false;
+                // NOTICE: a neighbour wanders close → stop, turn to them, share a beat.
+                if (!st.greeting && st.greetCd <= 0.0f && near && nd < kNoticeR) {
+                    st.greeting = true; st.walking = false;
+                    st.timer = frand(1.2f, 2.4f);
+                    faceToward(nearPos);
+                    play("idle");
+                }
+
+                if (st.greeting) {
+                    if (st.timer <= 0.0f) {                  // done greeting
+                        st.greeting = false;
+                        st.greetCd = frand(4.0f, 8.0f);
+                        st.timer   = frand(0.4f, 1.2f);
+                    }
+                    // hold position while greeting
+                } else if (st.walking) {
+                    glm::vec3 to = st.target - pos; to.y = 0.0f;
+                    float dist = glm::length(to);
+                    if (dist < 0.6f || st.timer <= 0.0f) {   // arrived, or gave up
+                        st.walking = false;
+                        st.timer = frand(2.0f, 5.0f);
+                        play("idle");
+                    } else {
+                        glm::vec3 dir = to / dist;
+                        glm::vec3 stepPos = pos + dir * 1.6f * deltaTime;   // gentle stroll (m/s)
+                        // SPACING: take the step unless it would crowd the nearest neighbour
+                        // (still allow it if we're already too close and moving away).
+                        bool crowding = near && dist2D(stepPos, nearPos) < kPersonal
+                                             && dist2D(stepPos, nearPos) < nd;
+                        if (!crowding) pos = stepPos;
+                        faceToward(st.target);
+                        play("walk");
+                    }
+                } else if (st.timer <= 0.0f) {
+                    // CLUSTER: wander around the shared tribe centre so the group
+                    // stays loosely together.
+                    float ang = frand(0.0f, 6.2831853f);
+                    float r   = frand(1.5f, 7.0f);
+                    st.target = m_tribeCenter + glm::vec3(std::cos(ang) * r, 0.0f, std::sin(ang) * r);
+                    st.walking = true; st.timer = 12.0f;
+                    play("walk");
+                }
             }
+
+            // Dominant state, for the tag above the head.
+            if (st.drinking)          st.stateTag = "#drinking";
+            else if (st.seekingWater) st.stateTag = "#thirsty";
+            else if (st.greeting)     st.stateTag = "#hello";
+            else if (st.walking)      st.stateTag = "#roaming";
+            else                      st.stateTag = "#content";
 
             // Stick to the ground wherever she ends up this frame.
             pos.y = m_terrain.getHeightAt(pos.x, pos.z) + st.footLift;
             obj->getTransform().setPosition(pos);
+        }
+    }
+
+    // Drop a water source (a flat blue pond) in front of the camera, on the terrain.
+    // Thirsty inhabitants path to the nearest one. Press U.
+    void spawnWater() {
+        if (!m_modelRenderer) return;
+        glm::vec4 blue(0.20f, 0.45f, 0.85f, 1.0f);
+        glm::vec3 p = m_camera.getPosition() + m_camera.getFront() * 6.0f;
+        p.y = m_terrain.getHeightAt(p.x, p.z) + 0.05f;
+        auto mesh = PrimitiveMeshBuilder::createCube(1.0f, blue);
+        uint32_t handle = m_modelRenderer->createModel(mesh.vertices, mesh.indices, nullptr, 0, 0);
+        auto obj = std::make_unique<SceneObject>("Water_" + std::to_string(++m_waterCounter));
+        obj->setBufferHandle(handle);
+        obj->setIndexCount(static_cast<uint32_t>(mesh.indices.size()));
+        obj->setVertexCount(static_cast<uint32_t>(mesh.vertices.size()));
+        obj->setLocalBounds(mesh.bounds);
+        obj->setMeshData(mesh.vertices, mesh.indices);
+        obj->setPrimitiveType(PrimitiveType::Cube);
+        obj->setPrimitiveSize(1.0f);
+        obj->setPrimitiveColor(blue);
+        obj->setBuildingType("water");
+        obj->getTransform().setPosition(p);
+        obj->getTransform().setScale({4.0f, 0.15f, 4.0f}); // a flat pool
+        m_sceneObjects.push_back(std::move(obj));
+        std::cout << "[Water] placed a water source" << std::endl;
+    }
+
+    // Float each inhabitant's dominant-state tag (#thirsty, #content, …) over its
+    // head — the glanceable readout of the state-sim. Terrain levels only.
+    void renderInhabitantTags() {
+        if (m_isEdenOSLevel) return;
+        float w = static_cast<float>(getWindow().getWidth());
+        float h = static_cast<float>(getWindow().getHeight());
+        if (w <= 0.0f || h <= 0.0f) return;
+        glm::mat4 vp = m_camera.getProjectionMatrix(w / h, 0.1f, 5000.0f) * m_camera.getViewMatrix();
+        auto* dl = ImGui::GetForegroundDrawList();
+        for (const auto& o : m_sceneObjects) {
+            if (!o || o->getBuildingType() != "inhabitant") continue;
+            glm::vec3 pos = const_cast<SceneObject*>(o.get())->getTransform().getPosition();
+            float topY = const_cast<SceneObject*>(o.get())->getWorldBounds().max.y;
+            glm::vec4 clip = vp * glm::vec4(pos.x, topY + 0.3f, pos.z, 1.0f);
+            if (clip.w <= 0.0f) continue;
+            glm::vec3 ndc = glm::vec3(clip) / clip.w;
+            if (ndc.z < -1.0f || ndc.z > 1.0f) continue;
+            float sx = (ndc.x + 1.0f) * 0.5f * w;
+            float sy = (1.0f - ndc.y) * 0.5f * h;
+            auto it = m_inhabitants.find(o->getName());
+            std::string label = (it != m_inhabitants.end()) ? it->second.stateTag : "#?";
+            ImVec2 ts = ImGui::CalcTextSize(label.c_str());
+            float padX = 6.0f, padY = 2.0f;
+            ImVec2 p0(sx - ts.x * 0.5f - padX, sy - ts.y * 0.5f - padY);
+            ImVec2 p1(sx + ts.x * 0.5f + padX, sy + ts.y * 0.5f + padY);
+            dl->AddRectFilled(p0, p1, IM_COL32(0, 0, 0, 160), 4.0f);
+            dl->AddText(ImVec2(sx - ts.x * 0.5f, sy - ts.y * 0.5f),
+                        IM_COL32(210, 225, 255, 255), label.c_str());
         }
     }
 
@@ -31164,9 +31273,16 @@ private:
         std::string clip;           // current anim clip (avoid re-triggering every frame)
         bool greeting = false;      // paused, facing a neighbour it just noticed
         float greetCd = 0.0f;       // cooldown before it will greet again
+        // Needs (the deterministic state-sim). First need: thirst.
+        float thirst = 0.0f;        // 0 = sated → 1 = parched
+        float thirstRate = 0.02f;   // per-second rise, randomised per creature
+        bool  seekingWater = false; // heading for water (hysteresis: on at THIRSTY, off at SATED)
+        bool  drinking = false;
+        std::string stateTag = "#content"; // dominant state, shown above the head
     };
     std::unordered_map<std::string, InhabitantState> m_inhabitants; // keyed by object name
     int m_inhabitantCounter = 0;
+    int m_waterCounter = 0;
     glm::vec3 m_tribeCenter{0.0f};  // shared home the tribe clusters around
     int m_tribeCount = 0;           // running count for the centre's average
     enum class PlayerZone { Silo, Basement, Outside, Void };
