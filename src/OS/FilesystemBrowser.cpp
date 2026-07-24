@@ -2969,6 +2969,13 @@ void FilesystemBrowser::spawnAgentAvatar(const glm::vec3& pos, const std::string
     obj->setAiProvider(provider);                 // per-avatar LLM (main.cpp registers it with the chat client)
     obj->setTargetLevel("agent://" + territory);  // its assigned folder
     obj->setEntityScript("agent");                // HEIDIC @entity behavior (face player on approach); bound on Compile
+    // Optional hand-written character: a "<model>.persona" text file beside the
+    // GLB (e.g. heretic.glb -> heretic.persona). Read live each chat, so editing
+    // it re-characterizes the bot without redeploying.
+    if (!modelPath.empty()) {
+        std::string personaPath = std::filesystem::path(modelPath).replace_extension(".persona").string();
+        if (std::filesystem::exists(personaPath)) obj->setPersonaPath(personaPath);
+    }
     obj->getTransform().setPosition(pos);
     m_sceneObjects->push_back(std::move(obj));
 }

@@ -121,6 +121,12 @@ public:
     void setAiActivated(bool on) { m_aiActivated = on; }
     bool isAiActivated() const { return m_aiActivated; }
 
+    // Path to this agent's persona text file (a `<model>.persona` sibling of its
+    // GLB). Read fresh each chat so editing the file re-characterizes the bot
+    // live. Empty = no file, fall back to built-in persona.
+    void setPersonaPath(const std::string& p) { m_personaPath = p; }
+    const std::string& getPersonaPath() const { return m_personaPath; }
+
     // Metadata from .lime files (key-value properties like material, capacity, etc.)
     void setModelMetadata(const std::unordered_map<std::string, std::string>& meta) { m_modelMetadata = meta; }
     const std::unordered_map<std::string, std::string>& getModelMetadata() const { return m_modelMetadata; }
@@ -767,6 +773,7 @@ private:
     std::string m_description;  // Description visible to AI perception
     std::string m_aiProvider;   // backend LLM provider for agent NPCs (empty = default)
     bool m_aiActivated = false;  // EDEN OS per-agent on/off (off by default; CLI activate_bot)
+    std::string m_personaPath;   // `<model>.persona` sibling file (read live per chat)
     std::unordered_map<std::string, std::string> m_modelMetadata;  // Key-value from .lime file
     std::string m_buildingType; // Building catalog type (e.g. "farm"). Empty = not a building.
     std::string m_modelPath;  // Source file path for save/load

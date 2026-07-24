@@ -550,17 +550,25 @@ protected:
                     while (!r.text.empty() && (r.text.back() == '\n' || r.text.back() == ' ')) r.text.pop_back();
                     onReply(r);
                 };
-                // Custom characters: Gemma is the guardian (only while the room is
-                // locked); Heretic is the ship's grumpy backup engineer (always).
-                std::string persona;
-                if (name == m_guardianName && m_funRoomLocked) persona = kGuardianPersona;
-                else if (provider == "heretic")               persona = kHereticPersona;
-                persona += kSearchCapability; // every agent can search the web
-                // Find the live avatar so we can give it perception; fall back to
-                // a plain send if it despawned mid-conversation.
+                // Find the live avatar (for perception + its persona file).
                 SceneObject* obj = nullptr;
                 for (const auto& o : m_sceneObjects)
                     if (o && o->getBuildingType() == "agent" && o->getName() == name) { obj = o.get(); break; }
+
+                // Persona precedence: the fun-room guardian mechanic wins for Gemma
+                // while locked; otherwise a hand-written <model>.persona file wins
+                // (read LIVE so edits apply on the next message); otherwise a
+                // built-in fallback. Web-search capability is always appended.
+                std::string persona;
+                if (name == m_guardianName && m_funRoomLocked) {
+                    persona = kGuardianPersona;
+                } else if (obj && !obj->getPersonaPath().empty()) {
+                    std::ifstream pf(obj->getPersonaPath());
+                    if (pf) { std::stringstream ss; ss << pf.rdbuf(); persona = ss.str(); }
+                }
+                if (persona.empty() && provider == "heretic") persona = kHereticPersona;
+                persona += kSearchCapability;
+
                 if (obj) {
                     PerceptionData perc = m_aiBehavior.performScanCone(obj, 120.0f, 50.0f);
                     m_httpClient->sendChatMessageWithPerception(sessionId, msg, name, persona,
