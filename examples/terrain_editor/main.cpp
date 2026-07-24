@@ -28972,25 +28972,36 @@ private:
             glm::vec3 vsize = vmax - vmin;
             float meshMaxDim = std::max({vsize.x, vsize.y, vsize.z});
             bool cmAuthored = meshMaxDim > 10.0f;  // meters-authored humanoids are ~2
+            float footLift = 0.0f;   // how far the mesh's lowest point sits below its origin
             if (!isLimeExport && cmAuthored) {
                 obj->setEulerRotation(glm::vec3(90.0f, 0.0f, 0.0f));
                 obj->getTransform().setScale(glm::vec3(0.012f));
+            } else {
+                // Meters-authored (Meshy / the dot): the origin may sit at the hips, so
+                // grounding the origin buries the feet. Lift by the mesh's lowest point
+                // so the FEET land on the terrain, not the pivot.
+                footLift = -vmin.y * obj->getTransform().getScale().y;
             }
 
-            // Position in front of camera at ground level (or subfloor if underground)
+            // Position in front of camera at ground level (or subfloor if underground),
+            // feet on the surface.
             glm::vec3 spawnPos = m_camera.getPosition() + m_camera.getFront() * 5.0f;
-            spawnPos.y = getPlacementFloorHeight(spawnPos.x, spawnPos.z);
+            spawnPos.y = getPlacementFloorHeight(spawnPos.x, spawnPos.z) + footLift;
             obj->getTransform().setPosition(spawnPos);
 
             // Store animation info
             auto animNames = m_skinnedModelRenderer->getAnimationNames(handle);
             obj->setAnimationNames(animNames);
 
-            // Play first animation if available
+            // Play idle if the model has it (a resting inhabitant), else the first clip.
             if (!animNames.empty()) {
-                m_skinnedModelRenderer->playAnimation(handle, animNames[0], true);
-                obj->setCurrentAnimation(animNames[0]);
-                std::cout << "Auto-playing animation: " << animNames[0] << std::endl;
+                std::string clip = animNames[0];
+                for (const auto& n : animNames) {
+                    if (n == "idle" || n == "Idle") { clip = n; break; }
+                }
+                m_skinnedModelRenderer->playAnimation(handle, clip, true);
+                obj->setCurrentAnimation(clip);
+                std::cout << "Auto-playing animation: " << clip << std::endl;
             }
 
             std::cout << "Created skinned object: " << obj->getName()
