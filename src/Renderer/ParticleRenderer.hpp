@@ -12,6 +12,7 @@ struct ParticleVertex {
     glm::vec3 position;
     glm::vec2 uv;
     float alpha;
+    glm::vec3 color;
 };
 
 class ParticleRenderer {
@@ -23,7 +24,12 @@ public:
     ParticleRenderer& operator=(const ParticleRenderer&) = delete;
 
     void addEmitter(const glm::vec3& position);
-    void addDirectedEmitter(const glm::vec3& position, const glm::vec3& direction, float speed = 2.0f);
+    // A directed spray. color/sizeScale/gravity let a caller make something other
+    // than the default gray water — e.g. big blue no-gravity ship-engine exhaust.
+    void addDirectedEmitter(const glm::vec3& position, const glm::vec3& direction, float speed = 2.0f,
+                            const glm::vec3& color = glm::vec3(0.3f, 0.3f, 0.35f),
+                            float sizeScale = 1.0f, bool gravity = true,
+                            float emitRadius = 0.03f, float spawnBoost = 1.0f);
     void removeEmitter(const glm::vec3& position, float epsilon = 0.5f);
     void clearEmitters();
     void clearDirectedEmitters();
@@ -43,6 +49,8 @@ private:
         float age;
         float size;
         bool isWater = false;  // true = affected by gravity, false = smoke (floats up)
+        glm::vec3 color{0.3f, 0.3f, 0.35f}; // billboard tint (default smoke gray)
+        float sizeScale = 1.0f;             // multiplies the final billboard size
     };
 
     struct Emitter {
@@ -53,6 +61,11 @@ private:
         glm::vec3 position;
         glm::vec3 direction;
         float speed;
+        glm::vec3 color{0.3f, 0.3f, 0.35f};
+        float sizeScale = 1.0f;
+        bool gravity = true;
+        float emitRadius = 0.03f;  // spawn disc radius (widens the plume)
+        float spawnBoost = 1.0f;   // particles per spawn tick (density for big plumes)
     };
 
     void createPipeline(VkRenderPass renderPass, VkExtent2D extent);

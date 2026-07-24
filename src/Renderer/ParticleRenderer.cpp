@@ -127,6 +127,7 @@ void ParticleRenderer::createPipeline(VkRenderPass renderPass, VkExtent2D extent
         .addVertexAttribute(0, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(ParticleVertex, position))
         .addVertexAttribute(0, 1, VK_FORMAT_R32G32_SFLOAT, offsetof(ParticleVertex, uv))
         .addVertexAttribute(0, 2, VK_FORMAT_R32_SFLOAT, offsetof(ParticleVertex, alpha))
+        .addVertexAttribute(0, 3, VK_FORMAT_R32G32B32_SFLOAT, offsetof(ParticleVertex, color))
         .setPrimitiveTopology(VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST)
         .setCullMode(VK_CULL_MODE_NONE)
         .enableAlphaBlending()
@@ -165,8 +166,11 @@ void ParticleRenderer::clearEmitters() {
     m_emitters.clear();
 }
 
-void ParticleRenderer::addDirectedEmitter(const glm::vec3& position, const glm::vec3& direction, float speed) {
-    m_directedEmitters.push_back({position, glm::normalize(direction), speed});
+void ParticleRenderer::addDirectedEmitter(const glm::vec3& position, const glm::vec3& direction, float speed,
+                                          const glm::vec3& color, float sizeScale, bool gravity,
+                                          float emitRadius, float spawnBoost) {
+    m_directedEmitters.push_back({position, glm::normalize(direction), speed, color, sizeScale, gravity,
+                                  emitRadius, spawnBoost});
 }
 
 void ParticleRenderer::clearDirectedEmitters() {
@@ -211,17 +215,28 @@ void ParticleRenderer::update(float deltaTime, const glm::vec3& cameraPos,
             perp1 = glm::normalize(glm::cross(emitter.direction, up));
             perp2 = glm::normalize(glm::cross(emitter.direction, perp1));
 
-            Particle p;
-            p.position = emitter.position + perp1 * randFloat(-0.03f, 0.03f) + perp2 * randFloat(-0.03f, 0.03f);
-            float spread = 0.15f;
-            p.velocity = emitter.direction * emitter.speed
-                       + perp1 * randFloat(-spread, spread)
-                       + perp2 * randFloat(-spread, spread);
-            p.lifetime = randFloat(0.8f, 1.5f);
-            p.age = 0.0f;
-            p.size = randFloat(0.06f, 0.12f);
-            p.isWater = true;
-            m_particles.push_back(p);
+            // A dense emitter (big ship plume) drops several particles per tick,
+            // spread across a filled disc so the whole thruster cluster is covered.
+            int burst = std::max(1, static_cast<int>(emitter.spawnBoost + 0.5f));
+            float velSpread = 0.15f + emitter.emitRadius * 0.06f; // flare a little with size
+            for (int b = 0; b < burst && m_particles.size() < MAX_PARTICLES; ++b) {
+                float ang = randFloat(0.0f, 6.2831853f);
+                float rad = emitter.emitRadius * std::sqrt(randFloat(0.0f, 1.0f)); // uniform disc
+                Particle p;
+                p.position = emitter.position
+                           + perp1 * (std::cos(ang) * rad)
+                           + perp2 * (std::sin(ang) * rad);
+                p.velocity = emitter.direction * emitter.speed
+                           + perp1 * randFloat(-velSpread, velSpread)
+                           + perp2 * randFloat(-velSpread, velSpread);
+                p.lifetime = randFloat(0.8f, 1.5f);
+                p.age = 0.0f;
+                p.size = randFloat(0.06f, 0.12f);
+                p.isWater = emitter.gravity;   // exhaust: gravity off so it streams straight
+                p.color = emitter.color;
+                p.sizeScale = emitter.sizeScale;
+                m_particles.push_back(p);
+            }
         }
     }
 
@@ -262,20 +277,21 @@ void ParticleRenderer::update(float deltaTime, const glm::vec3& cameraPos,
         const auto& p = m_particles[i];
         float t = p.age / p.lifetime; // 0..1
         float alpha = (1.0f - t) * 0.6f; // fade from 0.6 to 0
-        float size = p.size + t * 0.5f; // grow over lifetime
+        float size = (p.size + t * 0.5f) * p.sizeScale; // grow over lifetime, scaled per-emitter
 
         glm::vec3 right = cameraRight * size;
         glm::vec3 up = cameraUp * size;
+        const glm::vec3& c = p.color;
 
         uint32_t base = i * 4;
         // Bottom-left
-        verts[base + 0] = {p.position - right - up, {0.0f, 0.0f}, alpha};
+        verts[base + 0] = {p.position - right - up, {0.0f, 0.0f}, alpha, c};
         // Bottom-right
-        verts[base + 1] = {p.position + right - up, {1.0f, 0.0f}, alpha};
+        verts[base + 1] = {p.position + right - up, {1.0f, 0.0f}, alpha, c};
         // Top-right
-        verts[base + 2] = {p.position + right + up, {1.0f, 1.0f}, alpha};
+        verts[base + 2] = {p.position + right + up, {1.0f, 1.0f}, alpha, c};
         // Top-left
-        verts[base + 3] = {p.position - right + up, {0.0f, 1.0f}, alpha};
+        verts[base + 3] = {p.position - right + up, {0.0f, 1.0f}, alpha, c};
     }
 }
 

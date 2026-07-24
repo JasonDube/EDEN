@@ -3,6 +3,7 @@
 layout(location = 0) in vec3 inPosition;
 layout(location = 1) in vec2 inUV;
 layout(location = 2) in float inAlpha;
+layout(location = 3) in vec3 inColor;
 
 layout(push_constant) uniform PushConstants {
     mat4 viewProj;
@@ -10,9 +11,11 @@ layout(push_constant) uniform PushConstants {
 
 layout(location = 0) out vec2 fragUV;
 layout(location = 1) out float fragAlpha;
+layout(location = 2) out vec3 fragColor;
 
 void main() {
     gl_Position = pc.viewProj * vec4(inPosition, 1.0);
     fragUV = inUV;
     fragAlpha = inAlpha;
+    fragColor = inColor;
 }

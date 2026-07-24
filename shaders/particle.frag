@@ -2,6 +2,7 @@
 
 layout(location = 0) in vec2 fragUV;
 layout(location = 1) in float fragAlpha;
+layout(location = 2) in vec3 fragColor;
 
 layout(location = 0) out vec4 outColor;
 
@@ -11,11 +12,9 @@ void main() {
     float dist = length(center) * 2.0; // 0 at center, 1 at edge
     float circle = 1.0 - smoothstep(0.6, 1.0, dist);
 
-    // Smoke color: dark gray with slight blue tint
-    vec3 smokeColor = vec3(0.3, 0.3, 0.35);
-
     float alpha = circle * fragAlpha;
     if (alpha < 0.01) discard;
 
-    outColor = vec4(smokeColor, alpha);
+    // Per-particle color (gray for smoke/water, blue for ship-engine exhaust).
+    outColor = vec4(fragColor, alpha);
 }

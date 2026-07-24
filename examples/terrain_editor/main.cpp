@@ -24956,6 +24956,23 @@ private:
             obj->setVisible(false);                  // updateZoneVisibility reveals it Outside
             m_sceneObjects.push_back(std::move(obj));
         }
+        // Blue engine exhaust streaming down from the bottom cluster, on the spin
+        // axis (so the spin doesn't drag it). Big, no-gravity particles so the plume
+        // reads at the ship's ~490m scale. Only visible when you're Outside anyway.
+        if (m_particleRenderer && count > 0) {
+            float shipHeight = msize.y * scale;
+            float shipWidth  = std::max(msize.x, msize.z) * scale;
+            float shipBottomY = shipPos.y + combinedMin.y * scale;
+            glm::vec3 enginePos(siloCenter.x, shipBottomY + shipHeight * 0.03f, siloCenter.z);
+            m_particleRenderer->addDirectedEmitter(
+                enginePos, glm::vec3(0.0f, -1.0f, 0.0f), 130.0f,  // faster → longer plume
+                glm::vec3(0.35f, 0.72f, 1.0f),  // blue
+                45.0f,                           // sizeScale — plume reads at ship scale
+                false,                           // no gravity — streams straight in space
+                shipWidth * 0.30f,               // emitRadius — cover the whole thruster cluster
+                7.0f);                           // spawnBoost — keep the bigger plume dense
+        }
+
         std::cout << "[EDEN] ship exterior: " << count << " mesh(es), scale " << scale
                   << ", diameter ~" << (modelDiameter * scale) << "m (silo "
                   << siloDiameter << "m)" << std::endl;
