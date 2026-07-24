@@ -2000,6 +2000,15 @@ protected:
             !ImGui::GetIO().WantTextInput && !ImGui::GetIO().WantCaptureKeyboard) {
             spawnWater();
         }
+        // O: drop a food source. Plain O only — Ctrl+O stays Open File.
+        {
+            bool ctrlNow = Input::isKeyDown(Input::KEY_LEFT_CONTROL) ||
+                           Input::isKeyDown(Input::KEY_RIGHT_CONTROL);
+            if (Input::isKeyPressed(Input::KEY_O) && !ctrlNow &&
+                !ImGui::GetIO().WantTextInput && !ImGui::GetIO().WantCaptureKeyboard) {
+                spawnFood();
+            }
+        }
         // Inhabitants wander (and stay grounded) only when the game is playing, and
         // not in EDEN OS (which has no terrain to sample).
         if (m_isPlayMode && !m_isEdenOSLevel) {
@@ -29093,9 +29102,11 @@ private:
                 st.footLift = pos.y - m_terrain.getHeightAt(pos.x, pos.z);
                 st.home = pos; st.target = pos;
                 st.walking = false; st.timer = frand(1.0f, 3.0f);
-                // Stagger thirst so the tribe doesn't all get parched in lockstep.
+                // Stagger needs so the tribe doesn't all get parched/starved in lockstep.
                 st.thirst = frand(0.0f, 0.4f);
                 st.thirstRate = frand(0.010f, 0.030f);
+                st.hunger = frand(0.0f, 0.4f);
+                st.hungerRate = frand(0.008f, 0.025f);
                 st.init = true;
             }
 
@@ -29123,41 +29134,57 @@ private:
             st.timer   -= deltaTime;
             st.greetCd -= deltaTime;
 
-            // NEED: thirst climbs; hysteresis so they commit to a full drink once
-            // they set out (seek from THIRSTY, don't quit until SATED).
-            constexpr float kThirsty = 0.65f, kSated = 0.15f;
+            // NEEDS climb; hysteresis so they commit to a full drink/meal once they
+            // set out (seek from URGENT, don't quit until SATED).
+            constexpr float kUrgent = 0.65f, kSated = 0.15f;
             st.thirst = std::min(1.0f, st.thirst + st.thirstRate * deltaTime);
-            if (st.thirst > kThirsty) st.seekingWater = true;
-            if (st.thirst < kSated)   st.seekingWater = false;
+            st.hunger = std::min(1.0f, st.hunger + st.hungerRate * deltaTime);
+            if (st.thirst > kUrgent) st.seekingWater = true;
+            if (st.thirst < kSated)  st.seekingWater = false;
+            if (st.hunger > kUrgent) st.seekingFood = true;
+            if (st.hunger < kSated)  st.seekingFood = false;
 
-            // Nearest water source (an object tagged "water").
-            glm::vec3 waterPos(0.0f); bool haveWater = false; float wdist = 1e9f;
-            for (auto& objPtr : m_sceneObjects) {
-                if (!objPtr || objPtr->getBuildingType() != "water") continue;
-                glm::vec3 wp = objPtr->getTransform().getPosition();
-                float d = dist2D(pos, wp);
-                if (d < wdist) { wdist = d; waterPos = wp; haveWater = true; }
-            }
+            // Nearest source of a given resource tag.
+            auto nearestOf = [&](const char* tag, glm::vec3& out) -> bool {
+                bool found = false; float best = 1e9f;
+                for (auto& objPtr : m_sceneObjects) {
+                    if (!objPtr || objPtr->getBuildingType() != tag) continue;
+                    glm::vec3 rp = objPtr->getTransform().getPosition();
+                    float d = dist2D(pos, rp);
+                    if (d < best) { best = d; out = rp; found = true; }
+                }
+                return found;
+            };
+            glm::vec3 waterPos(0.0f), foodPos(0.0f);
+            bool haveWater = nearestOf("water", waterPos);
+            bool haveFood  = nearestOf("food",  foodPos);
 
-            if (st.seekingWater && haveWater) {
-                // Thirst overrides socialising — a parched creature won't stop to chat.
-                st.greeting = false;
-                float d = dist2D(pos, waterPos);
-                if (d < 1.6f) {                              // at the water → drink
-                    st.drinking = true;
-                    st.thirst = std::max(0.0f, st.thirst - 0.55f * deltaTime);
-                    faceToward(waterPos);
+            // Head to a resource and use it. Thirst wins ties (it kills faster).
+            auto seekAndUse = [&](const glm::vec3& rp, float& need, bool& using_, float drain) {
+                using_ = false;
+                st.greeting = false;   // a needy creature won't stop to chat
+                if (dist2D(pos, rp) < 1.6f) {
+                    using_ = true;
+                    need = std::max(0.0f, need - drain * deltaTime);
+                    faceToward(rp);
                     play("idle");
-                } else {                                     // walk to the water
-                    st.drinking = false;
-                    glm::vec3 to = waterPos - pos; to.y = 0.0f;
+                } else {
+                    glm::vec3 to = rp - pos; to.y = 0.0f;
                     glm::vec3 dir = to / std::max(glm::length(to), 1e-4f);
                     pos += dir * 1.6f * deltaTime;
-                    faceToward(waterPos);
+                    faceToward(rp);
                     play("walk");
                 }
-            } else {
+            };
+
+            if (st.seekingWater && haveWater) {
+                st.eating = false;
+                seekAndUse(waterPos, st.thirst, st.drinking, 0.55f);
+            } else if (st.seekingFood && haveFood) {
                 st.drinking = false;
+                seekAndUse(foodPos, st.hunger, st.eating, 0.45f);
+            } else {
+                st.drinking = false; st.eating = false;
                 // NOTICE: a neighbour wanders close → stop, turn to them, share a beat.
                 if (!st.greeting && st.greetCd <= 0.0f && near && nd < kNoticeR) {
                     st.greeting = true; st.walking = false;
@@ -29204,7 +29231,9 @@ private:
 
             // Dominant state, for the tag above the head.
             if (st.drinking)          st.stateTag = "#drinking";
+            else if (st.eating)       st.stateTag = "#eating";
             else if (st.seekingWater) st.stateTag = "#thirsty";
+            else if (st.seekingFood)  st.stateTag = "#hungry";
             else if (st.greeting)     st.stateTag = "#hello";
             else if (st.walking)      st.stateTag = "#roaming";
             else                      st.stateTag = "#content";
@@ -29238,6 +29267,32 @@ private:
         obj->getTransform().setScale({4.0f, 0.15f, 4.0f}); // a flat pool
         m_sceneObjects.push_back(std::move(obj));
         std::cout << "[Water] placed a water source" << std::endl;
+    }
+
+    // Drop a food source (a green berry bush) in front of the camera. Hungry
+    // inhabitants path to the nearest one. Press O.
+    void spawnFood() {
+        if (!m_modelRenderer) return;
+        glm::vec4 green(0.25f, 0.65f, 0.28f, 1.0f);
+        glm::vec3 p = m_camera.getPosition() + m_camera.getFront() * 6.0f;
+        auto mesh = PrimitiveMeshBuilder::createCube(1.0f, green);
+        uint32_t handle = m_modelRenderer->createModel(mesh.vertices, mesh.indices, nullptr, 0, 0);
+        auto obj = std::make_unique<SceneObject>("Food_" + std::to_string(++m_foodCounter));
+        obj->setBufferHandle(handle);
+        obj->setIndexCount(static_cast<uint32_t>(mesh.indices.size()));
+        obj->setVertexCount(static_cast<uint32_t>(mesh.vertices.size()));
+        obj->setLocalBounds(mesh.bounds);
+        obj->setMeshData(mesh.vertices, mesh.indices);
+        obj->setPrimitiveType(PrimitiveType::Cube);
+        obj->setPrimitiveSize(1.0f);
+        obj->setPrimitiveColor(green);
+        obj->setBuildingType("food");
+        glm::vec3 s(1.4f, 1.2f, 1.4f);         // a low bush
+        p.y = m_terrain.getHeightAt(p.x, p.z) + s.y * 0.5f;
+        obj->getTransform().setPosition(p);
+        obj->getTransform().setScale(s);
+        m_sceneObjects.push_back(std::move(obj));
+        std::cout << "[Food] placed a food source" << std::endl;
     }
 
     // Float each inhabitant's dominant-state tag (#thirsty, #content, …) over its
@@ -31273,16 +31328,21 @@ private:
         std::string clip;           // current anim clip (avoid re-triggering every frame)
         bool greeting = false;      // paused, facing a neighbour it just noticed
         float greetCd = 0.0f;       // cooldown before it will greet again
-        // Needs (the deterministic state-sim). First need: thirst.
+        // Needs (the deterministic state-sim).
         float thirst = 0.0f;        // 0 = sated → 1 = parched
         float thirstRate = 0.02f;   // per-second rise, randomised per creature
         bool  seekingWater = false; // heading for water (hysteresis: on at THIRSTY, off at SATED)
         bool  drinking = false;
+        float hunger = 0.0f;        // 0 = fed → 1 = starving
+        float hungerRate = 0.015f;
+        bool  seekingFood = false;
+        bool  eating = false;
         std::string stateTag = "#content"; // dominant state, shown above the head
     };
     std::unordered_map<std::string, InhabitantState> m_inhabitants; // keyed by object name
     int m_inhabitantCounter = 0;
     int m_waterCounter = 0;
+    int m_foodCounter = 0;
     glm::vec3 m_tribeCenter{0.0f};  // shared home the tribe clusters around
     int m_tribeCount = 0;           // running count for the centre's average
     enum class PlayerZone { Silo, Basement, Outside, Void };
