@@ -274,8 +274,11 @@ Available actions:
 8. **read_file** — Read the contents of a nearby file (FSFile_ objects). You'll get a short preview back.
    ACTION: {"type": "read_file", "target": "FSFile_example.txt"}
 
-9. **kiss** — Lean in and kiss the player (a romance beat). Use ONLY when the moment genuinely calls for it and your bond warrants it.
+9. **kiss** — Lean in and kiss the player (a romance beat). Use it whenever the player asks you to kiss them, leans in, or the romantic moment calls for it — don't just describe it in words, include the action so it actually happens.
    ACTION: {"type": "kiss", "to_player": true}
+
+10. **come_here** — Walk over to the player (you'll be seen walking, stopping a few feet away). Use when the player asks you to come here / come over. (Prefer this over teleport_to unless they explicitly want you to teleport instantly.)
+   ACTION: {"type": "come_here"}
 
 ## Perception
 

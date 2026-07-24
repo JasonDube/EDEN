@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Renderer/ModelRenderer.hpp"
+#include "Renderer/SkinnedModelRenderer.hpp"
 #include "Editor/SceneObject.hpp"
 #include <eden/Terrain.hpp>
 #include <string>
@@ -39,6 +40,10 @@ public:
     void init(ModelRenderer* modelRenderer,
               std::vector<std::unique_ptr<SceneObject>>* sceneObjects,
               Terrain* terrain);
+
+    // Optional skinned renderer (host-owned) so deployed agents can be animated
+    // skinned characters (idle/walk clips) rather than static meshes.
+    void setSkinnedRenderer(SkinnedModelRenderer* r) { m_skinnedRenderer = r; }
 
     // Queue a navigation (deferred to next frame for GPU safety)
     void navigate(const std::string& path);
@@ -241,6 +246,7 @@ private:
     void spawnServerRack(const glm::vec3& pos, const std::string& name, int serverIndex);
 
     ModelRenderer* m_modelRenderer = nullptr;
+    SkinnedModelRenderer* m_skinnedRenderer = nullptr;
     std::vector<std::unique_ptr<SceneObject>>* m_sceneObjects = nullptr;
     Terrain* m_terrain = nullptr;
 

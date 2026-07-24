@@ -368,6 +368,8 @@ protected:
 
         m_skinnedModelRenderer = std::make_unique<SkinnedModelRenderer>(
             getContext(), getSwapchain().getRenderPass(), getSwapchain().getExtent());
+        // Let deployed agents be animated skinned characters (dot's idle/walk).
+        m_filesystemBrowser.setSkinnedRenderer(m_skinnedModelRenderer.get());
 
         m_videoEditor = std::make_unique<eden::VideoEditor>(getContext());
         m_videoEditor->setDefaultDir(
@@ -533,6 +535,19 @@ protected:
                             r.text     = j.value("response", "...");
                             r.provider = j.value("provider", "?");
                             r.model    = j.value("model", "?");
+                            // Execute any motor action the bot emitted (kiss, follow, …)
+                            // ON this bot — the console never did this before, so
+                            // actions requested via chat silently did nothing.
+                            if (j.contains("action") && !j["action"].is_null()) {
+                                for (auto& o : m_sceneObjects)
+                                    if (o && o->getBuildingType() == "agent" && o->getName() == name) {
+                                        SceneObject* prev = m_currentInteractObject;
+                                        m_currentInteractObject = o.get();
+                                        m_aiBehavior.executeAIAction(j["action"]);
+                                        if (!m_inConversation) m_currentInteractObject = prev;
+                                        break;
+                                    }
+                            }
                         } catch (...) { r.ok = true; r.text = "..."; }
                     }
                     // The guardian's agentic unlock: if Gemma chose to open the fun
@@ -1936,7 +1951,7 @@ protected:
 
             // EDEN OS: agents spawn on navigation (after boot), so bind their
             // HEIDIC `agent` script lazily once they appear + are compiled.
-            if (m_isEdenOSLevel) { ensureEdenOSAgentsBound(); reconcileAgentVram(); }
+            if (m_isEdenOSLevel) { ensureEdenOSAgentsBound(); reconcileAgentVram(); updateWalkToPlayer(deltaTime); }
 
             for (auto& obj : m_sceneObjects) {
                 if (obj && obj->hasTickScript()) obj->runTickScript(deltaTime);
@@ -2169,6 +2184,9 @@ protected:
         float npcYaw = 0.0f;
         glm::vec3 npcStartPos{0.0f};
     } m_kiss;
+    // Walk-to-player: she strides over (walk clip) and stops ~4ft away. thenKiss
+    // = this approach is the run-up to a kiss (begins the beat on arrival).
+    struct WalkToPlayer { bool active = false; bool thenKiss = false; SceneObject* npc = nullptr; } m_walk;
     static float smooth01(float x) { x = std::clamp(x, 0.0f, 1.0f); return x * x * (3.0f - 2.0f * x); }
 
     // "The fun room" guardian demo: Gemma decides — agentically — who gets in.
@@ -2274,7 +2292,10 @@ protected:
         for (const auto& o : m_sceneObjects) {
             if (!o || o->getBuildingType() != "agent") continue;
             glm::vec3 pos = const_cast<SceneObject*>(o.get())->getTransform().getPosition();
-            glm::vec4 clip = vp * glm::vec4(pos.x, pos.y + 8.0f, pos.z, 1.0f); // ~8ft, above the head
+            // Sit the tag just above the model's ACTUAL head (bounds top), so it
+            // works for a 7ft robot and a player-height android alike.
+            float topY = const_cast<SceneObject*>(o.get())->getWorldBounds().max.y;
+            glm::vec4 clip = vp * glm::vec4(pos.x, topY + 0.4f, pos.z, 1.0f);
             if (clip.w <= 0.0f) continue;
             glm::vec3 ndc = glm::vec3(clip) / clip.w;
             if (ndc.z < -1.0f || ndc.z > 1.0f) continue;
@@ -2406,7 +2427,9 @@ protected:
             if (bit == m_botBubbles.end()) continue;
 
             glm::vec3 pos = const_cast<SceneObject*>(o.get())->getTransform().getPosition();
-            glm::vec4 clip = vp * glm::vec4(pos.x, pos.y + 9.5f, pos.z, 1.0f); // above the name tag
+            // Just above the model's actual head + a bit more (clears the name tag).
+            float topY = const_cast<SceneObject*>(o.get())->getWorldBounds().max.y;
+            glm::vec4 clip = vp * glm::vec4(pos.x, topY + 0.9f, pos.z, 1.0f);
             if (clip.w <= 0.0f) continue;
             glm::vec3 ndc = glm::vec3(clip) / clip.w;
             if (ndc.z < -1.0f || ndc.z > 1.0f) continue;
@@ -22968,7 +22991,64 @@ private:
 
     // Kick off the kiss beat (AIBehaviorHost hook): save camera + NPC pose, snap
     // her to face the player so the lean reads right.
+    // Kiss hook: a kiss only happens up close. If she's farther than kKissRange,
+    // she WALKS to the player first and kisses on arrival; if already close, the
+    // beat begins immediately.
     void startKissCutscene(SceneObject* npc) override {
+        if (!npc) return;
+        glm::vec3 to = m_camera.getPosition() - npc->getTransform().getPosition();
+        to.y = 0.0f;
+        if (glm::length(to) > 5.0f) startWalkToPlayer(npc, /*thenKiss=*/true);
+        else                        beginKissBeat(npc);
+    }
+
+    // "come_here" action: she walks over (no kiss).
+    void startComeHere(SceneObject* npc) override { startWalkToPlayer(npc, /*thenKiss=*/false); }
+
+    void startWalkToPlayer(SceneObject* npc, bool thenKiss) {
+        if (!npc) return;
+        m_walk.active = true; m_walk.npc = npc; m_walk.thenKiss = thenKiss;
+    }
+
+    // Play a skinned clip only when it changes (calling every frame would reset it).
+    void setAgentClip(SceneObject* npc, const std::string& clip) {
+        if (!npc || !npc->isSkinned() || !m_skinnedModelRenderer) return;
+        if (npc->getCurrentAnimation() == clip) return;
+        m_skinnedModelRenderer->playAnimation(npc->getSkinnedModelHandle(), clip, true);
+        npc->setCurrentAnimation(clip);
+    }
+
+    // Per-frame: walk the NPC toward the player (walk clip), stop ~4ft away, then
+    // idle — and if this walk was a kiss approach, begin the kiss on arrival.
+    void updateWalkToPlayer(float dt) {
+        if (!m_walk.active) return;
+        SceneObject* npc = m_walk.npc;
+        if (!npc) { m_walk.active = false; return; }
+        glm::vec3 npcPos = npc->getTransform().getPosition();
+        glm::vec3 to = m_camera.getPosition() - npcPos; to.y = 0.0f;
+        float dist = glm::length(to);
+        const float stopRange = 4.0f, speed = 4.0f;
+        if (dist <= stopRange) {                              // arrived
+            m_walk.active = false;
+            if (dist > 0.01f) {
+                glm::vec3 e = npc->getEulerRotation();
+                e.y = glm::degrees(std::atan2(to.x, to.z)); e.x = 0.0f;
+                npc->setEulerRotation(e);
+            }
+            setAgentClip(npc, "idle");
+            if (m_walk.thenKiss) beginKissBeat(npc);
+            return;
+        }
+        to /= dist;
+        float step = std::min(speed * dt, dist - stopRange);
+        npc->getTransform().setPosition(npcPos + to * step);   // y unchanged (stays on floor)
+        glm::vec3 e = npc->getEulerRotation();
+        e.y = glm::degrees(std::atan2(to.x, to.z)); e.x = 0.0f;
+        npc->setEulerRotation(e);
+        setAgentClip(npc, "walk");
+    }
+
+    void beginKissBeat(SceneObject* npc) {
         if (!npc) return;
         m_kiss.active = true;
         m_kiss.t = 0.0f;

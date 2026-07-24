@@ -1,6 +1,8 @@
 #include "OS/FilesystemBrowser.hpp"
 #include "Editor/PrimitiveMeshBuilder.hpp"
 #include "Editor/GLBLoader.hpp"
+#include "Editor/SkinnedGLBLoader.hpp"
+#include <fstream>
 #include "Editor/LimeLoader.hpp"
 #include "Terminal/EdenTerminalFont.inc"
 
@@ -2895,6 +2897,26 @@ static std::pair<std::string, std::string> agentProviderFromModel(const std::str
     return {"", "Agent"};
 }
 
+// Peek a GLB's JSON chunk for a rig + clips (without a full load) so we know
+// whether to spawn an agent as an animated skinned character or a static mesh.
+static bool glbHasSkin(const std::string& path) {
+    std::ifstream f(path, std::ios::binary);
+    if (!f) return false;
+    uint32_t magic = 0, ver = 0, len = 0;
+    f.read(reinterpret_cast<char*>(&magic), 4);
+    f.read(reinterpret_cast<char*>(&ver), 4);
+    f.read(reinterpret_cast<char*>(&len), 4);
+    if (magic != 0x46546C67u) return false; // "glTF"
+    uint32_t clen = 0, ctype = 0;
+    f.read(reinterpret_cast<char*>(&clen), 4);
+    f.read(reinterpret_cast<char*>(&ctype), 4);
+    if (ctype != 0x4E4F534Au || clen == 0 || clen > 64u * 1024u * 1024u) return false; // JSON chunk
+    std::string json(clen, '\0');
+    f.read(&json[0], clen);
+    return json.find("\"skins\"") != std::string::npos &&
+           json.find("\"animations\"") != std::string::npos;
+}
+
 void FilesystemBrowser::spawnAgentAvatar(const glm::vec3& pos, const std::string& modelPath,
                                          const std::string& territory) {
     if (!m_sceneObjects || !m_modelRenderer) return;
@@ -2903,10 +2925,51 @@ void FilesystemBrowser::spawnAgentAvatar(const glm::vec3& pos, const std::string
 
     std::unique_ptr<SceneObject> obj;
     bool loaded = false;
+    float footLift = 0.0f;   // skinned chars: lift so feet sit on the floor (origin may be at the hips)
 
     std::string ext = std::filesystem::path(modelPath).extension().string();
     std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
-    if (!modelPath.empty() && (ext == ".glb" || ext == ".gltf")) {
+
+    // Skinned character (rig + clips like dot's idle/walk): load it ANIMATED via
+    // the host's skinned renderer. Scales to ~7ft and plays idle. (getWorldBounds
+    // applies the transform scale, so localBounds stays the native bind-pose box.)
+    if (m_skinnedRenderer && !modelPath.empty() && (ext == ".glb" || ext == ".gltf") &&
+        glbHasSkin(modelPath)) {
+        auto sr = SkinnedGLBLoader::load(modelPath);
+        if (sr.success && sr.skeleton && !sr.meshes.empty()) {
+            auto& mesh = sr.meshes[0];
+            uint32_t handle = m_skinnedRenderer->createModel(
+                mesh.vertices, mesh.indices, std::make_unique<Skeleton>(*sr.skeleton),
+                sr.animations, mesh.hasTexture ? mesh.textureData.data() : nullptr,
+                mesh.textureWidth, mesh.textureHeight);
+            obj = std::make_unique<SceneObject>(displayName);
+            obj->setSkinnedModelHandle(handle);
+            glm::vec3 bmin(FLT_MAX), bmax(-FLT_MAX);
+            for (auto& v : mesh.vertices) { bmin = glm::min(bmin, v.position); bmax = glm::max(bmax, v.position); }
+            // Match TED's import scale (how she loads in red_planet = player height):
+            // native for meters-authored humanoids; the Mixamo correction (rotate +
+            // 0.012) only for cm-authored assets. Not scaled up to a 7ft agent.
+            bool isLimeExport = sr.generator.find("LIME") != std::string::npos;
+            float meshMaxDim = std::max({bmax.x - bmin.x, bmax.y - bmin.y, bmax.z - bmin.z});
+            float s = 1.0f;
+            if (meshMaxDim > 10.0f && !isLimeExport) {   // cm-authored (Mixamo etc.)
+                obj->setEulerRotation(glm::vec3(90.0f, 0.0f, 0.0f));
+                s = 0.012f;
+            }
+            obj->getTransform().setScale(glm::vec3(s));
+            obj->setLocalBounds({bmin, bmax});
+            footLift = -bmin.y * s;   // raise so the lowest vertex (feet) sits at pos.y
+            auto names = m_skinnedRenderer->getAnimationNames(handle);
+            std::string clip;
+            for (auto& n : names) if (n == "idle") { clip = n; break; }
+            if (clip.empty() && !names.empty()) clip = names[0];
+            if (!clip.empty()) { m_skinnedRenderer->playAnimation(handle, clip, true); obj->setCurrentAnimation(clip); }
+            obj->setAnimationNames(names);
+            loaded = true;
+        }
+    }
+
+    if (!loaded && !modelPath.empty() && (ext == ".glb" || ext == ".gltf")) {
         auto result = GLBLoader::load(modelPath);
         if (result.success && !result.meshes.empty()) {
             std::vector<ModelVertex> verts;
@@ -2976,7 +3039,7 @@ void FilesystemBrowser::spawnAgentAvatar(const glm::vec3& pos, const std::string
         std::string personaPath = std::filesystem::path(modelPath).replace_extension(".persona").string();
         if (std::filesystem::exists(personaPath)) obj->setPersonaPath(personaPath);
     }
-    obj->getTransform().setPosition(pos);
+    obj->getTransform().setPosition(pos + glm::vec3(0.0f, footLift, 0.0f));
     m_sceneObjects->push_back(std::move(obj));
 }
 

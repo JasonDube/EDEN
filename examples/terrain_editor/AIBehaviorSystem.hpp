@@ -58,6 +58,9 @@ struct AIBehaviorHost {
     // no-op so hosts that don't support it just ignore the action.
     virtual void startKissCutscene(eden::SceneObject* npc) {}
 
+    // "come_here": the NPC walks over to the player (walk clip), stops close.
+    virtual void startComeHere(eden::SceneObject* npc) {}
+
     // Grove scripting (optional — return false if not supported)
     virtual bool evalGroveScript(const std::string& script, std::string& output, std::string& error) { return false; }
 
@@ -636,6 +639,10 @@ public:
                 m_host.updateNPCTexture(npc);
             m_host.startKissCutscene(npc);
             std::cout << "[AI Action] kiss — cinematic beat" << std::endl;
+        }
+        else if (actionType == "come_here") {
+            m_host.startComeHere(npc);   // walk over to the player (walk clip)
+            std::cout << "[AI Action] come_here — walking to player" << std::endl;
         }
         else if (actionType == "set_expression") {
             std::string exprName = action.value("expression", "");
