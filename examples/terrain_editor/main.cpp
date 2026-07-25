@@ -2009,6 +2009,13 @@ protected:
                 spawnFood();
             }
         }
+        // Left click an inhabitant to inspect them (play mode, terrain levels). Only
+        // consumes the click if it actually lands on one, so nothing else changes.
+        if (m_isPlayMode && !m_isEdenOSLevel && !m_inhabitants.empty() &&
+            Input::isMouseButtonPressed(Input::MOUSE_LEFT) &&
+            !ImGui::GetIO().WantCaptureMouse) {
+            pickInhabitantAtCursor();
+        }
         // Y: release a lion (play mode only — editor Y is object-snap). Predators
         // hunt inhabitants; the tribe flees them.
         if (m_isPlayMode && Input::isKeyPressed(Input::KEY_Y) &&
@@ -2030,6 +2037,7 @@ protected:
                     }
                 }
                 m_inhabitants.erase(name);
+                if (m_selectedInhabitant == name) m_selectedInhabitant.clear();
             }
             m_pendingKills.clear();
         }
@@ -2583,6 +2591,7 @@ protected:
             renderUVViewer();
             renderAgentNameTags();
             renderInhabitantTags();
+            renderInhabitantPanel();
             renderServerStatus();
             renderBotBubbles();
             if (m_isEdenOSLevel) {
@@ -29144,6 +29153,17 @@ private:
         std::cout << "[Camp] tribe " << tribe << " founded a camp" << std::endl;
     }
 
+    // Current position of a named object, if it's still in the scene.
+    bool objectPos(const std::string& name, glm::vec3& out) {
+        for (const auto& o : m_sceneObjects) {
+            if (o && o->getName() == name) {
+                out = const_cast<SceneObject*>(o.get())->getTransform().getPosition();
+                return true;
+            }
+        }
+        return false;
+    }
+
     // Where a tribe's camp stands (the haul destination). False if it has none.
     bool tribeCamp(int tribe, glm::vec3& out) {
         if (tribe < 0 || tribe >= static_cast<int>(m_tribeCamps.size())) return false;
@@ -29178,6 +29198,10 @@ private:
                 r.init = true;
             }
             r.amount = std::min(r.capacity, r.amount + r.regen * deltaTime);
+            // Runs dry at the last drop; not worth the walk again until it's had a
+            // real refill.
+            if (r.amount <= 0.5f) r.exhausted = true;
+            if (r.amount >= 8.0f) r.exhausted = false;
 
             float frac = (r.capacity > 0.0f) ? (r.amount / r.capacity) : 0.0f;
             glm::vec3 s = r.fullScale * (0.25f + 0.75f * frac);   // never vanishes entirely
@@ -29229,8 +29253,11 @@ private:
                 st.thirstRate = frand(0.010f, 0.030f);
                 st.hunger = frand(0.0f, 0.4f);
                 st.hungerRate = frand(0.008f, 0.025f);
+                st.laziness = frand(0.0f, 1.0f);   // fixed for life
+                st.fatigue = frand(0.0f, 0.25f);
                 st.init = true;
             }
+            const glm::vec3 startPos = pos;   // for the distance actually covered
 
             auto play = [&](const char* name) {
                 if (st.clip != name) {
@@ -29272,11 +29299,20 @@ private:
             if (st.hunger > kUrgent) st.seekingFood = true;
             if (st.hunger < kSated)  st.seekingFood = false;
 
+            // REST, on the same hysteresis idea. The lazy sit down at a third of the
+            // fatigue a grafter will carry, and don't get up until they're properly
+            // recovered — so they rest sooner AND longer, which is the whole of the
+            // difference between them.
+            float tiredAt  = 0.80f - st.laziness * 0.45f;   // lazy 0.35 … grafter 0.80
+            float restedAt = 0.30f - st.laziness * 0.28f;   // lazy 0.02 … grafter 0.30
+            if (st.fatigue > tiredAt)  st.resting = true;
+            if (st.fatigue < restedAt) st.resting = false;
+
             // Nearest source of a given resource tag.
             // An exhausted source is skipped — a picked-bare bush isn't worth the walk.
             auto sourceLive = [&](const std::string& n) -> bool {
                 auto it = m_resources.find(n);
-                return it == m_resources.end() || it->second.amount > 1.0f;
+                return it == m_resources.end() || !it->second.exhausted;
             };
             auto nearestOf = [&](const char* tag, glm::vec3& out, std::string& outName) -> bool {
                 bool found = false; float best = 1e9f;
@@ -29295,8 +29331,18 @@ private:
             bool haveFood  = nearestOf("food",  foodPos,  foodName);
             // FEAR overrides every need: a predator within range means run.
             bool havePred  = nearestOf("predator", predPos, predName);
-            constexpr float kFearR = 8.0f;
-            bool fleeing = havePred && dist2D(pos, predPos) < kFearR;
+            // Bolt at 8m, and don't stop running until you're 12m clear. A single
+            // radius means the step that carries you out of it drops you straight
+            // back into wanting a drink — approach, flee, approach, flee.
+            constexpr float kFearR = 8.0f, kSafeR = 12.0f;
+            if (havePred) {
+                float pd = dist2D(pos, predPos);
+                if (pd < kFearR)      st.panicked = true;
+                else if (pd > kSafeR) st.panicked = false;
+            } else {
+                st.panicked = false;
+            }
+            bool fleeing = st.panicked && havePred;
 
             // This tribe's camp and store — the buffer they fall back on when the
             // pond has run dry.
@@ -29337,7 +29383,7 @@ private:
             if (fleeing) {
                 // Run directly away from the predator, faster than a stroll (panic).
                 st.drinking = false; st.eating = false; st.greeting = false;
-                st.walking = false;
+                st.walking = false; st.resting = false;   // panic beats tiredness
                 glm::vec3 away = pos - predPos; away.y = 0.0f;
                 glm::vec3 dir = away / std::max(glm::length(away), 1e-4f);
                 pos += dir * 2.4f * deltaTime;
@@ -29359,6 +29405,12 @@ private:
             } else {
                 st.drinking = false; st.eating = false;
 
+                if (st.resting) {
+                    // Sat down. The trip — and whatever's in her arms — waits.
+                    st.walking = false; st.greeting = false; st.gathering = false;
+                    play("idle");
+                } else {
+
                 // ECONOMY: whoever isn't personally needy goes to work — fill up at a
                 // source, carry it home, drop it in the tribe's store. No one is told
                 // to; it just falls out of "I'm fine, and the crate is low."
@@ -29366,7 +29418,7 @@ private:
                 constexpr float kCarryCap    = 10.0f;   // an armful
                 // Camp gone (or no tribe) — drop the job rather than walk to nowhere.
                 if (st.hauling && (!store || !haveCamp)) {
-                    st.hauling = false; st.gathering = false;
+                    st.hauling = false; st.gathering = false; st.targetSrc.clear();
                 }
                 // Interrupted mid-trip by thirst/hunger/the lion and still holding an
                 // armful — resume, and take it home before fetching anything else.
@@ -29393,22 +29445,35 @@ private:
                     const std::string& srcNm = toWater ? waterName : foodName;
 
                     if (st.carry < kCarryCap && haveSrc) {
-                        if (dist2D(pos, srcPos) < 1.6f) {
+                        // STICK WITH THE ONE YOU SET OUT FOR. Re-picking the nearest
+                        // every frame lets two workers swap each other's destination
+                        // out from under them, and they turn on the spot instead of
+                        // going anywhere.
+                        glm::vec3 goPos = srcPos; std::string goNm = srcNm;
+                        glm::vec3 held(0.0f);
+                        if (!st.targetSrc.empty() && sourceLive(st.targetSrc) &&
+                            objectPos(st.targetSrc, held)) {
+                            goPos = held; goNm = st.targetSrc;
+                        } else {
+                            st.targetSrc = srcNm;   // first trip, or ours ran dry
+                        }
+
+                        if (dist2D(pos, goPos) < 1.6f) {
                             // FILL UP — every unit in hand comes out of the source.
                             st.gathering = true;
-                            float* p = poolOf(srcNm);
+                            float* p = poolOf(goNm);
                             float take = 8.0f * deltaTime;
                             if (p) take = std::min(take, *p);
                             take = std::min(take, kCarryCap - st.carry);
                             st.carry += take;
                             if (p) *p = std::max(0.0f, *p - take);
-                            faceToward(srcPos);
+                            faceToward(goPos);
                             play("idle");
                         } else {
                             st.gathering = false;
-                            glm::vec3 to = srcPos - pos; to.y = 0.0f;
+                            glm::vec3 to = goPos - pos; to.y = 0.0f;
                             pos += (to / std::max(glm::length(to), 1e-4f)) * 1.6f * deltaTime;
-                            faceToward(srcPos);
+                            faceToward(goPos);
                             play("walk");
                         }
                     } else if (st.carry > 0.0f) {
@@ -29418,6 +29483,7 @@ private:
                             if (toWater) store->water += st.carry;
                             else         store->food  += st.carry;
                             st.carry = 0.0f; st.hauling = false; st.carryType = -1;
+                            st.targetSrc.clear();
                             st.timer = frand(0.4f, 1.2f);
                             play("idle");
                         } else {
@@ -29429,6 +29495,7 @@ private:
                     } else {
                         // Empty handed and nothing left to fetch — give it up.
                         st.hauling = false; st.gathering = false; st.carryType = -1;
+                        st.targetSrc.clear();
                     }
                 } else {
                 // NOTICE: a KIN wanders close → stop, turn to them, share a beat.
@@ -29476,7 +29543,23 @@ private:
                     play("walk");
                 }
                 }   // end of the not-hauling (social / wander) branch
+                }   // end of the not-resting branch
             }
+
+            // FATIGUE comes out of the distance actually covered, so a long haul to
+            // a far pond costs more than a short one, a full load costs more than
+            // empty hands, and panic — which is faster — costs most of all. The lazy
+            // tire quicker at all of it, and dawdle longer over the break.
+            float travelled = dist2D(pos, startPos);
+            float load = (st.carry > 0.0f) ? 1.5f : 1.0f;
+            if (fleeing) load *= 1.6f;
+            if (st.resting) {
+                st.fatigue -= (0.160f - st.laziness * 0.115f) * deltaTime;
+            } else {
+                st.fatigue += travelled * 0.020f * (0.8f + st.laziness * 0.6f) * load;
+                st.fatigue -= 0.004f * deltaTime;   // standing about barely helps
+            }
+            st.fatigue = std::min(1.0f, std::max(0.0f, st.fatigue));
 
             // Nothing left anywhere — no live source AND an empty crate. This is the
             // tribe failing, and it should read that way at a glance.
@@ -29489,6 +29572,7 @@ private:
             else if (st.eating)       st.stateTag = "#eating";
             else if (dryWater)        st.stateTag = "#parched";
             else if (dryFood)         st.stateTag = "#starving";
+            else if (st.resting)      st.stateTag = (st.laziness > 0.66f) ? "#lazing" : "#resting";
             else if (st.seekingWater) st.stateTag = "#thirsty";
             else if (st.seekingFood)  st.stateTag = "#hungry";
             else if (st.gathering)    st.stateTag = "#gathering";
@@ -29651,6 +29735,117 @@ private:
         }
     }
 
+    // Click one to inspect them. Ray comes from the mouse when the cursor is free,
+    // and from the crosshair when it's captured, so it works either way you're
+    // watching. A miss clears the selection rather than leaving a stale one up.
+    void pickInhabitantAtCursor() {
+        float w = static_cast<float>(getWindow().getWidth());
+        float h = static_cast<float>(getWindow().getHeight());
+        if (w <= 0.0f || h <= 0.0f) return;
+
+        glm::vec2 mp(w * 0.5f, h * 0.5f);
+        if (!Input::isMouseCaptured()) mp = Input::getMousePosition();
+        float nx = (mp.x / w) * 2.0f - 1.0f;
+        float ny = 1.0f - (mp.y / h) * 2.0f;
+
+        glm::mat4 invVP = glm::inverse(m_camera.getProjectionMatrix(w / h, 0.1f, 5000.0f) *
+                                       m_camera.getViewMatrix());
+        glm::vec4 nearP = invVP * glm::vec4(nx, ny, -1.0f, 1.0f);
+        glm::vec4 farP  = invVP * glm::vec4(nx, ny,  1.0f, 1.0f);
+        nearP /= nearP.w; farP /= farP.w;
+        glm::vec3 rayO = glm::vec3(nearP);
+        glm::vec3 rayD = glm::normalize(glm::vec3(farP - nearP));
+
+        std::string hit; float best = std::numeric_limits<float>::max();
+        for (const auto& o : m_sceneObjects) {
+            if (!o || o->getBuildingType() != "inhabitant" || !o->isVisible()) continue;
+            // Their bounds are slim; pad them so clicking a walking dot isn't fiddly.
+            AABB b = const_cast<SceneObject*>(o.get())->getWorldBounds();
+            b.min -= glm::vec3(0.25f); b.max += glm::vec3(0.25f);
+            float d = b.intersect(rayO, rayD);
+            if (d >= 0.0f && d < best) { best = d; hit = o->getName(); }
+        }
+        m_selectedInhabitant = hit;
+    }
+
+    // The inspector, sat to the right of the hotbar. Only what the sim actually
+    // tracks — which is thin today and gets fatter as they do.
+    void renderInhabitantPanel() {
+        if (m_isEdenOSLevel || m_inhabitants.empty()) return;
+        float w = static_cast<float>(getWindow().getWidth());
+        float h = static_cast<float>(getWindow().getHeight());
+
+        constexpr float slotSize = 48.0f, slotGap = 4.0f, bottomMargin = 16.0f;
+        float hotbarW = TOOLBAR_SLOT_COUNT * slotSize + (TOOLBAR_SLOT_COUNT - 1) * slotGap;
+        float hotbarRight = (w - hotbarW) * 0.5f + hotbarW;
+        constexpr float panelW = 216.0f, panelH = 208.0f;
+        ImGui::SetNextWindowPos(ImVec2(hotbarRight + 8.0f, h - bottomMargin - panelH),
+                                ImGuiCond_Always);
+        ImGui::SetNextWindowSize(ImVec2(panelW, panelH), ImGuiCond_Always);
+        ImGui::SetNextWindowBgAlpha(0.72f);
+        if (!ImGui::Begin("##inhabitant_info", nullptr,
+                          ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+                          ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoScrollbar |
+                          ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoSavedSettings |
+                          ImGuiWindowFlags_NoNav)) {
+            ImGui::End();
+            return;
+        }
+
+        auto it = m_inhabitants.find(m_selectedInhabitant);
+        if (m_selectedInhabitant.empty() || it == m_inhabitants.end()) {
+            ImGui::TextDisabled("Nobody selected.");
+            ImGui::Spacing();
+            ImGui::TextWrapped("Click one of them to see who they are.");
+            ImGui::End();
+            return;
+        }
+        const InhabitantState& s = it->second;
+
+        // Temperament is the one trait so far — read it out in words, since a bare
+        // 0.73 says nothing about what she'll actually do.
+        const char* temper = s.laziness < 0.20f ? "Grafter"
+                          : s.laziness < 0.40f ? "Willing"
+                          : s.laziness < 0.60f ? "Steady"
+                          : s.laziness < 0.80f ? "Idler" : "Layabout";
+        const char* doing = s.gathering ? "Gathering"
+                          : s.hauling   ? (s.carry > 0.0f ? "Carrying it home" : "Off to fetch")
+                          : s.resting   ? "Resting"
+                          : s.drinking  ? "Drinking"
+                          : s.eating    ? "Eating"
+                          : s.greeting  ? "Talking"
+                          : s.walking   ? "Wandering" : "Idle";
+
+        static const ImVec4 kTribeTint[] = {
+            ImVec4(0.47f, 0.78f, 1.00f, 1.0f), ImVec4(1.00f, 0.71f, 0.47f, 1.0f),
+            ImVec4(0.67f, 1.00f, 0.59f, 1.0f), ImVec4(0.90f, 0.59f, 1.00f, 1.0f),
+        };
+        ImGui::TextColored(kTribeTint[s.tribe & 3], "%s", m_selectedInhabitant.c_str());
+        ImGui::SameLine();
+        ImGui::TextDisabled("tribe %c", static_cast<char>('A' + (s.tribe % 26)));
+        ImGui::Separator();
+        ImGui::Text("%s", doing);
+        ImGui::TextDisabled("%s", s.stateTag.c_str());
+        ImGui::Spacing();
+
+        auto bar = [&](const char* label, float v, ImU32 col) {
+            ImGui::TextUnformatted(label);
+            ImGui::PushStyleColor(ImGuiCol_PlotHistogram, ImGui::ColorConvertU32ToFloat4(col));
+            ImGui::ProgressBar(std::min(1.0f, std::max(0.0f, v)), ImVec2(-1.0f, 10.0f), "");
+            ImGui::PopStyleColor();
+        };
+        bar("Thirst",  s.thirst,  IM_COL32(80, 150, 235, 255));
+        bar("Hunger",  s.hunger,  IM_COL32(95, 190, 100, 255));
+        bar("Fatigue", s.fatigue, IM_COL32(225, 165, 70, 255));
+        ImGui::Spacing();
+        ImGui::Text("Temperament: %s", temper);
+        if (s.carry > 0.0f) {
+            ImGui::TextDisabled("Carrying %.0f %s", s.carry,
+                                s.carryType == 0 ? "water" : "food");
+        }
+        ImGui::End();
+    }
+
     // Float each inhabitant's dominant-state tag (#thirsty, #content, …) over its
     // head — the glanceable readout of the state-sim. Terrain levels only.
     void renderInhabitantTags() {
@@ -29719,6 +29914,8 @@ private:
             ImVec2 p0(sx - ts.x * 0.5f - padX, sy - ts.y * 0.5f - padY);
             ImVec2 p1(sx + ts.x * 0.5f + padX, sy + ts.y * 0.5f + padY);
             dl->AddRectFilled(p0, p1, IM_COL32(0, 0, 0, 160), 4.0f);
+            if (o->getName() == m_selectedInhabitant)   // the one in the inspector
+                dl->AddRect(p0, p1, IM_COL32(255, 255, 255, 230), 4.0f, 0, 2.0f);
             dl->AddText(ImVec2(sx - ts.x * 0.5f, sy - ts.y * 0.5f), col, label.c_str());
         }
     }
@@ -31742,9 +31939,18 @@ private:
         bool  gathering = false;    // stood at the source, filling up
         int   carryType = -1;       // 0 = water, 1 = food, -1 = empty handed
         float carry = 0.0f;         // units in hand
+        std::string targetSrc;      // the source we SET OUT for — stuck with till it dies
+        bool  panicked = false;     // running from a predator (sticky, see kSafeR)
+        // Temperament. Work costs legs, and legs need sitting down again — but how
+        // soon and how long is a fixed trait, so the tribe sorts itself into grafters
+        // and layabouts without anyone authoring either.
+        float laziness = 0.5f;      // 0 = tireless grafter … 1 = born layabout
+        float fatigue = 0.0f;       // 0 = fresh → 1 = spent
+        bool  resting = false;      // sat down until recovered (hysteresis)
         std::string stateTag = "#content"; // dominant state, shown above the head
     };
     std::unordered_map<std::string, InhabitantState> m_inhabitants; // keyed by object name
+    std::string m_selectedInhabitant;   // the one being inspected (empty = nobody)
     int m_inhabitantCounter = 0;
     int m_waterCounter = 0;
     int m_foodCounter = 0;
@@ -31769,6 +31975,10 @@ private:
         float capacity = 0.0f;
         float regen = 0.0f;             // units per second trickling back
         glm::vec3 fullScale{1.0f};      // scale when brimming, to shrink from
+        // Drained sources need to actually refill a bit before they're worth walking
+        // to again. Without this gap, regen and the last sip trade the source across
+        // the threshold every frame and the whole tribe buzzes at the water's edge.
+        bool exhausted = false;
     };
     std::unordered_map<std::string, ResourceState> m_resources; // keyed by object name
 
