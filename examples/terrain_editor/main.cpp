@@ -2024,8 +2024,15 @@ protected:
         }
         // The sim runs only when the game is playing, and not in EDEN OS (no terrain).
         if (m_isPlayMode && !m_isEdenOSLevel) {
+            // Wind the day/night clock, but only where the tribe lives — akelba and
+            // EDEN OS keep the frozen noon they were deliberately parked at.
+            if (!m_inhabitants.empty() && !m_simDroveClock && m_gameTimeScale == 0.0f) {
+                m_gameTimeScale = kSimDayScale;
+                m_simDroveClock = true;
+            }
             updateResources(deltaTime);   // must run first — seeds every source's pool
             updateInhabitants(deltaTime);
+            updateReckoning(deltaTime);
             updatePredators(deltaTime);
             // Remove any inhabitants a predator caught this frame (deferred so we
             // never mutate m_sceneObjects mid-loop).
@@ -2040,6 +2047,10 @@ protected:
                 if (m_selectedInhabitant == name) m_selectedInhabitant.clear();
             }
             m_pendingKills.clear();
+        } else if (m_simDroveClock) {
+            m_gameTimeScale = 0.0f;       // hand the clock back the way we found it
+            m_simDroveClock = false;
+            m_prevSimMinutes = -1.0f;
         }
 
         // Poll for AI backend responses
@@ -2592,6 +2603,7 @@ protected:
             renderAgentNameTags();
             renderInhabitantTags();
             renderInhabitantPanel();
+            renderNewsFeed();
             renderServerStatus();
             renderBotBubbles();
             if (m_isEdenOSLevel) {
@@ -29272,10 +29284,13 @@ private:
                 st.thirst = frand(0.0f, 0.4f);
                 st.thirstRate = frand(0.010f, 0.030f);
                 st.hunger = frand(0.0f, 0.4f);
-                st.hungerRate = frand(0.008f, 0.025f);
+                // Slow enough that hunger is a DAILY thing — the old rate emptied
+                // them three times a day, which made the reckoning meaningless.
+                st.hungerRate = frand(0.0022f, 0.0048f);
                 st.laziness = frand(0.0f, 1.0f);   // fixed for life
                 st.skillForage = frand(0.0f, 1.0f); // ditto — some are hopeless
                 st.skillSocial = frand(0.0f, 1.0f);
+                st.displayName = nameFor(obj->getName());
                 st.fatigue = frand(0.0f, 0.25f);
                 st.init = true;
             }
@@ -29441,7 +29456,7 @@ private:
                 // to; it just falls out of "I'm fine, and the crate is low."
                 constexpr float kStoreTarget = 40.0f;   // enough put by, stop hauling
                 constexpr float kCarryCap    = 10.0f;   // an armful
-                constexpr float kLarderTarget = 12.0f;  // days' worth to forage up to
+                constexpr float kLarderTarget = 4.0f;   // a day or two — a bad day bites
 
                 // FORAGING — the day job, and the only way food happens. Aptitude
                 // swings the rate tenfold, and the ground itself runs out, so the
@@ -29835,6 +29850,136 @@ private:
         }
     }
 
+
+    // They're all women, and "Inhabitant_7 found four coconut shells full of berries"
+    // reads like a spreadsheet. Derived from the object's own counter so it's stable
+    // across a save and never collides.
+    static std::string nameFor(const std::string& objName) {
+        static const char* kNames[] = {
+            "Mira","Sela","Ondra","Tavi","Ruth","Anwe","Lissa","Bekka","Nour","Ivetta",
+            "Kesh","Marta","Perri","Oda","Wren","Ysolde","Fen","Hala","Cala","Reva",
+            "Tullia","Enid","Sabra","Noka","Lira","Vesna","Agda","Bri","Rhosyn","Talia",
+            "Wynn","Ilka","Suri","Denna","Oona","Zora","Maeve","Cora","Nera","Silke"
+        };
+        constexpr int kCount = static_cast<int>(sizeof(kNames) / sizeof(kNames[0]));
+        size_t us = objName.find_last_of('_');
+        int idx = 0;
+        if (us != std::string::npos) { try { idx = std::stoi(objName.substr(us + 1)); } catch (...) {} }
+        std::string n = kNames[((idx % kCount) + kCount) % kCount];
+        int wrap = idx / kCount;                     // second time round the list
+        if (wrap > 0) n += " " + std::string(wrap + 1, 'I');
+        return n;
+    }
+
+    // Dusk falls: total up what everyone actually found today and put it in the feed.
+    // A report for now — this is where sharing along the friendship edges will hook in.
+    void updateReckoning(float /*deltaTime*/) {
+        if (m_inhabitants.empty()) { m_prevSimMinutes = -1.0f; return; }
+        float now = m_gameTimeMinutes, prev = m_prevSimMinutes;
+        m_prevSimMinutes = now;
+        if (prev < 0.0f) return;                     // first frame: no crossing to detect
+        bool crossed = (now < prev) ? (prev < kDuskMinutes)          // wrapped past midnight
+                                    : (prev < kDuskMinutes && now >= kDuskMinutes);
+        if (crossed) runReckoning();
+    }
+
+    void runReckoning() {
+        static const char* kFoods[] = {"berries","roots","seeds","greens","mushrooms","tubers"};
+        static const char* kNums[]  = {"no","one","two","three","four","five","six",
+                                       "seven","eight","nine","ten","eleven","twelve"};
+        auto irand = [](int n) { return n > 0 ? (rand() % n) : 0; };
+
+        ++m_dayNumber;
+        m_newsFeed.push_back({true, "Day " + std::to_string(m_dayNumber)});
+
+        // Read as a league table — best day first, empty hands last.
+        std::vector<std::pair<std::string, InhabitantState*>> roll;
+        for (auto& kv : m_inhabitants) roll.push_back({kv.first, &kv.second});
+        std::sort(roll.begin(), roll.end(), [](const auto& a, const auto& b) {
+            return a.second->foragedToday > b.second->foragedToday;
+        });
+
+        constexpr float kDayRealSeconds = 1440.0f / kSimDayScale;
+        int wentHungry = 0;
+        for (auto& r : roll) {
+            InhabitantState& s = *r.second;
+            const std::string who = s.displayName.empty() ? r.first : s.displayName;
+
+            float effort = s.forageTimeToday / kDayRealSeconds;
+            const char* eff = effort > 0.55f ? "was out all day"
+                            : effort > 0.25f ? "spent a good part of the day out"
+                            : effort > 0.04f ? "went out for a while"
+                            : "barely left camp";
+
+            const char* food = kFoods[irand(6)];
+            std::string yield;
+            if (s.foragedToday < 0.05f) {
+                yield = "and found nothing at all";
+            } else if (s.foragedToday < 1.2f) {
+                yield = std::string("and came back with a bare handful of ") + food;
+            } else if (s.foragedToday < 9.0f) {
+                int n = std::max(1, static_cast<int>(std::lround(s.foragedToday / 1.2f)));
+                yield = std::string("and found ") + kNums[std::min(n, 12)] +
+                        (n == 1 ? " coconut shell full of " : " coconut shells full of ") + food;
+            } else {
+                int n = std::max(2, static_cast<int>(std::lround(s.foragedToday / 6.0f)));
+                yield = std::string("filled ") + kNums[std::min(n, 12)] + " baskets with " + food;
+            }
+
+            std::string line = who + " " + eff + " " + yield + ".";
+            if (s.foodStock <= 0.05f) { line += " Her larder is empty."; ++wentHungry; }
+            m_newsFeed.push_back({false, line});
+
+            s.foragedToday = 0.0f;
+            s.forageTimeToday = 0.0f;
+        }
+
+        if (wentHungry > 0) {
+            m_newsFeed.push_back({false, std::string("  ") + std::to_string(wentHungry) +
+                                  (wentHungry == 1 ? " of them has nothing to eat tonight."
+                                                   : " of them have nothing to eat tonight.")});
+        }
+        while (m_newsFeed.size() > 400) m_newsFeed.erase(m_newsFeed.begin());
+    }
+
+    // The feed itself, top-right. Collapsible, because you won't always want it.
+    void renderNewsFeed() {
+        if (m_isEdenOSLevel || m_inhabitants.empty()) return;
+        float w = static_cast<float>(getWindow().getWidth());
+        float h = static_cast<float>(getWindow().getHeight());
+        float panelW = std::max(380.0f, ImGui::GetFontSize() * 26.0f);
+        float panelH = std::max(200.0f, h * 0.38f);
+
+        ImGui::SetNextWindowPos(ImVec2(w - panelW - 16.0f, 16.0f), ImGuiCond_Always);
+        ImGui::SetNextWindowSize(ImVec2(panelW, panelH), ImGuiCond_Always);
+        ImGui::SetNextWindowBgAlpha(0.72f);
+        char title[96];
+        std::snprintf(title, sizeof(title), "Day %d  -  %s###tribe_news", m_dayNumber,
+                      formatGameTimeDisplay(m_gameTimeMinutes).c_str());
+        if (!ImGui::Begin(title, nullptr,
+                          ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
+                          ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoNav)) {
+            ImGui::End();
+            return;
+        }
+        if (m_newsFeed.empty()) {
+            ImGui::TextDisabled("Nothing has happened yet. The first reckoning is at dusk.");
+        }
+        ImGui::BeginChild("##news_scroll", ImVec2(0, 0), false);
+        for (const auto& e : m_newsFeed) {
+            if (e.first) {
+                ImGui::Spacing();
+                ImGui::TextColored(ImVec4(1.0f, 0.85f, 0.55f, 1.0f), "%s", e.second.c_str());
+                ImGui::Separator();
+            } else {
+                ImGui::TextWrapped("%s", e.second.c_str());
+            }
+        }
+        if (ImGui::GetScrollY() >= ImGui::GetScrollMaxY() - 1.0f) ImGui::SetScrollHereY(1.0f);
+        ImGui::EndChild();
+        ImGui::End();
+    }
+
     // Click one to inspect them. Ray comes from the mouse when the cursor is free,
     // and from the crosshair when it's captured, so it works either way you're
     // watching. A miss clears the selection rather than leaving a stale one up.
@@ -29938,8 +30083,9 @@ private:
         char tribeLbl[24];
         std::snprintf(tribeLbl, sizeof(tribeLbl), "tribe %c",
                       static_cast<char>('A' + (s.tribe % 26)));
-        ImGui::TextColored(kTribeTint[s.tribe & 3], "%s", m_selectedInhabitant.c_str());
-        ImGui::SameLine(std::max(ImGui::CalcTextSize(m_selectedInhabitant.c_str()).x + 12.0f,
+        const std::string who = s.displayName.empty() ? m_selectedInhabitant : s.displayName;
+        ImGui::TextColored(kTribeTint[s.tribe & 3], "%s", who.c_str());
+        ImGui::SameLine(std::max(ImGui::CalcTextSize(who.c_str()).x + 12.0f,
                                  contentW - ImGui::CalcTextSize(tribeLbl).x));
         ImGui::TextDisabled("%s", tribeLbl);
         ImGui::Separator();
@@ -29986,8 +30132,12 @@ private:
             size_t sep = kv.first.find('|');
             if (sep == std::string::npos) continue;
             std::string a = kv.first.substr(0, sep), b = kv.first.substr(sep + 1);
-            if      (a == m_selectedInhabitant) ties.push_back({b, kv.second});
-            else if (b == m_selectedInhabitant) ties.push_back({a, kv.second});
+            const std::string* other = (a == m_selectedInhabitant) ? &b
+                                     : (b == m_selectedInhabitant) ? &a : nullptr;
+            if (!other) continue;
+            auto oit = m_inhabitants.find(*other);
+            ties.push_back({(oit != m_inhabitants.end() && !oit->second.displayName.empty())
+                            ? oit->second.displayName : *other, kv.second});
         }
         std::sort(ties.begin(), ties.end(),
                   [](const auto& x, const auto& y) { return x.second > y.second; });
@@ -32116,6 +32266,7 @@ private:
         float skillForage = 0.5f;   // 0 = can't find a berry … 1 = gifted
         float skillSocial = 0.5f;   // 0 = charmless … 1 = magnetic
         float greetOutcome = 0.0f;  // how the last contest went, for the floating tag
+        std::string displayName;    // what the news feed calls her
         // What you forage is YOURS. Water is communal and goes to the camp crate;
         // food is not, which is what makes going hungry a thing you have to ask
         // someone else to fix.
@@ -32131,6 +32282,15 @@ private:
     // One symmetric number per pair, -1 (hostile) … +1 (close). Keyed by the two
     // names in sorted order. Small tribes, so N-squared is nothing.
     std::unordered_map<std::string, float> m_bonds;
+    // ── The day, and the reckoning at the end of it ─────────────────────────
+    // The engine clock sits frozen at noon by default; the tribe needs it turning to
+    // have a dusk to be reckoned at, so the sim winds it and puts it back after.
+    static constexpr float kSimDayScale = 4.8f;   // game minutes per real second → 5 min/day
+    static constexpr float kDuskMinutes = 1140.0f; // 19:00
+    bool  m_simDroveClock = false;
+    float m_prevSimMinutes = -1.0f;
+    int   m_dayNumber = 0;
+    std::vector<std::pair<bool, std::string>> m_newsFeed;  // {isDayHeader, line}
     int m_inhabitantCounter = 0;
     int m_waterCounter = 0;
     int m_foodCounter = 0;
