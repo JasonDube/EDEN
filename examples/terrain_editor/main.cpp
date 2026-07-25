@@ -29900,7 +29900,6 @@ private:
         });
 
         constexpr float kDayRealSeconds = 1440.0f / kSimDayScale;
-        int wentHungry = 0;
         for (auto& r : roll) {
             InhabitantState& s = *r.second;
             const std::string who = s.displayName.empty() ? r.first : s.displayName;
@@ -29927,19 +29926,109 @@ private:
             }
 
             std::string line = who + " " + eff + " " + yield + ".";
-            if (s.foodStock <= 0.05f) { line += " Her larder is empty."; ++wentHungry; }
+            if (s.foodStock <= 0.05f) line += " Her larder is empty.";
             m_newsFeed.push_back({false, line});
 
             s.foragedToday = 0.0f;
             s.forageTimeToday = 0.0f;
         }
 
+        runSharing();   // the empty-handed go asking before anyone eats
+
+        int wentHungry = 0;
+        for (const auto& kv : m_inhabitants)
+            if (kv.second.foodStock <= 0.05f) ++wentHungry;
         if (wentHungry > 0) {
             m_newsFeed.push_back({false, std::string("  ") + std::to_string(wentHungry) +
                                   (wentHungry == 1 ? " of them has nothing to eat tonight."
                                                    : " of them have nothing to eat tonight.")});
         }
         while (m_newsFeed.size() > 400) m_newsFeed.erase(m_newsFeed.begin());
+    }
+
+
+    // Nightfall: whoever came back empty goes round asking. Food never pools — it
+    // moves along the friendship edges one gift at a time, and how much you get
+    // depends on how close you are to whoever still has any. This is where a good
+    // social roll finally pays a hopeless forager, and where being nobody's friend
+    // stops being a social problem and becomes a food problem.
+    void runSharing() {
+        constexpr float kMeal    = 1.7f;   // roughly one sitting
+        constexpr float kReserve = 1.7f;   // a donor always keeps one back
+        constexpr float kAskMin  = 0.05f;  // below this you're a stranger, and it's no
+        auto frand = []() { return static_cast<float>(rand()) / static_cast<float>(RAND_MAX); };
+
+        std::vector<std::pair<std::string, InhabitantState*>> all, needy;
+        for (auto& kv : m_inhabitants) {
+            all.push_back({kv.first, &kv.second});
+            if (kv.second.foodStock < kMeal) needy.push_back({kv.first, &kv.second});
+        }
+        // The emptiest ask first — they're the ones who can't wait.
+        std::sort(needy.begin(), needy.end(), [](const auto& a, const auto& b) {
+            return a.second->foodStock < b.second->foodStock;
+        });
+
+        auto nameOf = [&](const std::string& key, const InhabitantState& st) {
+            return st.displayName.empty() ? key : st.displayName;
+        };
+
+        for (auto& n : needy) {
+            InhabitantState& asker = *n.second;
+            if (asker.foodStock >= kMeal) continue;
+            const std::string aName = nameOf(n.first, asker);
+
+            // Your own tribe, closest first — you ask your best friend before you
+            // ask anyone else.
+            std::vector<std::pair<float, std::pair<std::string, InhabitantState*>>> cands;
+            for (auto& c : all) {
+                if (c.first == n.first || c.second->tribe != asker.tribe) continue;
+                cands.push_back({bondValue(n.first, c.first), c});
+            }
+            std::sort(cands.begin(), cands.end(),
+                      [](const auto& x, const auto& y) { return x.first > y.first; });
+
+            bool fed = false;
+            for (auto& c : cands) {
+                float bond = c.first;
+                InhabitantState& donor = *c.second.second;
+                const std::string dName = nameOf(c.second.first, donor);
+                float& b = m_bonds[bondKey(n.first, c.second.first)];
+
+                // Sorted by closeness, so the first stranger means there's nobody
+                // warmer left to try. One humiliation a night.
+                if (bond < kAskMin) {
+                    m_newsFeed.push_back({false, "  " + aName + " went round asking, and"
+                                                 " nobody would give her anything."});
+                    b = std::max(-1.0f, b - 0.03f);
+                    break;
+                }
+                float surplus = donor.foodStock - kReserve;
+                if (surplus <= 0.05f) continue;          // would help, has nothing
+
+                // A mere acquaintance might still say no. A real friend doesn't.
+                if (bond < 0.25f && frand() > bond * 3.0f) {
+                    m_newsFeed.push_back({false, "  " + aName + " asked " + dName +
+                                                 ", who said no."});
+                    b = std::max(-1.0f, b - 0.05f);      // being refused stings
+                    continue;
+                }
+
+                // The closer you are, the bigger the share.
+                float want = kMeal - asker.foodStock;
+                float give = std::min(surplus, want * (0.30f + bond * 0.70f));
+                if (give <= 0.05f) continue;
+                donor.foodStock -= give;
+                asker.foodStock += give;
+                b = std::min(1.0f, b + 0.05f);           // and it draws them closer
+                m_newsFeed.push_back({false, "  " + dName + " gave " + aName + " " +
+                                             (give < 0.8f ? "a little food"
+                                                          : "a share of what she had") + "."});
+                fed = true;
+                if (asker.foodStock >= kMeal) break;
+            }
+            if (!fed && asker.foodStock <= 0.05f)
+                m_newsFeed.push_back({false, "  " + aName + " goes to bed hungry."});
+        }
     }
 
     // The feed itself, top-right. Collapsible, because you won't always want it.
