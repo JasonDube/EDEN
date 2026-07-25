@@ -29153,6 +29153,21 @@ private:
         std::cout << "[Camp] tribe " << tribe << " founded a camp" << std::endl;
     }
 
+    static std::string bondKey(const std::string& a, const std::string& b) {
+        return (a < b) ? (a + "|" + b) : (b + "|" + a);
+    }
+    float bondValue(const std::string& a, const std::string& b) const {
+        auto it = m_bonds.find(bondKey(a, b));
+        return (it == m_bonds.end()) ? 0.0f : it->second;
+    }
+    static const char* bondWord(float v) {
+        return v >  0.60f ? "close friend"
+             : v >  0.25f ? "friend"
+             : v >  0.05f ? "friendly"
+             : v > -0.05f ? "acquaintance"
+             : v > -0.30f ? "wary" : "hostile";
+    }
+
     // Current position of a named object, if it's still in the scene.
     bool objectPos(const std::string& name, glm::vec3& out) {
         for (const auto& o : m_sceneObjects) {
@@ -29232,8 +29247,13 @@ private:
         // Snapshot the tribe so each member can sense its neighbours this frame.
         std::vector<std::pair<SceneObject*, glm::vec3>> mob;
         for (auto& objPtr : m_sceneObjects) {
-            if (objPtr && objPtr->getBuildingType() == "inhabitant")
+            if (objPtr && objPtr->getBuildingType() == "inhabitant") {
+                // Seed up front: the greeting contest reaches into the OTHER party's
+                // state, and an insert mid-loop would invalidate the reference we're
+                // holding for this one.
+                m_inhabitants[objPtr->getName()];
                 mob.push_back({objPtr.get(), objPtr->getTransform().getPosition()});
+            }
         }
 
         constexpr float kNoticeR  = 2.5f;   // greet a neighbour once this close
@@ -29254,6 +29274,8 @@ private:
                 st.hunger = frand(0.0f, 0.4f);
                 st.hungerRate = frand(0.008f, 0.025f);
                 st.laziness = frand(0.0f, 1.0f);   // fixed for life
+                st.skillForage = frand(0.0f, 1.0f); // ditto — some are hopeless
+                st.skillSocial = frand(0.0f, 1.0f);
                 st.fatigue = frand(0.0f, 0.25f);
                 st.init = true;
             }
@@ -29396,12 +29418,15 @@ private:
                 // Pond's gone — fall back on what the tribe hauled home.
                 st.eating = false;
                 seekAndUse(campPos, st.thirst, st.drinking, 0.55f, &store->water, 1.5f);
-            } else if (st.seekingFood && haveFood) {
-                st.drinking = false;
-                seekAndUse(foodPos, st.hunger, st.eating, 0.45f, poolOf(foodName), 1.5f);
-            } else if (st.seekingFood && haveCamp && store && store->food > 0.1f) {
-                st.drinking = false;
-                seekAndUse(campPos, st.hunger, st.eating, 0.45f, &store->food, 1.5f);
+            } else if (st.seekingFood && st.foodStock > 0.05f) {
+                // You eat what you found. Standing in a berry bush is work, not a
+                // meal — the bush fills your larder, the larder fills you.
+                st.drinking = false; st.eating = true;
+                st.greeting = false; st.hauling = false;
+                st.foraging = false; st.gathering = false;
+                st.hunger = std::max(0.0f, st.hunger - 0.45f * deltaTime);
+                st.foodStock = std::max(0.0f, st.foodStock - 1.5f * deltaTime);
+                play("idle");
             } else {
                 st.drinking = false; st.eating = false;
 
@@ -29416,6 +29441,50 @@ private:
                 // to; it just falls out of "I'm fine, and the crate is low."
                 constexpr float kStoreTarget = 40.0f;   // enough put by, stop hauling
                 constexpr float kCarryCap    = 10.0f;   // an armful
+                constexpr float kLarderTarget = 12.0f;  // days' worth to forage up to
+
+                // FORAGING — the day job, and the only way food happens. Aptitude
+                // swings the rate tenfold, and the ground itself runs out, so the
+                // gifted strip a bush before the hopeless ever get there.
+                if (st.foraging && (!haveFood || st.foodStock >= kLarderTarget)) {
+                    st.foraging = false; st.gathering = false; st.targetSrc.clear();
+                }
+                if (!st.foraging && !st.hauling && st.carry <= 0.0f &&
+                    st.foodStock < kLarderTarget && haveFood) {
+                    st.foraging = true; st.walking = false; st.greeting = false;
+                }
+                if (st.foraging) {
+                    // Same commitment rule as hauling — stick with the ground you
+                    // set out for so two foragers don't swap each other's away.
+                    glm::vec3 goPos = foodPos; std::string goNm = foodName;
+                    glm::vec3 held(0.0f);
+                    if (!st.targetSrc.empty() && sourceLive(st.targetSrc) &&
+                        objectPos(st.targetSrc, held)) {
+                        goPos = held; goNm = st.targetSrc;
+                    } else {
+                        st.targetSrc = foodName;
+                    }
+                    st.forageTimeToday += deltaTime;
+                    if (dist2D(pos, goPos) < 1.6f) {
+                        st.gathering = true;
+                        float* p = poolOf(goNm);
+                        float rate = 3.0f * (0.15f + st.skillForage * 1.35f);
+                        float take = rate * deltaTime;
+                        if (p) take = std::min(take, *p);
+                        take = std::min(take, kLarderTarget - st.foodStock);
+                        st.foodStock += take;
+                        st.foragedToday += take;
+                        if (p) *p = std::max(0.0f, *p - take);
+                        faceToward(goPos);
+                        play("idle");
+                    } else {
+                        st.gathering = false;
+                        glm::vec3 to = goPos - pos; to.y = 0.0f;
+                        pos += (to / std::max(glm::length(to), 1e-4f)) * 1.6f * deltaTime;
+                        faceToward(goPos);
+                        play("walk");
+                    }
+                } else {
                 // Camp gone (or no tribe) — drop the job rather than walk to nowhere.
                 if (st.hauling && (!store || !haveCamp)) {
                     st.hauling = false; st.gathering = false; st.targetSrc.clear();
@@ -29425,24 +29494,18 @@ private:
                 if (store && haveCamp && !st.hauling && st.carry > 0.0f && st.carryType >= 0) {
                     st.hauling = true; st.walking = false; st.greeting = false;
                 }
-                if (store && haveCamp && !st.hauling && st.carry <= 0.0f) {
-                    bool wantWater = store->water < kStoreTarget && haveWater;
-                    bool wantFood  = store->food  < kStoreTarget && haveFood;
-                    if (wantWater && wantFood)                 // fetch whichever is scarcer
-                        st.carryType = (store->water <= store->food) ? 0 : 1;
-                    else if (wantWater) st.carryType = 0;
-                    else if (wantFood)  st.carryType = 1;
-                    else                st.carryType = -1;
-                    if (st.carryType >= 0) {
-                        st.hauling = true; st.walking = false; st.greeting = false;
-                    }
+                // WATER is still communal — fetched and carried back to the crate,
+                // and drunk from it by anyone. Only food is personal.
+                if (store && haveCamp && !st.hauling && st.carry <= 0.0f &&
+                    store->water < kStoreTarget && haveWater) {
+                    st.carryType = 0;
+                    st.hauling = true; st.walking = false; st.greeting = false;
                 }
 
                 if (st.hauling) {
-                    bool toWater = (st.carryType == 0);
-                    bool haveSrc = toWater ? haveWater : haveFood;
-                    const glm::vec3& srcPos  = toWater ? waterPos  : foodPos;
-                    const std::string& srcNm = toWater ? waterName : foodName;
+                    bool haveSrc = haveWater;
+                    const glm::vec3& srcPos  = waterPos;
+                    const std::string& srcNm = waterName;
 
                     if (st.carry < kCarryCap && haveSrc) {
                         // STICK WITH THE ONE YOU SET OUT FOR. Re-picking the nearest
@@ -29480,8 +29543,7 @@ private:
                         // HANDS FULL (or the source died mid-trip) — take it home.
                         st.gathering = false;
                         if (dist2D(pos, campPos) < 1.8f) {
-                            if (toWater) store->water += st.carry;
-                            else         store->food  += st.carry;
+                            store->water += st.carry;
                             st.carry = 0.0f; st.hauling = false; st.carryType = -1;
                             st.targetSrc.clear();
                             st.timer = frand(0.4f, 1.2f);
@@ -29499,17 +29561,42 @@ private:
                     }
                 } else {
                 // NOTICE: a KIN wanders close → stop, turn to them, share a beat.
+                // Whether you actually go over is the social skill talking. The shy
+                // hang back rather than approach and fumble it, so a low roll shows up
+                // as quiet rather than as a pile of enemies.
                 if (!st.greeting && st.greetCd <= 0.0f && kin && kd < kNoticeR) {
-                    st.greeting = true; st.walking = false;
-                    st.timer = frand(1.2f, 2.4f);
-                    faceToward(kinPos);
-                    play("idle");
+                    if (frand(0.0f, 1.0f) < 0.25f + st.skillSocial * 0.75f) {
+                        st.greeting = true; st.walking = false;
+                        st.timer = frand(1.2f, 2.4f);
+                        faceToward(kinPos);
+                        play("idle");
+
+                        // THE CONTEST. Both sides roll skill plus real noise, so upsets
+                        // are common and two awkward ones can still find each other.
+                        // The MARGIN sets the size of it, and a fumble costs less than
+                        // a hit gains — so persistence still slowly pays.
+                        auto kit = m_inhabitants.find(kin->getName());
+                        if (kit != m_inhabitants.end()) {
+                            float mine   = st.skillSocial          + frand(-0.5f, 0.5f);
+                            float theirs = kit->second.skillSocial + frand(-0.5f, 0.5f);
+                            float margin = mine - theirs;
+                            float delta  = margin * (margin > 0.0f ? 0.12f : 0.05f);
+                            float& b = m_bonds[bondKey(obj->getName(), kin->getName())];
+                            b = std::min(1.0f, std::max(-1.0f, b + delta));
+                            st.greetOutcome = delta;
+                            kit->second.greetCd = frand(1.0f, 2.0f);  // just been spoken to
+                        }
+                    } else {
+                        st.greetCd = frand(2.0f, 4.0f);   // hung back; maybe next time
+                    }
                 }
 
                 if (st.greeting) {
                     if (st.timer <= 0.0f) {                  // done greeting
                         st.greeting = false;
-                        st.greetCd = frand(4.0f, 8.0f);
+                        st.greetOutcome = 0.0f;
+                        // The warm seek company again sooner than the awkward do.
+                        st.greetCd = frand(4.0f, 8.0f) * (1.6f - st.skillSocial);
                         st.timer   = frand(0.4f, 1.2f);
                     }
                     // hold position while greeting
@@ -29543,6 +29630,7 @@ private:
                     play("walk");
                 }
                 }   // end of the not-hauling (social / wander) branch
+                }   // end of the not-foraging branch
                 }   // end of the not-resting branch
             }
 
@@ -29564,7 +29652,7 @@ private:
             // Nothing left anywhere — no live source AND an empty crate. This is the
             // tribe failing, and it should read that way at a glance.
             bool dryWater = st.seekingWater && !haveWater && !(store && store->water > 0.1f);
-            bool dryFood  = st.seekingFood  && !haveFood  && !(store && store->food  > 0.1f);
+            bool dryFood  = st.seekingFood  && !haveFood  && st.foodStock <= 0.05f;
 
             // Dominant state, for the tag above the head.
             if (fleeing)              st.stateTag = "#fleeing";
@@ -29575,15 +29663,27 @@ private:
             else if (st.resting)      st.stateTag = (st.laziness > 0.66f) ? "#lazing" : "#resting";
             else if (st.seekingWater) st.stateTag = "#thirsty";
             else if (st.seekingFood)  st.stateTag = "#hungry";
-            else if (st.gathering)    st.stateTag = "#gathering";
+            else if (st.gathering)    st.stateTag = st.foraging ? "#foraging" : "#gathering";
+            else if (st.foraging)     st.stateTag = "#searching";
             else if (st.hauling)      st.stateTag = (st.carry > 0.0f) ? "#hauling" : "#fetching";
-            else if (st.greeting)     st.stateTag = "#hello";
+            else if (st.greeting)     st.stateTag = st.greetOutcome > 0.0f ? "#hello+"
+                                                  : st.greetOutcome < 0.0f ? "#hello-" : "#hello";
             else if (st.walking)      st.stateTag = "#roaming";
             else                      st.stateTag = "#content";
 
             // Stick to the ground wherever she ends up this frame.
             pos.y = m_terrain.getHeightAt(pos.x, pos.z) + st.footLift;
             obj->getTransform().setPosition(pos);
+        }
+
+        // Bonds fade when they aren't kept up — a friendship is cultivated, not
+        // banked once. Grudges fade at the same rate, which is the only mercy in it.
+        for (auto it = m_bonds.begin(); it != m_bonds.end(); ) {
+            float d = 0.004f * deltaTime;
+            it->second = (it->second > 0.0f) ? std::max(0.0f, it->second - d)
+                                             : std::min(0.0f, it->second + d);
+            if (std::fabs(it->second) < 1e-3f) it = m_bonds.erase(it);
+            else ++it;
         }
     }
 
@@ -29812,7 +29912,8 @@ private:
                           : s.laziness < 0.40f ? "Willing"
                           : s.laziness < 0.60f ? "Steady"
                           : s.laziness < 0.80f ? "Idler" : "Layabout";
-        const char* doing = s.gathering ? "Gathering"
+        const char* doing = s.foraging  ? (s.gathering ? "Foraging" : "Looking for food")
+                          : s.gathering ? "Gathering"
                           : s.hauling   ? (s.carry > 0.0f ? "Carrying it home" : "Off to fetch")
                           : s.resting   ? "Resting"
                           : s.drinking  ? "Drinking"
@@ -29848,11 +29949,11 @@ private:
         // Label and bar on the SAME row — three lines instead of six.
         float labelW = ImGui::CalcTextSize("Fatigue").x + ImGui::GetStyle().ItemSpacing.x * 2.0f;
         float barH   = ImGui::GetTextLineHeight();
-        auto bar = [&](const char* label, float v, ImU32 col) {
+        auto bar = [&](const char* label, float v, ImU32 col, const char* overlay = "") {
             ImGui::TextUnformatted(label);
             ImGui::SameLine(labelW);
             ImGui::PushStyleColor(ImGuiCol_PlotHistogram, ImGui::ColorConvertU32ToFloat4(col));
-            ImGui::ProgressBar(std::min(1.0f, std::max(0.0f, v)), ImVec2(-1.0f, barH), "");
+            ImGui::ProgressBar(std::min(1.0f, std::max(0.0f, v)), ImVec2(-1.0f, barH), overlay);
             ImGui::PopStyleColor();
         };
         bar("Thirst",  s.thirst,  IM_COL32(80, 150, 235, 255));
@@ -29860,11 +29961,50 @@ private:
         bar("Fatigue", s.fatigue, IM_COL32(225, 165, 70, 255));
         ImGui::Spacing();
 
-        char carrying[48] = "";
-        if (s.carry > 0.0f)
-            std::snprintf(carrying, sizeof(carrying), "carrying %.0f %s", s.carry,
-                          s.carryType == 0 ? "water" : "food");
-        rightOf(temper, carrying, true);
+        // Aptitude, named rather than numbered — a bare 0.18 doesn't tell you she
+        // comes home empty-handed most days.
+        const char* knack = s.skillForage < 0.20f ? "Hopeless"
+                          : s.skillForage < 0.40f ? "Poor"
+                          : s.skillForage < 0.60f ? "Fair"
+                          : s.skillForage < 0.80f ? "Good" : "Gifted";
+        const char* charm = s.skillSocial < 0.20f ? "Charmless"
+                          : s.skillSocial < 0.40f ? "Awkward"
+                          : s.skillSocial < 0.60f ? "Fair"
+                          : s.skillSocial < 0.80f ? "Warm" : "Magnetic";
+        bar("Forage", s.skillForage, IM_COL32(190, 130, 200, 255), knack);
+        bar("Social", s.skillSocial, IM_COL32(215, 120, 150, 255), charm);
+        ImGui::Spacing();
+
+        char larder[48];
+        std::snprintf(larder, sizeof(larder), "larder %.1f", s.foodStock);
+        rightOf(temper, larder, true);
+        if (s.carry > 0.0f) ImGui::TextDisabled("carrying %.0f water", s.carry);
+
+        // Who they've got. This is the list that will decide who eats.
+        std::vector<std::pair<std::string, float>> ties;
+        for (const auto& kv : m_bonds) {
+            size_t sep = kv.first.find('|');
+            if (sep == std::string::npos) continue;
+            std::string a = kv.first.substr(0, sep), b = kv.first.substr(sep + 1);
+            if      (a == m_selectedInhabitant) ties.push_back({b, kv.second});
+            else if (b == m_selectedInhabitant) ties.push_back({a, kv.second});
+        }
+        std::sort(ties.begin(), ties.end(),
+                  [](const auto& x, const auto& y) { return x.second > y.second; });
+        ImGui::Separator();
+        if (ties.empty()) {
+            ImGui::TextDisabled("Knows nobody yet.");
+        } else {
+            for (size_t i = 0; i < ties.size() && i < 4; ++i) {
+                ImVec4 c = ties[i].second >= 0.0f ? ImVec4(0.70f, 0.90f, 0.70f, 1.0f)
+                                                  : ImVec4(0.95f, 0.60f, 0.55f, 1.0f);
+                ImGui::TextColored(c, "%s", ties[i].first.c_str());
+                const char* word = bondWord(ties[i].second);
+                ImGui::SameLine(std::max(ImGui::CalcTextSize(ties[i].first.c_str()).x + 12.0f,
+                                         contentW - ImGui::CalcTextSize(word).x));
+                ImGui::TextDisabled("%s", word);
+            }
+        }
         ImGui::End();
     }
 
@@ -29908,9 +30048,9 @@ private:
             if (tribe < 0 || tribe >= static_cast<int>(m_tribeStores.size())) continue;
             const TribeStore& s = m_tribeStores[tribe];
             char buf[96];
-            std::snprintf(buf, sizeof(buf), "%c camp  water %d  food %d",
+            std::snprintf(buf, sizeof(buf), "%c camp  water %d",
                           static_cast<char>('A' + (tribe % 26)),
-                          static_cast<int>(s.water), static_cast<int>(s.food));
+                          static_cast<int>(s.water));
             auto* raw = const_cast<SceneObject*>(o.get());
             floatLabel(raw->getTransform().getPosition(), raw->getWorldBounds().max.y,
                        buf, kTribeCols[tribe & 3]);
@@ -31969,10 +32109,28 @@ private:
         float laziness = 0.5f;      // 0 = tireless grafter … 1 = born layabout
         float fatigue = 0.0f;       // 0 = fresh → 1 = spent
         bool  resting = false;      // sat down until recovered (hysteresis)
+        // ── Skills ──────────────────────────────────────────────────────────
+        // Aptitude, fixed for life, and some of them are genuinely hopeless at it.
+        // One skill for now; it splits into buried / fruit / mushroom gathering
+        // later, at which point this becomes a small table rather than a float.
+        float skillForage = 0.5f;   // 0 = can't find a berry … 1 = gifted
+        float skillSocial = 0.5f;   // 0 = charmless … 1 = magnetic
+        float greetOutcome = 0.0f;  // how the last contest went, for the floating tag
+        // What you forage is YOURS. Water is communal and goes to the camp crate;
+        // food is not, which is what makes going hungry a thing you have to ask
+        // someone else to fix.
+        float foodStock = 0.0f;     // personal larder, in units
+        bool  foraging = false;     // out working a forage ground
+        float foragedToday = 0.0f;  // found since the last reckoning (for the feed)
+        float forageTimeToday = 0.0f; // seconds spent out there today
         std::string stateTag = "#content"; // dominant state, shown above the head
     };
     std::unordered_map<std::string, InhabitantState> m_inhabitants; // keyed by object name
     std::string m_selectedInhabitant;   // the one being inspected (empty = nobody)
+    // ── Bonds ───────────────────────────────────────────────────────────────
+    // One symmetric number per pair, -1 (hostile) … +1 (close). Keyed by the two
+    // names in sorted order. Small tribes, so N-squared is nothing.
+    std::unordered_map<std::string, float> m_bonds;
     int m_inhabitantCounter = 0;
     int m_waterCounter = 0;
     int m_foodCounter = 0;
