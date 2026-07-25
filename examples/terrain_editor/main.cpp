@@ -2017,6 +2017,7 @@ protected:
         }
         // The sim runs only when the game is playing, and not in EDEN OS (no terrain).
         if (m_isPlayMode && !m_isEdenOSLevel) {
+            updateResources(deltaTime);   // must run first — seeds every source's pool
             updateInhabitants(deltaTime);
             updatePredators(deltaTime);
             // Remove any inhabitants a predator caught this frame (deferred so we
@@ -29072,21 +29073,119 @@ private:
         }
         size_t before = m_sceneObjects.size();
         importSkinnedModel(dot);   // grounds feet, plays idle, pushes + selects
+        // Camps are spawned AFTER the loop — never push_back into m_sceneObjects
+        // while walking it.
+        std::vector<std::pair<int, glm::vec3>> newCamps;
         for (size_t i = before; i < m_sceneObjects.size(); ++i) {
             auto* o = m_sceneObjects[i].get();
             if (!o || !o->isSkinned()) continue;
             o->setBuildingType("inhabitant");
             o->setName("Inhabitant_" + std::to_string(++m_inhabitantCounter));
-            m_inhabitants.erase(o->getName()); // fresh state, seeded lazily in update
-            // Fold this one into the shared tribe centre (running average) so the
-            // group clusters around a common home instead of scattering.
             glm::vec3 p = o->getTransform().getPosition();
-            m_tribeCenter = (m_tribeCenter * static_cast<float>(m_tribeCount) + p)
-                            / static_cast<float>(m_tribeCount + 1);
-            m_tribeCount++;
+
+            // Join the nearest tribe within reach, else found a new one.
+            constexpr float kJoinRadius = 20.0f;
+            int tribe = -1; float best = kJoinRadius;
+            for (size_t t = 0; t < m_tribeCenters.size(); ++t) {
+                float dx = p.x - m_tribeCenters[t].x, dz = p.z - m_tribeCenters[t].z;
+                float d = std::sqrt(dx * dx + dz * dz);
+                if (d < best) { best = d; tribe = static_cast<int>(t); }
+            }
+            if (tribe < 0) {
+                tribe = static_cast<int>(m_tribeCenters.size());
+                m_tribeCenters.push_back(p);
+                m_tribeCounts.push_back(0);
+                m_tribeStores.push_back(TribeStore{});
+                m_tribeCamps.push_back("");
+                newCamps.push_back({tribe, p});   // a new tribe founds a camp
+            }
+            // Fold into that tribe's running-average centre.
+            int c = m_tribeCounts[tribe];
+            m_tribeCenters[tribe] = (m_tribeCenters[tribe] * static_cast<float>(c) + p)
+                                    / static_cast<float>(c + 1);
+            m_tribeCounts[tribe]++;
+
+            InhabitantState& s = m_inhabitants[o->getName()];
+            s = InhabitantState{};   // fresh state (rest seeded lazily in update)
+            s.tribe = tribe;
+            std::cout << "[Inhabitant] spawned into tribe " << tribe
+                      << " (" << m_tribeCounts[tribe] << " strong)" << std::endl;
         }
-        std::cout << "[Inhabitant] spawned dot inhabitant (tribe of "
-                  << m_tribeCount << ")" << std::endl;
+        for (const auto& c : newCamps) spawnStockpile(c.first, c.second);
+    }
+
+    // Every tribe gets a CAMP — the crate they haul gathered water and food back to.
+    // It's the tribe's economy made physical, and the place they come to drink from
+    // once the pond has been drunk dry.
+    void spawnStockpile(int tribe, const glm::vec3& at) {
+        if (!m_modelRenderer) return;
+        glm::vec4 brown(0.55f, 0.38f, 0.22f, 1.0f);
+        auto mesh = PrimitiveMeshBuilder::createCube(1.0f, brown);
+        uint32_t handle = m_modelRenderer->createModel(mesh.vertices, mesh.indices, nullptr, 0, 0);
+        std::string name = "Camp_" + std::string(1, static_cast<char>('A' + (tribe % 26)));
+        auto obj = std::make_unique<SceneObject>(name);
+        obj->setBufferHandle(handle);
+        obj->setIndexCount(static_cast<uint32_t>(mesh.indices.size()));
+        obj->setVertexCount(static_cast<uint32_t>(mesh.vertices.size()));
+        obj->setLocalBounds(mesh.bounds);
+        obj->setMeshData(mesh.vertices, mesh.indices);
+        obj->setPrimitiveType(PrimitiveType::Cube);
+        obj->setPrimitiveSize(1.0f);
+        obj->setPrimitiveColor(brown);
+        obj->setBuildingType("stockpile");
+        glm::vec3 s(1.6f, 1.0f, 1.6f);
+        glm::vec3 p = at;
+        p.y = m_terrain.getHeightAt(p.x, p.z) + s.y * 0.5f;
+        obj->getTransform().setPosition(p);
+        obj->getTransform().setScale(s);
+        m_sceneObjects.push_back(std::move(obj));
+        if (static_cast<int>(m_tribeCamps.size()) <= tribe) m_tribeCamps.resize(tribe + 1);
+        m_tribeCamps[tribe] = name;
+        std::cout << "[Camp] tribe " << tribe << " founded a camp" << std::endl;
+    }
+
+    // Where a tribe's camp stands (the haul destination). False if it has none.
+    bool tribeCamp(int tribe, glm::vec3& out) {
+        if (tribe < 0 || tribe >= static_cast<int>(m_tribeCamps.size())) return false;
+        const std::string& n = m_tribeCamps[tribe];
+        if (n.empty()) return false;
+        for (const auto& o : m_sceneObjects) {
+            if (o && o->getName() == n) {
+                out = const_cast<SceneObject*>(o.get())->getTransform().getPosition();
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // Draw down and trickle back. Sources shrink with what's left in them, so you can
+    // SEE the pond drying and the bush picked bare — the scarcity is glanceable, the
+    // same way the state tags are.
+    void updateResources(float deltaTime) {
+        for (auto& objPtr : m_sceneObjects) {
+            if (!objPtr) continue;
+            const std::string& type = objPtr->getBuildingType();
+            bool isWater = (type == "water");
+            bool isFood  = (type == "food");
+            if (!isWater && !isFood) continue;
+
+            ResourceState& r = m_resources[objPtr->getName()];
+            if (!r.init) {
+                r.capacity  = isWater ? 60.0f : 40.0f;
+                r.amount    = r.capacity;
+                r.regen     = isWater ? 1.2f : 0.5f;   // a spring refills; berries regrow slower
+                r.fullScale = objPtr->getTransform().getScale();
+                r.init = true;
+            }
+            r.amount = std::min(r.capacity, r.amount + r.regen * deltaTime);
+
+            float frac = (r.capacity > 0.0f) ? (r.amount / r.capacity) : 0.0f;
+            glm::vec3 s = r.fullScale * (0.25f + 0.75f * frac);   // never vanishes entirely
+            objPtr->getTransform().setScale(s);
+            glm::vec3 p = objPtr->getTransform().getPosition();
+            p.y = m_terrain.getHeightAt(p.x, p.z) + (isWater ? 0.05f : s.y * 0.5f);
+            objPtr->getTransform().setPosition(p);
+        }
     }
 
     // Bring inhabitants to life: a lazy wander (idle a beat → pick a nearby point →
@@ -29100,6 +29199,11 @@ private:
             float dx = a.x - b.x, dz = a.z - b.z;
             return std::sqrt(dx * dx + dz * dz);
         };
+
+        // Keep the per-tribe economy arrays in step with the tribes themselves
+        // (levels saved before the economy existed come back a tribe short).
+        if (m_tribeStores.size() < m_tribeCenters.size()) m_tribeStores.resize(m_tribeCenters.size());
+        if (m_tribeCamps.size()  < m_tribeCenters.size()) m_tribeCamps.resize(m_tribeCenters.size());
 
         // Snapshot the tribe so each member can sense its neighbours this frame.
         std::vector<std::pair<SceneObject*, glm::vec3>> mob;
@@ -29141,12 +29245,18 @@ private:
                     obj->setEulerRotation({0.0f, glm::degrees(std::atan2(f.x, f.z)), 0.0f});
             };
 
-            // Nearest OTHER inhabitant, for noticing + spacing.
+            // Nearest OTHER inhabitant for spacing (any tribe), and nearest KIN
+            // (same tribe) for greeting — you don't fraternise with a rival tribe.
             SceneObject* near = nullptr; float nd = 1e9f; glm::vec3 nearPos(0.0f);
+            SceneObject* kin  = nullptr; float kd = 1e9f; glm::vec3 kinPos(0.0f);
             for (auto& other : mob) {
                 if (other.first == obj) continue;
                 float d = dist2D(pos, other.second);
                 if (d < nd) { nd = d; near = other.first; nearPos = other.second; }
+                int ot = 0;
+                auto oit = m_inhabitants.find(other.first->getName());
+                if (oit != m_inhabitants.end()) ot = oit->second.tribe;
+                if (ot == st.tribe && d < kd) { kd = d; kin = other.first; kinPos = other.second; }
             }
 
             st.timer   -= deltaTime;
@@ -29163,31 +29273,56 @@ private:
             if (st.hunger < kSated)  st.seekingFood = false;
 
             // Nearest source of a given resource tag.
-            auto nearestOf = [&](const char* tag, glm::vec3& out) -> bool {
+            // An exhausted source is skipped — a picked-bare bush isn't worth the walk.
+            auto sourceLive = [&](const std::string& n) -> bool {
+                auto it = m_resources.find(n);
+                return it == m_resources.end() || it->second.amount > 1.0f;
+            };
+            auto nearestOf = [&](const char* tag, glm::vec3& out, std::string& outName) -> bool {
                 bool found = false; float best = 1e9f;
                 for (auto& objPtr : m_sceneObjects) {
                     if (!objPtr || objPtr->getBuildingType() != tag) continue;
+                    if (!sourceLive(objPtr->getName())) continue;
                     glm::vec3 rp = objPtr->getTransform().getPosition();
                     float d = dist2D(pos, rp);
-                    if (d < best) { best = d; out = rp; found = true; }
+                    if (d < best) { best = d; out = rp; outName = objPtr->getName(); found = true; }
                 }
                 return found;
             };
             glm::vec3 waterPos(0.0f), foodPos(0.0f), predPos(0.0f);
-            bool haveWater = nearestOf("water", waterPos);
-            bool haveFood  = nearestOf("food",  foodPos);
+            std::string waterName, foodName, predName;
+            bool haveWater = nearestOf("water", waterPos, waterName);
+            bool haveFood  = nearestOf("food",  foodPos,  foodName);
             // FEAR overrides every need: a predator within range means run.
-            bool havePred  = nearestOf("predator", predPos);
+            bool havePred  = nearestOf("predator", predPos, predName);
             constexpr float kFearR = 8.0f;
             bool fleeing = havePred && dist2D(pos, predPos) < kFearR;
 
-            // Head to a resource and use it. Thirst wins ties (it kills faster).
-            auto seekAndUse = [&](const glm::vec3& rp, float& need, bool& using_, float drain) {
+            // This tribe's camp and store — the buffer they fall back on when the
+            // pond has run dry.
+            TribeStore* store = (st.tribe >= 0 && st.tribe < static_cast<int>(m_tribeStores.size()))
+                                ? &m_tribeStores[st.tribe] : nullptr;
+            glm::vec3 campPos(0.0f);
+            bool haveCamp = tribeCamp(st.tribe, campPos);
+            // Live handle on a source's remaining units (updateResources has already
+            // seeded every water/food object this frame, so find() is enough).
+            auto poolOf = [&](const std::string& n) -> float* {
+                auto it = m_resources.find(n);
+                return (it == m_resources.end()) ? nullptr : &it->second.amount;
+            };
+
+            // Head to a resource and use it, drawing what's consumed out of the pool
+            // it came from. Thirst wins ties (it kills faster).
+            auto seekAndUse = [&](const glm::vec3& rp, float& need, bool& using_, float drain,
+                                  float* poolPtr, float poolRate) {
                 using_ = false;
                 st.greeting = false;   // a needy creature won't stop to chat
+                st.hauling = false;    // nor will it keep working
+                st.gathering = false;
                 if (dist2D(pos, rp) < 1.6f) {
                     using_ = true;
                     need = std::max(0.0f, need - drain * deltaTime);
+                    if (poolPtr) *poolPtr = std::max(0.0f, *poolPtr - poolRate * deltaTime);
                     faceToward(rp);
                     play("idle");
                 } else {
@@ -29210,17 +29345,97 @@ private:
                 play("walk");
             } else if (st.seekingWater && haveWater) {
                 st.eating = false;
-                seekAndUse(waterPos, st.thirst, st.drinking, 0.55f);
+                seekAndUse(waterPos, st.thirst, st.drinking, 0.55f, poolOf(waterName), 1.5f);
+            } else if (st.seekingWater && haveCamp && store && store->water > 0.1f) {
+                // Pond's gone — fall back on what the tribe hauled home.
+                st.eating = false;
+                seekAndUse(campPos, st.thirst, st.drinking, 0.55f, &store->water, 1.5f);
             } else if (st.seekingFood && haveFood) {
                 st.drinking = false;
-                seekAndUse(foodPos, st.hunger, st.eating, 0.45f);
+                seekAndUse(foodPos, st.hunger, st.eating, 0.45f, poolOf(foodName), 1.5f);
+            } else if (st.seekingFood && haveCamp && store && store->food > 0.1f) {
+                st.drinking = false;
+                seekAndUse(campPos, st.hunger, st.eating, 0.45f, &store->food, 1.5f);
             } else {
                 st.drinking = false; st.eating = false;
-                // NOTICE: a neighbour wanders close → stop, turn to them, share a beat.
-                if (!st.greeting && st.greetCd <= 0.0f && near && nd < kNoticeR) {
+
+                // ECONOMY: whoever isn't personally needy goes to work — fill up at a
+                // source, carry it home, drop it in the tribe's store. No one is told
+                // to; it just falls out of "I'm fine, and the crate is low."
+                constexpr float kStoreTarget = 40.0f;   // enough put by, stop hauling
+                constexpr float kCarryCap    = 10.0f;   // an armful
+                // Camp gone (or no tribe) — drop the job rather than walk to nowhere.
+                if (st.hauling && (!store || !haveCamp)) {
+                    st.hauling = false; st.gathering = false;
+                }
+                // Interrupted mid-trip by thirst/hunger/the lion and still holding an
+                // armful — resume, and take it home before fetching anything else.
+                if (store && haveCamp && !st.hauling && st.carry > 0.0f && st.carryType >= 0) {
+                    st.hauling = true; st.walking = false; st.greeting = false;
+                }
+                if (store && haveCamp && !st.hauling && st.carry <= 0.0f) {
+                    bool wantWater = store->water < kStoreTarget && haveWater;
+                    bool wantFood  = store->food  < kStoreTarget && haveFood;
+                    if (wantWater && wantFood)                 // fetch whichever is scarcer
+                        st.carryType = (store->water <= store->food) ? 0 : 1;
+                    else if (wantWater) st.carryType = 0;
+                    else if (wantFood)  st.carryType = 1;
+                    else                st.carryType = -1;
+                    if (st.carryType >= 0) {
+                        st.hauling = true; st.walking = false; st.greeting = false;
+                    }
+                }
+
+                if (st.hauling) {
+                    bool toWater = (st.carryType == 0);
+                    bool haveSrc = toWater ? haveWater : haveFood;
+                    const glm::vec3& srcPos  = toWater ? waterPos  : foodPos;
+                    const std::string& srcNm = toWater ? waterName : foodName;
+
+                    if (st.carry < kCarryCap && haveSrc) {
+                        if (dist2D(pos, srcPos) < 1.6f) {
+                            // FILL UP — every unit in hand comes out of the source.
+                            st.gathering = true;
+                            float* p = poolOf(srcNm);
+                            float take = 8.0f * deltaTime;
+                            if (p) take = std::min(take, *p);
+                            take = std::min(take, kCarryCap - st.carry);
+                            st.carry += take;
+                            if (p) *p = std::max(0.0f, *p - take);
+                            faceToward(srcPos);
+                            play("idle");
+                        } else {
+                            st.gathering = false;
+                            glm::vec3 to = srcPos - pos; to.y = 0.0f;
+                            pos += (to / std::max(glm::length(to), 1e-4f)) * 1.6f * deltaTime;
+                            faceToward(srcPos);
+                            play("walk");
+                        }
+                    } else if (st.carry > 0.0f) {
+                        // HANDS FULL (or the source died mid-trip) — take it home.
+                        st.gathering = false;
+                        if (dist2D(pos, campPos) < 1.8f) {
+                            if (toWater) store->water += st.carry;
+                            else         store->food  += st.carry;
+                            st.carry = 0.0f; st.hauling = false; st.carryType = -1;
+                            st.timer = frand(0.4f, 1.2f);
+                            play("idle");
+                        } else {
+                            glm::vec3 to = campPos - pos; to.y = 0.0f;
+                            pos += (to / std::max(glm::length(to), 1e-4f)) * 1.6f * deltaTime;
+                            faceToward(campPos);
+                            play("walk");
+                        }
+                    } else {
+                        // Empty handed and nothing left to fetch — give it up.
+                        st.hauling = false; st.gathering = false; st.carryType = -1;
+                    }
+                } else {
+                // NOTICE: a KIN wanders close → stop, turn to them, share a beat.
+                if (!st.greeting && st.greetCd <= 0.0f && kin && kd < kNoticeR) {
                     st.greeting = true; st.walking = false;
                     st.timer = frand(1.2f, 2.4f);
-                    faceToward(nearPos);
+                    faceToward(kinPos);
                     play("idle");
                 }
 
@@ -29250,22 +29465,34 @@ private:
                         play("walk");
                     }
                 } else if (st.timer <= 0.0f) {
-                    // CLUSTER: wander around the shared tribe centre so the group
-                    // stays loosely together.
+                    // CLUSTER: wander around THIS tribe's centre so the group stays
+                    // loosely together (and apart from the rival tribe).
+                    glm::vec3 center = (st.tribe >= 0 && st.tribe < (int)m_tribeCenters.size())
+                                       ? m_tribeCenters[st.tribe] : pos;
                     float ang = frand(0.0f, 6.2831853f);
                     float r   = frand(1.5f, 7.0f);
-                    st.target = m_tribeCenter + glm::vec3(std::cos(ang) * r, 0.0f, std::sin(ang) * r);
+                    st.target = center + glm::vec3(std::cos(ang) * r, 0.0f, std::sin(ang) * r);
                     st.walking = true; st.timer = 12.0f;
                     play("walk");
                 }
+                }   // end of the not-hauling (social / wander) branch
             }
+
+            // Nothing left anywhere — no live source AND an empty crate. This is the
+            // tribe failing, and it should read that way at a glance.
+            bool dryWater = st.seekingWater && !haveWater && !(store && store->water > 0.1f);
+            bool dryFood  = st.seekingFood  && !haveFood  && !(store && store->food  > 0.1f);
 
             // Dominant state, for the tag above the head.
             if (fleeing)              st.stateTag = "#fleeing";
             else if (st.drinking)     st.stateTag = "#drinking";
             else if (st.eating)       st.stateTag = "#eating";
+            else if (dryWater)        st.stateTag = "#parched";
+            else if (dryFood)         st.stateTag = "#starving";
             else if (st.seekingWater) st.stateTag = "#thirsty";
             else if (st.seekingFood)  st.stateTag = "#hungry";
+            else if (st.gathering)    st.stateTag = "#gathering";
+            else if (st.hauling)      st.stateTag = (st.carry > 0.0f) ? "#hauling" : "#fetching";
             else if (st.greeting)     st.stateTag = "#hello";
             else if (st.walking)      st.stateTag = "#roaming";
             else                      st.stateTag = "#content";
@@ -29433,6 +29660,45 @@ private:
         if (w <= 0.0f || h <= 0.0f) return;
         glm::mat4 vp = m_camera.getProjectionMatrix(w / h, 0.1f, 5000.0f) * m_camera.getViewMatrix();
         auto* dl = ImGui::GetForegroundDrawList();
+        // One colour per tribe so the groups (and their camps) read at a glance.
+        static const ImU32 kTribeCols[] = {
+            IM_COL32(120, 200, 255, 255), // A  blue
+            IM_COL32(255, 180, 120, 255), // B  orange
+            IM_COL32(170, 255, 150, 255), // C  green
+            IM_COL32(230, 150, 255, 255), // D  purple
+        };
+        auto floatLabel = [&](const glm::vec3& at, float topY, const std::string& label, ImU32 col) {
+            glm::vec4 clip = vp * glm::vec4(at.x, topY + 0.3f, at.z, 1.0f);
+            if (clip.w <= 0.0f) return;
+            glm::vec3 ndc = glm::vec3(clip) / clip.w;
+            if (ndc.z < -1.0f || ndc.z > 1.0f) return;
+            float sx = (ndc.x + 1.0f) * 0.5f * w;
+            float sy = (1.0f - ndc.y) * 0.5f * h;
+            ImVec2 ts = ImGui::CalcTextSize(label.c_str());
+            float padX = 6.0f, padY = 2.0f;
+            ImVec2 p0(sx - ts.x * 0.5f - padX, sy - ts.y * 0.5f - padY);
+            ImVec2 p1(sx + ts.x * 0.5f + padX, sy + ts.y * 0.5f + padY);
+            dl->AddRectFilled(p0, p1, IM_COL32(0, 0, 0, 160), 4.0f);
+            dl->AddText(ImVec2(sx - ts.x * 0.5f, sy - ts.y * 0.5f), col, label.c_str());
+        };
+
+        // Each camp shows what its tribe has put by — the economy, glanceable.
+        for (const auto& o : m_sceneObjects) {
+            if (!o || o->getBuildingType() != "stockpile") continue;
+            int tribe = -1;
+            for (size_t t = 0; t < m_tribeCamps.size(); ++t)
+                if (m_tribeCamps[t] == o->getName()) { tribe = static_cast<int>(t); break; }
+            if (tribe < 0 || tribe >= static_cast<int>(m_tribeStores.size())) continue;
+            const TribeStore& s = m_tribeStores[tribe];
+            char buf[96];
+            std::snprintf(buf, sizeof(buf), "%c camp  water %d  food %d",
+                          static_cast<char>('A' + (tribe % 26)),
+                          static_cast<int>(s.water), static_cast<int>(s.food));
+            auto* raw = const_cast<SceneObject*>(o.get());
+            floatLabel(raw->getTransform().getPosition(), raw->getWorldBounds().max.y,
+                       buf, kTribeCols[tribe & 3]);
+        }
+
         for (const auto& o : m_sceneObjects) {
             if (!o || o->getBuildingType() != "inhabitant") continue;
             glm::vec3 pos = const_cast<SceneObject*>(o.get())->getTransform().getPosition();
@@ -29444,14 +29710,16 @@ private:
             float sx = (ndc.x + 1.0f) * 0.5f * w;
             float sy = (1.0f - ndc.y) * 0.5f * h;
             auto it = m_inhabitants.find(o->getName());
-            std::string label = (it != m_inhabitants.end()) ? it->second.stateTag : "#?";
+            int tribe = 0; std::string tag = "#?";
+            if (it != m_inhabitants.end()) { tribe = it->second.tribe; tag = it->second.stateTag; }
+            ImU32 col = kTribeCols[tribe & 3];
+            std::string label = std::string(1, static_cast<char>('A' + (tribe % 26))) + ":" + tag;
             ImVec2 ts = ImGui::CalcTextSize(label.c_str());
             float padX = 6.0f, padY = 2.0f;
             ImVec2 p0(sx - ts.x * 0.5f - padX, sy - ts.y * 0.5f - padY);
             ImVec2 p1(sx + ts.x * 0.5f + padX, sy + ts.y * 0.5f + padY);
             dl->AddRectFilled(p0, p1, IM_COL32(0, 0, 0, 160), 4.0f);
-            dl->AddText(ImVec2(sx - ts.x * 0.5f, sy - ts.y * 0.5f),
-                        IM_COL32(210, 225, 255, 255), label.c_str());
+            dl->AddText(ImVec2(sx - ts.x * 0.5f, sy - ts.y * 0.5f), col, label.c_str());
         }
     }
 
@@ -31457,6 +31725,7 @@ private:
         std::string clip;           // current anim clip (avoid re-triggering every frame)
         bool greeting = false;      // paused, facing a neighbour it just noticed
         float greetCd = 0.0f;       // cooldown before it will greet again
+        int   tribe = 0;            // which tribe it belongs to (index into m_tribeCenters)
         // Needs (the deterministic state-sim).
         float thirst = 0.0f;        // 0 = sated → 1 = parched
         float thirstRate = 0.02f;   // per-second rise, randomised per creature
@@ -31466,14 +31735,42 @@ private:
         float hungerRate = 0.015f;
         bool  seekingFood = false;
         bool  eating = false;
+        // Economy: anyone not personally needy works — fill up at a source, carry it
+        // home, drop it in the tribe's store. That store is what they live on once
+        // the pond runs dry, which is what makes hauling survival and not busywork.
+        bool  hauling = false;      // committed to a gather-and-return trip
+        bool  gathering = false;    // stood at the source, filling up
+        int   carryType = -1;       // 0 = water, 1 = food, -1 = empty handed
+        float carry = 0.0f;         // units in hand
         std::string stateTag = "#content"; // dominant state, shown above the head
     };
     std::unordered_map<std::string, InhabitantState> m_inhabitants; // keyed by object name
     int m_inhabitantCounter = 0;
     int m_waterCounter = 0;
     int m_foodCounter = 0;
-    glm::vec3 m_tribeCenter{0.0f};  // shared home the tribe clusters around
-    int m_tribeCount = 0;           // running count for the centre's average
+    // Each tribe clusters around its own centre. A new inhabitant joins the nearest
+    // tribe if close enough, else founds a new one — so you make a second tribe just
+    // by spawning somewhere else on the map.
+    std::vector<glm::vec3> m_tribeCenters;
+    std::vector<int>       m_tribeCounts;   // running counts for each centre's average
+    // ── The tribe economy ───────────────────────────────────────────────────
+    // What a tribe has hauled home. Per-tribe, so two tribes drawing on one pond
+    // are genuinely competing for the same finite water.
+    struct TribeStore { float water = 0.0f; float food = 0.0f; };
+    std::vector<TribeStore>  m_tribeStores;
+    std::vector<std::string> m_tribeCamps;   // stockpile object name, per tribe
+
+    // Sources are FINITE. Every drink and every armful comes out of the pond/bush,
+    // which visibly shrinks as it's drawn down and trickles back over time. Without
+    // depletion there's no economy — just errands.
+    struct ResourceState {
+        bool  init = false;
+        float amount = 0.0f;
+        float capacity = 0.0f;
+        float regen = 0.0f;             // units per second trickling back
+        glm::vec3 fullScale{1.0f};      // scale when brimming, to shrink from
+    };
+    std::unordered_map<std::string, ResourceState> m_resources; // keyed by object name
 
     // ── Predators (the lion) ────────────────────────────────────────────────
     // A hunter that stalks inhabitants and turns the watering hole into a risk —
