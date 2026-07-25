@@ -29778,16 +29778,20 @@ private:
         constexpr float slotSize = 48.0f, slotGap = 4.0f, bottomMargin = 16.0f;
         float hotbarW = TOOLBAR_SLOT_COUNT * slotSize + (TOOLBAR_SLOT_COUNT - 1) * slotGap;
         float hotbarRight = (w - hotbarW) * 0.5f + hotbarW;
-        constexpr float panelW = 216.0f, panelH = 208.0f;
-        ImGui::SetNextWindowPos(ImVec2(hotbarRight + 8.0f, h - bottomMargin - panelH),
-                                ImGuiCond_Always);
-        ImGui::SetNextWindowSize(ImVec2(panelW, panelH), ImGuiCond_Always);
+        // Wide and stout: fixed width scaled to the font, height left to ImGui so
+        // nothing clips off the bottom at any font size, and anchored by its
+        // BOTTOM-left corner so it grows upward off the hotbar line.
+        float panelW = std::max(340.0f, ImGui::GetFontSize() * 21.0f);
+        ImGui::SetNextWindowPos(ImVec2(hotbarRight + 8.0f, h - bottomMargin),
+                                ImGuiCond_Always, ImVec2(0.0f, 1.0f));
+        ImGui::SetNextWindowSizeConstraints(ImVec2(panelW, 0.0f),
+                                            ImVec2(panelW, std::numeric_limits<float>::max()));
         ImGui::SetNextWindowBgAlpha(0.72f);
         if (!ImGui::Begin("##inhabitant_info", nullptr,
                           ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
                           ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoScrollbar |
                           ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoSavedSettings |
-                          ImGuiWindowFlags_NoNav)) {
+                          ImGuiWindowFlags_NoNav | ImGuiWindowFlags_AlwaysAutoResize)) {
             ImGui::End();
             return;
         }
@@ -29820,29 +29824,47 @@ private:
             ImVec4(0.47f, 0.78f, 1.00f, 1.0f), ImVec4(1.00f, 0.71f, 0.47f, 1.0f),
             ImVec4(0.67f, 1.00f, 0.59f, 1.0f), ImVec4(0.90f, 0.59f, 1.00f, 1.0f),
         };
+        // Anything that can share a line does, so the box stays short and wide.
+        float contentW = ImGui::GetContentRegionAvail().x;
+        auto rightOf = [&](const char* left, const char* right, bool dimRight) {
+            float rw = ImGui::CalcTextSize(right).x;
+            ImGui::TextUnformatted(left);
+            ImGui::SameLine(std::max(ImGui::CalcTextSize(left).x + 12.0f, contentW - rw));
+            if (dimRight) ImGui::TextDisabled("%s", right);
+            else          ImGui::TextUnformatted(right);
+        };
+
+        char tribeLbl[24];
+        std::snprintf(tribeLbl, sizeof(tribeLbl), "tribe %c",
+                      static_cast<char>('A' + (s.tribe % 26)));
         ImGui::TextColored(kTribeTint[s.tribe & 3], "%s", m_selectedInhabitant.c_str());
-        ImGui::SameLine();
-        ImGui::TextDisabled("tribe %c", static_cast<char>('A' + (s.tribe % 26)));
+        ImGui::SameLine(std::max(ImGui::CalcTextSize(m_selectedInhabitant.c_str()).x + 12.0f,
+                                 contentW - ImGui::CalcTextSize(tribeLbl).x));
+        ImGui::TextDisabled("%s", tribeLbl);
         ImGui::Separator();
-        ImGui::Text("%s", doing);
-        ImGui::TextDisabled("%s", s.stateTag.c_str());
+        rightOf(doing, s.stateTag.c_str(), true);
         ImGui::Spacing();
 
+        // Label and bar on the SAME row — three lines instead of six.
+        float labelW = ImGui::CalcTextSize("Fatigue").x + ImGui::GetStyle().ItemSpacing.x * 2.0f;
+        float barH   = ImGui::GetTextLineHeight();
         auto bar = [&](const char* label, float v, ImU32 col) {
             ImGui::TextUnformatted(label);
+            ImGui::SameLine(labelW);
             ImGui::PushStyleColor(ImGuiCol_PlotHistogram, ImGui::ColorConvertU32ToFloat4(col));
-            ImGui::ProgressBar(std::min(1.0f, std::max(0.0f, v)), ImVec2(-1.0f, 10.0f), "");
+            ImGui::ProgressBar(std::min(1.0f, std::max(0.0f, v)), ImVec2(-1.0f, barH), "");
             ImGui::PopStyleColor();
         };
         bar("Thirst",  s.thirst,  IM_COL32(80, 150, 235, 255));
         bar("Hunger",  s.hunger,  IM_COL32(95, 190, 100, 255));
         bar("Fatigue", s.fatigue, IM_COL32(225, 165, 70, 255));
         ImGui::Spacing();
-        ImGui::Text("Temperament: %s", temper);
-        if (s.carry > 0.0f) {
-            ImGui::TextDisabled("Carrying %.0f %s", s.carry,
-                                s.carryType == 0 ? "water" : "food");
-        }
+
+        char carrying[48] = "";
+        if (s.carry > 0.0f)
+            std::snprintf(carrying, sizeof(carrying), "carrying %.0f %s", s.carry,
+                          s.carryType == 0 ? "water" : "food");
+        rightOf(temper, carrying, true);
         ImGui::End();
     }
 
