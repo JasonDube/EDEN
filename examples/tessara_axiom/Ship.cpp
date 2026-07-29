@@ -84,7 +84,8 @@ void Ship::place(TerrainSource& hf, glm::vec2 near, float yawDegrees) {
 
     // Aimed a little BELOW the ground for the same reason: a ramp tip landing
     // exactly level with a flat pad is a coplanar face, and it flickers.
-    solveRampAngle();
+    solveRampAngle(hf);
+    solveLegs(hf);
 }
 
 void Ship::update(float dt, bool obstructed) {
@@ -120,15 +121,95 @@ float Ship::groundUnderHull(const TerrainSource& ground) const {
         const glm::vec3 at = m_origin + forward() * along;
         below = std::max(below, ground.heightAtWorld(at.x, at.z));
     }
+
+    // And under the FEET, which is where it actually touches.
+    //
+    // The samples above run down the centreline, and the legs are off to the sides.
+    // A rise under one foot that the centreline never crossed left the hull resting
+    // lower than that foot's ground, so the leg had a NEGATIVE extension to make --
+    // which is not a thing a leg does -- and the foot finished a unit and a quarter
+    // buried in the dirt.
+    for (int i = 0; i < kLegs; ++i) {
+        const glm::vec3 base = legBase(i);
+        below = std::max(below, ground.heightAtWorld(base.x, base.z));
+    }
     return below;
 }
 
-// The ramp's angle, solved for the deck height it actually has to reach down from.
-// Worked out once at placement and again on every touchdown, because a ramp still
-// reaching for the pad it took off from either hangs in the air or buries its tip.
-void Ship::solveRampAngle() {
+// The four feet, at the plane the hull rests on -- before the gear extends.
+glm::vec3 Ship::legBase(int i) const {
+    const float sx = (i & 1) ? 1.0f : -1.0f;
+    const float sz = (i & 2) ? 1.0f : -1.0f;
+    return m_origin + right()   * (sx * params.width  * 0.5f * 0.72f)
+                    + forward() * (sz * params.length * 0.5f * 0.58f);
+}
+
+// Each leg as long as the ground under IT requires.
+//
+// The hull rests on the highest ground beneath it, so on a slope every other leg
+// has ground to find below that. Without this they simply stopped at the hull's
+// plane and the downhill pair hung in the air with daylight under them.
+void Ship::solveLegs(const TerrainSource& ground) {
+    for (int i = 0; i < kLegs; ++i) {
+        const glm::vec3 base = legBase(i);
+        const float under = ground.heightAtWorld(base.x, base.z);
+        m_legDrop[i] = std::clamp(m_origin.y - under + params.groundBite,
+                                  0.0f, params.legTravel);
+    }
+}
+
+float Ship::legSpread() const {
+    float lo = m_legDrop[0], hi = m_legDrop[0];
+    for (int i = 1; i < kLegs; ++i) {
+        lo = std::min(lo, m_legDrop[i]);
+        hi = std::max(hi, m_legDrop[i]);
+    }
+    return hi - lo;
+}
+
+// The ramp's angle, solved so the TIP lands on the ground it is actually reaching
+// for -- not on a nominal deck height.
+//
+// Those are the same number only on a level pad. Set down facing downhill and the
+// ground at the tip is well below the ground under the hull, so an angle solved
+// from the deck height leaves the ramp hanging; facing uphill it drives the tip
+// into the slope. And the tip's position depends on the angle, which depends on
+// the ground at the tip, so it is solved by iterating -- four passes, which is
+// three more than it needs on anything walkable.
+// The ramp's angle: whatever reaches the ground from the deck height, and nothing
+// cleverer than that.
+//
+// Two more ambitious versions were tried and both were worse. Solving for the
+// ground under the TIP -- so a ramp set down facing downhill lays out further to
+// reach -- is right in principle and wrong in every particular: the angle it
+// wants is steeper than 24 degrees, and 24 is where the biped's router gives up
+// (0.90 of rise per two-unit node), so he simply stopped delivering. Capping it at
+// something walkable leaves nothing to solve, because the nominal angle is already
+// 21. And sweeping the angle against real terrain broke the rally as well.
+//
+// So it reaches for the deck height it has, and when the ground behind the ship is
+// lower than the ground under it the tip stops short. Ship::rampGap reports by how
+// much, which is the honest version: a ramp that stops short is a step the crew can
+// still take, and a ramp steep enough to always touch is one nothing can climb.
+void Ship::solveRampAngle(const TerrainSource&) {
     m_openAngle = glm::degrees(std::asin(
         std::clamp((params.deckHeight + params.groundBite) / m_rampLength, 0.0f, 0.95f)));
+}
+
+float Ship::siteDrop(const TerrainSource& ground) const {
+    float lo = 1e30f, hi = -1e30f;
+    for (int i = 0; i < kLegs; ++i) {
+        const glm::vec3 base = legBase(i);
+        const float under = ground.heightAtWorld(base.x, base.z);
+        lo = std::min(lo, under);
+        hi = std::max(hi, under);
+    }
+    return hi - lo;
+}
+
+float Ship::rampGap(const TerrainSource& ground) const {
+    const glm::vec3 tip = rampFootPosition();
+    return tip.y - ground.heightAtWorld(tip.x, tip.z);
 }
 
 // Put it on the ground where it stands, in one move, and hand back the
@@ -142,7 +223,8 @@ glm::vec3 Ship::settle(const TerrainSource& ground) {
     m_landing  = false;
     m_vy = 0.0f;
     m_touchdownSpeed = 0.0f;   // it was set down, not landed
-    solveRampAngle();
+    solveRampAngle(ground);
+    solveLegs(ground);
 
     m_lastMove = m_origin - was;
     m_lastTurn = 0.0f;
@@ -184,8 +266,10 @@ void Ship::fly(float dt, float forward, float turn, float lift,
             m_landing = false;
             m_airborne = false;
 
-            // And the ramp is re-solved for the ground it is actually over.
-            solveRampAngle();
+            // And the ramp and the gear are both re-solved for the ground it is
+            // actually standing on.
+            solveRampAngle(ground);
+            solveLegs(ground);
         }
     } else {
         // Held off the ground, but at a RATE rather than by decree. Clamping it
@@ -653,16 +737,23 @@ void appendShipMesh(const Ship& ship,
     auto at = [&](float x, float y, float z) { return o + r * x + u * y + f * z; };
 
     // ---- landing struts ---------------------------------------------------
-    for (int i = 0; i < 4; ++i) {
+    // Each one drawn to the length the ground under it asked for. The shoulder
+    // stays on the hull and only the foot moves, which is what a leg looks like --
+    // the alternative is four legs of one length and daylight under the downhill
+    // pair, which is what this looked like on a slope.
+    for (int i = 0; i < Ship::kLegs; ++i) {
         float sx = (i & 1) ? 1.0f : -1.0f;
         float sz = (i & 2) ? 1.0f : -1.0f;
-        glm::vec3 foot = at(sx * halfW * 0.72f, 0.0f, sz * halfL * 0.58f);
+        const float drop = ship.legDrop(i);
+
+        const glm::vec3 shoulder = at(sx * halfW * 0.72f, p.deckHeight + 0.2f,
+                                     sz * halfL * 0.58f);
+        const glm::vec3 foot = at(sx * halfW * 0.72f, -drop, sz * halfL * 0.58f);
 
         // Sunk in, not sat on. Bottom face below the terrain, top face above.
         appendBox(verts, indices, foot + u * (0.18f - p.groundBite), r, u, f,
                   glm::vec3(0.85f, 0.18f + p.groundBite, 1.15f), kHullDark);
-        appendTaperedStrut(verts, indices, foot + u * 0.30f,
-                           foot + u * (p.deckHeight + 0.2f), 0.34f, 0.26f, kTrim);
+        appendTaperedStrut(verts, indices, foot + u * 0.30f, shoulder, 0.34f, 0.26f, kTrim);
     }
 
     // Every piece below is nudged so that NO TWO SHARE A FACE PLANE.

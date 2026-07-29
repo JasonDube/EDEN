@@ -1807,6 +1807,99 @@ void checkTheLanding() {
 }
 
 // ---------------------------------------------------------------------------
+// 5g. Set down on a slope, all four feet find the ground.
+//
+// Reported from a screenshot: the ship resting on a hillside with daylight under
+// its two downhill struts. The hull rests on the HIGHEST ground beneath it -- it
+// has to, or the uphill end is buried -- so on any slope the other legs have
+// ground to find below that, and they were simply stopping at the hull's plane.
+//
+// The hull deliberately does NOT tilt. Every Blocker in it is an upright box with
+// a floor and a ceiling, the deck is a level patch, and the walker stands on a
+// world-aligned lattice; pitching the ship invalidates all three at once. The gear
+// compensates instead, which is what gear is for -- and it keeps the deck walkable
+// and the crates where they were put.
+//
+// Tested on real relief, because a flat field cannot fail this and every other
+// landing check runs on one.
+// ---------------------------------------------------------------------------
+void checkTheLandingGear() {
+    int sites = 0, allDown = 0, reached = 0, tooSteep = 0;
+    float worstFoot = 0.0f, worstGap = -1e9f, mostSpread = 0.0f;
+
+    // Several places on a rolling field, and several headings at each, so the ramp
+    // points up some slopes and down others.
+    for (float relief : {8.0f, 22.0f}) {
+        for (glm::vec2 at : {glm::vec2(0.0f, 0.0f), glm::vec2(40.0f, -30.0f),
+                             glm::vec2(-52.0f, 44.0f)}) {
+            for (float yaw : {0.0f, 70.0f, 155.0f, 250.0f}) {
+                Scene s(relief, at, yaw);
+                ++sites;
+
+                // As LANDED, and landed SOMEWHERE ELSE. place() levels a pad
+                // under itself, so a ship that takes off and comes straight back
+                // down lands on flat ground and this check passes without testing
+                // anything -- which it did, reporting a leg spread of 0.00 across
+                // twenty-four slopes.
+                s.ship.setAirborne(true);
+                for (int i = 0; i < 60 * 4; ++i)
+                    s.ship.fly(1.0f / 60.0f, 1.0f, 0.0f, 1.0f, s.terrain);
+                for (int i = 0; i < 60 * 3; ++i)
+                    s.ship.fly(1.0f / 60.0f, 1.0f, 0.0f, 0.0f, s.terrain);
+
+                s.ship.beginLanding();
+                for (int i = 0; i < 60 * 60 && s.ship.airborne(); ++i) {
+                    const float rate = -s.ship.verticalSpeed();
+                    s.ship.fly(1.0f / 60.0f, 0.0f, 0.0f, rate > 4.0f ? 1.0f : 0.0f, s.terrain);
+                }
+                s.ship.openRamp();
+                for (int i = 0; i < 300; ++i) s.ship.update(1.0f / 60.0f);
+                s.republish();
+
+                // Every foot within a hand's width of the dirt under it -- but
+                // only asked of sites the gear can actually absorb. A hull
+                // thirty-eight units long on a steep hillside has ten units of drop
+                // end to end, and no landing leg is ten units long; four of these
+                // twenty-four sites are that, and demanding it anyway would be
+                // demanding the impossible and calling working code broken.
+                if (!s.ship.standsLevel(s.terrain)) { ++tooSteep; continue; }
+
+                float worstHere = 0.0f;
+                for (int i = 0; i < Ship::kLegs; ++i) {
+                    const glm::vec3 foot = s.ship.legFoot(i);
+                    const float under = s.terrain.heightAtWorld(foot.x, foot.z);
+                    worstHere = std::max(worstHere, std::fabs(foot.y - under));
+                }
+                if (worstHere < 0.5f) ++allDown;
+                worstFoot = std::max(worstFoot, worstHere);
+                mostSpread = std::max(mostSpread, s.ship.legSpread());
+
+                // A gap under 0.9 is one both of them can still step across: it is
+                // the biped's own ledge limit. Bigger than that on a steep downhill
+                // site is a real outcome rather than a bug -- the alternative is a
+                // ramp too steep to route over -- so it is counted and reported.
+                const float gap = s.ship.rampGap(s.terrain);
+                if (gap < 0.9f) ++reached;
+                worstGap = std::max(worstGap, gap);
+            }
+        }
+    }
+
+    const int standable = sites - tooSteep;
+
+    char detail[224];
+    std::snprintf(detail, sizeof detail,
+                  "%d slopes, %d too steep for the gear: %d of %d standable had all "
+                  "four feet down (worst %.2f off, legs differed by up to %.2f), "
+                  "ramp reached on %d (worst gap %.2f)",
+                  sites, tooSteep, allDown, standable, worstFoot, mostSpread,
+                  reached, worstGap);
+
+    report("it stands on all four legs on a slope",
+           standable > 0 && allDown == standable && mostSpread > 0.3f, detail);
+}
+
+// ---------------------------------------------------------------------------
 // 6. And all of it on an AUTHORED planet, not the field this example generates.
 //
 // The creatures were tuned against 11 units of relief on 256 units of ground.
@@ -1944,6 +2037,7 @@ int runShipChecks(bool verbose) {
     checkThePlayerRides();
     checkTheHelmView();
     checkTheLanding();
+    checkTheLandingGear();
     checkTheRealPlanet();
 
     std::printf("  %s\n\n", g_failed ? "SOMETHING IS BROKEN" : "all ok");

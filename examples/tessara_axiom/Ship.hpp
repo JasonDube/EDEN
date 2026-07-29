@@ -47,6 +47,17 @@ public:
         // resolve. Burying the contact slightly means the faces intersect rather
         // than coincide, and there is always a winner.
         float groundBite   = 0.14f;
+
+        // How far a landing leg will reach down past the hull's own resting
+        // plane. The hull sits on the HIGHEST ground under it -- it has to, or the
+        // uphill end is buried -- so on any slope the downhill legs have to make
+        // up the difference or hang in the air, which is what they were doing.
+        //
+        // Bounded because a leg is a strut, not a rope: past this the site is too
+        // steep to stand on and the ship rests on whichever legs reach.
+        float legTravel    = 3.2f;
+
+
     };
 
     Params params;
@@ -114,6 +125,47 @@ public:
 
     // The far end of the ramp, so the scene can tell how far it has swung.
     glm::vec3 rampFootPosition() const;
+
+    // ---- landing gear ------------------------------------------------------
+    // Four legs, each as long as the ground under IT requires.
+    //
+    // The hull does not tilt, and that is a decision about collision rather than
+    // taste -- see the note on flight. Every Blocker in this hull is an upright
+    // box with a floor and a ceiling, the deck is a level SurfacePatch, and the
+    // walker stands on a world-aligned lattice; pitching the whole ship would
+    // invalidate all three at once and the first sign of getting it wrong is
+    // somebody falling out through the side.
+    //
+    // So the gear compensates instead, which is what gear is for. Level hull,
+    // four feet on the dirt, and a ramp that reaches -- and a deck that stays
+    // walkable and crates that stay where they were put.
+    static constexpr int kLegs = 4;
+    glm::vec3 legBase(int i) const;                  // foot, at the hull's plane
+    float legDrop(int i) const { return m_legDrop[i]; }   // how far it reached down
+    glm::vec3 legFoot(int i) const { return legBase(i) - up() * m_legDrop[i]; }
+
+    // Longest and shortest leg, so a site too steep to stand on can be said out
+    // loud rather than merely looking wrong.
+    float legSpread() const;
+
+    // How far the ramp's tip finished from the ground under it: 0 is resting,
+    // positive is hanging in the air. Asked so a site the hatch cannot reach can
+    // be said out loud instead of merely looking wrong.
+    float rampGap(const TerrainSource& ground) const;
+
+    // How much the ground varies under the four feet, and whether the gear can
+    // absorb it.
+    //
+    // A hull thirty-eight units long on a fifteen degree slope has ten units of
+    // drop from nose to tail, and no landing leg is ten units long. So there is a
+    // real limit here, and it is worth being able to ASK about rather than
+    // discovering it by looking at a ship with daylight under one end. Told to the
+    // pilot before committing, this is the difference between a bad landing SITE
+    // and a bad landing.
+    float siteDrop(const TerrainSource& ground) const;
+    bool  standsLevel(const TerrainSource& ground) const {
+        return siteDrop(ground) <= params.legTravel;
+    }
 
     // What can be stood on. Published rather than acted on: the ship does not
     // know who walks into it, and nothing that walks knows it is a ship.
@@ -249,10 +301,12 @@ private:
     bool  m_opening = false;
     bool  m_rampHeld = false;
     float m_bridgeDoor = 0.0f;   // 0 shut, 1 open
-    void solveRampAngle();
+    void solveRampAngle(const TerrainSource& ground);
+    void solveLegs(const TerrainSource& ground);
 
     bool  m_airborne = false;
     bool  m_landing  = false;
+    float m_legDrop[kLegs] = {0.0f, 0.0f, 0.0f, 0.0f};
     float m_vy = 0.0f;               // vertical speed, only while coming down
     float m_touchdownSpeed = 0.0f;   // how fast it was falling when it arrived
     glm::vec3 m_lastMove{0.0f};

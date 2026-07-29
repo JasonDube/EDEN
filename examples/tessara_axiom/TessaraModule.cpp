@@ -880,6 +880,13 @@ void TessaraModule::renderUI(float, float) {
         ImGui::TextColored(m_launch == Launch::Ready ? ImVec4(0.35f, 0.9f, 0.45f, 1.0f)
                                                      : ImVec4(0.95f, 0.82f, 0.35f, 1.0f),
                            "%s", launchLabel());
+        if (m_launch == Launch::Ready && !m_ship.airborne() && m_source) {
+            const float gap = m_ship.rampGap(*m_source);
+            if (gap > 0.5f) {
+                ImGui::TextColored(ImVec4(0.95f, 0.82f, 0.35f, 1.0f),
+                                   "  the ramp stops %.1f short of the ground here", gap);
+            }
+        }
         ImGui::Text("  biped:  %s", m_biped.onStation() ? "on station" : "coming");
         // "cannot get there" rather than "coming", because a rally that will
         // never finish and one that is merely slow look identical from here, and
@@ -910,6 +917,20 @@ void TessaraModule::renderUI(float, float) {
                                                                : "NOT ABOARD - it left without you");
             ImGui::TextDisabled(m_atHelm ? "  at the helm: WASD to fly, space/shift for height"
                                          : "  nobody at the helm - holding course");
+
+            // What the ground below is like, before committing to it. A site the
+            // gear cannot absorb is a ship left standing on two legs with daylight
+            // under the other two, and that is worth knowing while you can still
+            // fly on and find somewhere flatter.
+            {
+                const float drop = m_ship.siteDrop(*m_source);
+                const bool level = m_ship.standsLevel(*m_source);
+                ImGui::TextColored(level ? ImVec4(0.35f, 0.9f, 0.45f, 1.0f)
+                                         : ImVec4(0.95f, 0.82f, 0.35f, 1.0f),
+                                   "  ground below varies %.1f%s", drop,
+                                   level ? " - the gear can take it"
+                                         : " - TOO ROUGH, it will stand on two legs");
+            }
 
             // Coming down is flown, so the two numbers that matter while you do it
             // are how far there is left and how fast you are using it up.
