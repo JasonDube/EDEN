@@ -397,6 +397,16 @@ void TessaraModule::launch() {
     // Recorded in the SHIP's frame, so that wherever the ship goes he is still
     // standing where he was standing. There is no other way to carry him.
     m_walker.parkIn(*m_ground, m_ship.origin(), m_ship.right(), m_ship.forward());
+
+    // Said out loud, because "it left without me" and "it did not carry me" look
+    // identical from the pad and have completely different causes.
+    const glm::vec3 feet = m_playerPosition - glm::vec3(0.0f, 1.7f, 0.0f);
+    const bool aboard = m_ground->enclosureAt(feet) >= 0 ||
+                        m_ground->onPatch(feet.x, feet.z, feet.y, kPlayerStepUp);
+    std::printf("[tessara] launch: player feet at (%.1f, %.1f, %.1f), deck at %.1f -> %s\n",
+                feet.x, feet.y, feet.z, m_ship.origin().y + m_ship.params.deckHeight,
+                aboard ? "ABOARD" : "NOT ABOARD");
+
     m_launch = Launch::Flying;
 }
 
@@ -496,8 +506,13 @@ void TessaraModule::updateLaunch(float dt) {
             // stood on the deck his eye is a metre and a half above it, which is
             // inside the hold either way, but on the ramp it is the difference
             // between being aboard and not.
+            // Standing ON the ship, which is a broader and truer question than
+            // being in the hold. The deck, the bridge and the ramp are all its
+            // floor, and somebody in the doorway is on it whichever side of the
+            // enclosure's edge their feet happen to fall.
             const glm::vec3 feet = m_playerPosition - glm::vec3(0.0f, 1.7f, 0.0f);
-            m_carriedPlayer = m_ground->enclosureAt(feet) >= 0;
+            m_carriedPlayer = m_ground->enclosureAt(feet) >= 0 ||
+                              m_ground->onPatch(feet.x, feet.z, feet.y, kPlayerStepUp);
             m_carryMove = move;
             m_carryTurn = spun;
             m_carryAbout = m_ship.origin() - move;
@@ -699,6 +714,10 @@ void TessaraModule::renderUI(float, float) {
         if (m_launch == Launch::Flying) {
             const float agl = m_ship.heightAboveGround(*m_source);
             ImGui::Text("  %.0f above the ground", agl);
+            ImGui::TextColored(m_carriedPlayer ? ImVec4(0.35f, 0.9f, 0.45f, 1.0f)
+                                               : ImVec4(0.95f, 0.45f, 0.35f, 1.0f),
+                               "  you are %s", m_carriedPlayer ? "aboard - riding with it"
+                                                               : "NOT ABOARD - it left without you");
             ImGui::TextDisabled(m_atHelm ? "  at the helm: WASD to fly, space/ctrl for height"
                                          : "  nobody at the helm - holding course");
             if (ImGui::Button("SET DOWN")) setDown();
