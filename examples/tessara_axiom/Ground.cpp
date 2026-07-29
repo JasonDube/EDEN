@@ -263,9 +263,28 @@ bool Ground::wayThrough(const glm::vec3& from, const glm::vec3& to,
         if (use < 0) return false;
 
         // He is in the doorway and his goal is not through it, so the way out is
-        // the end he is not aiming past.
-        outWaypoint = (there == use) ? m_enclosures[use].inside : m_enclosures[use].outside;
-        return m_enclosures[use].open || (outShut = true, true);
+        // the end he is not aiming past -- and PAST it, not at it.
+        //
+        // Aiming at the mark itself parks him exactly on the corridor's own
+        // threshold. He steps out, the corridor stops applying, he turns for his
+        // real goal, that turn carries him back inside, and the corridor sends
+        // him to the mark again. He orbits the spot at walking pace and never
+        // leaves: seen in the game as a creature circling the blue ring at the
+        // foot of the ramp instead of going to fetch the next crate.
+        //
+        // Same mistake as a corridor that reaches its own exit, one boundary
+        // further out. A mark you are told to walk to must not be a mark you are
+        // standing on when you get there.
+        const Enclosure& e = m_enclosures[use];
+        if (there == use) {
+            outWaypoint = e.inside;
+        } else {
+            const glm::vec2 axis(e.inside.x - e.outside.x, e.inside.z - e.outside.z);
+            const float len = glm::length(axis);
+            const glm::vec2 away = (len > 1e-4f) ? -axis / len : glm::vec2(0.0f, -1.0f);
+            outWaypoint = e.outside + glm::vec3(away.x, 0.0f, away.y) * 4.0f;
+        }
+        return e.open || (outShut = true, true);
     }
 
     // Whichever room is involved. If he is in one, it is the one he must leave --

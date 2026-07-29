@@ -148,7 +148,7 @@ protected:
 
         // Down on arrival. A shut ramp is a sealed hold, and the biped's whole
         // job is now inside it -- he would walk to the door and time out.
-        m_ship.toggleRamp();
+        m_ship.openRamp();
 
         uploadTerrain();
         dropBiped();
@@ -233,7 +233,7 @@ protected:
             // precisely this.
             if (m_showBiped && m_biped.wayShut() && !m_ship.isOpening() &&
                 glm::length(m_biped.hipCentre() - m_ship.controlPosition()) < kPanelRange) {
-                m_ship.toggleRamp();
+                m_ship.openRamp();
             }
 
             // Nobody gets shut in the ramp. The scene knows who is about; the

@@ -56,7 +56,7 @@ struct Scene {
         : terrain(128, 2.0f, relief), ground(terrain)
     {
         ship.place(terrain, at, yaw);
-        ship.toggleRamp();
+        ship.openRamp();
         for (int i = 0; i < settleFrames; ++i) ship.update(1.0f / 60.0f);
         republish();
     }
@@ -77,7 +77,7 @@ struct Scene {
 
     // Shut the ramp again and republish, for the checks about a closed door.
     void closeRamp() {
-        ship.toggleRamp();
+        ship.closeRamp();
         for (int i = 0; i < 300; ++i) ship.update(1.0f / 60.0f);
         republish();
     }
@@ -659,7 +659,7 @@ void checkTheDoorMoving() {
         }
         const bool caught = s.ship.isOnRamp(w.bodyCentre(s.ground));
 
-        s.ship.toggleRamp();                  // shut it on him
+        s.ship.closeRamp();                   // shut it on him
         float lowest = 1e9f;
         for (int i = 0; i < 60 * 6; ++i) {
             s.ship.update(1.0f / 60.0f, s.ship.isOnRamp(w.bodyCentre(s.ground)));
@@ -835,6 +835,46 @@ void checkTheDoorMoving() {
         std::snprintf(detail, sizeof detail, "ramp finished at %.0f%%, crate %s",
                       s.ship.rampProgress() * 100.0f, delivered ? "delivered" : "NOT delivered");
         report("the biped opens the ramp himself", delivered, detail);
+    }
+
+    // The control does what the ramp visibly needs, from any state it can be in.
+    //
+    // It used to flip a bool, and the bool was not only the player's: the
+    // interlock sets it to opening whenever something stands on a closing ramp,
+    // and the biped sets it when he wants in. So a press could arrive with the
+    // intent already inverted and do the exact opposite of the obvious thing --
+    // press to open a shut ramp, and shut it again. From the outside that looks
+    // like the walker waiting at a door that will not open, forever, which is
+    // precisely what he should do and precisely what you cannot debug.
+    {
+        Scene s(0.0f, {0.0f, 0.0f}, 0.0f);
+
+        // Shut, pressed: opens.
+        s.closeRamp();
+        s.ship.toggleRamp();
+        for (int i = 0; i < 400; ++i) s.ship.update(1.0f / 60.0f);
+        const bool openedFromShut = s.ship.rampProgress() > 0.9f;
+
+        // Open, pressed: shuts.
+        s.ship.toggleRamp();
+        for (int i = 0; i < 400; ++i) s.ship.update(1.0f / 60.0f);
+        const bool shutFromOpen = s.ship.rampProgress() < 0.1f;
+
+        // And shut, pressed, AFTER the interlock has been flipping the intent
+        // about behind the player's back. This is the one that failed.
+        s.ship.openRamp();
+        for (int i = 0; i < 60; ++i) s.ship.update(1.0f / 60.0f, true);   // held by somebody
+        s.ship.closeRamp();
+        for (int i = 0; i < 400; ++i) s.ship.update(1.0f / 60.0f);
+        s.ship.toggleRamp();
+        for (int i = 0; i < 400; ++i) s.ship.update(1.0f / 60.0f);
+        const bool openedAfterMeddling = s.ship.rampProgress() > 0.9f;
+
+        char detail[128];
+        std::snprintf(detail, sizeof detail, "shut->open %d, open->shut %d, and %d after the interlock meddled",
+                      (int)openedFromShut, (int)shutFromOpen, (int)openedAfterMeddling);
+        report("the ramp control is never inverted",
+               openedFromShut && shutFromOpen && openedAfterMeddling, detail);
     }
 
     // And swinging OPEN through somebody stood at the foot of it. That one is

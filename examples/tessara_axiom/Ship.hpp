@@ -62,7 +62,21 @@ public:
     // Held rather than reversed, because a ramp that undoes its own closing the
     // moment somebody steps on it can never be shut at all while anyone is about.
     void update(float dt, bool obstructed = false);
-    void toggleRamp() { m_opening = !m_opening; }
+
+    // Worked from where the ramp IS, not from where it was last told to go.
+    //
+    // This used to flip a bool, and the bool is not only yours: the interlock
+    // sets it to opening whenever something stands on a closing ramp, and the
+    // biped sets it when he wants in. So a press could arrive with the intent
+    // already inverted and do the exact opposite of what the ramp plainly needed
+    // -- press to open a shut ramp and shut it again, while the walker went on
+    // waiting for it, correctly and apparently forever. Deciding from m_ramp
+    // means the button always does the thing you can see it needs.
+    void toggleRamp() { m_opening = (m_ramp < 0.5f); }
+
+    // Said outright, for anything that wants one of the two rather than the other.
+    void openRamp()  { m_opening = true; }
+    void closeRamp() { m_opening = false; }
 
     // True while it wants to close and cannot, so the fact can be shown rather
     // than merely happening.

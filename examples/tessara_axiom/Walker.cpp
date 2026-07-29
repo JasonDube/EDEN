@@ -617,8 +617,17 @@ void Walker::update(const Ground& hf, float dt) {
             // he is, stand STILL. Not wander -- wandering would drift him back
             // under the very door he is waiting for, which is how he got hit by
             // it in the first place.
+            // Arrived when the route runs out OR he is near enough -- the same
+            // pair of tests every other arrival uses, and both are needed. The
+            // radius alone leaves him short: the route ends at a block corner
+            // that quantises to four and a half units from the mark, so he never
+            // satisfies it, never settles, and spends the wait shuffling on the
+            // spot. Which reads exactly like being frozen, while being the
+            // opposite of it -- measured at a hundred and sixty units of walking
+            // per ten seconds without going anywhere.
             const glm::vec3 at = bodyCentre(hf);
-            const bool there = glm::length(glm::vec2(at.x - m_waitWorld.x,
+            const bool there = (m_pathIndex >= m_path.size())
+                            || glm::length(glm::vec2(at.x - m_waitWorld.x,
                                                      at.z - m_waitWorld.z)) < 4.0f;
             if (there) {
                 m_accum = 0.0f;
@@ -629,6 +638,24 @@ void Walker::update(const Ground& hf, float dt) {
             while (m_accum >= 1.0f && guard < 64) { m_accum -= 1.0f; tick(hf); ++guard; }
             if (guard >= 64) m_accum = 0.0f;
             return;
+        }
+    }
+
+    // A door can shut while he is already on his way to it, and until now that
+    // was a different situation entirely from finding it shut when he set off:
+    // the route was planned and valid when he got it, so he followed it to the
+    // ramp, was refused, and ground there with his stuck counter climbing. The
+    // wait was only ever entered at the moment of picking a crate up.
+    //
+    // It is the same predicament either way, so it gets the same answer.
+    if (m_hasTask && m_carrying && !m_waiting) {
+        const Enclosure* door = hf.between(bodyCentre(hf), m_storageWorld);
+        if (door && !door->open) {
+            m_waitWorld = door->outside;
+            m_waiting = true;
+            m_activity = Activity::Waiting;
+            m_taskTicks = 0;
+            planPath(hf, nodeNear(hf, m_waitWorld) - glm::ivec2(1));
         }
     }
 
