@@ -272,17 +272,13 @@ public:
 
     // ---- what he is doing -------------------------------------------------
     // ---- fetching ---------------------------------------------------------
-    // `approachVia` and `carryVia` are optional staging points -- somewhere he
-    // must reach before the real target is worth aiming at.
-    //
-    // His steering is greedy: aim at the goal, turn if the ground ahead is not
-    // walkable. Fine in the open, useless against a ship -- the hull is not
-    // "unwalkable ground", it is a deck two units up that he never rises to, so
-    // he would walk under his own destination forever. A single waypoint at the
-    // foot of the ramp is the whole fix.
-    void assignFetch(const glm::vec3& crate, const glm::vec3& storage,
-                     const glm::vec3* approachVia = nullptr,
-                     const glm::vec3* carryVia = nullptr);
+    // Just the two ends of the job. Where the door is, which side of it he is on,
+    // and whether it is open are asked of the Ground as he goes -- see aimAt().
+    void assignFetch(const glm::vec3& crate, const glm::vec3& storage);
+
+    // He is stood at a way through that is closed, holding a job on the far side
+    // of it. Not an error and not something he resolves: somebody has to open it.
+    bool wayShut() const { return m_wayShut; }
     void abandonTask();
 
     // Stand still and face whoever is watching, so the thing can be looked at.
@@ -327,6 +323,7 @@ private:
     void  updateTorso(float speed, float dt);
     float supportHipHeight(const Ground& hf, float& outDesired) const;
     bool  passable(const Ground& hf, glm::vec2 from, float headingDeg, float distance) const;
+    bool  aimAt(const Ground& hf, const glm::vec3& target);
     float randomSigned();
 
     glm::vec2 m_pos{0.0f};        // world x, z
@@ -369,10 +366,7 @@ private:
     float     m_speedScale = 1.0f;
     float     m_taskTimer = 0.0f;
 
-    glm::vec3 m_approachVia{0.0f};
-    glm::vec3 m_carryVia{0.0f};
-    bool      m_haveApproachVia = false;
-    bool      m_haveCarryVia = false;
+    bool      m_wayShut = false;
 
     glm::vec2 m_goal{0.0f};
     bool      m_goalActive = false;

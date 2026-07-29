@@ -195,6 +195,123 @@ glm::vec2 Ground::resolve(glm::vec2 xz, float footY, float height, float radius)
     return xz;
 }
 
+int Ground::enclosureAt(const glm::vec3& p) const {
+    for (size_t i = 0; i < m_enclosures.size(); ++i) {
+        const Enclosure& e = m_enclosures[i];
+        if (p.y < e.floorY) continue;
+
+        const float dx = p.x - e.origin.x;
+        const float dz = p.z - e.origin.z;
+        const float u = dx * e.right.x + dz * e.right.z;
+        const float v = dx * e.along.x + dz * e.along.z;
+
+        if (std::fabs(u) <= e.halfWidth && std::fabs(v) <= e.halfLength) {
+            return static_cast<int>(i);
+        }
+    }
+    return -1;
+}
+
+bool Ground::wayThrough(const glm::vec3& from, const glm::vec3& to,
+                        glm::vec3& outWaypoint, bool& outShut) const
+{
+    outShut = false;
+
+    const int here = enclosureAt(from);
+    const int there = enclosureAt(to);
+
+    // How far along the way through, and how far off its centreline. Flat,
+    // because the two marks are two units apart in height and a creature that
+    // counted its own climb as progress would arrive early.
+    auto measure = [&](const Enclosure& e, float& outAlong, float& outAcross, float& outSpan) {
+        const glm::vec2 axis(e.inside.x - e.outside.x, e.inside.z - e.outside.z);
+        outSpan = glm::length(axis);
+        const glm::vec2 dir = (outSpan > 1e-4f) ? axis / outSpan : glm::vec2(0.0f, 1.0f);
+        const glm::vec2 d(from.x - e.outside.x, from.z - e.outside.z);
+        outAlong  = glm::dot(d, dir);
+        outAcross = d.x * -dir.y + d.y * dir.x;
+    };
+
+    int use = (here >= 0) ? here : there;
+
+    if (here == there) {
+        // Same side of everything -- unless he is standing IN a way through, in
+        // which case he has to come out of it endwise. This is the case that had
+        // him halfway down the ramp, technically out of the hold, aiming at a
+        // crate off the beam and walking into the kerb.
+        use = -1;
+        for (size_t i = 0; i < m_enclosures.size() && use < 0; ++i) {
+            float along, across, span;
+            measure(m_enclosures[i], along, across, span);
+            // Stopping a stride short at BOTH ends is what lets him leave it.
+            // A corridor that reaches its own exit mark tells a creature standing
+            // on that mark to walk to where it already is, and he mills there
+            // until the job times out -- the same shape of mistake as measuring
+            // the door by proximity, one level down.
+            if (along > 1.0f && along < span - 1.0f &&
+                std::fabs(across) < m_enclosures[i].corridorHalf) {
+                use = static_cast<int>(i);
+            }
+        }
+        if (use < 0) return false;
+
+        // He is in the doorway and his goal is not through it, so the way out is
+        // the end he is not aiming past.
+        outWaypoint = (there == use) ? m_enclosures[use].inside : m_enclosures[use].outside;
+        return m_enclosures[use].open || (outShut = true, true);
+    }
+
+    // Whichever room is involved. If he is in one, it is the one he must leave --
+    // getting out comes before getting in, and with one room in the world the
+    // distinction is theoretical anyway.
+    const Enclosure& e = m_enclosures[use];
+
+    if (!e.open) {
+        outShut = true;
+        outWaypoint = (here >= 0) ? e.inside : e.outside;
+        return true;
+    }
+
+    // Which end of the way through to head for, decided by whether he is PAST the
+    // near one rather than by how close he is to it.
+    //
+    // That distinction is the whole of it. Proximity oscillates: he reaches the
+    // muster point, is handed the head of the ramp, starts up it, and within three
+    // strides is far enough from the muster point to be handed the muster point
+    // again. He turns round, comes back, and does it forever -- a creature pacing
+    // at the bottom of a ramp, which looks exactly like a collision bug and is
+    // not one. Nor is it fixable by widening the radius; that only moves the
+    // distance at which it happens.
+    //
+    // Projecting onto the line between the two marks is monotonic instead. Every
+    // step up the ramp is a step further along that line, so the answer can only
+    // move forwards, and no state has to be kept anywhere to remember which leg
+    // of the journey this is.
+    //
+    float along, across, span;
+    measure(e, along, across, span);
+
+
+    if (here >= 0) {
+        // Inside, getting out. Deeper in than the head of the ramp, go to it
+        // first -- that is what lines him up with the doorway instead of cutting
+        // the corner into its frame.
+        outWaypoint = (along > span) ? e.inside : e.outside;
+    } else {
+        // Outside, getting in. The muster point first, unless he is already lined
+        // up with the way through.
+        //
+        // Lined up, not merely level with it. Standing off the starboard beam he
+        // is well past the muster point measured along the ramp's axis, and going
+        // by that alone he gets sent to the head of the ramp -- which from there
+        // is a line straight through the hull wall. Being abeam of a door is not
+        // being in front of it, and the difference is the whole width of the ship.
+        const bool linedUp = along > -0.5f && std::fabs(across) < e.corridorHalf;
+        outWaypoint = linedUp ? e.inside : e.outside;
+    }
+    return true;
+}
+
 glm::vec3 Ground::normalAt(float x, float z, float fromY, float stepUp) const {
     const float chosen = heightAt(x, z, fromY, stepUp);
 

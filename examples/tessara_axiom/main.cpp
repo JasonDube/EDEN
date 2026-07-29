@@ -246,6 +246,12 @@ protected:
             m_ground.clearBlockers();
             for (const Blocker& b : solids) m_ground.addBlocker(b);
 
+            // And the hold as a room with one door, so anything walking between
+            // the bay and the field goes round to the ramp rather than at the
+            // nearest wall.
+            m_ground.clearEnclosures();
+            m_ground.addEnclosure(m_ship.enclosure());
+
             m_walker.update(m_ground, deltaTime);
 
             if (m_showBiped) {
@@ -654,12 +660,11 @@ private:
                   [this] { return m_biped.hasTask(); },
                   m_biped.hipCentre(), m_biped.yawDegrees() * 0.0174533f,
                   [this](const glm::vec3& c, const glm::vec3& s) {
-                      // Out via the ramp if he is already aboard, and in via the
-                      // ramp once he is carrying. Everything else he can walk to
-                      // in a straight line.
-                      glm::vec3 ramp = m_ship.rampApproachPoint();
-                      bool aboard = m_ship.isAboard(m_biped.hipCentre());
-                      m_biped.assignFetch(c, s, aboard ? &ramp : nullptr, &ramp);
+                      // Just the two ends of the job. Which side of the hull he is
+                      // on, and which side the crate is on, change while he walks
+                      // -- so they are his to keep asking, not the scene's to
+                      // decide once and hand him.
+                      m_biped.assignFetch(c, s);
                   },
                   [this] { return m_biped.cargoPosition(); });
 

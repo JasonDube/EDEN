@@ -87,6 +87,11 @@ public:
     // because it is the only surface that reaches, not because it is labelled.
     void appendBlockers(std::vector<Blocker>& out) const;
 
+    // The hold, as a room with one door -- so anything walking between the bay
+    // and the field routes through the ramp instead of at the nearest wall.
+    // Reports itself shut whenever the ramp is not down far enough to walk on.
+    Enclosure enclosure() const;
+
     // Where cargo goes, and the spot on the ground you walk to before you can
     // walk UP. Published for the same reason as the patches.
     glm::vec3 bayStoragePoint() const;

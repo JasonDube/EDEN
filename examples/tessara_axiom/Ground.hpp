@@ -55,6 +55,44 @@ struct Blocker {
     bool  enabled = true;
 };
 
+// Somewhere with a way in, and only the one.
+//
+// The point of naming this is that a creature standing in the cargo bay and a
+// crate lying on the field are not simply far apart -- they are separated by a
+// WALL, and the distance between them says nothing about that. Greedy steering
+// asks only which way the goal lies, so it walks at the hull, is refused, sidles
+// along, tries again, and never arrives. It is not stupid; it has never been told
+// there is such a thing as a room.
+//
+// So this is the telling. `inside` and `outside` are where you stand to use the
+// way through, one on each side of it, and `open` is whether it can be used at
+// all. Anything holding those three can route itself in or out without knowing
+// what the room is -- the same bargain as the patches, where nothing that walks
+// knows the floor it is on belongs to a ship.
+struct Enclosure {
+    glm::vec3 origin{0.0f};        // centre of the footprint
+    glm::vec3 right{1, 0, 0};      // unit, horizontal
+    glm::vec3 along{0, 0, 1};      // unit, horizontal
+    float halfWidth  = 1.0f;
+    float halfLength = 1.0f;
+
+    // You are only inside if you are also at or above this. Under the hull is
+    // outdoors: it is a bad place to be, but it is not the hold.
+    float floorY = 0.0f;
+
+    glm::vec3 outside{0.0f};       // where you stand to go in
+    glm::vec3 inside{0.0f};        // where you stand to come out
+    bool      open = true;         // whether the way through is usable
+
+    // How wide the way through is. The two marks give its length; this gives it
+    // a body, and it needs one because a doorway is somewhere you can BE. Halfway
+    // down the ramp a creature is out of the hold already -- so by region alone
+    // it is on the same side as a crate lying off the beam, aims straight at it,
+    // and walks into the kerb. Being in the way through has to outrank being on
+    // the same side of it, or the last stride of every exit goes over the edge.
+    float corridorHalf = 2.0f;
+};
+
 // What the world's inhabitants stand on.
 //
 // Everything that walks -- the player, the biped -- asks this instead of asking
@@ -70,6 +108,27 @@ public:
 
     void clearBlockers() { m_blockers.clear(); }
     void addBlocker(const Blocker& blocker) { m_blockers.push_back(blocker); }
+
+    void clearEnclosures() { m_enclosures.clear(); }
+    void addEnclosure(const Enclosure& e) { m_enclosures.push_back(e); }
+
+    // Which enclosure a point is in, or -1 for the open world.
+    int enclosureAt(const glm::vec3& p) const;
+
+    // ---- getting from one to the other -------------------------------------
+    // Where to head for NEXT, when `to` is not in the same place as `from`.
+    //
+    // False means they are already on the same side of everything and the goal
+    // can simply be walked at. True means it cannot, and `outWaypoint` is the
+    // nearer end of the way through -- the muster point from outside, the head of
+    // the ramp from inside. Reaching that end hands back the far one, and stepping
+    // through puts both in the same region, at which point this stops answering
+    // and ordinary steering takes over. Nobody has to track which leg they are on.
+    //
+    // `outShut` says the way exists but is closed, which is a different answer
+    // from "no way" and wants a different response: not a detour, a wait.
+    bool wayThrough(const glm::vec3& from, const glm::vec3& to,
+                    glm::vec3& outWaypoint, bool& outShut) const;
 
     // Pass-through, so a Ground can stand in wherever a Heightfield was.
     int   n() const { return m_terrain->n(); }
@@ -130,6 +189,7 @@ private:
     const Heightfield* m_terrain;
     std::vector<SurfacePatch> m_patches;
     std::vector<Blocker> m_blockers;
+    std::vector<Enclosure> m_enclosures;
 };
 
 } // namespace tessara

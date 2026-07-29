@@ -309,6 +309,40 @@ void Ship::appendBlockers(std::vector<Blocker>& out) const {
     }
 }
 
+Enclosure Ship::enclosure() const {
+    const float halfL = params.length * 0.5f;
+
+    Enclosure e;
+    e.right  = right();
+    e.along  = forward();
+    e.origin = m_origin;
+
+    // The hull's own footprint, and the deck as its floor. Under the belly is
+    // therefore NOT inside: it is a bad place to stand, but a creature there
+    // wants to walk out from under the hull, not out through the door.
+    e.halfWidth  = params.width * 0.5f;
+    e.halfLength = halfL;
+    e.floorY     = m_origin.y + params.deckHeight - 0.6f;
+
+    e.outside = rampApproachPoint();
+
+    // A few units in from the doorway, on the deck. Far enough in that reaching
+    // it means genuinely being through the door rather than hovering in it.
+    e.inside = m_origin + up() * params.deckHeight - forward() * (halfL - 4.0f);
+
+    // Shut is not the same as part-open: the ramp only reaches the ground at the
+    // very end of its travel, and a way through you cannot yet step onto is a way
+    // through that is closed. Asked of the ramp's actual tip rather than of its
+    // progress, because that is the thing that has to touch the dirt.
+    e.open = rampFootPosition().y <= m_origin.y + 0.75f;
+
+    // The walkable width of the ramp, less the kerbs and a body's width, so
+    // "still in the doorway" and "clear of the doorway" agree with what the
+    // solids will actually let him do.
+    e.corridorHalf = params.bayWidth * 0.46f - 1.6f;
+    return e;
+}
+
 glm::vec3 Ship::bayStoragePoint() const {
     // Rear third of the bay, so a stack does not block the way in.
     return m_origin + up() * params.deckHeight

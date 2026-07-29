@@ -258,15 +258,43 @@ void Biped::updateAnkles(const Ground& hf, float dt) {
     }
 }
 
-void Biped::assignFetch(const glm::vec3& crate, const glm::vec3& storage,
-                        const glm::vec3* approachVia, const glm::vec3* carryVia) {
+// Point him at where he is going, or at the door if where he is going is on the
+// other side of one. Returns false if he is walking to the door rather than to
+// the thing, so the caller knows not to check whether it has arrived yet.
+//
+// Asked EVERY FRAME rather than worked out when the job was handed to him, which
+// is the whole fix. Before, the staging point was decided once, at assignment:
+// whether he was aboard was true or false at that instant and then never looked
+// at again. So he would be sent for a crate while standing in the hold, walk out
+// correctly, pick it up -- and the fact that he was now outside, with a delivery
+// to make inside, was news to nobody. He crossed the threshold and his plan did
+// not. Which side of a wall you are on is not something you can be told once.
+bool Biped::aimAt(const Ground& hf, const glm::vec3& target) {
+    glm::vec3 door;
+    bool shut = false;
+
+    if (!hf.wayThrough(m_hipCentre, target, door, shut)) {
+        m_wayShut = false;
+        m_goal = glm::vec2(target.x, target.z);
+        m_goalActive = true;
+        return true;
+    }
+
+    // Reported, not acted on. A creature holding a crate in front of a closed
+    // ramp should stand there looking at it, which is a thing you can see and
+    // therefore a thing you can fix; wandering off is the same failure with the
+    // evidence removed. The scene above decides how long to allow it.
+    m_wayShut = shut;
+
+    m_goal = glm::vec2(door.x, door.z);
+    m_goalActive = !shut;
+    return false;
+}
+
+void Biped::assignFetch(const glm::vec3& crate, const glm::vec3& storage) {
     m_crate = crate;
     m_storage = storage;
-
-    m_haveApproachVia = approachVia != nullptr;
-    if (approachVia) m_approachVia = *approachVia;
-    m_haveCarryVia = carryVia != nullptr;
-    if (carryVia) m_carryVia = *carryVia;
+    m_wayShut = false;
     m_hasTask = true;
     m_carrying = false;
     m_activity = Activity::Approach;
@@ -275,6 +303,7 @@ void Biped::assignFetch(const glm::vec3& crate, const glm::vec3& storage,
 
 void Biped::abandonTask() {
     m_hasTask = m_carrying = m_handOverride = m_goalActive = false;
+    m_wayShut = false;
     m_activity = Activity::Wander;
     m_bendTarget = 0.0f;
     m_squat = 0.0f;
@@ -398,17 +427,8 @@ void Biped::updateTask(const Ground& hf, float dt) {
 
     switch (m_activity) {
         case Activity::Approach: {
-            // Clear the staging point first, if there is one -- that is how he
-            // gets back OFF the ship before setting out for the next crate.
-            if (m_haveApproachVia) {
-                m_goal = glm::vec2(m_approachVia.x, m_approachVia.z);
-                m_goalActive = true;
-                if (distanceTo(m_approachVia) < 2.4f) m_haveApproachVia = false;
-                break;
-            }
+            if (!aimAt(hf, m_crate)) break;   // going out through the door first
 
-            m_goal = glm::vec2(m_crate.x, m_crate.z);
-            m_goalActive = true;
             if (distanceTo(m_crate) < params.reachDistance) {
                 m_activity = Activity::Reach;
                 m_taskTimer = 0.0f;
@@ -449,20 +469,10 @@ void Biped::updateTask(const Ground& hf, float dt) {
         }
 
         case Activity::Carry: {
-            // Via the foot of the ramp, then up it.
-            if (m_haveCarryVia) {
-                m_goal = glm::vec2(m_carryVia.x, m_carryVia.z);
-                m_goalActive = true;
-                m_handOverride = true;
-                for (int i = 0; i < 2; ++i) m_handTarget[i] = graspPoint(i, carrySpot);
-                if (distanceTo(m_carryVia) < 2.4f) m_haveCarryVia = false;
-                break;
-            }
-
-            m_goal = glm::vec2(m_storage.x, m_storage.z);
-            m_goalActive = true;
             m_handOverride = true;
             for (int i = 0; i < 2; ++i) m_handTarget[i] = graspPoint(i, carrySpot);
+
+            if (!aimAt(hf, m_storage)) break;   // in through the door first
 
             if (distanceTo(m_storage) < params.placeDistance) {
                 m_activity = Activity::Place;

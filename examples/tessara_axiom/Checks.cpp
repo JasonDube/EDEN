@@ -70,6 +70,16 @@ struct Scene {
         ship.appendBlockers(solids);
         ground.clearBlockers();
         for (const Blocker& b : solids) ground.addBlocker(b);
+
+        ground.clearEnclosures();
+        ground.addEnclosure(ship.enclosure());
+    }
+
+    // Shut the ramp again and republish, for the checks about a closed door.
+    void closeRamp() {
+        ship.toggleRamp();
+        for (int i = 0; i < 300; ++i) ship.update(1.0f / 60.0f);
+        republish();
     }
 
     glm::vec3 f() const { return ship.forward(); }
@@ -194,7 +204,7 @@ void checkBipedCarriesAboard() {
 
         Biped man;
         man.reset(s.ground, glm::vec2(from.x, from.z), 0.0f, 1u);
-        man.assignFetch(crate, pile, nullptr, &muster);
+        man.assignFetch(crate, pile);
         ++tried;
 
         bool carried = false;
@@ -413,6 +423,165 @@ void checkWalkerClimbs() {
 }
 
 // ---------------------------------------------------------------------------
+// 4b. The hull is a ROOM, and the only way between it and the field is the door.
+//
+// The failure this catches has nothing to do with collision and everything to do
+// with what a creature believes. Greedy steering asks which way the goal lies; a
+// crate on the field lies THROUGH the port hull wall, so that is the way it goes,
+// and it spends the rest of the run sidling along the outside of a ship it is
+// trying to get out of. The collision is working perfectly the whole time.
+//
+// Both directions, because they fail independently, and because the version that
+// decided the staging point once at assignment got the outbound leg right and the
+// return leg wrong -- he crossed the threshold and his plan did not.
+// ---------------------------------------------------------------------------
+void checkRoomsAndDoors() {
+    Scene s(0.0f, {0.0f, 0.0f}, 0.0f);
+
+    const glm::vec3 pile = s.ship.bayStoragePoint();
+    const glm::vec3 inBay = pile + s.r() * 2.0f;
+    const glm::vec3 onField = s.ship.origin() + s.r() * 40.0f;   // straight out the side
+
+    const bool insideIsInside = s.ground.enclosureAt(inBay) >= 0;
+    const bool fieldIsOutside = s.ground.enclosureAt(onField) < 0;
+    // Under the belly is outdoors: a creature there wants to walk out from under
+    // the hull, not go looking for the door.
+    const bool underIsOutside =
+        s.ground.enclosureAt(s.ship.origin() + s.f() * 4.0f) < 0;
+    report("the hold reads as a room, the field does not",
+           insideIsInside && fieldIsOutside && underIsOutside,
+           "bay inside, field outside, under the belly outside");
+
+    glm::vec3 way;
+    bool shut = false;
+
+    // Outbound: standing at the pile, wanting something off the starboard beam.
+    const bool outbound = s.ground.wayThrough(inBay, onField, way, shut) && !shut &&
+                          glm::length(way - s.ship.enclosure().inside) < 0.01f;
+    // Having reached the head of the ramp, the next mark is the muster point.
+    glm::vec3 way2;
+    const bool outbound2 = s.ground.wayThrough(s.ship.enclosure().inside, onField, way2, shut) &&
+                           glm::length(way2 - s.ship.rampApproachPoint()) < 0.01f;
+    report("leaving the hold routes to the door", outbound && outbound2,
+           "head of the ramp first, then the muster point");
+
+    // Inbound: out on the field with a crate for the pile.
+    const bool inbound = s.ground.wayThrough(onField, pile, way, shut) && !shut &&
+                         glm::length(way - s.ship.rampApproachPoint()) < 0.01f;
+    const bool inbound2 = s.ground.wayThrough(s.ship.rampApproachPoint(), pile, way2, shut) &&
+                          glm::length(way2 - s.ship.enclosure().inside) < 0.01f;
+    report("entering the hold routes to the door", inbound && inbound2,
+           "muster point first, then the head of the ramp");
+
+    // Same side of the wall as the goal: no detour, walk straight at it.
+    const bool direct = !s.ground.wayThrough(onField, onField + s.r() * 10.0f, way, shut) &&
+                        !s.ground.wayThrough(inBay, pile, way, shut);
+    report("no detour when there is no wall between", direct,
+           "field to field and bay to bay are walked straight");
+
+    // And a shut ramp is a shut door, not a slow one. The ramp only reaches the
+    // ground at the very end of its travel, so half-open has to read as closed --
+    // a way through you cannot step onto is not a way through.
+    {
+        Scene shutShip(0.0f, {0.0f, 0.0f}, 0.0f);
+        shutShip.closeRamp();
+        bool s1 = false, s2 = false;
+        shutShip.ground.wayThrough(onField, pile, way, s1);
+        shutShip.ground.wayThrough(inBay, onField, way, s2);
+        report("a shut ramp reads as a shut door", s1 && s2,
+               "reported closed from both sides rather than walked at");
+    }
+}
+
+// And the same thing driven rather than queried: a whole round trip that starts
+// in the hold, fetches something from the far side of the ship, and brings it
+// back. Every leg of that crosses the threshold, and the version of this that
+// decided the route once at assignment got exactly half of them right.
+void checkBipedRoundTrip() {
+    int done = 0, tried = 0;
+
+    for (float yaw : {0.0f, 34.0f}) {
+        Scene s(0.0f, {0.0f, 0.0f}, yaw);
+        const glm::vec3 pile = s.ship.bayStoragePoint();
+        const glm::vec3 muster = s.ship.rampApproachPoint();
+
+        // Leg one: in from the field, so he ends up standing in the hold.
+        Biped man;
+        glm::vec3 first = muster - s.f() * 6.0f;
+        first.y += 0.425f;
+        man.reset(s.ground, glm::vec2(muster.x - s.f().x * 16.0f,
+                                      muster.z - s.f().z * 16.0f), 0.0f, 1u);
+        man.assignFetch(first, pile);
+        for (int i = 0; i < 60 * 90 && man.hasTask(); ++i) man.update(s.ground, 1.0f / 60.0f);
+
+        if (s.ground.enclosureAt(man.hipCentre()) < 0) continue;   // never got in
+        ++tried;
+
+        // Leg two: from inside the hold, out to a crate off the beam and back.
+        // The straight line to it runs through the hull wall in both directions.
+        glm::vec3 out = s.ship.origin() + s.r() * 34.0f;
+        out.y = s.terrain.heightAtWorld(out.x, out.z) + 0.425f;
+
+        man.assignFetch(out, pile);
+        float nearestFoot = 1e9f;
+        bool reachedIt = false;
+        for (int i = 0; i < 60 * 120 && man.hasTask(); ++i) {
+            man.update(s.ground, 1.0f / 60.0f);
+            const glm::vec3 p = man.hipCentre();
+            if (man.hasCargo()) reachedIt = true;
+            nearestFoot = std::min(nearestFoot,
+                glm::length(glm::vec2(p.x - s.ship.rampFootPosition().x,
+                                      p.z - s.ship.rampFootPosition().z)));
+        }
+
+        const glm::vec3 end = man.hipCentre();
+        const bool home = glm::length(glm::vec2(end.x - pile.x, end.z - pile.z)) < 5.0f &&
+                          s.ground.enclosureAt(end) >= 0;
+        if (reachedIt && home && nearestFoot < 4.0f) ++done;
+    }
+
+    char detail[128];
+    std::snprintf(detail, sizeof detail,
+                  "%d of %d went out of the hold, round the hull and back in by the ramp",
+                  done, tried);
+    report("the biped leaves and re-enters by the door", tried > 0 && done == tried, detail);
+}
+
+// The walker needs none of this and is checked anyway, because "it happens to be
+// correct" and "it is known to be correct" are different states. Its route is a
+// breadth-first search over steps it can actually take, so a wall is not
+// something it has to be told about -- there is simply no route through one.
+void checkWalkerLeavesByTheRamp() {
+    Scene s(0.0f, {0.0f, 0.0f}, 0.0f);
+    const glm::vec3 pile = s.ship.bayStoragePoint();
+    const glm::vec3 foot = s.ship.rampFootPosition();
+    const glm::vec3 crate = s.ship.origin() + s.r() * 40.0f;
+
+    // reset() drops onto the terrain by design, so he cannot be teleported into
+    // the bay -- he has to walk in. Send him in with a crate first.
+    Walker w;
+    w.reset(s.ground, glm::ivec2(50, 30), 0);
+    glm::vec3 first = s.ship.rampApproachPoint() - s.f() * 8.0f;
+    first.y = s.terrain.heightAtWorld(first.x, first.z);
+    w.assignFetch(s.ground, first, pile);
+    for (int i = 0; i < 40000 && w.hasTask(); ++i) w.update(s.ground, 1.0f / 60.0f);
+
+    const bool aboard = s.ship.isAboard(w.bodyCentre(s.ground));
+
+    w.assignFetch(s.ground, crate, pile);
+    float nearest = 1e9f;
+    for (const glm::ivec2& n : w.path()) {
+        const glm::vec3 p = s.terrain.worldAt(n);
+        nearest = std::min(nearest, glm::length(glm::vec2(p.x - foot.x, p.z - foot.z)));
+    }
+
+    char detail[128];
+    std::snprintf(detail, sizeof detail, "route out passes %.1f from the ramp foot", nearest);
+    report("the walker routes out through the ramp",
+           aboard && w.hasTask() && nearest < 6.0f, detail);
+}
+
+// ---------------------------------------------------------------------------
 // 5. He can be SENT aboard, not merely get there.
 //
 // His routes were planned on the terrain once, which put the cargo deck inside a
@@ -494,6 +663,9 @@ int runShipChecks(bool verbose) {
     checkNoOtherWayIn();
     checkNoOtherWayInForWalker();
     checkWalkerClimbs();
+    checkRoomsAndDoors();
+    checkBipedRoundTrip();
+    checkWalkerLeavesByTheRamp();
     checkRoutesAndDeliveries();
 
     std::printf("  %s\n\n", g_failed ? "SOMETHING IS BROKEN" : "all ok");
