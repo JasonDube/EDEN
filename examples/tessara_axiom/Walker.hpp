@@ -103,6 +103,21 @@ public:
     void assignFetch(const Ground& hf, const glm::vec3& crate, const glm::vec3& storage);
     void abandonTask();
 
+    // Carried. He CANNOT be moved a fraction of a node -- his feet are lattice
+    // indices, and half a node is not a thing that can happen to him -- so he is
+    // parked instead: told to hold still, and drawn at a fixed offset from the
+    // ship rather than at a place on the ground. It is honest, too. Nobody walks
+    // about the hold during a burn.
+    // parkIn records where every one of his feet is IN THE SHIP'S FRAME, once.
+    // parkFollow moves that frame. Between them he is drawn rigidly attached to
+    // a deck that is going somewhere, while his actual feet stay on the lattice
+    // nodes they were standing on and quietly stop mattering until he lands.
+    void parkIn(const Ground& hf, const glm::vec3& origin,
+                const glm::vec3& right, const glm::vec3& fwd);
+    void parkFollow(const glm::vec3& origin, const glm::vec3& right, const glm::vec3& fwd);
+    void unpark() { m_parked = false; }
+    bool parked() const { return m_parked; }
+
     // ---- being called in ---------------------------------------------------
     // Go to this spot and stand on it. Outranks a job: a rally is a rally.
     //
@@ -239,6 +254,11 @@ private:
     bool       m_waiting  = false;
     glm::vec3  m_waitWorld{0.0f};
 
+    bool       m_parked = false;
+    glm::vec3  m_parkFoot[4]{};        // each foot, in the carrying frame
+    glm::vec3  m_parkOrigin{0.0f};     // and the frame itself, as it is now
+    glm::vec3  m_parkRight{1, 0, 0};
+    glm::vec3  m_parkFwd{0, 0, 1};
     bool       m_stationed = false;
     bool       m_atStation  = false;
     int        m_stationTries = 0;

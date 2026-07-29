@@ -1947,7 +1947,12 @@ protected:
             // Feed player input to scripted controllers (input_* verbs). Suppressed
             // while ImGui wants the keyboard (typing in a field) so movement keys
             // don't leak. Same keys the C++ controller reads.
-            bool typing = ImGui::GetIO().WantTextInput;
+            // A module can take the movement keys -- flying a ship you are stood
+            // inside is the case -- and then the same W must not also walk you
+            // about its hold. wantsCaptureKeyboard has been on GameModule since
+            // the beginning and nothing ever honoured it.
+            bool typing = ImGui::GetIO().WantTextInput ||
+                          (m_gameModule && m_gameModule->wantsCaptureKeyboard());
             float mx = 0.0f, mz = 0.0f;
             if (!typing) {
                 if (Input::isKeyDown(Input::KEY_D)) mx += 1.0f;

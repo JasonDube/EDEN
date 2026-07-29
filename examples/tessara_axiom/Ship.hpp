@@ -127,6 +127,40 @@ public:
     // Reports itself shut whenever the ramp is not down far enough to walk on.
     Enclosure enclosure() const;
 
+    // ---- flight ------------------------------------------------------------
+    // Hover only: heading and height, and no bank.
+    //
+    // That is a decision about COLLISION, not about taste. A SurfacePatch can
+    // tilt -- the ramp is one -- so a rolling deck would be expressible. A
+    // Blocker cannot: it is an upright box with a floor and a ceiling, and the
+    // note on it says why. Banking would turn all sixteen of this hull's walls
+    // into oriented boxes needing a real narrow-phase, and the first sign of
+    // getting it wrong is somebody falling out through the side.
+    struct Flight {
+        float speed     = 26.0f;   // units per second, full ahead
+        float turnRate  = 42.0f;   // degrees per second
+        float climbRate = 14.0f;
+        float clearance = 7.0f;    // never closer than this to the ground
+        float ceiling   = 260.0f;  // nor further from it
+    };
+    Flight flight;
+
+    // Controls are -1..1. `ground` is asked how high the world is here, because a
+    // surface aircraft that will not fly into a hill is most of what makes one
+    // pleasant, and it costs one height query.
+    void fly(float dt, float forward, float turn, float lift, const TerrainSource& ground);
+
+    // What the last fly() actually did. Everything standing in the hold has to be
+    // moved by exactly this, which is the whole of carrying passengers.
+    glm::vec3 lastMove() const { return m_lastMove; }
+    float     lastTurn() const { return m_lastTurn; }
+
+    bool  airborne() const { return m_airborne; }
+    void  setAirborne(bool on) { m_airborne = on; }
+    float heightAboveGround(const TerrainSource& ground) const {
+        return m_origin.y - ground.heightAtWorld(m_origin.x, m_origin.z);
+    }
+
     // ---- the bridge door ---------------------------------------------------
     // Two panels sliding apart in the bulkhead. Opens for whoever is standing at
     // it and shuts behind them, which is what an interior door does -- there is
@@ -171,6 +205,9 @@ private:
     bool  m_opening = false;
     bool  m_rampHeld = false;
     float m_bridgeDoor = 0.0f;   // 0 shut, 1 open
+    bool  m_airborne = false;
+    glm::vec3 m_lastMove{0.0f};
+    float m_lastTurn = 0.0f;
     float m_rampLength = 4.4f; // the doorway height
     float m_openAngle  = 27.0f; // worked out at placement, from the two of them
 };

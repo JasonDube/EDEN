@@ -388,6 +388,40 @@ void Biped::assignFetch(const Ground& hf, const glm::vec3& crate, const glm::vec
     }
 }
 
+void Biped::carry(const glm::vec3& move, float turnDegrees, const glm::vec3& about) {
+    const float a = glm::radians(turnDegrees);
+    const float s = std::sin(a), c = std::cos(a);
+
+    auto shift = [&](glm::vec3 p) {
+        const glm::vec3 d = p - about;
+        return about + glm::vec3(d.x * c + d.z * s, d.y, -d.x * s + d.z * c) + move;
+    };
+
+    for (int i = 0; i < 2; ++i) {
+        m_foot[i]      = shift(m_foot[i]);
+        m_plant[i]     = shift(m_plant[i]);
+        m_swingFrom[i] = shift(m_swingFrom[i]);
+        m_swingTo[i]   = shift(m_swingTo[i]);
+    }
+    m_hipCentre = shift(m_hipCentre);
+    m_hipY      = m_hipCentre.y;
+
+    const glm::vec3 p = shift(glm::vec3(m_pos.x, 0.0f, m_pos.y));
+    m_pos = glm::vec2(p.x, p.z);
+
+    // Turned with the ship, or he ends up facing whatever bearing he was on when
+    // it started turning, which on a ship that turns is a creature slowly
+    // rotating relative to the deck he is standing on.
+    m_yaw += turnDegrees;
+    m_desiredYaw += turnDegrees;
+
+    // The station travels too; it is a place on the deck, not a place in the
+    // world, and a mark he was standing on has to stay a mark he is standing on.
+    if (m_stationed) m_stationWorld = shift(m_stationWorld);
+    m_route.clear();          // any route was to somewhere that has moved
+    m_routeIndex = 0;
+}
+
 void Biped::orderTo(const Ground& hf, const glm::vec3& spot) {
     abandonTask();
     m_stationed = true;

@@ -591,6 +591,9 @@ void Walker::escapeIfBuried(const Ground& hf) {
 void Walker::update(const Ground& hf, float dt) {
     if (m_visited.empty()) return;
 
+    // Parked: the floor is moving and he has no way to move with it. See park().
+    if (m_parked) return;
+
     escapeIfBuried(hf);
 
     // Called in. Ahead of the leash, the leaving trip and any job, because all
@@ -863,7 +866,33 @@ void Walker::update(const Ground& hf, float dt) {
     if (guard >= 64) m_accum = 0.0f;   // fell far behind; do not spiral
 }
 
+void Walker::parkIn(const Ground& hf, const glm::vec3& origin,
+                    const glm::vec3& right, const glm::vec3& fwd) {
+    for (int i = 0; i < 4; ++i) {
+        const glm::vec3 d = footWorld(hf, i) - origin;
+        m_parkFoot[i] = glm::vec3(glm::dot(d, right), d.y, glm::dot(d, fwd));
+    }
+    m_parked = true;
+    m_accum = 0.0f;
+    parkFollow(origin, right, fwd);
+}
+
+void Walker::parkFollow(const glm::vec3& origin, const glm::vec3& right,
+                        const glm::vec3& fwd) {
+    m_parkOrigin = origin;
+    m_parkRight = right;
+    m_parkFwd = fwd;
+}
+
 glm::vec3 Walker::footWorld(const Ground& hf, int i) const {
+    // Parked: drawn in the carrying frame rather than on the ground. His feet are
+    // lattice indices and a moving deck is not on the lattice, so the drawing is
+    // what moves.
+    if (m_parked) {
+        const glm::vec3& L = m_parkFoot[i];
+        return m_parkOrigin + m_parkRight * L.x + glm::vec3(0.0f, L.y, 0.0f) + m_parkFwd * L.z;
+    }
+
     const glm::ivec2& from = m_prevFeet[i];
     const glm::ivec2& to   = m_feet[i];
 

@@ -299,6 +299,17 @@ public:
         m_homeRadius = radius;
     }
 
+    // Move the whole creature, feet included, by a transform somebody else
+    // applied to the floor.
+    //
+    // His feet are planted at WORLD positions and stay there while his hips
+    // travel over them -- the basis of the entire walk, and exactly wrong when
+    // the floor itself moves. Move the hips alone and the legs stretch for ground
+    // he is no longer over, the solver clamps, and the hips are dragged down to
+    // whatever the legs can still touch. It is the same primitive the ramp uses
+    // when it shoves him aside, applied every frame instead of occasionally.
+    void carry(const glm::vec3& move, float turnDegrees, const glm::vec3& about);
+
     // Stand still and face whoever is watching, so the thing can be looked at.
     // Not a pause: the head still tracks, the ankles still settle, the arms
     // still hang. Freezing everything shows you a statue rather than the

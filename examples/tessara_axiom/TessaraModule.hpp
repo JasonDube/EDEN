@@ -64,10 +64,17 @@ public:
     // take a while -- a walker on the far side of the field, a ramp that will not
     // shut because somebody is standing on it -- and a state you can name is a
     // state you can show, and one the player can see the ship is stuck in.
-    enum class Launch { Idle, Rallying, Sealing, Ready };
+    enum class Launch { Idle, Rallying, Sealing, Ready, Flying };
 
     void callRally();     // everybody in, to their own station
     void standDown();     // as you were
+    void launch();        // up, once the hold is sealed
+    void setDown();       // and back onto the ground
+
+    // The module takes the movement keys while somebody is flying from the helm,
+    // so the same W that walks you about the hold does not also walk you about
+    // the hold WHILE steering the ship you are standing in.
+    bool wantsCaptureKeyboard() const override { return m_atHelm; }
     Launch launchState() const { return m_launch; }
 
     // Standing at the foot of the ramp looking up it -- which is both the most
@@ -90,7 +97,8 @@ private:
     void scatterCrates();
     void republishGround();
     void updateHauling();
-    void updateLaunch();
+    void updateLaunch(float dt);
+    void carryPassengers(const glm::vec3& move, float turn);
     const char* launchLabel() const;
     void rebuildGeometry();
     void upload(const std::vector<SceneVertex>& verts,
@@ -138,6 +146,7 @@ private:
     std::string m_renderError;
 
     Launch m_launch = Launch::Idle;
+    bool   m_atHelm = false;
 
     bool m_playing = false;
     bool m_placed = false;

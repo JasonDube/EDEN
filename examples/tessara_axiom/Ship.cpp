@@ -108,6 +108,33 @@ void Ship::update(float dt, bool obstructed) {
     m_ramp = std::clamp(m_ramp + (m_opening ? rate : -rate), 0.0f, 1.0f);
 }
 
+void Ship::fly(float dt, float forward, float turn, float lift,
+               const TerrainSource& ground) {
+    const glm::vec3 was = m_origin;
+    const float wasYaw = m_yaw;
+
+    m_yaw += glm::clamp(turn, -1.0f, 1.0f) * flight.turnRate * dt;
+    m_origin += this->forward() * (glm::clamp(forward, -1.0f, 1.0f) * flight.speed * dt);
+    m_origin.y += glm::clamp(lift, -1.0f, 1.0f) * flight.climbRate * dt;
+
+    // Terrain following, which is most of what makes a surface aircraft pleasant
+    // and costs one height query. The floor is the ground UNDER THE HULL rather
+    // than under its centre -- a ship thirty-eight units long crossing a ridge
+    // meets it with its nose, and a clearance measured amidships would have the
+    // bow buried while the middle was comfortably clear.
+    float below = ground.heightAtWorld(m_origin.x, m_origin.z);
+    const float halfL = params.length * 0.5f;
+    for (float along : {-halfL, -halfL * 0.5f, halfL * 0.5f, halfL}) {
+        const glm::vec3 at = m_origin + this->forward() * along;
+        below = std::max(below, ground.heightAtWorld(at.x, at.z));
+    }
+
+    m_origin.y = std::clamp(m_origin.y, below + flight.clearance, below + flight.ceiling);
+
+    m_lastMove = m_origin - was;
+    m_lastTurn = m_yaw - wasYaw;
+}
+
 bool Ship::isOnRamp(const glm::vec3& p) const {
     const SurfacePatch ramp = rampPatch();
     if (!ramp.enabled) return false;

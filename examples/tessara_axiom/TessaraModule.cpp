@@ -12,6 +12,8 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+
+#include "eden/Input.hpp"
 #include <stdexcept>
 
 namespace tessara {
@@ -266,7 +268,7 @@ void TessaraModule::update(float dt) {
     // A rally suspends the haul loop outright: it hands out crates, and handing
     // a crate to something that has been called in is how a rally never finishes.
     if (m_launch == Launch::Idle) updateHauling();
-    updateLaunch();
+    updateLaunch(dt);
     rebuildGeometry();
 }
 
@@ -378,7 +380,49 @@ void TessaraModule::standDown() {
     m_launch = Launch::Idle;
 }
 
-void TessaraModule::updateLaunch() {
+void TessaraModule::launch() {
+    if (m_launch != Launch::Ready) return;
+    m_ship.setAirborne(true);
+
+    // Recorded in the SHIP's frame, so that wherever the ship goes he is still
+    // standing where he was standing. There is no other way to carry him.
+    m_walker.parkIn(*m_ground, m_ship.origin(), m_ship.right(), m_ship.forward());
+    m_launch = Launch::Flying;
+}
+
+void TessaraModule::setDown() {
+    m_ship.setAirborne(false);
+    m_walker.unpark();
+    m_launch = Launch::Ready;
+}
+
+// Everything standing in the hold moves by exactly what the ship moved by.
+void TessaraModule::carryPassengers(const glm::vec3& move, float turn) {
+    const glm::vec3 about = m_ship.origin() - move;   // where the pivot WAS
+    const float a = glm::radians(turn);
+    const float s = std::sin(a), co = std::cos(a);
+    auto shift = [&](glm::vec3 p) {
+        const glm::vec3 d = p - about;
+        return about + glm::vec3(d.x * co + d.z * s, d.y, -d.x * s + d.z * co) + move;
+    };
+
+    if (m_ground->enclosureAt(m_biped.hipCentre()) >= 0) {
+        m_biped.carry(move, turn, about);
+    }
+
+    for (Crate& crate : m_crates) {
+        if (m_ground->enclosureAt(crate.position) >= 0) {
+            crate.position = shift(crate.position);
+            crate.yaw += a;
+        }
+    }
+
+    // The leash is a place on the deck now, not a place on the planet.
+    m_walker.setHome(m_ship.origin(), kHomeRange);
+    m_biped.setHome(m_ship.origin(), kHomeRange);
+}
+
+void TessaraModule::updateLaunch(float dt) {
     switch (m_launch) {
         case Launch::Idle:
             break;
@@ -410,6 +454,38 @@ void TessaraModule::updateLaunch() {
 
         case Launch::Ready:
             break;
+
+        case Launch::Flying: {
+            // Flown from the helm, and only from the helm. Standing at the
+            // console is the whole interface -- walk away and the ship holds its
+            // heading, which is what a hover does.
+            const glm::vec3 helm = m_ship.helmStation();
+            m_atHelm = glm::length(glm::vec2(m_playerPosition.x - helm.x,
+                                             m_playerPosition.z - helm.z)) < 4.0f;
+
+            float forward = 0.0f, turn = 0.0f, lift = 0.0f;
+            if (m_atHelm) {
+                using eden::Input;
+                if (Input::isKeyDown(Input::KEY_W)) forward += 1.0f;
+                if (Input::isKeyDown(Input::KEY_S)) forward -= 1.0f;
+                if (Input::isKeyDown(Input::KEY_D)) turn += 1.0f;
+                if (Input::isKeyDown(Input::KEY_A)) turn -= 1.0f;
+                if (Input::isKeyDown(Input::KEY_SPACE)) lift += 1.0f;
+                if (Input::isKeyDown(Input::KEY_LEFT_CONTROL)) lift -= 1.0f;
+            }
+
+            m_ship.fly(dt, forward, turn, lift, *m_source);
+            const glm::vec3 move = m_ship.lastMove();
+            const float spun = m_ship.lastTurn();
+
+            if (glm::dot(move, move) > 1e-10f || std::fabs(spun) > 1e-5f) {
+                carryPassengers(move, spun);
+            }
+
+            // And the walker rides, drawn in the ship's frame.
+            m_walker.parkFollow(m_ship.origin(), m_ship.right(), m_ship.forward());
+            break;
+        }
     }
 }
 
@@ -418,6 +494,7 @@ const char* TessaraModule::launchLabel() const {
         case Launch::Rallying: return "rallying - waiting for the crew";
         case Launch::Sealing:  return "sealing the hold";
         case Launch::Ready:    return "READY TO LAUNCH";
+        case Launch::Flying:   return "AIRBORNE";
         default:               return "";
     }
 }
@@ -591,7 +668,19 @@ void TessaraModule::renderUI(float, float) {
                            "%s", launchLabel());
         ImGui::Text("  biped:  %s", m_biped.onStation() ? "on station" : "coming");
         ImGui::Text("  walker: %s", m_walker.onStation() ? "on station" : "coming");
-        if (ImGui::Button("stand down")) standDown();
+        if (m_launch == Launch::Ready) {
+            if (ImGui::Button("LAUNCH")) launch();
+            ImGui::SameLine();
+        }
+        if (m_launch == Launch::Flying) {
+            const float agl = m_ship.heightAboveGround(*m_source);
+            ImGui::Text("  %.0f above the ground", agl);
+            ImGui::TextDisabled(m_atHelm ? "  at the helm: WASD to fly, space/ctrl for height"
+                                         : "  nobody at the helm - holding course");
+            if (ImGui::Button("SET DOWN")) setDown();
+        } else if (ImGui::Button("stand down")) {
+            standDown();
+        }
     }
 
     ImGui::Separator();

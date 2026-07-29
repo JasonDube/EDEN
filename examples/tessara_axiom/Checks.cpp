@@ -1197,6 +1197,78 @@ void checkTheRally() {
 }
 
 // ---------------------------------------------------------------------------
+// 5c. Flight: it lifts, it follows the ground, and everything aboard comes too.
+//
+// Carrying passengers is the whole of the difficulty. Everything standing in the
+// hold is at a WORLD position, and a moving deck makes every one of those wrong
+// at once -- the biped's planted feet most of all, since a foot staying put
+// while the hips travel over it is the basis of the entire walk and exactly the
+// wrong instinct on a floor that is going somewhere.
+// ---------------------------------------------------------------------------
+void checkFlight() {
+    Scene s(0.0f, {0.0f, 0.0f}, 34.0f);
+
+    Biped rider;
+    const glm::vec3 st = s.ship.stationPosition(0);
+    rider.reset(s.ground, glm::vec2(st.x, st.z), 0.0f, 5u);
+    glm::vec3 crate = s.ship.stationPosition(3);
+
+    // Measured in the SHIP's axes. Comparing world offsets across a flight that
+    // turns compares two different frames and calls the difference drift.
+    auto localTo = [](const Ship& sh, const glm::vec3& p) {
+        const glm::vec3 d = p - sh.origin();
+        return glm::vec3(glm::dot(d, sh.right()), d.y, glm::dot(d, sh.forward()));
+    };
+    const glm::vec3 riderWas = localTo(s.ship, rider.hipCentre());
+    const glm::vec3 crateWas = localTo(s.ship, crate);
+    const glm::vec3 from = s.ship.origin();
+
+    s.closeRamp();
+    s.ship.setAirborne(true);
+
+    float lowest = 1e9f;
+    for (int i = 0; i < 60 * 45; ++i) {
+        s.ship.fly(1.0f / 60.0f, 1.0f, 0.35f, i < 60 * 4 ? 1.0f : 0.0f, s.terrain);
+
+        const glm::vec3 move = s.ship.lastMove();
+        const float spun = s.ship.lastTurn();
+        const glm::vec3 about = s.ship.origin() - move;
+        const float a = glm::radians(spun);
+        const float sn = std::sin(a), cs = std::cos(a);
+        const glm::vec3 d = crate - about;
+        crate = about + glm::vec3(d.x * cs + d.z * sn, d.y, -d.x * sn + d.z * cs) + move;
+        rider.carry(move, spun, about);
+        s.republish();
+
+        lowest = std::min(lowest, s.ship.heightAboveGround(s.terrain));
+    }
+
+    const float riderDrift = glm::length(glm::vec2(
+        localTo(s.ship, rider.hipCentre()).x - riderWas.x,
+        localTo(s.ship, rider.hipCentre()).z - riderWas.z));
+    const float crateDrift = glm::length(glm::vec2(
+        localTo(s.ship, crate).x - crateWas.x,
+        localTo(s.ship, crate).z - crateWas.z));
+    // Net displacement, not distance flown -- it is turning throughout, so it
+    // flies a circuit and comes most of the way back. Asserting on path length
+    // would be the honest measure; asserting it ended a long way from where it
+    // started asserts that it flew in a straight line, which it was never asked
+    // to do.
+    const float went = glm::length(glm::vec2(s.ship.origin().x - from.x,
+                                             s.ship.origin().z - from.z));
+
+    char detail[176];
+    std::snprintf(detail, sizeof detail,
+                  "circuit put it %.0f from the pad, cleared %.1f at worst, "
+                  "rider drifted %.2f, crate %.2f",
+                  went, lowest, riderDrift, crateDrift);
+    report("it flies, and the hold comes with it",
+           went > 40.0f && lowest >= s.ship.flight.clearance - 0.5f &&
+           riderDrift < 1.0f && crateDrift < 1.0f &&
+           s.ground.enclosureAt(rider.hipCentre()) >= 0, detail);
+}
+
+// ---------------------------------------------------------------------------
 // 6. And all of it on an AUTHORED planet, not the field this example generates.
 //
 // The creatures were tuned against 11 units of relief on 256 units of ground.
@@ -1327,6 +1399,7 @@ int runShipChecks(bool verbose) {
     checkTheDoorMoving();
     checkRoutesAndDeliveries();
     checkTheRally();
+    checkFlight();
     checkTheRealPlanet();
 
     std::printf("  %s\n\n", g_failed ? "SOMETHING IS BROKEN" : "all ok");
