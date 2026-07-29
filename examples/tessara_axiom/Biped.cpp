@@ -859,7 +859,32 @@ void Biped::update(const Ground& hf, float dt, const glm::vec3* observer) {
     // his head -- the ramp is out of stepping range, so the floor under him comes
     // back as the dirt and the test still catches him.
     const float floor = hf.heightAt(m_pos.x, m_pos.y, soleHeight(), params.stepUp);
-    m_pos = hf.resolve(m_pos, floor, standHeight(), params.bodyRadius);
+    const glm::vec2 shoved = hf.resolve(m_pos, floor, standHeight(), params.bodyRadius);
+
+    // Being pushed moves ALL of him, feet included.
+    //
+    // His feet are planted at world positions and stay there while the hips
+    // travel over them -- which is the whole basis of the walk, and is exactly
+    // wrong for a shove. Moving the hips alone strands them: the legs stretch to
+    // reach ground he is no longer standing over, the solver clamps at full
+    // extension, and the hips get dragged down to whatever the legs can still
+    // reach. Standing still under a ramp swinging open, he was pushed four units
+    // clear and his hips ended at ground level with his feet somewhere behind
+    // him. He did not fall over; he was pulled apart and then down.
+    //
+    // A shove is a translation of a creature, not a correction to a coordinate.
+    const glm::vec2 push = shoved - m_pos;
+    if (glm::dot(push, push) > 1e-8f) {
+        const glm::vec3 push3(push.x, 0.0f, push.y);
+        for (int i = 0; i < 2; ++i) {
+            m_foot[i]      += push3;
+            m_plant[i]     += push3;
+            m_swingFrom[i] += push3;
+            m_swingTo[i]   += push3;
+        }
+        m_hipCentre += push3;
+    }
+    m_pos = shoved;
 
     // ---- gait ---------------------------------------------------------
     // Break into a run above a speed, drop back below it. The hysteresis band

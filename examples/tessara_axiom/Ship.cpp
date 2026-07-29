@@ -88,9 +88,48 @@ void Ship::place(Heightfield& hf, glm::vec2 near, float yawDegrees) {
         std::clamp((params.deckHeight + params.groundBite) / m_rampLength, 0.0f, 0.95f)));
 }
 
-void Ship::update(float dt) {
+void Ship::update(float dt, bool obstructed) {
+    // Closing on somebody is the only direction that hurts, so that is the only
+    // one that is refused. Opening sweeps the ramp down onto ground it is about
+    // to become part of, and can be let run.
+    //
+    // It REVERSES rather than stopping where it is. Stopping deadlocks: the ramp
+    // waits for whoever is on it to leave, and a creature standing on a ramp
+    // frozen halfway has no particular reason to go anywhere -- the walker just
+    // wanders on the spot, so it is held at eighty per cent forever and neither
+    // of them will move first. Reopening ends the standoff, gives him a floor
+    // that is level and stops moving, and lets him walk off it in his own time.
+    // It is also what every lift door does, and reads immediately: the ramp came
+    // back down, so something is on it.
+    m_rampHeld = obstructed && !m_opening;
+    if (m_rampHeld) m_opening = true;
+
     float rate = dt / std::max(0.05f, params.rampSeconds);
     m_ramp = std::clamp(m_ramp + (m_opening ? rate : -rate), 0.0f, 1.0f);
+}
+
+bool Ship::isOnRamp(const glm::vec3& p) const {
+    const SurfacePatch ramp = rampPatch();
+    if (!ramp.enabled) return false;
+
+    const glm::vec3 d = p - ramp.origin;
+    const float u = d.x * ramp.right.x + d.z * ramp.right.z;
+
+    // `along` is tilted, so its ground shadow is what a horizontal offset has to
+    // be measured against -- the same solve the surface query does.
+    const glm::vec2 flat(ramp.along.x, ramp.along.z);
+    const float run = glm::length(flat);
+    if (run < 1e-4f) return false;
+    const float v = (d.x * flat.x + d.z * flat.y) / (run * run);
+
+    if (std::fabs(u) > ramp.halfWidth + 0.9f) return false;
+    if (std::fabs(v) > ramp.halfLength + 0.9f) return false;
+
+    // And actually on it, rather than passing beneath or standing on the deck
+    // over its top end. Generous upward, because a body's reported position is
+    // its hips or its shell, not its soles.
+    const float surface = ramp.origin.y + ramp.along.y * v;
+    return p.y > surface - 1.2f && p.y < surface + 5.5f;
 }
 
 glm::vec3 Ship::controlPosition() const {

@@ -224,7 +224,14 @@ protected:
         handleKeys();
 
         if (!m_paused) {
-            m_ship.update(deltaTime);
+            // Nobody gets shut in the ramp. The scene knows who is about; the
+            // ship only knows whether it is clear.
+            const bool rampBusy =
+                (m_showBiped && m_ship.isOnRamp(m_biped.hipCentre())) ||
+                m_ship.isOnRamp(m_walker.bodyCentre(m_ground)) ||
+                m_ship.isOnRamp(cameraPosition() - glm::vec3(0.0f, kPlayerEyeHeight, 0.0f));
+
+            m_ship.update(deltaTime, rampBusy);
 
             // Republished each frame because the ramp swings, and BEFORE anything
             // walks -- both creatures read this now, and a frame where the ship
@@ -1205,6 +1212,16 @@ private:
         ImGui::Text("pile: %d of %d", m_stored, static_cast<int>(m_crates.size()));
         ImGui::Text("biped:  %s", m_biped.activityName());
         ImGui::Text("walker: %s", m_walker.activityName());
+
+        // Said out loud, because a ramp that comes back down on its own is the
+        // sort of thing you assume is a bug until something tells you it is not.
+        if (m_ship.rampHeld()) {
+            ImGui::TextColored(ImVec4(0.95f, 0.72f, 0.25f, 1.0f),
+                               "ramp reopening - somebody is standing on it");
+        } else if (m_biped.wayShut()) {
+            ImGui::TextColored(ImVec4(0.95f, 0.72f, 0.25f, 1.0f),
+                               "biped is waiting at a shut ramp");
+        }
         ImGui::Checkbox("walker hauls too", &m_walkerHauls);
         if (ImGui::IsItemHovered()) {
             ImGui::SetTooltip("Off, because the hold is up a ramp. The walker stands on\n"

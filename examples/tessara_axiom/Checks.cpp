@@ -635,6 +635,83 @@ void checkWalkerLeavesByTheRamp() {
 }
 
 // ---------------------------------------------------------------------------
+// 4c. The door is a moving floor, and a moving floor is its own kind of trouble.
+// ---------------------------------------------------------------------------
+void checkTheDoorMoving() {
+    // Shutting it on somebody scooped them: two and a half units of lift and
+    // seventeen units of travel in a second and a half, none of it walked. It
+    // reverses instead, which also has to be checked FOR NOT DEADLOCKING -- the
+    // first attempt held the ramp where it was, and a creature standing on a ramp
+    // frozen halfway has no reason to go anywhere, so it stayed at eighty per cent
+    // for as long as anyone watched.
+    {
+        Scene s(0.0f, {0.0f, 0.0f}, 0.0f);
+        Walker w;
+        w.reset(s.ground, glm::ivec2(50, 30), 0);
+        const glm::vec3 pile = s.ship.bayStoragePoint();
+        w.assignFetch(s.ground, pile, pile);
+
+        // Catch him partway up it.
+        for (int i = 0; i < 40000 && w.hasTask(); ++i) {
+            w.update(s.ground, 1.0f / 60.0f);
+            const glm::vec3 p = w.bodyCentre(s.ground);
+            if (s.ship.isOnRamp(p) && p.y > s.ship.origin().y + 1.0f) break;
+        }
+        const bool caught = s.ship.isOnRamp(w.bodyCentre(s.ground));
+
+        s.ship.toggleRamp();                  // shut it on him
+        float lowest = 1e9f;
+        for (int i = 0; i < 60 * 6; ++i) {
+            s.ship.update(1.0f / 60.0f, s.ship.isOnRamp(w.bodyCentre(s.ground)));
+            s.republish();
+            w.update(s.ground, 1.0f / 60.0f);
+            if (s.ship.isOnRamp(w.bodyCentre(s.ground))) {
+                lowest = std::min(lowest, s.ship.rampProgress());
+            }
+        }
+
+        char detail[128];
+        std::snprintf(detail, sizeof detail,
+                      "told to shut with him on it, it fell to %.0f%% and came back to %.0f%%",
+                      lowest * 100.0f, s.ship.rampProgress() * 100.0f);
+        report("the ramp will not shut on anybody", caught && s.ship.rampProgress() > 0.9f, detail);
+    }
+
+    // And swinging OPEN through somebody stood at the foot of it. That one is
+    // allowed to shove -- it is a slab coming down and there is nowhere else for
+    // him to be -- but it has to shove all of him. Moving a body without its
+    // planted feet strands them, the legs stretch to reach ground he is no longer
+    // over, the solver clamps, and the hips are dragged down to what the legs can
+    // still touch. He ended at ground level with his feet somewhere behind him.
+    {
+        Scene closed(0.0f, {0.0f, 0.0f}, 0.0f);
+        closed.closeRamp();
+
+        const glm::vec3 muster = closed.ship.rampApproachPoint();
+        Biped man;
+        man.reset(closed.ground, glm::vec2(muster.x, muster.z), 0.0f, 1u);
+        man.setHold(true);                    // stand there and take it
+
+        const float standing = man.hipCentre().y;
+        float lowestHip = 1e9f;
+
+        closed.ship.toggleRamp();
+        for (int i = 0; i < 60 * 6; ++i) {
+            closed.ship.update(1.0f / 60.0f, closed.ship.isOnRamp(man.hipCentre()));
+            closed.republish();
+            man.update(closed.ground, 1.0f / 60.0f);
+            lowestHip = std::min(lowestHip, man.hipCentre().y);
+        }
+
+        char detail[128];
+        std::snprintf(detail, sizeof detail,
+                      "hips stayed at %.2f, never below %.2f", standing, lowestHip);
+        report("opening it shoves people clear, not into the dirt",
+               lowestHip > standing - 0.6f, detail);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // 5. He can be SENT aboard, not merely get there.
 //
 // His routes were planned on the terrain once, which put the cargo deck inside a
@@ -720,6 +797,7 @@ int runShipChecks(bool verbose) {
     checkBipedRoundTrip();
     checkWalkerLeavesByTheRamp();
     checkTheyLeaveWhenDone();
+    checkTheDoorMoving();
     checkRoutesAndDeliveries();
 
     std::printf("  %s\n\n", g_failed ? "SOMETHING IS BROKEN" : "all ok");

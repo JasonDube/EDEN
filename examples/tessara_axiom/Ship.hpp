@@ -56,8 +56,22 @@ public:
 
     float openAngleDegrees() const { return m_openAngle; }
 
-    void update(float dt);
+    // `obstructed` is whether anything is standing on the ramp. A ramp that shuts
+    // regardless scoops whoever is on it: measured at two and a half units of lift
+    // and seventeen units of travel in a second and a half, none of it walked.
+    // Held rather than reversed, because a ramp that undoes its own closing the
+    // moment somebody steps on it can never be shut at all while anyone is about.
+    void update(float dt, bool obstructed = false);
     void toggleRamp() { m_opening = !m_opening; }
+
+    // True while it wants to close and cannot, so the fact can be shown rather
+    // than merely happening.
+    bool rampHeld() const { return m_rampHeld; }
+
+    // Is this standing ON the ramp? Not merely over its footprint -- somebody on
+    // the deck above its top end is not on the ramp, and somebody on the ground
+    // beside its foot is not either.
+    bool isOnRamp(const glm::vec3& p) const;
 
     bool  isOpening() const { return m_opening; }
     bool  rampSettled() const { return m_ramp <= 0.0f || m_ramp >= 1.0f; }
@@ -103,6 +117,7 @@ private:
     float m_yaw = 0.0f;
     float m_ramp = 0.0f;       // 0 shut, 1 down
     bool  m_opening = false;
+    bool  m_rampHeld = false;
     float m_rampLength = 4.4f; // the doorway height
     float m_openAngle  = 27.0f; // worked out at placement, from the two of them
 };
