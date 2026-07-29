@@ -13072,7 +13072,15 @@ private:
                 }
                 // Turned with the deck, or a quarter turn of the ship leaves you
                 // facing the wall you were flying past.
-                if (std::fabs(spun) > 1e-5f) m_camera.setYaw(m_camera.getYaw() + spun);
+                //
+                // MINUS, because the two yaws count in opposite directions and
+                // nothing says so anywhere. Camera::updateVectors builds its front
+                // as (cos yaw, ., sin yaw); the ship builds its forward as
+                // (sin yaw, ., cos yaw). One is the other reflected, so a camera
+                // yaw is ninety degrees minus a ship yaw and their DELTAS have
+                // opposite signs. Adding it turned the captain's head one way
+                // while the bow went the other.
+                if (std::fabs(spun) > 1e-5f) m_camera.setYaw(m_camera.getYaw() - spun);
             }
         }
         

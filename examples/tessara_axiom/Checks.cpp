@@ -33,6 +33,7 @@
 
 #include "eden/LevelSerializer.hpp"
 #include "eden/Terrain.hpp"
+#include "eden/Camera.hpp"
 
 #include <unordered_map>
 
@@ -1395,6 +1396,64 @@ void checkThePlayerRides() {
 }
 
 // ---------------------------------------------------------------------------
+// 5e. The captain turns with the bow.
+//
+// Two yaws, counted in opposite directions, and nothing in either file says so:
+// Camera::updateVectors builds its front as (cos yaw, ., sin yaw), and Ship
+// builds its forward as (sin yaw, ., cos yaw). One is the other reflected, so a
+// camera yaw is ninety degrees minus a ship yaw and their DELTAS have opposite
+// signs. The host applies the ship's turn to the camera, which meant pressing A
+// swung the bow to port and the captain's head to starboard.
+//
+// This runs the host's rule against a real eden::Camera rather than restating
+// it: turn the ship, apply the correction, and ask whether the man at the helm
+// is still looking where the ship is going.
+// ---------------------------------------------------------------------------
+void checkTheHelmView() {
+    Scene s(0.0f, {0.0f, 0.0f}, 34.0f);
+
+    // Facing the way the ship is. atan2(x, z) is the ship's convention; the
+    // camera's own yaw is what makes its front come out that way.
+    eden::Camera cam;
+    const glm::vec3 bowWas = s.ship.forward();
+    cam.setYaw(90.0f - s.ship.yawDegrees());
+
+    const float aligned = glm::dot(glm::normalize(glm::vec3(cam.getFront().x, 0.0f,
+                                                            cam.getFront().z)), bowWas);
+
+    s.ship.setAirborne(true);
+    float swung = 0.0f;
+    glm::vec3 bowEarly = bowWas;
+    for (int i = 0; i < 60 * 6; ++i) {
+        s.ship.fly(1.0f / 60.0f, 0.6f, -1.0f, 0.0f, s.terrain);   // hard to port, as A does
+        const float spun = s.ship.lastTurn();
+        swung += spun;
+        if (std::fabs(spun) > 1e-5f) cam.setYaw(cam.getYaw() - spun);   // the host's rule
+
+        // Which WAY it went is only answerable inside half a turn -- six seconds
+        // of hard rudder is most of a circle, and a bearing that has come back
+        // round says nothing about which side it left on.
+        if (i == 29) bowEarly = s.ship.forward();
+    }
+
+    const glm::vec3 bowNow = s.ship.forward();
+    const glm::vec3 look = glm::normalize(glm::vec3(cam.getFront().x, 0.0f, cam.getFront().z));
+    const float still = glm::dot(look, bowNow);
+
+    // ...and that it went to PORT, which is the half the sign error would keep
+    // getting right by accident if we only checked that they agreed.
+    const float toPort = glm::dot(glm::cross(glm::vec3(0, 1, 0), bowWas), bowEarly);
+
+    char detail[176];
+    std::snprintf(detail, sizeof detail,
+                  "started aligned %.3f, swung %.0f to port, still aligned %.3f",
+                  aligned, -swung, still);
+    report("the captain turns with the bow",
+           aligned > 0.999f && std::fabs(swung) > 20.0f && toPort < 0.0f && still > 0.999f,
+           detail);
+}
+
+// ---------------------------------------------------------------------------
 // 6. And all of it on an AUTHORED planet, not the field this example generates.
 //
 // The creatures were tuned against 11 units of relief on 256 units of ground.
@@ -1527,6 +1586,7 @@ int runShipChecks(bool verbose) {
     checkTheRally();
     checkFlight();
     checkThePlayerRides();
+    checkTheHelmView();
     checkTheRealPlanet();
 
     std::printf("  %s\n\n", g_failed ? "SOMETHING IS BROKEN" : "all ok");

@@ -93,6 +93,11 @@ public:
 
     // ---- frame -------------------------------------------------------------
     glm::vec3 origin() const { return m_origin; }       // on the ground, ship centre
+
+    // Degrees, counted so that forward() is (sin, ., cos). Worth saying out loud
+    // because eden::Camera counts the other way and the two have to be reconciled
+    // wherever somebody stands at the helm.
+    float yawDegrees() const { return m_yaw; }
     glm::vec3 forward() const;
     glm::vec3 right() const;
     static glm::vec3 up() { return glm::vec3(0, 1, 0); }
