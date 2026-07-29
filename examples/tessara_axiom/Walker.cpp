@@ -192,7 +192,47 @@ bool Walker::goodStep(const Ground& hf, const glm::ivec2& from, const glm::ivec2
     const glm::vec3 origin = hf.worldAt(from, fromY, 0.01f);
     const glm::vec3 half   = (origin + landing) * 0.5f;
 
-    return !hf.blocked(half.x, half.z, std::max(fromY, landing.y), params.bodyRise);
+    // Stood on whatever is under the MIDPOINT, not at the height of either end.
+    //
+    // Both ends used to be candidates and the higher one was taken, on the
+    // reasoning that it is the more forgiving. It is not forgiving enough on a
+    // ramp: the ramp is a patch with a solid underside whose top face is set a
+    // sixteenth of a unit proud of the deck, so halfway through the last step --
+    // ramp to deck -- the floor under him is higher than either end of the step,
+    // and measuring from an end puts his soles inside the slab he is walking on.
+    //
+    // That refused the ramp-to-deck step outright wherever the ramp lay oblique
+    // to the lattice, because only then are his two front feet at different
+    // heights on it and only then does the geometry get that close. Twelve of
+    // seventy-two ship headings could not be boarded, and the ramp was innocent.
+    //
+    // Only ever a RAISE, never a drop. Taking the midpoint's floor outright is
+    // too generous the other way: measured up there, a body stepping onto the
+    // ramp's flank from the dirt beside it is standing on the ramp by the time it
+    // is halfway, so the kerb it is climbing over stops colliding with it and the
+    // flank becomes a way in. Eight of sixty-four ship placements leaked one.
+    //
+    // The higher of the two ends stays the floor, then; the midpoint only gets a
+    // say when the ground between them is higher than both, which is the one case
+    // the old rule could not see.
+    float midFloor = std::max(fromY, landing.y);
+
+    // ...and only for a foot already standing on one of the ship's own surfaces.
+    //
+    // Lifting the body onto the floor between the two ends is right for somebody
+    // walking along the ramp and wrong for somebody standing on the dirt
+    // UNDERNEATH it: from down there the same lift puts him on top of the slab
+    // halfway through the step, so the underside stops colliding with him and he
+    // mounts the ramp from below, in the middle, in one step. Thirty of those
+    // appeared the moment the lift was unconditional.
+    //
+    // Asked with a hair's step-up, so the question is what he is standing on now
+    // rather than what he could reach.
+    if (hf.onPatch(origin.x, origin.z, fromY, 0.01f)) {
+        midFloor = std::max(midFloor, hf.heightAt(half.x, half.z, fromY, maxRise));
+    }
+
+    return !hf.blocked(half.x, half.z, midFloor, params.bodyRise);
 }
 
 // Both front feet must be able to step, or the whole move is refused. Half a
@@ -320,53 +360,84 @@ bool Walker::planPath(const Ground& hf, const glm::ivec2& goalBlock) {
     };
 
     const size_t cells = static_cast<size_t>(w) * (hi.y - lo.y + 1);
-    std::vector<int> cameFrom(cells, -2);
-    std::vector<int> cameDir(cells, -1);
 
-    // How high the block was when the search first arrived at it. The whole
-    // reason a route can climb the ramp rather than stopping at the bottom of it.
-    std::vector<float> arrivedAt(cells, 0.0f);
+    // The search state is a block AND a height, not a block.
+    //
+    // It used to be a block, with one recorded arrival height apiece -- "how high
+    // it was when the search first got there" -- and a block was closed the
+    // moment it was reached. That is exactly wrong at the foot of a ramp, which
+    // is the one place in this world where a single 2x2 of nodes is legitimately
+    // standable at two different heights: on the dirt, and on the slab a few
+    // inches above it. Whichever the search happened to reach first won, and the
+    // other was lost for good.
+    //
+    // Which one it reached first depended on how the ramp lay across the lattice,
+    // so the ship could be landed at a heading from which nothing could ever
+    // route aboard. Twenty of seventy-two headings, measured -- and never the one
+    // it happens to land at, which is why it went unseen until the ship could fly
+    // and come down facing anywhere.
+    //
+    // Heights within kSameSurface of each other count as the same state, so this
+    // stays a handful of states per block rather than one per float.
+    constexpr float kSameSurface = 0.35f;
 
-    std::vector<glm::ivec2> frontier{start}, next;
-    cameFrom[index(start)] = -1;
+    struct State {
+        glm::ivec2 block;
+        float y;
+        int parent;    // index into `states`, -1 at the start
+        int dir;       // the heading that arrived here
+    };
+    std::vector<State> states;
+    std::vector<std::vector<int>> atCell(cells);
+
+    // A ceiling on the whole thing, so a pathological surface cannot turn this
+    // into a search over every float. Four standing heights per block is already
+    // more than any geometry here produces.
+    const size_t kMaxStates = cells * 4;
+
+    auto known = [&](const glm::ivec2& b, float y) {
+        for (int i : atCell[index(b)]) {
+            if (std::fabs(states[static_cast<size_t>(i)].y - y) < kSameSurface) return true;
+        }
+        return false;
+    };
+    auto push = [&](const glm::ivec2& b, float y, int parent, int dir) {
+        states.push_back(State{b, y, parent, dir});
+        atCell[index(b)].push_back(static_cast<int>(states.size()) - 1);
+        return static_cast<int>(states.size()) - 1;
+    };
 
     // Seeded from where he is actually standing, not from the terrain -- so a
     // route planned while he is already on the deck starts on the deck.
-    arrivedAt[index(start)] = 0.25f * (m_footY[0] + m_footY[1] + m_footY[2] + m_footY[3]);
+    const float startY = 0.25f * (m_footY[0] + m_footY[1] + m_footY[2] + m_footY[3]);
+    push(start, startY, -1, -1);
 
-    bool found = (start == goal);
-    while (!found && !frontier.empty()) {
-        next.clear();
-        for (const glm::ivec2& b : frontier) {
-            const float here = arrivedAt[index(b)];
+    int goalState = (start == goal) ? 0 : -1;
+    for (size_t head = 0; goalState < 0 && head < states.size(); ++head) {
+        const glm::ivec2 b = states[head].block;
+        const float here   = states[head].y;
 
-            for (int dir = 0; dir < kDirCount; ++dir) {
-                glm::ivec2 to = b + dirVec(dir);
-                if (!valid(to) || cameFrom[index(to)] != -2) continue;
+        for (int dir = 0; dir < kDirCount; ++dir) {
+            const glm::ivec2 to = b + dirVec(dir);
+            if (!valid(to)) continue;
 
-                float landed;
-                if (!blockCanStep(hf, b, dir, here, landed)) continue;
+            float landed;
+            if (!blockCanStep(hf, b, dir, here, landed)) continue;
+            if (known(to, landed)) continue;
+            if (states.size() >= kMaxStates) break;
 
-                cameFrom[index(to)]  = index(b);
-                cameDir[index(to)]   = dir;
-                arrivedAt[index(to)] = landed;
-                if (to == goal) { found = true; break; }
-                next.push_back(to);
-            }
-            if (found) break;
+            const int made = push(to, landed, static_cast<int>(head), dir);
+            if (to == goal) { goalState = made; break; }
         }
-        frontier.swap(next);
     }
 
-    if (!found) { m_pathFailed = true; return false; }
+    if (goalState < 0) { m_pathFailed = true; return false; }
 
     // Walk the parents back, then reverse.
-    for (glm::ivec2 at = goal; at != start; ) {
-        int i = index(at);
-        m_path.push_back(cameDir[i]);
-        m_pathNodes.push_back(at);
-        int parent = cameFrom[i];
-        at = glm::ivec2(lo.x + parent % w, lo.y + parent / w);
+    for (int at = goalState; states[static_cast<size_t>(at)].parent >= 0;
+         at = states[static_cast<size_t>(at)].parent) {
+        m_path.push_back(states[static_cast<size_t>(at)].dir);
+        m_pathNodes.push_back(states[static_cast<size_t>(at)].block);
     }
     std::reverse(m_path.begin(), m_path.end());
     std::reverse(m_pathNodes.begin(), m_pathNodes.end());

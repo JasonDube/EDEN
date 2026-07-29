@@ -465,7 +465,9 @@ void checkNoOtherWayInForWalker() {
     }}}
 
     char detail[128];
-    std::snprintf(detail, sizeof detail, "%d ship placements across a lattice cell", placements);
+    std::snprintf(detail, sizeof detail,
+                  "%d placements: %d leaked a way up the flank, %d had no way in",
+                  placements, leaked, noWayIn);
     report("kerbs hold however the ship is aligned", leaked == 0 && noWayIn == 0, detail);
 }
 
@@ -1300,6 +1302,86 @@ void checkFlight() {
 }
 
 // ---------------------------------------------------------------------------
+// 5c-i. The walker can board however the ship is pointing.
+//
+// Every other check about getting aboard puts the ship at one of a handful of
+// convenient headings, and the module lands it at thirty-four degrees, so this
+// went unnoticed: on twenty of seventy-two headings the walker could not board at
+// ALL. Not slowly, not sometimes -- there was no route, and there never would be.
+// The biped managed every one of them.
+//
+// It mattered the moment the ship could fly, because a ship that flies comes down
+// facing wherever it was last pointing, and a heading nobody chose is exactly the
+// kind nobody had tried.
+//
+// The cause was in goodStep, and the ramp was innocent. A step's midpoint was
+// tested with the body standing at the height of the higher END of the step --
+// which is below the floor when the floor between them is higher than both, and
+// the ramp's top face is deliberately set a sixteenth of a unit proud of the deck
+// so the two do not z-fight. So the last step of the climb, ramp to deck, put his
+// soles inside the slab he was standing on and was refused. It only bit when the
+// ramp lay oblique to his lattice, because only then are his two front feet at
+// different heights on it and only then does the geometry come that close.
+//
+// Cheap enough to ask at every heading: it is one route plan each, no simulation.
+// The diagonals are walked properly as well, since a route existing and a machine
+// following it are different claims.
+// ---------------------------------------------------------------------------
+void checkEveryHeading() {
+    int headings = 0, noRoute = 0;
+    float worstYaw = -1.0f;
+
+    for (int yaw = 0; yaw < 360; yaw += 5) {
+        Scene s(0.0f, {0.0f, 0.0f}, static_cast<float>(yaw));
+        const glm::vec3 from = s.ship.rampApproachPoint() - s.f() * 14.0f;
+        ++headings;
+
+        for (int st = 0; st < s.ship.stationCount(); ++st) {
+            Walker w;
+            w.reset(s.ground, s.ground.nodeNear(from), 0);
+            w.orderTo(s.ground, s.ship.stationPosition(st));
+            if (w.pathFailed()) {
+                ++noRoute;
+                if (worstYaw < 0.0f) worstYaw = static_cast<float>(yaw);
+                break;
+            }
+        }
+    }
+
+    char detail[176];
+    std::snprintf(detail, sizeof detail, "%d headings, %d with no route aboard%s",
+                  headings, noRoute, noRoute ? " (first at some yaw)" : "");
+    report("the walker can board at any ship heading", noRoute == 0, detail);
+
+    // And the diagonals actually walked, not merely planned.
+    int walked = 0, arrived = 0;
+    for (float yaw : {45.0f, 135.0f, 225.0f, 315.0f}) {
+        Scene s(0.0f, {0.0f, 0.0f}, yaw);
+        const glm::vec3 station = s.ship.stationPosition(1);
+        Walker w;
+        w.reset(s.ground, s.ground.nodeNear(s.ship.rampApproachPoint() - s.f() * 14.0f), 0);
+        w.setHome(s.ship.origin(), 250.0f);
+        w.orderTo(s.ground, station);
+        ++walked;
+
+        for (int i = 0; i < 60 * 120; ++i) {
+            s.ship.update(1.0f / 60.0f, s.ship.isOnRamp(w.bodyCentre(s.ground)));
+            s.republish();
+            w.update(s.ground, 1.0f / 60.0f);
+            if (w.onStation() && s.ground.enclosureAt(w.bodyCentre(s.ground)) >= 0) {
+                ++arrived;
+                break;
+            }
+        }
+    }
+
+    char walkDetail[128];
+    std::snprintf(walkDetail, sizeof walkDetail,
+                  "%d of %d diagonals walked aboard and mustered", arrived, walked);
+    report("and walks aboard on the diagonals", arrived == walked, walkDetail);
+}
+
+// ---------------------------------------------------------------------------
 // 5c-ii. A rally works from every way he can be standing when it is called.
 //
 // Reported as "sometimes the walker gets stuck at the foot of the ramp, three or
@@ -1698,6 +1780,7 @@ int runShipChecks(bool verbose) {
     checkRoutesAndDeliveries();
     checkTheRally();
     checkFlight();
+    checkEveryHeading();
     checkRallyApproaches();
     checkStationHonesty();
     checkThePlayerRides();
