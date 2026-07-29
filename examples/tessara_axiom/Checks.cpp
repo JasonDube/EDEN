@@ -547,6 +547,59 @@ void checkBipedRoundTrip() {
     report("the biped leaves and re-enters by the door", tried > 0 && done == tried, detail);
 }
 
+// Having finished, does he leave? Both of them, because they fail for opposite
+// reasons and one of them does not fail at all.
+//
+// The walker's heading rule scores a direction by how much UNWALKED ground it
+// opens, which says nothing inside a room he has just walked every node of: every
+// direction scores zero, the tie-break picks at random, and he paces the bay --
+// measured at 153 steps in a minute without finding the door. His stuck counter
+// never moves the whole time, which is why it reads as deliberation rather than as
+// a fault. The biped drifts and turns away from walls instead, and that happens to
+// walk him out on its own; he is checked so it stays that way.
+void checkTheyLeaveWhenDone() {
+    int leftWalker = 0, leftBiped = 0, tried = 0;
+
+    for (float yaw : {0.0f, 34.0f}) {
+        Scene s(0.0f, {0.0f, 0.0f}, yaw);
+        const glm::vec3 pile = s.ship.bayStoragePoint();
+        const glm::vec3 muster = s.ship.rampApproachPoint();
+        ++tried;
+
+        {
+            Walker w;
+            w.reset(s.ground, glm::ivec2(50, 30), 0);
+            glm::vec3 crate = muster - s.f() * 8.0f;
+            crate.y = s.terrain.heightAtWorld(crate.x, crate.z);
+            w.assignFetch(s.ground, crate, pile);
+            for (int i = 0; i < 40000 && w.hasTask(); ++i) w.update(s.ground, 1.0f / 60.0f);
+
+            // Delivered and idle. Thirty seconds is many times what the trip takes.
+            for (int i = 0; i < 60 * 30; ++i) w.update(s.ground, 1.0f / 60.0f);
+            if (s.ground.enclosureAt(w.bodyCentre(s.ground)) < 0) ++leftWalker;
+        }
+
+        {
+            Biped man;
+            glm::vec3 crate = muster - s.f() * 6.0f;
+            crate.y += 0.425f;
+            man.reset(s.ground, glm::vec2(muster.x - s.f().x * 16.0f,
+                                          muster.z - s.f().z * 16.0f), 0.0f, 1u);
+            man.assignFetch(crate, pile);
+            for (int i = 0; i < 60 * 90 && man.hasTask(); ++i) man.update(s.ground, 1.0f / 60.0f);
+
+            for (int i = 0; i < 60 * 30; ++i) man.update(s.ground, 1.0f / 60.0f);
+            if (s.ground.enclosureAt(man.hipCentre()) < 0) ++leftBiped;
+        }
+    }
+
+    char detail[128];
+    std::snprintf(detail, sizeof detail, "walker %d of %d, biped %d of %d, within thirty seconds",
+                  leftWalker, tried, leftBiped, tried);
+    report("both walk back out once the job is done",
+           leftWalker == tried && leftBiped == tried, detail);
+}
+
 // The walker needs none of this and is checked anyway, because "it happens to be
 // correct" and "it is known to be correct" are different states. Its route is a
 // breadth-first search over steps it can actually take, so a wall is not
@@ -666,6 +719,7 @@ int runShipChecks(bool verbose) {
     checkRoomsAndDoors();
     checkBipedRoundTrip();
     checkWalkerLeavesByTheRamp();
+    checkTheyLeaveWhenDone();
     checkRoutesAndDeliveries();
 
     std::printf("  %s\n\n", g_failed ? "SOMETHING IS BROKEN" : "all ok");

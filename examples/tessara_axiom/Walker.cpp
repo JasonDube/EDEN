@@ -327,6 +327,7 @@ void Walker::assignFetch(const Ground& hf, const glm::vec3& crate,
     m_target = nodeNear(hf, crate);
     m_storageWorld = storage;
     m_carrying = false;
+    m_leaving = false;      // a job outranks getting out of the way
     m_taskTicks = 0;
 
     // No route, no job. Better to say so at once than to grind at a ridge.
@@ -338,7 +339,7 @@ void Walker::abandonTask() {
     m_path.clear();
     m_pathNodes.clear();
     m_pathIndex = 0;
-    m_hasTask = m_carrying = false;
+    m_hasTask = m_carrying = m_leaving = false;
     m_activity = Activity::Wander;
 }
 
@@ -346,6 +347,7 @@ const char* Walker::activityName() const {
     switch (m_activity) {
         case Activity::Approach: return "driving to the crate";
         case Activity::Carry:    return "hauling it to the pile";
+        case Activity::Leaving:  return "heading back outside";
         default:                 return "wandering";
     }
 }
@@ -384,7 +386,7 @@ void Walker::tick(const Ground& hf) {
         // step, so "am I going the right way" is an equality test rather than a
         // search, and he cannot wedge in a local minimum because the route was
         // proved to exist before he set off.
-        if (m_hasTask && m_pathIndex < m_path.size()) {
+        if ((m_hasTask || m_leaving) && m_pathIndex < m_path.size()) {
             int want = m_path[m_pathIndex];
 
             if (want != m_dir) {
@@ -467,6 +469,47 @@ void Walker::tick(const Ground& hf) {
 
 void Walker::update(const Ground& hf, float dt) {
     if (m_visited.empty()) return;
+
+    // Nothing to do and indoors: go outside.
+    //
+    // He is a field machine, and the hold is a corridor a few nodes wide that he
+    // has just walked every node of. His heading rule scores a direction by how
+    // much UNWALKED ground it opens, so in there every direction scores nothing,
+    // the tie-break picks at random, and he paces the bay for as long as you care
+    // to watch -- measured at 153 steps in a minute without once finding the
+    // door. He is not stuck; the stuck counter never moves. That is what makes it
+    // worse than being stuck, because it reads as deliberation.
+    //
+    // The route out is planned, not steered toward. He has a pathfinder and the
+    // way out is exactly the kind of thing it is for.
+    if (!m_hasTask && !m_leaving) {
+        glm::vec3 out;
+        bool shut = false;
+        if (hf.wayOut(bodyCentre(hf), out, shut) && !shut) {
+            m_target = nodeNear(hf, out);
+            if (planPath(hf, m_target - glm::ivec2(1))) {
+                m_leaving = true;
+                m_activity = Activity::Leaving;
+                m_taskTicks = 0;
+            }
+        }
+    }
+
+    if (m_leaving) {
+        const glm::vec2 here = glm::vec2(m_block) + 0.5f;
+        const bool arrived = (m_pathIndex >= m_path.size())
+                          || glm::length(glm::vec2(m_target) - here) <= params.pickupNodes;
+
+        // Out, or out of patience. Either way he goes back to wandering, and if he
+        // is somehow still indoors the next tick will simply plan the trip again.
+        if (arrived || ++m_taskTicks > params.giveUpTicks) {
+            m_leaving = false;
+            m_activity = Activity::Wander;
+            m_path.clear();
+            m_pathNodes.clear();
+            m_pathIndex = 0;
+        }
+    }
 
     if (m_hasTask) {
         glm::vec2 here = glm::vec2(m_block) + 0.5f;

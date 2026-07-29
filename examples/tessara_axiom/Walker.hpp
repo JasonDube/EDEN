@@ -43,7 +43,7 @@ public:
     // not the carrying -- it is that the heading rule has to change. Wandering
     // scores a direction by how much UNWALKED ground it opens; hauling scores it
     // by how much closer it gets him. Same loop, opposite objective.
-    enum class Activity { Wander, Approach, Carry };
+    enum class Activity { Wander, Approach, Carry, Leaving };
 
     struct Params {
         // What counts as a wall. Whether this bites at all depends on the
@@ -197,6 +197,11 @@ private:
     Activity   m_activity = Activity::Wander;
     bool       m_hasTask  = false;
     bool       m_carrying = false;
+
+    // On his way out of somewhere, under his own steam rather than under orders.
+    // Deliberately NOT m_hasTask: he stays assignable the whole time, so a crate
+    // coming up while he is halfway down the ramp simply replaces the trip.
+    bool       m_leaving  = false;
     glm::ivec2 m_target{0, 0};
     glm::vec3  m_storageWorld{0.0f};
     // A planned route, not a greedy heading. Greedy scored 7 of 24 deliveries;

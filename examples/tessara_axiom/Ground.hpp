@@ -130,6 +130,22 @@ public:
     bool wayThrough(const glm::vec3& from, const glm::vec3& to,
                     glm::vec3& outWaypoint, bool& outShut) const;
 
+    // Where to get to in order to be OUT of whatever you are in, with nowhere
+    // particular to be. False if you are already outdoors.
+    //
+    // The far side of the way through, unlike wayThrough -- this one is for
+    // things that PLAN a route and want a destination, not for things that steer
+    // and want the next mark. Handing a planner the near mark makes it arrive
+    // almost at once, decide it has finished, and start again.
+    //
+    // Wanting this at all is a lesson about wandering. A creature with no job
+    // picks its heading by how much unwalked ground each one opens -- which is a
+    // fine rule outdoors and says nothing at all inside a room it has just walked
+    // every node of. Every heading scores zero, the tie-break picks at random, and
+    // it paces the hold indefinitely: hundreds of steps, never leaving, looking
+    // for all the world like it is doing something.
+    bool wayOut(const glm::vec3& from, glm::vec3& outDestination, bool& outShut) const;
+
     // Pass-through, so a Ground can stand in wherever a Heightfield was.
     int   n() const { return m_terrain->n(); }
     float spacing() const { return m_terrain->spacing(); }

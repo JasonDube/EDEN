@@ -312,6 +312,27 @@ bool Ground::wayThrough(const glm::vec3& from, const glm::vec3& to,
     return true;
 }
 
+bool Ground::wayOut(const glm::vec3& from, glm::vec3& outDestination, bool& outShut) const {
+    const int here = enclosureAt(from);
+    if (here < 0) return false;
+
+    // The far side of the way through, not the near one.
+    //
+    // wayThrough hands back the NEXT mark, which is what something steering
+    // wants -- it re-asks every frame and the answer walks it along. Handing the
+    // same thing to something that PLANS is a different mistake entirely: it
+    // routes to the head of the ramp, arrives two units later, considers itself
+    // outside, goes back to wandering, re-asks, routes to the head of the ramp
+    // again. It flickers between the two states in the middle of the bay forever
+    // and never gets near the door.
+    //
+    // A planner wants the destination and will find its own way to it -- and this
+    // one can, because its search only ever crosses ground it could walk.
+    outDestination = m_enclosures[here].outside;
+    outShut = !m_enclosures[here].open;
+    return true;
+}
+
 glm::vec3 Ground::normalAt(float x, float z, float fromY, float stepUp) const {
     const float chosen = heightAt(x, z, fromY, stepUp);
 
