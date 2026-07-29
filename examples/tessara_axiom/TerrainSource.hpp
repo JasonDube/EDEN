@@ -2,6 +2,8 @@
 
 #include <glm/glm.hpp>
 
+#include <cmath>
+
 namespace tessara {
 
 // The ground under everything, whatever is producing it.

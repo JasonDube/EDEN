@@ -28,6 +28,11 @@
 #include "Heightfield.hpp"
 #include "Ship.hpp"
 #include "Walker.hpp"
+#include "BorrowedTerrain.hpp"
+
+#include "eden/LevelSerializer.hpp"
+
+#include <unordered_map>
 
 #include <cmath>
 #include <cstdio>
@@ -1067,6 +1072,117 @@ void checkRoutesAndDeliveries() {
 
 } // namespace
 
+// ---------------------------------------------------------------------------
+// 6. And all of it on an AUTHORED planet, not the field this example generates.
+//
+// The creatures were tuned against 11 units of relief on 256 units of ground.
+// red_planet is 4032 units across with 207 units of relief -- a different order
+// of country entirely -- and it is the ground this is actually meant to run on.
+// Skipped, not failed, when the level is not present: it lives in build output
+// and a fresh clone has not got one.
+// ---------------------------------------------------------------------------
+void checkTheRealPlanet() {
+    const std::string level =
+        "build/examples/terrain_editor/levels/red_planet.eden";
+    const char* tries[] = {
+        "build/examples/terrain_editor/levels/red_planet.eden",
+        "../../build/examples/terrain_editor/levels/red_planet.eden",
+        "../../../levels/red_planet.eden",
+        "levels/red_planet.eden",
+    };
+
+    eden::LevelData data;
+    bool loaded = false;
+    for (const char* p : tries) {
+        if (eden::LevelSerializer::load(p, data) && !data.chunks.empty()) { loaded = true; break; }
+    }
+    if (!loaded) {
+        if (g_verbose) std::printf("  %-34s %-4s %s\n", "the authored planet", "--",
+                                   "red_planet.eden not found, skipped");
+        return;
+    }
+
+    glm::ivec2 lo(1 << 30), hi(-(1 << 30));
+    for (const auto& ch : data.chunks) { lo = glm::min(lo, ch.coord); hi = glm::max(hi, ch.coord); }
+    const int res = static_cast<int>(std::lround(std::sqrt((double)data.chunks[0].heightmap.size())));
+    const float tile = 2.0f;
+    const int nodes = (hi.x - lo.x + 1) * (res - 1);
+    const float half = nodes * 0.5f * tile;
+
+    std::unordered_map<long long, const eden::LevelData::ChunkData*> byCoord;
+    for (const auto& ch : data.chunks) byCoord[(long long)ch.coord.x * 100000 + ch.coord.y] = &ch;
+
+    auto heightAt = [=](float wx, float wz) -> float {
+        const int gx = (int)std::floor((wx + half) / tile);
+        const int gz = (int)std::floor((wz + half) / tile);
+        auto it = byCoord.find((long long)(gx / (res - 1) + lo.x) * 100000 + (gz / (res - 1) + lo.y));
+        if (it == byCoord.end()) return 0.0f;
+        const size_t idx = (size_t)(gz % (res - 1)) * res + (gx % (res - 1));
+        return idx < it->second->heightmap.size() ? it->second->heightmap[idx] : 0.0f;
+    };
+
+    BorrowedTerrain planet(nodes, tile, heightAt);
+    Ground ground(planet);
+
+    Ship ship;
+    ship.place(planet, glm::vec2(0.0f, 0.0f), 34.0f);
+    ship.openRamp();
+    for (int i = 0; i < 300; ++i) ship.update(1.0f / 60.0f);
+
+    ground.addPatch(ship.deckPatch());
+    ground.addPatch(ship.rampPatch());
+    std::vector<Blocker> solids; ship.appendBlockers(solids);
+    for (const Blocker& b : solids) ground.addBlocker(b);
+    ground.addEnclosure(ship.enclosure());
+
+    const glm::vec3 o = ship.origin();
+    const glm::vec3 pile = ship.bayStoragePoint();
+    const glm::vec3 foot = ship.rampFootPosition();
+
+    Biped man;
+    const float maxRise = tile * std::tan(glm::radians(man.params.maxSlopeDeg));
+
+    int planned = 0, viaRamp = 0;
+    for (int i = 0; i < 8; ++i) {
+        const float a = i * 0.785f;
+        glm::vec3 from = o + glm::vec3(std::cos(a), 0.0f, std::sin(a)) * 60.0f;
+        from.y = heightAt(from.x, from.z);
+
+        std::vector<glm::ivec2> route;
+        if (!ground.findRoute(ground.nodeNear(from), from.y, ground.nodeNear(pile),
+                              maxRise, man.params.bodyRadius, man.standHeight(), route)) continue;
+        ++planned;
+
+        float nearest = 1e9f;
+        for (const glm::ivec2& nd : route) {
+            const glm::vec3 p = planet.worldAt(nd);
+            nearest = std::min(nearest, glm::length(glm::vec2(p.x - foot.x, p.z - foot.z)));
+        }
+        if (nearest < 8.0f) ++viaRamp;
+    }
+
+    Walker w;
+    w.reset(ground, ground.nodeNear(glm::vec3(o.x + 40.0f, 0.0f, o.z + 40.0f)) - glm::ivec2(1), 0);
+    glm::vec3 crate = o + glm::vec3(35.0f, 0.0f, 22.0f);
+    crate.y = heightAt(crate.x, crate.z);
+    w.assignFetch(ground, crate, pile);
+
+    bool hadCargo = false;
+    for (int i = 0; i < 60 * 200 && w.hasTask(); ++i) {
+        w.update(ground, 1.0f / 60.0f);
+        if (w.hasCargo()) hadCargo = true;
+    }
+    const glm::vec3 end = w.bodyCentre(ground);
+    const float toPile = glm::length(glm::vec2(end.x - pile.x, end.z - pile.z));
+    const bool delivered = hadCargo && toPile < 6.0f;
+
+    char detail[192];
+    std::snprintf(detail, sizeof detail,
+                  "%d units across, ship down at y=%.0f, %d of 8 routes via the ramp, crate %s",
+                  (int)(nodes * tile), o.y, viaRamp, delivered ? "delivered" : "NOT delivered");
+    report("it all works on the authored planet", planned == 8 && viaRamp == 8 && delivered, detail);
+}
+
 int runShipChecks(bool verbose) {
     g_verbose = verbose;
     g_failed = 0;
@@ -1086,6 +1202,7 @@ int runShipChecks(bool verbose) {
     checkTheyLeaveWhenDone();
     checkTheDoorMoving();
     checkRoutesAndDeliveries();
+    checkTheRealPlanet();
 
     std::printf("  %s\n\n", g_failed ? "SOMETHING IS BROKEN" : "all ok");
     return g_failed;
