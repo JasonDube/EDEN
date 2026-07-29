@@ -51,6 +51,7 @@
 
 // Game Modules
 #include "GameModules/GameModule.hpp"
+#include "TessaraModule.hpp"
 
 // OS / Filesystem
 #include "OS/FilesystemBrowser.hpp"
@@ -4421,6 +4422,13 @@ protected:
         // Render AI nodes
         if (m_aiNodeRenderer && m_aiNodeRenderer->isVisible()) {
             m_aiNodeRenderer->render(cmd, vp);
+        }
+
+        // A game module's own world content, in this pass with this camera. Play
+        // mode only: an editor showing you a level should show you the level.
+        if (m_gameModule && m_isPlayMode) {
+            eden::ModuleRenderFrame frame{ cmd, vp, m_camera.getPosition() };
+            m_gameModule->renderWorld(frame);
         }
 
         ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), cmd);
@@ -12935,6 +12943,26 @@ private:
         } else if (!m_roomBrushMode) {
             m_roomBrushDrawing = false;
         }
+    }
+
+    // A module that has just been created knows nothing about this level or this
+    // renderer. Both are handed over here rather than at four separate call
+    // sites, so a module loaded from a level and one picked from the panel come
+    // up identically.
+    void wireGameModule() {
+        if (!m_gameModule) return;
+
+        if (auto* tessara = dynamic_cast<tessara::TessaraModule*>(m_gameModule.get())) {
+            tessara->setTerrain(&m_terrain);
+        }
+
+        eden::ModuleRenderSetup setup{
+            getContext(),
+            getBufferManager(),
+            getSwapchain().getRenderPass(),
+            getSwapchain().getExtent(),
+        };
+        m_gameModule->attachRenderer(setup);
     }
 
     void updatePlayMode(float deltaTime) {
@@ -22784,6 +22812,7 @@ private:
                         m_gameModule = eden::GameModuleFactory::create(moduleName);
                         if (m_gameModule) {
                             m_gameModule->initialize();
+                            wireGameModule();
                             std::cout << "Loaded game module: " << moduleName << std::endl;
                         }
                     }
@@ -23774,6 +23803,7 @@ private:
             // Load the saved module
             if (!m_gameModule) {
                 m_gameModule = eden::GameModuleFactory::create(levelData.gameModuleName);
+                if (m_gameModule) { m_gameModule->initialize(); wireGameModule(); }
                 if (m_gameModule) {
                     m_gameModule->initialize();
                     std::cout << "Loaded game module: " << levelData.gameModuleName << std::endl;
@@ -32981,6 +33011,14 @@ static void crashHandler(int sig) {
 
 int main(int argc, char* argv[]) {
     eden::ConsoleCapture::get().install();   // tee stdout/stderr into the in-app Console
+
+    // Modules this host ships. Registered here rather than listed inside the
+    // engine, because a game knows about the engine and never the other way
+    // round -- see GameModuleFactory. A level asks for one by name in its
+    // gameModuleName and gets it if this binary was built with it.
+    eden::GameModuleFactory::registerModule("tessara", [] {
+        return std::make_unique<tessara::TessaraModule>();
+    });
     signal(SIGSEGV, crashHandler);
     signal(SIGABRT, crashHandler);
     signal(SIGFPE, crashHandler);

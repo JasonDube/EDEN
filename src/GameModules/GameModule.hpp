@@ -2,10 +2,34 @@
 
 #include <string>
 #include <memory>
+#include <functional>
 #include <vector>
 #include <glm/glm.hpp>
+#include <vulkan/vulkan.h>
 
 namespace eden {
+
+class VulkanContext;
+class BufferManager;
+
+// What a module needs from the host to put geometry on the screen, and what it
+// gets handed each frame to draw with.
+//
+// Kept as two small structs rather than a widening argument list, because the
+// last thing a seam like this wants is for every module to break the day the
+// renderer grows a parameter.
+struct ModuleRenderSetup {
+    VulkanContext& context;
+    BufferManager& buffers;
+    VkRenderPass   renderPass;
+    VkExtent2D     extent;
+};
+
+struct ModuleRenderFrame {
+    VkCommandBuffer cmd;
+    glm::mat4       viewProj;
+    glm::vec3       eye;
+};
 
 /**
  * GameModule - Base class for loadable game modules
@@ -40,6 +64,19 @@ public:
     // screenWidth/screenHeight are the viewport dimensions
     virtual void renderUI(float screenWidth, float screenHeight) = 0;
 
+    // ---- world content ----------------------------------------------------
+    // A module with things IN the world -- creatures, vehicles, a landed ship --
+    // draws them here, in the host's pass with the host's camera. Optional,
+    // because plenty of modules are only a UI and a backend.
+    //
+    // attachRenderer comes once, before any frame, and is where a module builds
+    // whatever pipelines and buffers it needs. It is separate from initialize()
+    // because a module can be loaded before there is a swapchain to build
+    // against, and because the render pass changes when the window resizes.
+    virtual void attachRenderer(const ModuleRenderSetup&) {}
+    virtual void detachRenderer() {}
+    virtual void renderWorld(const ModuleRenderFrame&) {}
+
     // Input handling - return true if module consumed the input
     virtual bool wantsCaptureKeyboard() const { return false; }
     virtual bool wantsCaptureMouse() const { return false; }
@@ -63,6 +100,17 @@ protected:
  */
 class GameModuleFactory {
 public:
+    using Maker = std::function<std::unique_ptr<GameModule>()>;
+
+    // Modules REGISTER themselves rather than being listed here.
+    //
+    // The alternative -- a hardcoded switch in this file -- would have the engine
+    // naming its games, and then depending on them to build. That is backwards:
+    // a game knows about the engine, never the other way round. A host links
+    // whichever modules it ships and registers them at startup, so the same
+    // engine binary serves a level that wants one and a level that wants none.
+    static void registerModule(const std::string& name, Maker maker);
+
     // Get available module types
     static std::vector<std::string> getAvailableModules();
 

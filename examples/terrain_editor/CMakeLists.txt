@@ -8,7 +8,7 @@ add_executable(terrain_editor main.cpp grove_host.cpp MCPServer.cpp
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(VTERM REQUIRED vterm)
 
-target_link_libraries(terrain_editor PRIVATE eden ${VTERM_LIBRARIES} util)
+target_link_libraries(terrain_editor PRIVATE tessara_core eden ${VTERM_LIBRARIES} util)
 
 # Grove scripting language (Rust static library)
 add_library(grove STATIC IMPORTED)

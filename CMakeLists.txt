@@ -341,6 +341,8 @@ add_subdirectory(modules/ai_companion)
 # Build examples
 add_subdirectory(examples/spinning_triangle)
 add_subdirectory(examples/terrain_flyover)
+# Before terrain_editor: it links tessara_core, which is defined in there.
+add_subdirectory(examples/tessara_axiom)
 add_subdirectory(examples/terrain_editor)
 add_subdirectory(examples/eve)
 add_subdirectory(examples/spacegame)
@@ -351,4 +353,3 @@ add_subdirectory(examples/slag_legion)
 add_subdirectory(examples/project_simulacra)
 add_subdirectory(examples/tearsheet3d)
 add_subdirectory(examples/vieuphoria)
-add_subdirectory(examples/tessara_axiom)

@@ -1,32 +1,37 @@
-add_executable(tessara_axiom
-    main.cpp
+# The reusable half of TESSARA:AXIOM: everything that is content rather than
+# application. The standalone example links it, and so does the editor, which
+# hosts the same content as a game module on whatever planet a level is made of.
+# Nothing in here creates a window or owns a frame loop.
+add_library(tessara_core STATIC
     Heightfield.cpp
+    Ground.cpp
+    Ship.cpp
     Walker.cpp
-    CreatureMesh.cpp
     Biped.cpp
+    CreatureMesh.cpp
     BipedMesh.cpp
     ScenePipeline.cpp
+    Checks.cpp
+    TessaraModule.cpp
+)
+target_link_libraries(tessara_core PUBLIC eden)
+target_include_directories(tessara_core PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/src)
+
+add_executable(tessara_axiom
+    main.cpp
     Conversation.cpp
-    Ship.cpp
-    Ground.cpp
 )
 
-target_link_libraries(tessara_axiom PRIVATE eden)
+target_link_libraries(tessara_axiom PRIVATE eden tessara_core)
 
 # The gait's two knobs are not guessable by eye, so they get measured instead --
 # and neither is whether anything can walk up the ramp, so Checks.cpp rides along
 # in the same binary. No Vulkan, no window: none of the creatures, the ground or
 # the ship have a renderer in them, which is exactly why they can be tested.
-add_executable(tessara_gait_sim
-    gait_sim.cpp
-    Checks.cpp
-    Heightfield.cpp
-    Ground.cpp
-    Walker.cpp
-    Biped.cpp
-    Ship.cpp
-)
-target_link_libraries(tessara_gait_sim PRIVATE eden)
+add_executable(tessara_gait_sim gait_sim.cpp)
+target_link_libraries(tessara_gait_sim PRIVATE eden tessara_core)
 target_include_directories(tessara_gait_sim PRIVATE ${CMAKE_SOURCE_DIR}/src)
 
 # Renderer headers (VulkanApplicationBase, ImGuiManager, ...) live under src/,
