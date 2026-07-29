@@ -184,8 +184,12 @@ SurfacePatch Ship::deckPatch() const {
     // So they OVERLAP rather than meet. Abutting surfaces are the same mistake as
     // coplanar faces one file over -- exact adjacency is not something float
     // arithmetic will hold for you, and there is no reason to ask it to.
+    // Forward to the nose, not just to the bulkhead. The bridge is a place you
+    // stand, so it needs a floor; before this the deck stopped at the bulkhead
+    // and everything beyond it was solid, which is why the front of the ship was
+    // a wall rather than a room.
     const float aft  = -halfL - 0.6f;
-    const float fore = -halfL * 0.1f + halfL * 0.9f - 0.15f;
+    const float fore = halfL * 0.95f;
 
     SurfacePatch patch;
     patch.right  = right();
@@ -336,25 +340,54 @@ void Ship::appendBlockers(std::vector<Blocker>& out) const {
         }
     }
 
-    // ---- everything forward of the bulkhead --------------------------------
-    // Where the hold ends and the bridge begins. Solid all the way to the nose
-    // rather than a thin partition at the bulkhead's own thickness, for two
-    // reasons. The bridge is not somewhere anyone walks -- there is no door to
-    // it and no floor drawn in it -- so a wall with a hollow behind it would be
-    // modelling a room nobody can reach. And a thin wall is a wall you can walk
-    // through: the biped checks his path at four points along it, which at
-    // walking pace is a sample every couple of units, and the bulkhead drawn in
-    // the mesh is barely half a unit thick. He would straddle it. A solid seven
-    // units deep cannot be stepped over by anything that takes steps.
+    // ---- the bulkhead, with a way through it -------------------------------
+    // It used to be solid from here to the nose, on the grounds that the bridge
+    // was somewhere nobody could walk -- no door, no floor. Both of those are now
+    // false, so what is left is a partition with a doorway in it, built the same
+    // way the cargo doorway is: two posts, and the gap between them is not a
+    // feature anybody implemented.
+    //
+    // The posts are DEEP rather than thin, for the reason the solid version was.
+    // A thin wall is a wall you can walk through -- the biped checks his path at
+    // four points, which at walking pace is a sample every couple of units, and a
+    // partition drawn half a unit thick is one he straddles.
     {
         const float face = halfL * 0.62f;
+        const float doorHalf = 2.2f;              // the gap you walk through
 
+        for (int side = 0; side < 2; ++side) {
+            const float sx = side ? 1.0f : -1.0f;
+            const float inner = doorHalf;
+            const float outer = halfB + 0.3f;
+
+            Blocker b = base;
+            b.origin     = m_origin + forward() * face
+                         + right() * (sx * (inner + outer) * 0.5f);
+            b.halfWidth  = (outer - inner) * 0.5f;
+            b.halfLength = 1.1f;
+            b.floorY     = m_origin.y + split;
+            b.ceilingY   = m_origin.y + roof;
+            out.push_back(b);
+        }
+    }
+
+    // ---- the bulwark across the nose ---------------------------------------
+    // Waist high, and that is the whole point of it. The nose used to be solid
+    // from below the deck to well above head height, so standing at the front of
+    // the ship you were looking at a wall -- which is no way to fly anything.
+    // Low enough to see over, high enough to stop you walking out of the front.
+    {
+        // Thin, and right at the bow. A bulwark nearly four units deep ate the
+        // bridge: with a body's width added it reached back past where the
+        // captain stands, so the room the door had just been cut into had no
+        // floor left to stand on. It only has to be deep enough that nothing
+        // steps over it, and nothing walks at the bow in a hurry.
         Blocker b = base;
-        b.origin     = m_origin + forward() * ((face + halfL) * 0.5f);
+        b.origin     = m_origin + forward() * (halfL * 0.95f);
         b.halfWidth  = halfB + 0.3f;
-        b.halfLength = (halfL - face) * 0.5f;
+        b.halfLength = 1.2f;
         b.floorY     = m_origin.y + split;
-        b.ceilingY   = m_origin.y + roof;
+        b.ceilingY   = m_origin.y + params.deckHeight + 1.15f;
         out.push_back(b);
     }
 }
@@ -406,6 +439,16 @@ Enclosure Ship::enclosure() const {
                     + right() * (params.bayWidth * 0.5f - 1.8f)
                     - forward() * (params.length * 0.30f);
     return e;
+}
+
+glm::vec3 Ship::helmPosition() const {
+    return m_origin + up() * (params.deckHeight + 1.10f)
+                    + forward() * (params.length * 0.42f);
+}
+
+glm::vec3 Ship::helmStation() const {
+    return m_origin + up() * params.deckHeight
+                    + forward() * (params.length * 0.36f);
 }
 
 glm::vec3 Ship::stationPosition(int index) const {
@@ -553,14 +596,26 @@ void appendShipMesh(const Ship& ship,
                   glm::vec3(p.bayWidth * 0.5f - 0.19f, 0.15f, 0.22f), kTrim);
     }
 
-    // Front bulkhead -- the bay stops here and the bridge begins. Oversized on
-    // every axis so it buries into the walls, the deck and the roof.
+    // Front bulkhead -- the bay stops here and the bridge begins. Two posts with
+    // a doorway between them, because the bridge is somewhere you walk to now.
+    // Oversized on every axis so they bury into the walls, the deck and the roof.
     const float bulkTop = p.deckHeight + p.bayHeight + eps;
     const float bulkBot = p.deckHeight - 0.30f;                          // 1.70
+    const float doorHalf = 2.2f;
+    for (int side = 0; side < 2; ++side) {
+        const float sx = side ? 1.0f : -1.0f;
+        const float outer = p.bayWidth * 0.5f + eps * 2.0f;
+        appendBox(verts, indices,
+                  at(sx * (doorHalf + outer) * 0.5f,
+                     (bulkTop + bulkBot) * 0.5f, halfL * 0.62f), r, u, f,
+                  glm::vec3((outer - doorHalf) * 0.5f,
+                            (bulkTop - bulkBot) * 0.5f, 0.25f), kHullDark);
+    }
+    // A lintel over the doorway, so the gap reads as a door rather than as a
+    // piece of missing wall.
     appendBox(verts, indices,
-              at(0.0f, (bulkTop + bulkBot) * 0.5f, halfL * 0.62f), r, u, f,
-              glm::vec3(p.bayWidth * 0.5f + eps * 2.0f,
-                        (bulkTop - bulkBot) * 0.5f, 0.25f), kHullDark);
+              at(0.0f, p.deckHeight + p.bayHeight - 0.35f, halfL * 0.62f), r, u, f,
+              glm::vec3(doorHalf + 0.3f, 0.35f, 0.22f), kTrim);
 
     // ---- bridge -----------------------------------------------------------
     const float bridgeY = roofY + 1.35f;
@@ -577,10 +632,53 @@ void appendShipMesh(const Ship& ship,
                   glm::vec3(0.14f, 0.60f, halfL * 0.14f), kGlass);
     }
 
-    // Nose, pushed out PAST the hull front rather than finishing flush with it
-    // -- that shared vertical plane was the second seam.
-    appendBox(verts, indices, at(0.0f, p.deckHeight + 1.2f, halfL * 0.86f + eps), r, u, f,
-              glm::vec3(halfW * 0.80f, 1.5f, halfL * 0.14f + eps), kHull);
+    // Nose. A bulwark you can see over rather than a wall you cannot -- it used
+    // to run from below the deck to a metre above standing eye height, so the
+    // view forward from the front of the ship was hull. Pushed out PAST the hull
+    // front rather than finishing flush with it; that shared vertical plane was
+    // the second seam.
+    const float bulwarkTop = p.deckHeight + 1.15f;
+    appendBox(verts, indices,
+              at(0.0f, (p.deckHeight - 0.3f + bulwarkTop) * 0.5f, halfL * 0.95f + eps),
+              r, u, f,
+              glm::vec3(halfW * 0.80f, (bulwarkTop - p.deckHeight + 0.3f) * 0.5f,
+                        1.2f + eps), kHull);
+
+    // And glass above it, which is what makes the bridge a bridge. Not collision:
+    // the bulwark is what stops you, and a windscreen you cannot see out of is a
+    // wall with extra steps.
+    appendBox(verts, indices,
+              at(0.0f, bulwarkTop + 1.5f, halfL * 0.95f + eps), r, u, f,
+              glm::vec3(halfW * 0.78f, 1.5f, 0.10f), kGlass);
+
+    // Corner posts, so the windscreen has something to be held in.
+    for (int side = 0; side < 2; ++side) {
+        const float sx = side ? 1.0f : -1.0f;
+        appendBox(verts, indices,
+                  at(sx * halfW * 0.78f, bulwarkTop + 1.5f, halfL * 0.95f + eps), r, u, f,
+                  glm::vec3(0.16f, 1.55f, 0.16f), kTrim);
+    }
+
+    // ---- the helm ----------------------------------------------------------
+    // A console at the front of the bridge with a lit panel on it, and a mark on
+    // the deck behind it where the captain stands. Both at deck level: the cabin
+    // on the roof reads as a bridge from outside and is six units above anybody's
+    // head, so this is the one that is actually flown from.
+    {
+        const glm::vec3 helm = ship.helmPosition();
+        appendBox(verts, indices, helm, r, u, f,
+                  glm::vec3(1.9f, 0.55f, 0.42f), kHullDark);
+        appendBox(verts, indices, helm + u * 0.50f - f * 0.10f, r, u, f,
+                  glm::vec3(1.55f, 0.09f, 0.30f), kPanelOn);
+
+        // Legs, so it stands on the deck rather than floating over it.
+        for (int side = 0; side < 2; ++side) {
+            const float sx = side ? 1.0f : -1.0f;
+            appendBox(verts, indices,
+                      helm + r * (sx * 1.55f) - u * 0.85f, r, u, f,
+                      glm::vec3(0.16f, 0.55f, 0.16f), kTrim);
+        }
+    }
 
     // ---- ramp -------------------------------------------------------------
     const float shut = 90.0f;

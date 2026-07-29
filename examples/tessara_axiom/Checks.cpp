@@ -118,9 +118,37 @@ void checkShipSolids() {
     // partition thinner than his sample spacing.
     const bool wallsSolid =
         solid(at(-7.0f, 0.0f), deck) && solid(at(7.0f, 0.0f), deck) &&
-        solid(at(0.0f, 11.8f), deck) && solid(at(0.0f, 17.0f), deck);
-    report("hull walls and nose are solid", wallsSolid,
-           "sides, bulkhead, and everything forward of it");
+        solid(at(-4.0f, 11.8f), deck) && solid(at(4.0f, 11.8f), deck);
+    report("hull walls and bulkhead posts are solid", wallsSolid,
+           "sides, and the bulkhead either side of its doorway");
+
+    // ---- the bridge --------------------------------------------------------
+    // The front of the ship used to be solid from the bulkhead to the nose, on
+    // the grounds that nobody could get there. Now they can, and the point of
+    // going is to see out -- so both halves of that are checked: a way through,
+    // and a sightline over the bulwark from where the captain stands.
+    const bool doorway = !solid(at(0.0f, 11.8f), deck);
+    const bool bridgeFloor = !solid(at(0.0f, 14.0f), deck) &&
+                             !solid(s.ship.helmStation(), deck);
+    report("the bridge is a room you can walk into", doorway && bridgeFloor,
+           "doorway through the bulkhead, floor beyond it, standing room at the helm");
+
+    // Eye height on this planet is 1.7 above the feet. The bulwark has to come
+    // BELOW that from the helm, or the view forward is hull -- which is what it
+    // was, by a clear metre.
+    {
+        const glm::vec3 stand = s.ship.helmStation();
+        const float eye = deck + 1.7f;
+        const float bulwark = ground + 2.2f + 1.15f;
+        const bool stopped = solid(at(0.0f, 18.5f), deck);   // still cannot walk out
+        char detail[144];
+        std::snprintf(detail, sizeof detail,
+                      "eye at %.2f, bulwark tops out at %.2f, %s",
+                      eye, bulwark, stopped ? "and it still stops you" : "BUT YOU FALL OUT");
+        report("you can see over the bow from the helm",
+               eye > bulwark + 0.3f && stopped, detail);
+        (void)stand;
+    }
 
     const bool bellySolid =
         solid(at(0.0f, 0.0f), ground) && solid(at(0.0f, 15.0f), ground) &&

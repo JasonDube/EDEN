@@ -127,6 +127,15 @@ public:
     // Reports itself shut whenever the ramp is not down far enough to walk on.
     Enclosure enclosure() const;
 
+    // ---- the helm ----------------------------------------------------------
+    // Where the ship is flown from, and where the captain stands to fly it.
+    //
+    // At DECK level in the nose rather than in the raised cabin on the roof --
+    // that cabin reads as a bridge from outside and is six units above anyone's
+    // head, with nothing to climb. A helm you cannot reach is scenery.
+    glm::vec3 helmPosition() const;   // the console itself
+    glm::vec3 helmStation() const;    // where a body stands to work it
+
     // ---- muster stations ---------------------------------------------------
     // Numbered places in the hold where a unit stands for launch.
     //
