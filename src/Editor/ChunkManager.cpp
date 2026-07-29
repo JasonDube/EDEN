@@ -104,12 +104,22 @@ void ChunkManager::uploadChunk(TerrainChunk& chunk) {
 }
 
 void ChunkManager::updateModifiedChunks(Terrain& terrain) {
+    // Batched, because each chunk upload otherwise submits its two copies and
+    // calls vkQueueWaitIdle on each -- a full flush of a queue holding the whole
+    // visible world, twice per chunk. Paint across a few chunks and that is the
+    // hitch. Opened only if nobody else has a batch running, since ending theirs
+    // would submit it half-recorded.
+    bool ownBatch = false;
     for (auto& vc : terrain.getVisibleChunks()) {
-        if (vc.chunk->needsUpload()) {
-            vc.chunk->regenerateMesh();
-            uploadChunk(*vc.chunk);
+        if (!vc.chunk->needsUpload()) continue;
+        if (!ownBatch && !m_bufferManager.batching()) {
+            m_bufferManager.beginBatch();
+            ownBatch = true;
         }
+        vc.chunk->regenerateMesh();
+        uploadChunk(*vc.chunk);
     }
+    if (ownBatch) m_bufferManager.endBatch();
 }
 
 void ChunkManager::releaseAllChunkBuffers(Terrain& terrain) {

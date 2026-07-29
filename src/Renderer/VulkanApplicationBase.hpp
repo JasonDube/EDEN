@@ -39,6 +39,24 @@ public:
     // Main entry point
     void run();
 
+    // Where the frame actually went, smoothed, in milliseconds.
+    //
+    // Added because "it feels low" is not a thing anyone can fix. These separate
+    // the three causes that look identical from outside: logic taking too long
+    // (update), too much being recorded (record), and a GPU that has not finished
+    // the previous frame -- which shows up as a wait in acquire or present, not as
+    // work anywhere. Five clock reads a frame, and every app on this engine gets
+    // them for free.
+    struct FrameCost {
+        float poll    = 0.0f;
+        float update  = 0.0f;
+        float acquire = 0.0f;   // waiting for a swapchain image and its fence
+        float record  = 0.0f;   // building this frame's command buffer
+        float present = 0.0f;   // submit and hand it over
+        float total   = 0.0f;
+    };
+    const FrameCost& frameCost() const { return m_frameCost; }
+
 protected:
     // Override these in derived classes
     virtual void onInit() = 0;
@@ -47,6 +65,8 @@ protected:
     virtual void update(float deltaTime) = 0;
     virtual void recordCommandBuffer(VkCommandBuffer cmd, uint32_t imageIndex) = 0;
     virtual void onSwapchainRecreated() {}
+
+    FrameCost m_frameCost;
 
     // Frame rendering helpers
     bool beginFrame(uint32_t& imageIndex);

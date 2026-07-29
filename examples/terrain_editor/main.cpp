@@ -20518,6 +20518,17 @@ private:
             else fpsColor = ImVec4(1.0f, 0.4f, 0.4f, 1.0f);                        // red
             ImGui::TextColored(fpsColor, "FPS: %.0f (%.1f ms)", m_fps, frameMs);
 
+            // Where the frame went. Four numbers instead of one, because a slow
+            // frame has three different causes that look identical from a single
+            // total: logic that takes too long (upd), too much being recorded
+            // (rec), and a GPU that has not finished the last frame -- which shows
+            // up as a WAIT in acq or pre and as work nowhere at all.
+            {
+                const FrameCost& cost = frameCost();
+                ImGui::TextDisabled("upd %.1f  acq %.1f  rec %.1f  pre %.1f",
+                                    cost.update, cost.acquire, cost.record, cost.present);
+            }
+
             // RAM with color coding
             ImVec4 ramColor;
             if (m_cachedRamMB < 2048.0f) ramColor = ImVec4(0.4f, 1.0f, 0.4f, 1.0f);

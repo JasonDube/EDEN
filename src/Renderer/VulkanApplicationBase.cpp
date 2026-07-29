@@ -92,22 +92,46 @@ void VulkanApplicationBase::mainLoop() {
     auto shouldClose = [this] { return m_kms ? m_kms->shouldClose() : m_window->shouldClose(); };
     auto pollEvents  = [this] { if (m_kms) m_kms->pollEvents(); else m_window->pollEvents(); };
 
+    // Smoothed rather than instantaneous: a number that changes sixty times a
+    // second is a number nobody can read off the screen.
+    auto mark = [](std::chrono::high_resolution_clock::time_point& since, float& into) {
+        const auto now = std::chrono::high_resolution_clock::now();
+        const float took = std::chrono::duration<float, std::milli>(now - since).count();
+        into += (took - into) * 0.1f;
+        since = now;
+    };
+
     while (!shouldClose()) {
+        auto phase = std::chrono::high_resolution_clock::now();
+        const auto frameBegan = phase;
+
         pollEvents();
+        mark(phase, m_frameCost.poll);
 
         auto currentTime = std::chrono::high_resolution_clock::now();
         float deltaTime = std::chrono::duration<float>(currentTime - lastTime).count();
         lastTime = currentTime;
 
         update(deltaTime);
+        mark(phase, m_frameCost.update);
 
         uint32_t imageIndex;
-        if (beginFrame(imageIndex)) {
+        const bool got = beginFrame(imageIndex);
+        mark(phase, m_frameCost.acquire);
+
+        if (got) {
             recordCommandBuffer(m_commandBuffers[m_currentFrame], imageIndex);
+            mark(phase, m_frameCost.record);
+
             endFrame(imageIndex);
+            mark(phase, m_frameCost.present);
         }
 
         if (!m_kms) Input::update();  // Input is the GLFW path; KMS apps use callbacks
+
+        const float whole = std::chrono::duration<float, std::milli>(
+            std::chrono::high_resolution_clock::now() - frameBegan).count();
+        m_frameCost.total += (whole - m_frameCost.total) * 0.1f;
     }
 
     m_context->waitIdle();
