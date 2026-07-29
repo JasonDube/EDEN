@@ -1,4 +1,5 @@
 #include "Swapchain.hpp"
+#include <cstdlib>
 #include "VulkanContext.hpp"
 #include "Buffer.hpp"
 #include <stdexcept>
@@ -346,13 +347,43 @@ VkSurfaceFormatKHR Swapchain::chooseSwapSurfaceFormat(const std::vector<VkSurfac
     return availableFormats[0];
 }
 
+// How the frame gets handed to the display, and whether that waits.
+//
+// This matters more than it looks. FIFO waits for the vertical blank, so the
+// frame time is pinned to the refresh rate whatever the work is -- which makes a
+// frame that is nearly fast enough look exactly like one that is far too slow,
+// and makes every optimisation look like it did nothing. MAILBOX is the same wait
+// without the queue backing up. IMMEDIATE does not wait at all: it tears, and it
+// is the only one that tells you what the machine can actually do.
+//
+// So it is selectable, and it says which one it picked. EDEN_VSYNC=0 asks for
+// uncapped.
 VkPresentModeKHR Swapchain::chooseSwapPresentMode(const std::vector<VkPresentModeKHR>& availablePresentModes) {
-    for (const auto& mode : availablePresentModes) {
-        if (mode == VK_PRESENT_MODE_MAILBOX_KHR) {
-            return mode;
-        }
+    const char* vsync = std::getenv("EDEN_VSYNC");
+    const bool uncapped = vsync && vsync[0] == '0';
+
+    auto has = [&](VkPresentModeKHR want) {
+        for (const auto& mode : availablePresentModes) if (mode == want) return true;
+        return false;
+    };
+
+    if (uncapped && has(VK_PRESENT_MODE_IMMEDIATE_KHR)) {
+        m_presentMode = VK_PRESENT_MODE_IMMEDIATE_KHR;
+    } else if (has(VK_PRESENT_MODE_MAILBOX_KHR)) {
+        m_presentMode = VK_PRESENT_MODE_MAILBOX_KHR;
+    } else {
+        m_presentMode = VK_PRESENT_MODE_FIFO_KHR;
     }
-    return VK_PRESENT_MODE_FIFO_KHR;
+    return m_presentMode;
+}
+
+const char* Swapchain::getPresentModeName() const {
+    switch (m_presentMode) {
+        case VK_PRESENT_MODE_IMMEDIATE_KHR: return "immediate (uncapped)";
+        case VK_PRESENT_MODE_MAILBOX_KHR:   return "mailbox";
+        case VK_PRESENT_MODE_FIFO_KHR:      return "fifo (vsync)";
+        default:                            return "other";
+    }
 }
 
 VkExtent2D Swapchain::chooseSwapExtent(const VkSurfaceCapabilitiesKHR& capabilities, int width, int height) {

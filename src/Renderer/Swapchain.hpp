@@ -30,6 +30,12 @@ public:
     VkRenderPass getRenderPass() const { return m_renderPass; }
     const std::vector<VkFramebuffer>& getFramebuffers() const { return m_framebuffers; }
     uint32_t getImageCount() const { return static_cast<uint32_t>(m_images.size()); }
+
+    // Which present mode was actually chosen, in words. Worth showing: a frame
+    // time pinned to the refresh rate and a frame time that is genuinely too slow
+    // look identical, and only one of them is worth optimising.
+    VkPresentModeKHR getPresentMode() const { return m_presentMode; }
+    const char* getPresentModeName() const;
     VkFormat getDepthFormat() const { return m_depthFormat; }
     const std::vector<VkImage>& getImages() const { return m_images; }
 
@@ -54,6 +60,7 @@ private:
     VkFormat m_imageFormat;
     VkExtent2D m_extent;
 
+    VkPresentModeKHR m_presentMode = VK_PRESENT_MODE_FIFO_KHR;
     std::vector<VkImage> m_images;
     std::vector<VkImageView> m_imageViews;
     VkRenderPass m_renderPass = VK_NULL_HANDLE;

@@ -20578,6 +20578,9 @@ private:
                 ImGui::TextDisabled("upd %.1f  acq %.1f  rec %.1f  pre %.1f",
                                     cost.update, cost.acquire, cost.record, cost.present);
                 ImGui::TextDisabled("chunks: %d of %d drawn", m_chunksDrawn, m_chunksConsidered);
+                ImGui::TextDisabled("present: %s, %u images",
+                                    getSwapchain().getPresentModeName(),
+                                    getSwapchain().getImageCount());
             }
 
             // RAM with color coding
