@@ -683,7 +683,7 @@ private:
                       // on, and which side the crate is on, change while he walks
                       // -- so they are his to keep asking, not the scene's to
                       // decide once and hand him.
-                      m_biped.assignFetch(c, s);
+                      m_biped.assignFetch(m_ground, c, s);
                   },
                   [this] { return m_biped.cargoPosition(); });
 

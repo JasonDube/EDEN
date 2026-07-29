@@ -1,5 +1,6 @@
 #include "Ground.hpp"
 
+#include <algorithm>
 #include <cmath>
 
 namespace tessara {
@@ -195,6 +196,70 @@ glm::vec2 Ground::resolve(glm::vec2 xz, float footY, float height, float radius)
     return xz;
 }
 
+glm::ivec2 Ground::nodeNear(const glm::vec3& world) const {
+    const float half = n() * 0.5f * spacing();
+    const int x = static_cast<int>(std::round((world.x + half) / spacing()));
+    const int z = static_cast<int>(std::round((world.z + half) / spacing()));
+    return glm::clamp(glm::ivec2(x, z), glm::ivec2(0), glm::ivec2(n() - 1));
+}
+
+bool Ground::findRoute(const glm::ivec2& from, float fromY, const glm::ivec2& to,
+                       float maxRise, float radius, float height,
+                       std::vector<glm::ivec2>& outNodes) const
+{
+    outNodes.clear();
+
+    const int side = n();
+    auto index = [side](const glm::ivec2& p) { return p.y * side + p.x; };
+    auto valid = [side](const glm::ivec2& p) {
+        return p.x >= 0 && p.y >= 0 && p.x < side && p.y < side;
+    };
+    if (!valid(from) || !valid(to)) return false;
+
+    std::vector<int> cameFrom(static_cast<size_t>(side) * side, -2);
+    std::vector<float> arrivedAt(static_cast<size_t>(side) * side, 0.0f);
+
+    std::vector<glm::ivec2> frontier{from}, next;
+    cameFrom[index(from)] = -1;
+    arrivedAt[index(from)] = fromY;
+
+    static const glm::ivec2 kStep[4] = { {1,0}, {0,1}, {-1,0}, {0,-1} };
+
+    bool found = (from == to);
+    while (!found && !frontier.empty()) {
+        next.clear();
+        for (const glm::ivec2& b : frontier) {
+            const float here = arrivedAt[index(b)];
+
+            for (const glm::ivec2& d : kStep) {
+                const glm::ivec2 at = b + d;
+                if (!valid(at) || cameFrom[index(at)] != -2) continue;
+
+                const glm::vec3 landing = worldAt(at, here, maxRise);
+                if (std::fabs(landing.y - here) > maxRise) continue;
+                if (blocked(landing.x, landing.z, landing.y, height, radius)) continue;
+
+                cameFrom[index(at)]  = index(b);
+                arrivedAt[index(at)] = landing.y;
+                if (at == to) { found = true; break; }
+                next.push_back(at);
+            }
+            if (found) break;
+        }
+        frontier.swap(next);
+    }
+
+    if (!found) return false;
+
+    for (glm::ivec2 at = to; at != from; ) {
+        outNodes.push_back(at);
+        const int parent = cameFrom[index(at)];
+        at = glm::ivec2(parent % side, parent / side);
+    }
+    std::reverse(outNodes.begin(), outNodes.end());
+    return true;
+}
+
 int Ground::enclosureAt(const glm::vec3& p) const {
     for (size_t i = 0; i < m_enclosures.size(); ++i) {
         const Enclosure& e = m_enclosures[i];
@@ -224,123 +289,39 @@ bool Ground::wayThrough(const glm::vec3& from, const glm::vec3& to,
 {
     outShut = false;
 
+    // Nothing to say unless the way is SHUT.
+    //
+    // This function used to steer -- hand back the near mark, then the far one,
+    // walk you through endwise, with a corridor to stop you stepping off the side
+    // of a ramp. All of that is gone, and the reason is that the creature it
+    // steered now plans routes. A route cannot cross a wall: it finds the door by
+    // itself, because the door is the only way its search gets through, and it
+    // comes off a ramp endwise because the kerbs are not ways off.
+    //
+    // Two things steering one creature is one thing too many. Left in, the marks
+    // and the route disagreed exactly where they overlapped -- the route led up
+    // the ramp as the way toward something beyond it, the marks saw him up there
+    // with a goal outside and sent him back down, and he paced between them at
+    // the ring by the door for as long as anyone watched. Three separate attempts
+    // to arbitrate produced three new boundaries for them to argue on, which is
+    // the tell: it was not a boundary that was wrong.
+    //
+    // A shut door is the one thing a route genuinely cannot see. There is no way
+    // through, so the search simply fails -- and failing is not the same answer
+    // as being told to go and press something. That is what is left here.
     const int here = enclosureAt(from);
     const int there = enclosureAt(to);
+    if (here == there) return false;
 
-    // How far along the way through, and how far off its centreline. Flat,
-    // because the two marks are two units apart in height and a creature that
-    // counted its own climb as progress would arrive early.
-    auto measure = [&](const Enclosure& e, float& outAlong, float& outAcross, float& outSpan) {
-        const glm::vec2 axis(e.inside.x - e.outside.x, e.inside.z - e.outside.z);
-        outSpan = glm::length(axis);
-        const glm::vec2 dir = (outSpan > 1e-4f) ? axis / outSpan : glm::vec2(0.0f, 1.0f);
-        const glm::vec2 d(from.x - e.outside.x, from.z - e.outside.z);
-        outAlong  = glm::dot(d, dir);
-        outAcross = d.x * -dir.y + d.y * dir.x;
-    };
+    const Enclosure& e = m_enclosures[here >= 0 ? here : there];
+    if (e.open) return false;
 
-    int use = (here >= 0) ? here : there;
+    outShut = true;
 
-    if (here == there) {
-        // Same side of everything -- unless he is standing IN a way through, in
-        // which case he has to come out of it endwise. This is the case that had
-        // him halfway down the ramp, technically out of the hold, aiming at a
-        // crate off the beam and walking into the kerb.
-        use = -1;
-        for (size_t i = 0; i < m_enclosures.size() && use < 0; ++i) {
-            float along, across, span;
-            measure(m_enclosures[i], along, across, span);
-            // Stopping a stride short at BOTH ends is what lets him leave it.
-            // A corridor that reaches its own exit mark tells a creature standing
-            // on that mark to walk to where it already is, and he mills there
-            // until the job times out -- the same shape of mistake as measuring
-            // the door by proximity, one level down.
-            if (along > 1.0f && along < span - 1.0f &&
-                std::fabs(across) < m_enclosures[i].corridorHalf) {
-                use = static_cast<int>(i);
-            }
-        }
-        if (use < 0) return false;
-
-        // He is in the doorway and his goal is not through it, so the way out is
-        // the end he is not aiming past -- and PAST it, not at it.
-        //
-        // Aiming at the mark itself parks him exactly on the corridor's own
-        // threshold. He steps out, the corridor stops applying, he turns for his
-        // real goal, that turn carries him back inside, and the corridor sends
-        // him to the mark again. He orbits the spot at walking pace and never
-        // leaves: seen in the game as a creature circling the blue ring at the
-        // foot of the ramp instead of going to fetch the next crate.
-        //
-        // Same mistake as a corridor that reaches its own exit, one boundary
-        // further out. A mark you are told to walk to must not be a mark you are
-        // standing on when you get there.
-        const Enclosure& e = m_enclosures[use];
-        if (there == use) {
-            outWaypoint = e.inside;
-        } else {
-            const glm::vec2 axis(e.inside.x - e.outside.x, e.inside.z - e.outside.z);
-            const float len = glm::length(axis);
-            const glm::vec2 away = (len > 1e-4f) ? -axis / len : glm::vec2(0.0f, -1.0f);
-            outWaypoint = e.outside + glm::vec3(away.x, 0.0f, away.y) * 4.0f;
-        }
-        return e.open || (outShut = true, true);
-    }
-
-    // Whichever room is involved. If he is in one, it is the one he must leave --
-    // getting out comes before getting in, and with one room in the world the
-    // distinction is theoretical anyway.
-    const Enclosure& e = m_enclosures[use];
-
-    if (!e.open) {
-        outShut = true;
-
-        // Shut, the next place to go is whatever will open it -- so for anything
-        // on the outside with hands, the way through IS the button. Anything shut
-        // IN gets the door itself and no more, because there is nothing on this
-        // side to work.
-        outWaypoint = (here < 0 && e.hasControl) ? e.control
-                    : (here >= 0 ? e.inside : e.outside);
-        return true;
-    }
-
-    // Which end of the way through to head for, decided by whether he is PAST the
-    // near one rather than by how close he is to it.
-    //
-    // That distinction is the whole of it. Proximity oscillates: he reaches the
-    // muster point, is handed the head of the ramp, starts up it, and within three
-    // strides is far enough from the muster point to be handed the muster point
-    // again. He turns round, comes back, and does it forever -- a creature pacing
-    // at the bottom of a ramp, which looks exactly like a collision bug and is
-    // not one. Nor is it fixable by widening the radius; that only moves the
-    // distance at which it happens.
-    //
-    // Projecting onto the line between the two marks is monotonic instead. Every
-    // step up the ramp is a step further along that line, so the answer can only
-    // move forwards, and no state has to be kept anywhere to remember which leg
-    // of the journey this is.
-    //
-    float along, across, span;
-    measure(e, along, across, span);
-
-
-    if (here >= 0) {
-        // Inside, getting out. Deeper in than the head of the ramp, go to it
-        // first -- that is what lines him up with the doorway instead of cutting
-        // the corner into its frame.
-        outWaypoint = (along > span) ? e.inside : e.outside;
-    } else {
-        // Outside, getting in. The muster point first, unless he is already lined
-        // up with the way through.
-        //
-        // Lined up, not merely level with it. Standing off the starboard beam he
-        // is well past the muster point measured along the ramp's axis, and going
-        // by that alone he gets sent to the head of the ramp -- which from there
-        // is a line straight through the hull wall. Being abeam of a door is not
-        // being in front of it, and the difference is the whole width of the ship.
-        const bool linedUp = along > -0.5f && std::fabs(across) < e.corridorHalf;
-        outWaypoint = linedUp ? e.inside : e.outside;
-    }
+    // Shut, the way through is whatever will open it -- so for anything on the
+    // outside with hands, it is the button. Anything shut IN gets the door and no
+    // more, because there is nothing on that side to work.
+    outWaypoint = (here < 0 && e.hasControl) ? e.control : (here >= 0 ? e.inside : e.outside);
     return true;
 }
 
@@ -348,18 +329,10 @@ bool Ground::wayOut(const glm::vec3& from, glm::vec3& outDestination, bool& outS
     const int here = enclosureAt(from);
     if (here < 0) return false;
 
-    // The far side of the way through, not the near one.
-    //
-    // wayThrough hands back the NEXT mark, which is what something steering
-    // wants -- it re-asks every frame and the answer walks it along. Handing the
-    // same thing to something that PLANS is a different mistake entirely: it
-    // routes to the head of the ramp, arrives two units later, considers itself
-    // outside, goes back to wandering, re-asks, routes to the head of the ramp
-    // again. It flickers between the two states in the middle of the bay forever
-    // and never gets near the door.
-    //
-    // A planner wants the destination and will find its own way to it -- and this
-    // one can, because its search only ever crosses ground it could walk.
+    // The far side of the way through -- a destination, for something that plans
+    // a route and will find its own way there. Handing a planner the near mark
+    // instead makes it arrive two units later, decide it has finished, and start
+    // again, flickering in the middle of the room without ever nearing the door.
     outDestination = m_enclosures[here].outside;
     outShut = !m_enclosures[here].open;
     return true;

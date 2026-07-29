@@ -269,14 +269,81 @@ void Biped::updateAnkles(const Ground& hf, float dt) {
 // correctly, pick it up -- and the fact that he was now outside, with a delivery
 // to make inside, was news to nobody. He crossed the threshold and his plan did
 // not. Which side of a wall you are on is not something you can be told once.
+// Follow a planned route toward `to`, replanning when it goes stale. Sets the
+// immediate goal to the next node along, which is never more than a couple of
+// units away and is always somewhere he can actually stand.
+//
+// This is the difference between steering and navigating, and he needed both.
+// Aiming straight at a goal and turning away from ground he cannot walk works
+// perfectly in open country and is helpless the moment the way round is not
+// roughly toward the thing. He sat in a bay of terrain refusing every heading he
+// tried -- SIXTY refusals a second, measured -- circling the same three points
+// eleven units from a crate for as long as anyone watched. No amount of better
+// turning fixes that; a creature that cannot see round a corner has to be told
+// what is round it.
+void Biped::steerAlongRoute(const Ground& hf, const glm::vec3& to) {
+    const bool stale = m_route.empty()
+                    || glm::length(glm::vec2(to.x - m_routedTo.x, to.z - m_routedTo.z)) > 3.0f;
+
+    if (stale || m_replan) {
+        m_routedTo = to;
+        m_replan = false;
+        m_routeIndex = 0;
+
+        const float maxRise = hf.spacing() * std::tan(glm::radians(params.maxSlopeDeg));
+        std::vector<glm::ivec2> nodes;
+        if (hf.findRoute(hf.nodeNear(m_hipCentre), soleHeight(), hf.nodeNear(to),
+                         maxRise, params.bodyRadius, standHeight(), nodes)) {
+            m_route.clear();
+            for (const glm::ivec2& node : nodes) m_route.push_back(hf.terrain().worldAt(node));
+        } else {
+            // No way there at all. Say so rather than steering at it and hoping:
+            // hoping is what the circling WAS. The scene already knows what to do
+            // with a hauler that cannot reach a crate -- it marks the crate as
+            // one he has refused and offers it to the other one -- and that is a
+            // far better answer than a creature walking in circles for a minute
+            // at a crate on the wrong side of a ridge.
+            m_route.clear();
+            m_routeFailed = true;
+        }
+    }
+
+    // Drop nodes as he reaches them. Generously, because he is a body a metre
+    // wide walking a lattice two units across and standing exactly on a node is
+    // not a thing worth waiting for.
+    while (m_routeIndex < m_route.size()) {
+        const glm::vec3& at = m_route[m_routeIndex];
+        if (glm::length(m_pos - glm::vec2(at.x, at.z)) > 2.5f) break;
+        ++m_routeIndex;
+    }
+
+    // The last stretch is aimed at the thing itself rather than at the node
+    // nearest it, or he stops a node short of everything he ever reaches for.
+    m_goal = (m_routeIndex < m_route.size())
+                 ? glm::vec2(m_route[m_routeIndex].x, m_route[m_routeIndex].z)
+                 : glm::vec2(to.x, to.z);
+    m_goalActive = true;
+}
+
 bool Biped::aimAt(const Ground& hf, const glm::vec3& target) {
     glm::vec3 door;
     bool shut = false;
 
-    if (!hf.wayThrough(m_hipCentre, target, door, shut)) {
+    // Asked about his FEET, not his chest.
+    //
+    // Whether you are in a room, and whether you are up in a doorway, are both
+    // questions about where you are standing. Asked of the hips they are asked
+    // about a point nearly three units in the air, which is above the cargo deck
+    // while he is stood on the dirt beside the hull -- so a rule meant for
+    // somebody partway up the ramp fired at him out on the flat, sent him back to
+    // the muster point, released him, and let him turn for his goal, over and
+    // over. That is the circling at the ring: not steering, not routing, just a
+    // question asked about the wrong part of him.
+    const glm::vec3 standing(m_pos.x, soleHeight(), m_pos.y);
+
+    if (!hf.wayThrough(standing, target, door, shut)) {
         m_wayShut = false;
-        m_goal = glm::vec2(target.x, target.z);
-        m_goalActive = true;
+        steerAlongRoute(hf, target);
         return true;
     }
 
@@ -290,25 +357,36 @@ bool Biped::aimAt(const Ground& hf, const glm::vec3& target) {
     // there. A creature that could reach into the ship and open its ramp from
     // across the field would be a different and much worse kind of creature.
     m_wayShut = shut;
-
-    m_goal = glm::vec2(door.x, door.z);
-    m_goalActive = true;
+    steerAlongRoute(hf, door);
     return false;
 }
 
-void Biped::assignFetch(const glm::vec3& crate, const glm::vec3& storage) {
+void Biped::assignFetch(const Ground& hf, const glm::vec3& crate, const glm::vec3& storage) {
     m_crate = crate;
     m_storage = storage;
     m_wayShut = false;
+    m_routeFailed = false;
+    m_replan = true;         // a new job is a new route
     m_hasTask = true;
     m_carrying = false;
     m_activity = Activity::Approach;
     m_taskTimer = 0.0f;
+
+    // Looked at before accepted. The walker has always done this -- no route, no
+    // job -- and it is the difference between refusing work and pretending to do
+    // it. A refused crate goes back on the pile for the other one to try.
+    steerAlongRoute(hf, crate);
+    if (m_routeFailed) {
+        m_hasTask = false;
+        m_activity = Activity::Wander;
+    }
 }
 
 void Biped::abandonTask() {
     m_hasTask = m_carrying = m_handOverride = m_goalActive = false;
     m_wayShut = false;
+    m_routeFailed = false;
+    m_route.clear();
     m_activity = Activity::Wander;
     m_bendTarget = 0.0f;
     m_squat = 0.0f;
@@ -389,6 +467,13 @@ void Biped::updateTask(const Ground& hf, float dt) {
     m_goalActive = false;
     m_speedScale = 1.0f;
     m_bendTarget = 0.0f;
+
+    // Lost the way mid-job. Same answer as never having had one.
+    if (m_routeFailed && m_hasTask) {
+        abandonTask();
+        m_squat += (0.0f - m_squat) * std::min(1.0f, dt * params.bendRate);
+        return;
+    }
 
     if (!m_hasTask) {
         m_activity = Activity::Wander;
@@ -648,11 +733,29 @@ void Biped::reset(const Ground& hf, glm::vec2 position, float headingDeg, uint32
 // back off it, every frame, forever -- because he was judged to be inside the very
 // thing he was standing on.
 //
-// The higher of the two feet, not the lower: mid-stride one foot is off the
-// ground and one is bearing weight, and it is the one bearing weight that says
-// what he is standing on.
+// The foot bearing WEIGHT -- which is a different thing from the higher one, and
+// the difference is half a unit of nonsense.
+//
+// Taking the maximum was meant to pick the foot that is on the deck while the
+// other dangles. On flat ground it picks the foot in the AIR: the swing lifts it
+// better than half a unit, so he reports himself standing that far above ground
+// he is walking on, for most of every stride.
+//
+// Against a blocker that is harmless -- they have margin. Against a rule that
+// asks whether he is up on a RAMP it is fatal, because standing on a ramp is
+// exactly "higher than the dirt". So the doorway rule fired at him out on open
+// country every time a foot came up, sent him back to the muster mark, released
+// him when the foot came down, and let him turn for his goal again. That is the
+// circling at the ring, and no amount of routing or steering was ever going to
+// fix it: he was being asked where he stood and answering with a foot in mid-air.
 float Biped::soleHeight() const {
-    return std::max(m_foot[0].y, m_foot[1].y);
+    if (m_inStance[0] && m_inStance[1]) return std::max(m_foot[0].y, m_foot[1].y);
+    if (m_inStance[0]) return m_foot[0].y;
+    if (m_inStance[1]) return m_foot[1].y;
+
+    // Both off the ground, which is a run's flight phase. The lower is the truer
+    // account of the floor he left and is about to land on.
+    return std::min(m_foot[0].y, m_foot[1].y);
 }
 
 float Biped::standHeight() const {
@@ -712,7 +815,19 @@ bool Biped::passable(const Ground& hf, glm::vec2 from, float headingDeg,
 }
 
 void Biped::steer(const Ground& hf, float dt) {
-    const float probe = params.walkSpeed * 0.9f + 3.0f;
+    // How far ahead he checks before committing to a heading.
+    //
+    // Seven and a half units when he is finding his own way, which is what makes
+    // him turn away from a bank before he is standing on it. But a body following
+    // a ROUTE has already been told the way, and the next mark on it is two units
+    // off and known good -- so probing four times that distance means refusing a
+    // heading because of ground well beyond where he is being sent. He sidesteps,
+    // the route pulls him back, and the two argue at about thirty refusals a
+    // second while he walks in a small circle.
+    //
+    // Knowing the way is exactly the licence to look less far ahead.
+    const bool routed = m_routeIndex < m_route.size();
+    const float probe = routed ? 2.5f : (params.walkSpeed * 0.9f + 3.0f);
 
     m_refused = false;
 

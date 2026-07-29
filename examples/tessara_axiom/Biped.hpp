@@ -4,6 +4,7 @@
 
 #include <glm/glm.hpp>
 #include <cstdint>
+#include <vector>
 
 namespace tessara {
 
@@ -274,7 +275,7 @@ public:
     // ---- fetching ---------------------------------------------------------
     // Just the two ends of the job. Where the door is, which side of it he is on,
     // and whether it is open are asked of the Ground as he goes -- see aimAt().
-    void assignFetch(const glm::vec3& crate, const glm::vec3& storage);
+    void assignFetch(const Ground& hf, const glm::vec3& crate, const glm::vec3& storage);
 
     // He is stood at a way through that is closed, holding a job on the far side
     // of it. Not an error and not something he resolves: somebody has to open it.
@@ -324,6 +325,7 @@ private:
     float supportHipHeight(const Ground& hf, float& outDesired) const;
     bool  passable(const Ground& hf, glm::vec2 from, float headingDeg, float distance) const;
     bool  aimAt(const Ground& hf, const glm::vec3& target);
+    void  steerAlongRoute(const Ground& hf, const glm::vec3& to);
     float randomSigned();
 
     glm::vec2 m_pos{0.0f};        // world x, z
@@ -367,6 +369,15 @@ private:
     float     m_taskTimer = 0.0f;
 
     bool      m_wayShut = false;
+
+    // The way to wherever he is going, as world points a couple of units apart.
+    // Steering handles the gap between two of them; it was never going to handle
+    // the gap between him and the far side of a hill.
+    std::vector<glm::vec3> m_route;
+    size_t    m_routeIndex = 0;
+    glm::vec3 m_routedTo{0.0f};
+    bool      m_replan = true;
+    bool      m_routeFailed = false;
 
     glm::vec2 m_goal{0.0f};
     bool      m_goalActive = false;

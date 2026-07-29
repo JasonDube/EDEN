@@ -161,6 +161,26 @@ public:
     // for all the world like it is doing something.
     bool wayOut(const glm::vec3& from, glm::vec3& outDestination, bool& outShut) const;
 
+    // ---- routes ------------------------------------------------------------
+    // A way from one place to another that actually exists, as a list of nodes.
+    //
+    // Breadth-first over the lattice, carrying a surface height per node so a
+    // route can climb a ramp -- the same search the walker plans with, offered to
+    // anything that needs one. Which turned out to be everything: steering that
+    // aims at the goal and turns away from what it cannot walk on is fine in open
+    // country and helpless against anything concave. A creature in a bay of
+    // terrain refuses every heading it tries, sixty times a second, and circles
+    // between the same three points until something else moves.
+    //
+    // `radius` and `height` are the body being routed; a gap it cannot fit
+    // through is not a way through for it.
+    bool findRoute(const glm::ivec2& from, float fromY, const glm::ivec2& to,
+                   float maxRise, float radius, float height,
+                   std::vector<glm::ivec2>& outNodes) const;
+
+    // The node nearest a world point, for handing one to findRoute.
+    glm::ivec2 nodeNear(const glm::vec3& world) const;
+
     // Pass-through, so a Ground can stand in wherever a Heightfield was.
     int   n() const { return m_terrain->n(); }
     float spacing() const { return m_terrain->spacing(); }

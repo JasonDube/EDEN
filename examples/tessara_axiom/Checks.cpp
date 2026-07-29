@@ -204,7 +204,7 @@ void checkBipedCarriesAboard() {
 
         Biped man;
         man.reset(s.ground, glm::vec2(from.x, from.z), 0.0f, 1u);
-        man.assignFetch(crate, pile);
+        man.assignFetch(s.ground, crate, pile);
         ++tried;
 
         bool carried = false;
@@ -452,28 +452,42 @@ void checkRoomsAndDoors() {
            insideIsInside && fieldIsOutside && underIsOutside,
            "bay inside, field outside, under the belly outside");
 
+    // A ROUTE between the two goes through the door, in both directions.
+    //
+    // This used to assert which mark wayThrough handed back next, which was
+    // testing the mechanism rather than the thing. The mechanism is gone -- the
+    // marks fought the routes and the routes won -- and the thing it was for
+    // survives unchanged, so it is asserted directly: a way from the bay to the
+    // field passes the foot of the ramp, because there is nowhere else to pass.
+    Biped man;
+    const float maxRise = s.ground.spacing() * std::tan(glm::radians(man.params.maxSlopeDeg));
+    const glm::vec3 foot = s.ship.rampFootPosition();
+
+    auto throughTheDoor = [&](const glm::vec3& from, const glm::vec3& to) {
+        std::vector<glm::ivec2> nodes;
+        if (!s.ground.findRoute(s.ground.nodeNear(from), from.y, s.ground.nodeNear(to),
+                                maxRise, man.params.bodyRadius, man.standHeight(), nodes)) {
+            return 1e9f;
+        }
+        float nearest = 1e9f;
+        for (const glm::ivec2& n : nodes) {
+            const glm::vec3 p = s.terrain.worldAt(n);
+            nearest = std::min(nearest, glm::length(glm::vec2(p.x - foot.x, p.z - foot.z)));
+        }
+        return nearest;
+    };
+
+    const float outbound = throughTheDoor(inBay, onField);
+    const float inbound  = throughTheDoor(onField, inBay);
+
+    char detail[128];
+    std::snprintf(detail, sizeof detail, "out passes %.1f from the ramp foot, in passes %.1f",
+                  outbound, inbound);
+    report("routes between bay and field use the ramp", outbound < 6.0f && inbound < 6.0f, detail);
+
+    // Same side of the wall as the goal: nothing to say about it at all.
     glm::vec3 way;
     bool shut = false;
-
-    // Outbound: standing at the pile, wanting something off the starboard beam.
-    const bool outbound = s.ground.wayThrough(inBay, onField, way, shut) && !shut &&
-                          glm::length(way - s.ship.enclosure().inside) < 0.01f;
-    // Having reached the head of the ramp, the next mark is the muster point.
-    glm::vec3 way2;
-    const bool outbound2 = s.ground.wayThrough(s.ship.enclosure().inside, onField, way2, shut) &&
-                           glm::length(way2 - s.ship.rampApproachPoint()) < 0.01f;
-    report("leaving the hold routes to the door", outbound && outbound2,
-           "head of the ramp first, then the muster point");
-
-    // Inbound: out on the field with a crate for the pile.
-    const bool inbound = s.ground.wayThrough(onField, pile, way, shut) && !shut &&
-                         glm::length(way - s.ship.rampApproachPoint()) < 0.01f;
-    const bool inbound2 = s.ground.wayThrough(s.ship.rampApproachPoint(), pile, way2, shut) &&
-                          glm::length(way2 - s.ship.enclosure().inside) < 0.01f;
-    report("entering the hold routes to the door", inbound && inbound2,
-           "muster point first, then the head of the ramp");
-
-    // Same side of the wall as the goal: no detour, walk straight at it.
     const bool direct = !s.ground.wayThrough(onField, onField + s.r() * 10.0f, way, shut) &&
                         !s.ground.wayThrough(inBay, pile, way, shut);
     report("no detour when there is no wall between", direct,
@@ -511,7 +525,7 @@ void checkBipedRoundTrip() {
         first.y += 0.425f;
         man.reset(s.ground, glm::vec2(muster.x - s.f().x * 16.0f,
                                       muster.z - s.f().z * 16.0f), 0.0f, 1u);
-        man.assignFetch(first, pile);
+        man.assignFetch(s.ground, first, pile);
         for (int i = 0; i < 60 * 90 && man.hasTask(); ++i) man.update(s.ground, 1.0f / 60.0f);
 
         if (s.ground.enclosureAt(man.hipCentre()) < 0) continue;   // never got in
@@ -522,7 +536,7 @@ void checkBipedRoundTrip() {
         glm::vec3 out = s.ship.origin() + s.r() * 34.0f;
         out.y = s.terrain.heightAtWorld(out.x, out.z) + 0.425f;
 
-        man.assignFetch(out, pile);
+        man.assignFetch(s.ground, out, pile);
         float nearestFoot = 1e9f;
         bool reachedIt = false;
         for (int i = 0; i < 60 * 120 && man.hasTask(); ++i) {
@@ -585,7 +599,7 @@ void checkTheyLeaveWhenDone() {
             crate.y += 0.425f;
             man.reset(s.ground, glm::vec2(muster.x - s.f().x * 16.0f,
                                           muster.z - s.f().z * 16.0f), 0.0f, 1u);
-            man.assignFetch(crate, pile);
+            man.assignFetch(s.ground, crate, pile);
             for (int i = 0; i < 60 * 90 && man.hasTask(); ++i) man.update(s.ground, 1.0f / 60.0f);
 
             for (int i = 0; i < 60 * 30; ++i) man.update(s.ground, 1.0f / 60.0f);
@@ -815,7 +829,7 @@ void checkTheDoorMoving() {
         crate.y += 0.425f;
         man.reset(s.ground, glm::vec2(muster.x - s.f().x * 18.0f,
                                       muster.z - s.f().z * 18.0f), 0.0f, 1u);
-        man.assignFetch(crate, pile);
+        man.assignFetch(s.ground, crate, pile);
 
         bool delivered = false;
         for (int i = 0; i < 60 * 90 && !delivered; ++i) {
