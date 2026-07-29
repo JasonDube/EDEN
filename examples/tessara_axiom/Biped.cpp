@@ -500,9 +500,15 @@ void Biped::updateTask(const Ground& hf, float dt) {
     if (m_stationed) {
         m_activity = Activity::Stationed;
 
+        // Tight, because he can be exact. He walks in continuous space and his
+        // route's last stretch aims at the spot itself, so there is no reason for
+        // him to stop two units short and report himself lined up -- which is
+        // what a reach-distance threshold had him doing. That number is how close
+        // he stands to a crate he is bending for; it is not what "on the mark"
+        // means. Latched once reached, so a footfall does not jog him off it.
         const float away = glm::length(glm::vec2(m_pos.x - m_stationWorld.x,
                                                  m_pos.y - m_stationWorld.z));
-        if (away < params.reachDistance + 0.6f) {
+        if (m_atStation || away < 0.55f) {
             m_atStation = true;
             m_goalActive = false;
             m_speedScale = 0.0f;       // stand on the spot, feet under him

@@ -241,6 +241,7 @@ private:
 
     bool       m_stationed = false;
     bool       m_atStation  = false;
+    int        m_stationTries = 0;
     glm::vec3  m_stationWorld{0.0f};
 
     glm::vec3  m_home{0.0f};

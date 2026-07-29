@@ -201,6 +201,21 @@ bool Walker::canAdvance(const Ground& hf, int dir) const {
         && goodStep(hf, fr, fr + d, surfaceUnder(hf, fr));
 }
 
+// The 2x2 block whose CENTRE lands nearest a world point.
+//
+// Not the same as the block offset from the nearest node, which is what the
+// hauling code uses and is fine there -- a crate only has to be reached. A
+// station has to be STOOD ON, and he stands at the middle of his block, so the
+// question is which block puts its middle closest. The difference is a whole
+// node: sent to a mark he settled two and a half units off it, and looked like
+// he was near his spot rather than on it, because he was.
+static glm::ivec2 blockNearest(const Ground& hf, const glm::vec3& world) {
+    const float half = hf.n() * 0.5f * hf.spacing();
+    return glm::ivec2(
+        static_cast<int>(std::round((world.x + half) / hf.spacing() - 0.5f)),
+        static_cast<int>(std::round((world.z + half) / hf.spacing() - 0.5f)));
+}
+
 // Nearest lattice node to a world point, which is how anything out in continuous
 // space gets expressed to a creature that only understands nodes.
 static glm::ivec2 nodeNear(const Ground& hf, const glm::vec3& world) {
@@ -355,6 +370,7 @@ void Walker::orderTo(const Ground& hf, const glm::vec3& spot) {
 
     m_stationed = true;
     m_atStation = false;
+    m_stationTries = 0;
     m_stationWorld = spot;
     m_activity = Activity::Stationed;
 
@@ -362,7 +378,7 @@ void Walker::orderTo(const Ground& hf, const glm::vec3& spot) {
     // and keeps trying -- a ramp that is still coming down is the commonest
     // reason, and it will not be a reason for long.
     m_target = nodeNear(hf, spot);
-    planPath(hf, m_target - glm::ivec2(1));
+    planPath(hf, blockNearest(hf, spot));
 }
 
 void Walker::standDown() {
@@ -580,26 +596,46 @@ void Walker::update(const Ground& hf, float dt) {
     // Called in. Ahead of the leash, the leaving trip and any job, because all
     // three of those are things he does when nobody has told him otherwise.
     if (m_stationed) {
+        // Arrival LATCHES. Once he is on his spot he stays on it, and nothing
+        // measured per-frame is allowed to take it back.
+        //
+        // Without the latch he shook. He cannot stand on an arbitrary point --
+        // his feet are lattice nodes, so the nearest he can get to a spot is the
+        // block containing it, which is up to a node and a half away. Asking him
+        // every frame whether he was within some radius of the exact spot, and
+        // replanning whenever the route ran out, meant he arrived as close as he
+        // could get, was told he had not arrived, replanned, took a step, and did
+        // that sixty times a second forever. From outside it reads as a seizure.
+        if (m_atStation) {
+            m_accum = 0.0f;
+            return;
+        }
+
+        // The block his station falls in. This -- not the spot -- is the thing he
+        // can actually stand on, so it is the thing he is asked about.
+        const glm::ivec2 want = blockNearest(hf, m_stationWorld);
         const glm::vec3 at = bodyCentre(hf);
         const float away = glm::length(glm::vec2(at.x - m_stationWorld.x,
                                                  at.z - m_stationWorld.z));
 
-        // On station and staying there. Judged by distance rather than by the
-        // route running out: the route ends at a block corner, and a block corner
-        // is up to a node and a half from the spot he was actually sent to.
-        if (away < 3.0f) {
+        if (m_block == want || away < 1.6f) {
             m_atStation = true;
             m_accum = 0.0f;
             return;
         }
 
-        m_atStation = false;
         if (m_pathIndex >= m_path.size()) {
-            // Route spent without arriving, or never had one. Ask again -- the
-            // usual reason is a ramp that was still coming down when he was
-            // called, and that stops being true shortly.
+            // Route spent and still not there. Try again a couple of times -- a
+            // ramp still coming down is the usual reason and it passes -- but
+            // count the attempts, because a station he cannot quite reach must
+            // end with him standing still near it rather than trying forever.
+            if (++m_stationTries > 3) {
+                m_atStation = true;
+                m_accum = 0.0f;
+                return;
+            }
             m_target = nodeNear(hf, m_stationWorld);
-            planPath(hf, m_target - glm::ivec2(1));
+            planPath(hf, blockNearest(hf, m_stationWorld));
         }
 
         m_accum += dt * std::max(0.0f, params.stepsPerSecond);
