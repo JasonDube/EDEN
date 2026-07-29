@@ -69,7 +69,14 @@ public:
     void callRally();     // everybody in, to their own station
     void standDown();     // as you were
     void launch();        // up, once the hold is sealed
-    void setDown();       // and back onto the ground
+
+    // Let go of the hover and fly it down. Landing is a thing you do, not a thing
+    // that happens to you: gravity builds a descent rate and lift is the only
+    // thing that spends it, so arriving gently is a decision made in the last few
+    // seconds. Ignored unless the ship is actually up.
+    void land();
+
+    void setDown();       // put it on the ground where it stands, at once
 
     // The module takes the movement keys while somebody is flying from the helm,
     // so the same W that walks you about the hold does not also walk you about

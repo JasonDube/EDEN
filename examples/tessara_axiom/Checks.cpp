@@ -1588,6 +1588,38 @@ void checkThePlayerRides() {
            aboardOnDeck && sealedAt >= 0 && rose > 1.0f &&
            carriedFrames >= total - 2 && std::fabs(standsAt - stoodAt) < 0.25f,
            detail);
+
+    // ...and brings him back down. Same seam, opposite direction, and exactly the
+    // kind of thing that works one way round and not the other -- the launch left
+    // him on the pad for two orderings that only bite while the deck is rising.
+    if (sealedAt < 0) return;
+
+    int downFrames = 0;
+    mod.land();
+    for (int i = 0; i < 60 * 60; ++i) {
+        // Nobody at the helm and no keys held, so this is the ugliest descent
+        // available: hands off, all the way down. It is the carry that is on trial
+        // here, not the airmanship, and an unflown drop is the harshest version of
+        // it -- the deck moves fastest, so anything that fails to keep up fails
+        // here first.
+        if (frame()) ++downFrames;
+        if (mod.launchState() != TessaraModule::Launch::Flying) break;
+    }
+
+    const float rested = ship.origin().y;
+    const float deckDown = rested + ship.params.deckHeight;
+    const float onDeck = (eye.y - kEye) - deckDown;
+
+    char downDetail[192];
+    std::snprintf(downDetail, sizeof downDetail,
+                  "came down over %d carried frames, touched at %.1f/s, "
+                  "stands %+.2f above the deck, aboard %d",
+                  downFrames, ship.touchdownSpeed(), onDeck, (int)mod.playerAboard());
+
+    report("and brings the player back down",
+           !ship.airborne() && downFrames > 30 && std::fabs(onDeck) < 0.25f &&
+           mod.playerAboard(),
+           downDetail);
 }
 
 // ---------------------------------------------------------------------------
@@ -1646,6 +1678,132 @@ void checkTheHelmView() {
     report("the captain turns with the bow",
            aligned > 0.999f && std::fabs(swung) > 20.0f && toPort < 0.0f && still > 0.999f,
            detail);
+}
+
+// ---------------------------------------------------------------------------
+// 5f. It comes down, and coming down is something you can do badly.
+//
+// The hover is a clearance the ship is not allowed through, so landing is that
+// floor being let go of -- and once it is, the only thing holding it up is the
+// lift being asked for. Which means the descent has to be a real fall with a real
+// rate, and the test of that is not that it lands: it is that a landing flown
+// badly arrives hard and one flown well does not. A "physics" landing that cannot
+// be botched is an animation with extra steps.
+//
+// Three descents from the same height, differing only in what the pilot does:
+// nothing at all, a late grab, and a proper flare.
+// ---------------------------------------------------------------------------
+void checkTheLanding() {
+    // The pilot, as a descent rate he is willing to accept. Nobody flares at a
+    // height -- they flare when the ground is coming up too fast -- and a
+    // fixed-height trigger is a bang-bang controller that can hold a hover
+    // instead of landing, which tests the controller rather than the ship.
+    struct Run { const char* name; float wants; float from; };
+    const Run runs[] = {
+        { "hands off",  -1.0f, 999.0f },   // never touch it
+        { "late grab",   4.0f,   6.0f },   // right rate, noticed far too late
+        { "flared",      4.0f, 999.0f },   // flown all the way down
+    };
+
+    float speeds[3] = {0.0f, 0.0f, 0.0f};
+    bool  landed[3] = {false, false, false};
+    float rode[3]   = {0.0f, 0.0f, 0.0f};
+    int   which = 0;
+
+    for (const Run& run : runs) {
+        Scene s(0.0f, {0.0f, 0.0f}, 34.0f);
+
+        // Somebody in the hold, so the descent is also asked whether it brings
+        // people down as well as taking them up.
+        Biped rider;
+        const glm::vec3 st = s.ship.stationPosition(0);
+        rider.reset(s.ground, glm::vec2(st.x, st.z), 0.0f, 5u);
+
+        auto localTo = [](const Ship& sh, const glm::vec3& p) {
+            const glm::vec3 d = p - sh.origin();
+            return glm::vec3(glm::dot(d, sh.right()), d.y, glm::dot(d, sh.forward()));
+        };
+        const glm::vec3 riderWas = localTo(s.ship, rider.hipCentre());
+
+        s.closeRamp();
+        s.ship.setAirborne(true);
+
+        // Up to a working height first, so there is a descent to fly. Carrying
+        // him on the way up too, or the drift measured at the end is the climb.
+        for (int i = 0; i < 60 * 8; ++i) {
+            s.ship.fly(1.0f / 60.0f, 0.0f, 0.0f, 1.0f, s.terrain);
+            rider.carry(s.ship.lastMove(), s.ship.lastTurn(),
+                        s.ship.origin() - s.ship.lastMove());
+            s.republish();
+        }
+        const float from = s.ship.heightAboveGround(s.terrain);
+
+        s.ship.beginLanding();
+        for (int i = 0; i < 60 * 60 && s.ship.airborne(); ++i) {
+            const float agl  = s.ship.heightAboveGround(s.terrain);
+            const float rate = -s.ship.verticalSpeed();
+            const float lift = (run.wants > 0.0f && agl < run.from && rate > run.wants)
+                             ? 1.0f : 0.0f;
+
+            s.ship.fly(1.0f / 60.0f, 0.0f, 0.0f, lift, s.terrain);
+            rider.carry(s.ship.lastMove(), s.ship.lastTurn(),
+                        s.ship.origin() - s.ship.lastMove());
+            s.republish();
+        }
+
+        landed[which] = !s.ship.airborne();
+        speeds[which] = s.ship.touchdownSpeed();
+        rode[which] = glm::length(localTo(s.ship, rider.hipCentre()) - riderWas);
+        if (g_verbose) {
+            std::printf("      %-10s from %.0f up: touched down at %.1f/s (%s), "
+                        "rider off by %.2f\n",
+                        run.name, from, speeds[which],
+                        s.ship.landedHard() ? "hard" : "clean", rode[which]);
+        }
+        ++which;
+    }
+
+    Scene ref(0.0f, {0.0f, 0.0f}, 34.0f);
+    const float hardAt = ref.ship.flight.hardAt;
+
+    char detail[192];
+    std::snprintf(detail, sizeof detail,
+                  "hands off %.1f/s, late grab %.1f/s, flared %.1f/s (hard above %.0f)",
+                  speeds[0], speeds[1], speeds[2], hardAt);
+
+    report("it lands, and a bad landing is a bad landing",
+           landed[0] && landed[1] && landed[2] &&
+           speeds[0] > hardAt &&              // untouched, it arrives hard
+           speeds[2] < hardAt &&              // flown down, it does not
+           speeds[2] < speeds[1] &&           // and flying it earlier is better
+           rode[0] < 0.5f && rode[2] < 0.5f,  // and the hold came down too
+           detail);
+
+    // The ramp has to reach the ground it landed ON, not the pad it left.
+    {
+        Scene s(0.0f, {0.0f, 0.0f}, 34.0f);
+        s.closeRamp();
+        s.ship.setAirborne(true);
+        for (int i = 0; i < 60 * 6; ++i) s.ship.fly(1.0f / 60.0f, 1.0f, 0.0f, 1.0f, s.terrain);
+        s.ship.beginLanding();
+        for (int i = 0; i < 60 * 60 && s.ship.airborne(); ++i) {
+            const float rate = -s.ship.verticalSpeed();
+            s.ship.fly(1.0f / 60.0f, 0.0f, 0.0f, rate > 4.0f ? 1.0f : 0.0f, s.terrain);
+        }
+        s.ship.openRamp();
+        for (int i = 0; i < 300; ++i) s.ship.update(1.0f / 60.0f);
+        s.republish();
+
+        const glm::vec3 tip = s.ship.rampFootPosition();
+        const float under = s.terrain.heightAtWorld(tip.x, tip.z);
+        const float gap = tip.y - under;
+
+        char rampDetail[160];
+        std::snprintf(rampDetail, sizeof rampDetail,
+                      "tip finished %+.2f from the ground it landed on", gap);
+        report("the ramp reaches the ground it landed on",
+               !s.ship.airborne() && gap < 0.4f && gap > -1.0f, rampDetail);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1785,6 +1943,7 @@ int runShipChecks(bool verbose) {
     checkStationHonesty();
     checkThePlayerRides();
     checkTheHelmView();
+    checkTheLanding();
     checkTheRealPlanet();
 
     std::printf("  %s\n\n", g_failed ? "SOMETHING IS BROKEN" : "all ok");

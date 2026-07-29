@@ -147,13 +147,47 @@ public:
         float climbRate = 14.0f;
         float clearance = 7.0f;    // never closer than this to the ground
         float ceiling   = 260.0f;  // nor further from it
+
+        // ---- coming down -------------------------------------------------
+        // The clearance above is what makes this a hover: it is a floor the ship
+        // is simply not allowed through. Landing is that floor being let go of,
+        // and once it is gone the only thing holding a hundred tons up is the
+        // lift the pilot is asking for. So the descent is not a scripted
+        // animation -- it is a fall being flown, and it can be flown badly.
+        float gravity   = 11.0f;   // units per second per second, unlifted
+        float thrust    = 30.0f;   // what full lift answers it with
+        float maxDrop   = 26.0f;   // terminal descent; airframes have one
+        float hardAt    = 7.0f;    // touchdown faster than this is a bad one
     };
     Flight flight;
+
+    // Let go of the hover floor and start falling. Flown down from here: lift
+    // still works, and is the only thing that stops it arriving hard.
+    void beginLanding() { m_landing = true; }
+    void abortLanding() { m_landing = false; }
+    bool landing() const { return m_landing; }
+
+    // How fast it was going down when the gear met the ground, and whether that
+    // counts as a landing or an arrival. Both stay readable after touchdown so
+    // whoever was flying gets told.
+    float touchdownSpeed() const { return m_touchdownSpeed; }
+    bool  landedHard() const { return m_touchdownSpeed > flight.hardAt; }
+    float verticalSpeed() const { return m_vy; }
 
     // Controls are -1..1. `ground` is asked how high the world is here, because a
     // surface aircraft that will not fly into a hill is most of what makes one
     // pleasant, and it costs one height query.
     void fly(float dt, float forward, float turn, float lift, const TerrainSource& ground);
+
+    // Put it on the ground where it stands, at once, and report the displacement
+    // so everything aboard can be moved by the same amount. The blunt instrument
+    // beside beginLanding(): no descent, no way to do it badly, and nothing to fly.
+    glm::vec3 settle(const TerrainSource& ground);
+
+    // How high the world is under the hull -- the highest of several samples along
+    // it, not the one under the middle. Public because a landing pad, a shadow and
+    // a HUD all want the same number.
+    float groundUnderHull(const TerrainSource& ground) const;
 
     // What the last fly() actually did. Everything standing in the hold has to be
     // moved by exactly this, which is the whole of carrying passengers.
@@ -161,7 +195,12 @@ public:
     float     lastTurn() const { return m_lastTurn; }
 
     bool  airborne() const { return m_airborne; }
-    void  setAirborne(bool on) { m_airborne = on; }
+    void  setAirborne(bool on) {
+        m_airborne = on;
+        m_landing = false;
+        m_vy = 0.0f;
+        if (on) m_touchdownSpeed = 0.0f;   // last arrival stays readable after it
+    }
     float heightAboveGround(const TerrainSource& ground) const {
         return m_origin.y - ground.heightAtWorld(m_origin.x, m_origin.z);
     }
@@ -210,7 +249,12 @@ private:
     bool  m_opening = false;
     bool  m_rampHeld = false;
     float m_bridgeDoor = 0.0f;   // 0 shut, 1 open
+    void solveRampAngle();
+
     bool  m_airborne = false;
+    bool  m_landing  = false;
+    float m_vy = 0.0f;               // vertical speed, only while coming down
+    float m_touchdownSpeed = 0.0f;   // how fast it was falling when it arrived
     glm::vec3 m_lastMove{0.0f};
     float m_lastTurn = 0.0f;
     float m_rampLength = 4.4f; // the doorway height

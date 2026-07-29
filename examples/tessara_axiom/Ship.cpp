@@ -84,8 +84,7 @@ void Ship::place(TerrainSource& hf, glm::vec2 near, float yawDegrees) {
 
     // Aimed a little BELOW the ground for the same reason: a ramp tip landing
     // exactly level with a flat pad is a coplanar face, and it flickers.
-    m_openAngle = glm::degrees(std::asin(
-        std::clamp((params.deckHeight + params.groundBite) / m_rampLength, 0.0f, 0.95f)));
+    solveRampAngle();
 }
 
 void Ship::update(float dt, bool obstructed) {
@@ -108,6 +107,48 @@ void Ship::update(float dt, bool obstructed) {
     m_ramp = std::clamp(m_ramp + (m_opening ? rate : -rate), 0.0f, 1.0f);
 }
 
+// Terrain following, which is most of what makes a surface aircraft pleasant and
+// costs a handful of height queries. The floor is the ground UNDER THE HULL rather
+// than under its centre -- a ship thirty-eight units long crossing a ridge meets
+// it with its nose, and a clearance measured amidships would have the bow buried
+// while the middle was comfortably clear. Landing on it uses the same number, so
+// setting down across a rise rests on the rise.
+float Ship::groundUnderHull(const TerrainSource& ground) const {
+    float below = ground.heightAtWorld(m_origin.x, m_origin.z);
+    const float halfL = params.length * 0.5f;
+    for (float along : {-halfL, -halfL * 0.5f, halfL * 0.5f, halfL}) {
+        const glm::vec3 at = m_origin + forward() * along;
+        below = std::max(below, ground.heightAtWorld(at.x, at.z));
+    }
+    return below;
+}
+
+// The ramp's angle, solved for the deck height it actually has to reach down from.
+// Worked out once at placement and again on every touchdown, because a ramp still
+// reaching for the pad it took off from either hangs in the air or buries its tip.
+void Ship::solveRampAngle() {
+    m_openAngle = glm::degrees(std::asin(
+        std::clamp((params.deckHeight + params.groundBite) / m_rampLength, 0.0f, 0.95f)));
+}
+
+// Put it on the ground where it stands, in one move, and hand back the
+// displacement -- because everything aboard has to be moved by exactly it, and a
+// ship that arrives without its crew is the bug this whole seam exists to avoid.
+glm::vec3 Ship::settle(const TerrainSource& ground) {
+    const glm::vec3 was = m_origin;
+
+    m_origin.y = groundUnderHull(ground);
+    m_airborne = false;
+    m_landing  = false;
+    m_vy = 0.0f;
+    m_touchdownSpeed = 0.0f;   // it was set down, not landed
+    solveRampAngle();
+
+    m_lastMove = m_origin - was;
+    m_lastTurn = 0.0f;
+    return m_lastMove;
+}
+
 void Ship::fly(float dt, float forward, float turn, float lift,
                const TerrainSource& ground) {
     const glm::vec3 was = m_origin;
@@ -115,30 +156,51 @@ void Ship::fly(float dt, float forward, float turn, float lift,
 
     m_yaw += glm::clamp(turn, -1.0f, 1.0f) * flight.turnRate * dt;
     m_origin += this->forward() * (glm::clamp(forward, -1.0f, 1.0f) * flight.speed * dt);
-    m_origin.y += glm::clamp(lift, -1.0f, 1.0f) * flight.climbRate * dt;
+    if (!m_landing) m_origin.y += glm::clamp(lift, -1.0f, 1.0f) * flight.climbRate * dt;
 
-    // Terrain following, which is most of what makes a surface aircraft pleasant
-    // and costs one height query. The floor is the ground UNDER THE HULL rather
-    // than under its centre -- a ship thirty-eight units long crossing a ridge
-    // meets it with its nose, and a clearance measured amidships would have the
-    // bow buried while the middle was comfortably clear.
-    float below = ground.heightAtWorld(m_origin.x, m_origin.z);
-    const float halfL = params.length * 0.5f;
-    for (float along : {-halfL, -halfL * 0.5f, halfL * 0.5f, halfL}) {
-        const glm::vec3 at = m_origin + this->forward() * along;
-        below = std::max(below, ground.heightAtWorld(at.x, at.z));
-    }
+    const float below = groundUnderHull(ground);
 
-    // Held off the ground, but at a RATE rather than by decree. Clamping it
-    // outright means take-off is a single frame in which the ship, and the deck,
-    // and everybody standing on the deck, are seven units higher than they were --
-    // and anything that reads a position once a frame sees them teleport. A ship
-    // that rises is also simply what leaving the ground looks like.
-    const float floor = below + flight.clearance;
-    if (m_origin.y < floor) {
-        m_origin.y = std::min(floor, m_origin.y + flight.climbRate * dt);
+    if (m_landing) {
+        // Flown down, not lowered.
+        //
+        // Everything above this point is a hover: the clearance is a floor the
+        // ship is simply not allowed through, and while it holds, height is
+        // whatever the pilot last asked for. Landing is letting go of that floor,
+        // and the moment it is gone the only thing holding the ship up is lift.
+        // So the descent carries a real vertical speed that gravity builds and
+        // lift spends, and arriving is a thing you can do badly.
+        m_vy += (glm::clamp(lift, 0.0f, 1.0f) * flight.thrust - flight.gravity) * dt;
+        m_vy = std::clamp(m_vy, -flight.maxDrop, flight.climbRate);
+        m_origin.y += m_vy * dt;
+
+        // The gear meets the ground where the HULL does, which is the highest of
+        // the samples taken above rather than the one under the middle. Set down
+        // across a rise and it rests on the rise -- the ship does not tilt, so the
+        // alternative is a nose buried in a slope.
+        if (m_origin.y <= below) {
+            m_origin.y = below;
+            m_touchdownSpeed = -m_vy;
+            m_vy = 0.0f;
+            m_landing = false;
+            m_airborne = false;
+
+            // And the ramp is re-solved for the ground it is actually over.
+            solveRampAngle();
+        }
+    } else {
+        // Held off the ground, but at a RATE rather than by decree. Clamping it
+        // outright means take-off is a single frame in which the ship, and the
+        // deck, and everybody standing on the deck, are seven units higher than
+        // they were -- and anything that reads a position once a frame sees them
+        // teleport. A ship that rises is also simply what leaving the ground looks
+        // like.
+        const float floor = below + flight.clearance;
+        if (m_origin.y < floor) {
+            m_origin.y = std::min(floor, m_origin.y + flight.climbRate * dt);
+        }
+        m_origin.y = std::min(m_origin.y, below + flight.ceiling);
+        m_vy = 0.0f;
     }
-    m_origin.y = std::min(m_origin.y, below + flight.ceiling);
 
     m_lastMove = m_origin - was;
     m_lastTurn = m_yaw - wasYaw;

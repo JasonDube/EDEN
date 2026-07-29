@@ -435,11 +435,39 @@ void TessaraModule::launch() {
     m_launch = Launch::Flying;
 }
 
+void TessaraModule::land() {
+    if (m_launch != Launch::Flying) return;
+    m_ship.beginLanding();
+}
+
+// The blunt version: on the ground, now, wherever it happens to be over.
+//
+// It used to clear `airborne` and stop there, which left the ship hanging seven
+// units up with its ramp reaching for a pad it had flown away from, and everybody
+// aboard standing on a deck that had quietly stopped being a vehicle. It moves the
+// ship down and carries the hold with it, in one step, by the same manifest the
+// flying path uses -- a big move rather than a lot of small ones, but the same move.
 void TessaraModule::setDown() {
-    m_carriedPlayer = false;
-    m_ship.setAirborne(false);
+    if (!m_ground || !m_placed) {
+        m_carriedPlayer = false;
+        m_launch = Launch::Ready;
+        return;
+    }
+
+    const Manifest aboard = manifest();
+    const glm::vec3 move = m_ship.settle(*m_source);
+    republishGround();
+
+    m_carriedPlayer = aboard.player;
+    m_carryMove  = move;
+    m_carryTurn  = 0.0f;
+    m_carryAbout = m_ship.origin() - move;
+    if (glm::dot(move, move) > 1e-10f) carryPassengers(aboard, move, 0.0f);
+
     m_walker.unpark();
     m_launch = Launch::Ready;
+    std::printf("[tessara] set down at (%.0f, %.1f, %.0f), dropped %.1f\n",
+                m_ship.origin().x, m_ship.origin().y, m_ship.origin().z, -move.y);
 }
 
 // Who is aboard, asked while the ship is still where they are standing.
@@ -517,6 +545,10 @@ void TessaraModule::updateLaunch(float dt) {
             break;
 
         case Launch::Ready:
+            // Whatever the last airborne frame asked the host to do with the
+            // player, it has been done by now. Left standing, it would be redone
+            // every frame and walk him off across the planet.
+            m_carriedPlayer = false;
             break;
 
         case Launch::Flying: {
@@ -592,6 +624,19 @@ void TessaraModule::updateLaunch(float dt) {
 
             // And the walker rides, drawn in the ship's frame.
             m_walker.parkFollow(m_ship.origin(), m_ship.right(), m_ship.forward());
+
+            // Down. Checked AFTER the carry, because the frame it touches down on
+            // is a frame the ship moved -- the last few inches of the drop -- and
+            // everybody aboard has to come the whole way.
+            if (!m_ship.airborne()) {
+                m_walker.unpark();
+                m_launch = Launch::Ready;
+                m_reportAt = 0.0f;
+                std::printf("[tessara] down at (%.0f, %.1f, %.0f), %.1f/s on the gear -- %s\n",
+                            m_ship.origin().x, m_ship.origin().y, m_ship.origin().z,
+                            m_ship.touchdownSpeed(),
+                            m_ship.landedHard() ? "HARD" : "clean");
+            }
             break;
         }
     }
@@ -823,7 +868,28 @@ void TessaraModule::renderUI(float, float) {
                                                                : "NOT ABOARD - it left without you");
             ImGui::TextDisabled(m_atHelm ? "  at the helm: WASD to fly, space/shift for height"
                                          : "  nobody at the helm - holding course");
-            if (ImGui::Button("SET DOWN")) setDown();
+
+            // Coming down is flown, so the two numbers that matter while you do it
+            // are how far there is left and how fast you are using it up.
+            if (m_ship.landing()) {
+                const float rate = -m_ship.verticalSpeed();
+                const bool fast = rate > m_ship.flight.hardAt;
+                ImGui::TextColored(fast ? ImVec4(0.95f, 0.45f, 0.35f, 1.0f)
+                                        : ImVec4(0.35f, 0.9f, 0.45f, 1.0f),
+                                   "  LANDING - down %.1f/s%s", rate,
+                                   fast ? "  TOO FAST, hold space" : "");
+                ImGui::TextDisabled("  hold space to flare; %.0f to go", agl);
+                if (ImGui::Button("abort")) m_ship.abortLanding();
+                ImGui::SameLine();
+                if (ImGui::Button("cut and drop")) setDown();
+            } else {
+                if (ImGui::Button("LAND")) land();
+                ImGui::SameLine();
+                ImGui::TextDisabled("let go of the hover and fly it down");
+                if (ImGui::Button("SET DOWN")) setDown();
+                ImGui::SameLine();
+                ImGui::TextDisabled("put it on the ground, no descent");
+            }
         } else if (ImGui::Button("stand down")) {
             standDown();
         }
