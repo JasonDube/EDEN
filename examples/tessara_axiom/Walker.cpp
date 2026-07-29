@@ -350,6 +350,30 @@ void Walker::assignFetch(const Ground& hf, const glm::vec3& crate,
     m_activity = m_hasTask ? Activity::Approach : Activity::Wander;
 }
 
+void Walker::orderTo(const Ground& hf, const glm::vec3& spot) {
+    abandonTask();
+
+    m_stationed = true;
+    m_atStation = false;
+    m_stationWorld = spot;
+    m_activity = Activity::Stationed;
+
+    // Planned, like every trip he makes. If there is no route he stays ordered
+    // and keeps trying -- a ramp that is still coming down is the commonest
+    // reason, and it will not be a reason for long.
+    m_target = nodeNear(hf, spot);
+    planPath(hf, m_target - glm::ivec2(1));
+}
+
+void Walker::standDown() {
+    m_stationed = false;
+    m_atStation = false;
+    m_activity = Activity::Wander;
+    m_path.clear();
+    m_pathNodes.clear();
+    m_pathIndex = 0;
+}
+
 void Walker::abandonTask() {
     m_path.clear();
     m_pathNodes.clear();
@@ -364,6 +388,7 @@ const char* Walker::activityName() const {
         case Activity::Carry:    return "hauling it to the pile";
         case Activity::Leaving:  return "heading back outside";
         case Activity::Waiting:  return "waiting for the ramp";
+        case Activity::Stationed: return "answering the rally";
         default:                 return "wandering";
     }
 }
@@ -402,7 +427,7 @@ void Walker::tick(const Ground& hf) {
         // step, so "am I going the right way" is an equality test rather than a
         // search, and he cannot wedge in a local minimum because the route was
         // proved to exist before he set off.
-        if ((m_hasTask || m_leaving) && m_pathIndex < m_path.size()) {
+        if ((m_hasTask || m_leaving || m_stationed) && m_pathIndex < m_path.size()) {
             int want = m_path[m_pathIndex];
 
             if (want != m_dir) {
@@ -551,6 +576,38 @@ void Walker::update(const Ground& hf, float dt) {
     if (m_visited.empty()) return;
 
     escapeIfBuried(hf);
+
+    // Called in. Ahead of the leash, the leaving trip and any job, because all
+    // three of those are things he does when nobody has told him otherwise.
+    if (m_stationed) {
+        const glm::vec3 at = bodyCentre(hf);
+        const float away = glm::length(glm::vec2(at.x - m_stationWorld.x,
+                                                 at.z - m_stationWorld.z));
+
+        // On station and staying there. Judged by distance rather than by the
+        // route running out: the route ends at a block corner, and a block corner
+        // is up to a node and a half from the spot he was actually sent to.
+        if (away < 3.0f) {
+            m_atStation = true;
+            m_accum = 0.0f;
+            return;
+        }
+
+        m_atStation = false;
+        if (m_pathIndex >= m_path.size()) {
+            // Route spent without arriving, or never had one. Ask again -- the
+            // usual reason is a ramp that was still coming down when he was
+            // called, and that stops being true shortly.
+            m_target = nodeNear(hf, m_stationWorld);
+            planPath(hf, m_target - glm::ivec2(1));
+        }
+
+        m_accum += dt * std::max(0.0f, params.stepsPerSecond);
+        int guard = 0;
+        while (m_accum >= 1.0f && guard < 64) { m_accum -= 1.0f; tick(hf); ++guard; }
+        if (guard >= 64) m_accum = 0.0f;
+        return;
+    }
 
     // Strayed too far: come back.
     //

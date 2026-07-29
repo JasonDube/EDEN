@@ -58,6 +58,18 @@ public:
     // rather than broken -- there is simply nowhere to put a ship.
     void setTerrain(eden::Terrain* terrain);
 
+    // ---- the launch sequence -----------------------------------------------
+    // Rally, seal, ready. Deliberately a sequence with named states rather than
+    // a button that does everything: each step waits on a thing that can fail or
+    // take a while -- a walker on the far side of the field, a ramp that will not
+    // shut because somebody is standing on it -- and a state you can name is a
+    // state you can show, and one the player can see the ship is stuck in.
+    enum class Launch { Idle, Rallying, Sealing, Ready };
+
+    void callRally();     // everybody in, to their own station
+    void standDown();     // as you were
+    Launch launchState() const { return m_launch; }
+
     // Standing at the foot of the ramp looking up it -- which is both the most
     // useful place to be dropped and the one that shows you at a glance whether
     // any of this is working.
@@ -78,6 +90,8 @@ private:
     void scatterCrates();
     void republishGround();
     void updateHauling();
+    void updateLaunch();
+    const char* launchLabel() const;
     void rebuildGeometry();
     void upload(const std::vector<SceneVertex>& verts,
                 const std::vector<uint32_t>& indices, uint32_t& handle);
@@ -121,6 +135,8 @@ private:
     std::vector<uint32_t>    m_indices;
 
     std::string m_renderError;
+
+    Launch m_launch = Launch::Idle;
 
     bool m_playing = false;
     bool m_placed = false;

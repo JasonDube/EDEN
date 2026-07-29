@@ -27,7 +27,7 @@ public:
     // parts that already existed -- the hand goals were always a target the arms
     // solve toward, so reaching for something real needed no new kinematics at
     // all, only somewhere else to point them.
-    enum class Activity { Wander, Approach, Reach, Lift, Carry, Place };
+    enum class Activity { Wander, Approach, Reach, Lift, Carry, Place, Stationed };
 
     struct Params {
         float walkSpeed   = 5.0f;    // world units per second
@@ -277,6 +277,15 @@ public:
     // and whether it is open are asked of the Ground as he goes -- see aimAt().
     void assignFetch(const Ground& hf, const glm::vec3& crate, const glm::vec3& storage);
 
+    // ---- being called in ---------------------------------------------------
+    // Go to this spot and stand on it. Outranks a job. See Walker::orderTo -- the
+    // same order, answered by a creature that steers rather than one that plans,
+    // which is the only difference between them here.
+    void orderTo(const Ground& hf, const glm::vec3& spot);
+    bool ordered() const { return m_stationed; }
+    bool onStation() const { return m_stationed && m_atStation; }
+    void standDown();
+
     // He is stood at a way through that is closed, holding a job on the far side
     // of it. Not an error and not something he resolves: somebody has to open it.
     bool wayShut() const { return m_wayShut; }
@@ -386,6 +395,10 @@ private:
     glm::vec3 m_routedTo{0.0f};
     bool      m_replan = true;
     bool      m_routeFailed = false;
+
+    bool      m_stationed = false;
+    bool      m_atStation  = false;
+    glm::vec3 m_stationWorld{0.0f};
 
     glm::vec3 m_home{0.0f};
     float     m_homeRadius = 0.0f;

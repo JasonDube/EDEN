@@ -43,7 +43,7 @@ public:
     // not the carrying -- it is that the heading rule has to change. Wandering
     // scores a direction by how much UNWALKED ground it opens; hauling scores it
     // by how much closer it gets him. Same loop, opposite objective.
-    enum class Activity { Wander, Approach, Carry, Leaving, Waiting };
+    enum class Activity { Wander, Approach, Carry, Leaving, Waiting, Stationed };
 
     struct Params {
         // What counts as a wall. Whether this bites at all depends on the
@@ -102,6 +102,18 @@ public:
     // ---- hauling ----------------------------------------------------------
     void assignFetch(const Ground& hf, const glm::vec3& crate, const glm::vec3& storage);
     void abandonTask();
+
+    // ---- being called in ---------------------------------------------------
+    // Go to this spot and stand on it. Outranks a job: a rally is a rally.
+    //
+    // A numbered station rather than "come here" because five of these have to
+    // line up without treading on each other, and because a spot he has been SENT
+    // to is one the scene can ask whether he has reached. Standing near a ship is
+    // not a state anything can be certain of.
+    void orderTo(const Ground& hf, const glm::vec3& spot);
+    bool ordered() const { return m_stationed; }
+    bool onStation() const { return m_stationed && m_atStation; }
+    void standDown();
 
     Activity  activity() const { return m_activity; }
     bool      hasTask()  const { return m_hasTask; }
@@ -226,6 +238,10 @@ private:
     // front of itself.
     bool       m_waiting  = false;
     glm::vec3  m_waitWorld{0.0f};
+
+    bool       m_stationed = false;
+    bool       m_atStation  = false;
+    glm::vec3  m_stationWorld{0.0f};
 
     glm::vec3  m_home{0.0f};
     float      m_homeRadius = 0.0f;

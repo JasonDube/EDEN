@@ -251,7 +251,10 @@ void TessaraModule::update(float dt) {
     const glm::vec3 eye = m_playerPosition;
     m_biped.update(*m_ground, dt, &eye);
 
-    updateHauling();
+    // A rally suspends the haul loop outright: it hands out crates, and handing
+    // a crate to something that has been called in is how a rally never finishes.
+    if (m_launch == Launch::Idle) updateHauling();
+    updateLaunch();
     rebuildGeometry();
 }
 
@@ -328,6 +331,85 @@ void TessaraModule::updateHauling() {
     }
 }
 
+void TessaraModule::callRally() {
+    if (!m_ground || !m_placed) return;
+
+    // Each to its OWN station, so five of them line up rather than converge.
+    m_biped.orderTo(*m_ground, m_ship.stationPosition(0));
+    m_walker.orderTo(*m_ground, m_ship.stationPosition(1));
+
+    // Whatever they were carrying goes down where they stand. A crate held by a
+    // creature that has stopped hauling would otherwise hang in the air at the
+    // last place its hands were.
+    for (int self = 0; self < 2; ++self) {
+        Hauler& h = m_haul[self];
+        if (h.crate >= 0) {
+            Crate& crate = m_crates[h.crate];
+            crate.position.y = m_ground->heightAt(crate.position.x, crate.position.z,
+                                                  crate.position.y, 2.0f) + kCrateSize * 0.5f;
+            m_freeSlots.push_back(h.slot);
+            h.crate = h.slot = -1;
+            h.wasCarrying = false;
+        }
+    }
+
+    // The way in has to be open to answer a rally, and shutting it is the NEXT
+    // step -- so anything mid-close reverses now rather than stranding whoever is
+    // still out on the field.
+    m_ship.openRamp();
+    m_launch = Launch::Rallying;
+}
+
+void TessaraModule::standDown() {
+    m_biped.standDown();
+    m_walker.standDown();
+    m_launch = Launch::Idle;
+}
+
+void TessaraModule::updateLaunch() {
+    switch (m_launch) {
+        case Launch::Idle:
+            break;
+
+        case Launch::Rallying: {
+            // Everybody on their spot AND actually inside, because a station is a
+            // place on the deck and standing at the foot of the ramp under it is
+            // not the same thing.
+            const bool bipedIn = m_biped.onStation() &&
+                                 m_ground->enclosureAt(m_biped.hipCentre()) >= 0;
+            const bool walkerIn = m_walker.onStation() &&
+                                  m_ground->enclosureAt(m_walker.bodyCentre(*m_ground)) >= 0;
+            if (bipedIn && walkerIn) {
+                m_ship.closeRamp();
+                m_launch = Launch::Sealing;
+            }
+            break;
+        }
+
+        case Launch::Sealing:
+            // The interlock can refuse -- somebody on the ramp reopens it -- and
+            // that is reported rather than fought. Shut means shut.
+            if (m_ship.rampProgress() <= 0.001f) {
+                m_launch = Launch::Ready;
+            } else if (m_ship.isOpening()) {
+                m_launch = Launch::Rallying;   // it reversed under somebody; wait again
+            }
+            break;
+
+        case Launch::Ready:
+            break;
+    }
+}
+
+const char* TessaraModule::launchLabel() const {
+    switch (m_launch) {
+        case Launch::Rallying: return "rallying - waiting for the crew";
+        case Launch::Sealing:  return "sealing the hold";
+        case Launch::Ready:    return "READY TO LAUNCH";
+        default:               return "";
+    }
+}
+
 void TessaraModule::attachRenderer(const eden::ModuleRenderSetup& setup) {
     detachRenderer();
     m_buffers = &setup.buffers;
@@ -383,6 +465,14 @@ void TessaraModule::rebuildGeometry() {
                     m_verts, m_indices);
     }
     appendStoragePad(m_storage, 1.6f, m_stored > 0, m_verts, m_indices);
+
+    // The stations, marked. A spot a unit is sent to should be a spot you can see
+    // it standing on -- otherwise a crew lined up correctly and a crew lined up by
+    // accident look identical.
+    for (int i = 0; i < m_ship.stationCount(); ++i) {
+        appendApproachMark(m_ship.stationPosition(i), 1.1f, m_launch != Launch::Idle,
+                           m_verts, m_indices);
+    }
     if (m_ship.rampProgress() > 0.15f) {
         appendApproachMark(m_ship.rampApproachPoint(), 1.5f, m_biped.hasCargo(),
                            m_verts, m_indices);
@@ -453,6 +543,21 @@ void TessaraModule::renderUI(float, float) {
                            "biped is waiting at a shut ramp");
     }
 
+    ImGui::Separator();
+    if (m_launch == Launch::Idle) {
+        if (ImGui::Button("RALLY")) callRally();
+        ImGui::SameLine();
+        ImGui::TextDisabled("call the crew in and seal the hold");
+    } else {
+        ImGui::TextColored(m_launch == Launch::Ready ? ImVec4(0.35f, 0.9f, 0.45f, 1.0f)
+                                                     : ImVec4(0.95f, 0.82f, 0.35f, 1.0f),
+                           "%s", launchLabel());
+        ImGui::Text("  biped:  %s", m_biped.onStation() ? "on station" : "coming");
+        ImGui::Text("  walker: %s", m_walker.onStation() ? "on station" : "coming");
+        if (ImGui::Button("stand down")) standDown();
+    }
+
+    ImGui::Separator();
     if (ImGui::Button("scatter crates again")) scatterCrates();
     ImGui::SameLine();
     if (ImGui::Button("work the ramp")) m_ship.toggleRamp();

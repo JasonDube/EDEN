@@ -1073,6 +1073,62 @@ void checkRoutesAndDeliveries() {
 } // namespace
 
 // ---------------------------------------------------------------------------
+// 5b. The rally: everybody in, to their OWN station, and the hold sealed.
+//
+// Stations are numbered rather than "somewhere in the bay" because a crew of
+// five has to line up without treading on each other, and because a spot a unit
+// was SENT to is one the scene can ask whether it reached. "Near the ship" is
+// not a state anything can be sure of, which is exactly the property a launch
+// sequence needs before it shuts a door.
+// ---------------------------------------------------------------------------
+void checkTheRally() {
+    Scene s(0.0f, {0.0f, 0.0f}, 34.0f);
+    const glm::vec3 o = s.ship.origin();
+
+    // Well out on the field, in different directions, so neither of them is
+    // simply already there.
+    Walker w;
+    w.reset(s.ground, s.ground.nodeNear(o + glm::vec3(60.0f, 0.0f, 45.0f)) - glm::ivec2(1), 0);
+    Biped man;
+    man.reset(s.ground, glm::vec2(o.x - 55.0f, o.z + 35.0f), 0.0f, 3u);
+
+    const glm::vec3 stationB = s.ship.stationPosition(0);
+    const glm::vec3 stationW = s.ship.stationPosition(1);
+    const float apart = glm::length(glm::vec2(stationB.x - stationW.x, stationB.z - stationW.z));
+
+    man.orderTo(s.ground, stationB);
+    w.orderTo(s.ground, stationW);
+
+    bool closing = false;
+    int sealedAt = -1;
+    for (int i = 0; i < 60 * 180; ++i) {
+        const bool busy = s.ship.isOnRamp(man.hipCentre()) ||
+                          s.ship.isOnRamp(w.bodyCentre(s.ground));
+        s.ship.update(1.0f / 60.0f, busy);
+        s.republish();
+        w.update(s.ground, 1.0f / 60.0f);
+        man.update(s.ground, 1.0f / 60.0f);
+
+        const bool bothIn = w.onStation() && man.onStation() &&
+                            s.ground.enclosureAt(w.bodyCentre(s.ground)) >= 0 &&
+                            s.ground.enclosureAt(man.hipCentre()) >= 0;
+        if (bothIn && !closing) { s.ship.closeRamp(); closing = true; }
+        if (closing && s.ship.rampProgress() <= 0.001f) { sealedAt = i; break; }
+    }
+
+    const glm::vec3 bp = man.hipCentre();
+    const glm::vec3 wp = w.bodyCentre(s.ground);
+    const float crewApart = glm::length(glm::vec2(bp.x - wp.x, bp.z - wp.z));
+
+    char detail[176];
+    std::snprintf(detail, sizeof detail,
+                  "stations %.1f apart, crew ended %.1f apart, sealed after %.0fs",
+                  apart, crewApart, sealedAt >= 0 ? sealedAt / 60.0f : -1.0f);
+    report("a rally brings them in and seals the hold",
+           sealedAt >= 0 && man.onStation() && w.onStation() && crewApart > 2.5f, detail);
+}
+
+// ---------------------------------------------------------------------------
 // 6. And all of it on an AUTHORED planet, not the field this example generates.
 //
 // The creatures were tuned against 11 units of relief on 256 units of ground.
@@ -1202,6 +1258,7 @@ int runShipChecks(bool verbose) {
     checkTheyLeaveWhenDone();
     checkTheDoorMoving();
     checkRoutesAndDeliveries();
+    checkTheRally();
     checkTheRealPlanet();
 
     std::printf("  %s\n\n", g_failed ? "SOMETHING IS BROKEN" : "all ok");

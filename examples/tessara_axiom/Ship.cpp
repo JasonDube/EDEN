@@ -408,6 +408,24 @@ Enclosure Ship::enclosure() const {
     return e;
 }
 
+glm::vec3 Ship::stationPosition(int index) const {
+    const int i = std::max(0, index);
+    const int row = i / 2;
+    const float side = (i % 2) ? 1.0f : -1.0f;
+
+    // Far enough apart that a walker's two-by-two footprint and a biped's
+    // shoulders do not overlap, and far enough forward that the pile at the rear
+    // third of the bay is behind everybody.
+    const float across = 2.6f;
+    const float spacing = 5.0f;
+    const float firstRow = -params.length * 0.10f;
+
+    return m_origin
+         + up() * params.deckHeight
+         + right() * (side * across)
+         + forward() * (firstRow + row * spacing);
+}
+
 glm::vec3 Ship::bayStoragePoint() const {
     // Rear third of the bay, so a stack does not block the way in.
     return m_origin + up() * params.deckHeight

@@ -388,9 +388,29 @@ void Biped::assignFetch(const Ground& hf, const glm::vec3& crate, const glm::vec
     }
 }
 
+void Biped::orderTo(const Ground& hf, const glm::vec3& spot) {
+    abandonTask();
+    m_stationed = true;
+    m_atStation = false;
+    m_stationWorld = spot;
+    m_activity = Activity::Stationed;
+    m_replan = true;
+    steerAlongRoute(hf, spot);
+}
+
+void Biped::standDown() {
+    m_stationed = false;
+    m_atStation = false;
+    m_activity = Activity::Wander;
+    m_route.clear();
+    m_routeIndex = 0;
+}
+
 void Biped::abandonTask() {
     m_hasTask = m_carrying = m_handOverride = m_goalActive = false;
     m_wayShut = false;
+    m_stationed = false;
+    m_atStation = false;
     m_routeFailed = false;
     m_route.clear();
     m_activity = Activity::Wander;
@@ -406,6 +426,7 @@ const char* Biped::activityName() const {
         case Activity::Lift:     return "standing up with it";
         case Activity::Carry:    return "carrying it to storage";
         case Activity::Place:    return "setting it down";
+        case Activity::Stationed: return "answering the rally";
         default:                 return "wandering";
     }
 }
@@ -473,6 +494,25 @@ void Biped::updateTask(const Ground& hf, float dt) {
     m_goalActive = false;
     m_speedScale = 1.0f;
     m_bendTarget = 0.0f;
+
+    // Called in. Before anything else he might be doing, because everything else
+    // he might be doing is what he does when nobody has told him otherwise.
+    if (m_stationed) {
+        m_activity = Activity::Stationed;
+
+        const float away = glm::length(glm::vec2(m_pos.x - m_stationWorld.x,
+                                                 m_pos.y - m_stationWorld.z));
+        if (away < params.reachDistance + 0.6f) {
+            m_atStation = true;
+            m_goalActive = false;
+            m_speedScale = 0.0f;       // stand on the spot, feet under him
+        } else {
+            m_atStation = false;
+            aimAt(hf, m_stationWorld);
+        }
+        m_squat += (0.0f - m_squat) * std::min(1.0f, dt * params.bendRate);
+        return;
+    }
 
     // Lost the way mid-job. Same answer as never having had one.
     if (m_routeFailed && m_hasTask) {

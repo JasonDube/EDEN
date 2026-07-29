@@ -127,6 +127,19 @@ public:
     // Reports itself shut whenever the ramp is not down far enough to walk on.
     Enclosure enclosure() const;
 
+    // ---- muster stations ---------------------------------------------------
+    // Numbered places in the hold where a unit stands for launch.
+    //
+    // Numbered rather than "somewhere in the bay" because a crew of five has to
+    // line up the same way every time, and because a station a unit can be SENT
+    // to is a thing the scene can check has been reached. "Near the ship" is not
+    // a state anything can be sure of.
+    //
+    // Laid out in pairs down the bay, port and starboard, working forward from
+    // behind the pile so nobody stands on the cargo.
+    int       stationCount() const { return 6; }
+    glm::vec3 stationPosition(int index) const;
+
     // Where cargo goes, and the spot on the ground you walk to before you can
     // walk UP. Published for the same reason as the patches.
     glm::vec3 bayStoragePoint() const;
