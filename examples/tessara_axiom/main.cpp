@@ -224,6 +224,18 @@ protected:
         handleKeys();
 
         if (!m_paused) {
+            // He walked to the panel because the way was shut, so the panel gets
+            // worked. Noticed rather than commanded: he puts himself in front of
+            // it and the scene sees him there, exactly as it sees the player.
+            //
+            // Only ever opens. A creature that could also shut it would shut it on
+            // the walker, who is standing outside holding a crate and waiting for
+            // precisely this.
+            if (m_showBiped && m_biped.wayShut() && !m_ship.isOpening() &&
+                glm::length(m_biped.hipCentre() - m_ship.controlPosition()) < kPanelRange) {
+                m_ship.toggleRamp();
+            }
+
             // Nobody gets shut in the ramp. The scene knows who is about; the
             // ship only knows whether it is clear.
             const bool rampBusy =

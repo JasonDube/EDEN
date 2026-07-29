@@ -84,6 +84,16 @@ struct Enclosure {
     glm::vec3 inside{0.0f};        // where you stand to come out
     bool      open = true;         // whether the way through is usable
 
+    // Where you stand to WORK it, if it can be worked at all.
+    //
+    // On the outside only, which is the whole of its politics: something shut
+    // out can let itself in, and something shut in cannot let itself out. That
+    // is a property of this door rather than of doors, and it is why the two
+    // creatures answer a closed ramp so differently -- one of them has hands and
+    // the other has to wait for it.
+    glm::vec3 control{0.0f};
+    bool      hasControl = false;
+
     // How wide the way through is. The two marks give its length; this gives it
     // a body, and it needs one because a doorway is somewhere you can BE. Halfway
     // down the ramp a creature is out of the hold already -- so by region alone
@@ -114,6 +124,11 @@ public:
 
     // Which enclosure a point is in, or -1 for the open world.
     int enclosureAt(const glm::vec3& p) const;
+
+    // The enclosure standing between these two, or null if nothing does. For
+    // anything that wants to reason about the door itself rather than be steered
+    // through it -- where to wait for it, where to work it.
+    const Enclosure* between(const glm::vec3& from, const glm::vec3& to) const;
 
     // ---- getting from one to the other -------------------------------------
     // Where to head for NEXT, when `to` is not in the same place as `from`.

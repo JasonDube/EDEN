@@ -379,6 +379,13 @@ Enclosure Ship::enclosure() const {
     // "still in the doorway" and "clear of the doorway" agree with what the
     // solids will actually let him do.
     e.corridorHalf = params.bayWidth * 0.46f - 1.6f;
+
+    // Standing room at the ramp control, out from the hull far enough that a body
+    // is not inside the belly while it reaches for the button.
+    e.hasControl = true;
+    e.control = m_origin
+              + right() * (params.width * 0.5f + 2.0f)
+              - forward() * (params.length * 0.22f);
     return e;
 }
 

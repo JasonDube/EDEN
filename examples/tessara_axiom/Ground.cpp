@@ -212,6 +212,13 @@ int Ground::enclosureAt(const glm::vec3& p) const {
     return -1;
 }
 
+const Enclosure* Ground::between(const glm::vec3& from, const glm::vec3& to) const {
+    const int here = enclosureAt(from);
+    const int there = enclosureAt(to);
+    if (here == there) return nullptr;
+    return &m_enclosures[here >= 0 ? here : there];
+}
+
 bool Ground::wayThrough(const glm::vec3& from, const glm::vec3& to,
                         glm::vec3& outWaypoint, bool& outShut) const
 {
@@ -268,7 +275,13 @@ bool Ground::wayThrough(const glm::vec3& from, const glm::vec3& to,
 
     if (!e.open) {
         outShut = true;
-        outWaypoint = (here >= 0) ? e.inside : e.outside;
+
+        // Shut, the next place to go is whatever will open it -- so for anything
+        // on the outside with hands, the way through IS the button. Anything shut
+        // IN gets the door itself and no more, because there is nothing on this
+        // side to work.
+        outWaypoint = (here < 0 && e.hasControl) ? e.control
+                    : (here >= 0 ? e.inside : e.outside);
         return true;
     }
 

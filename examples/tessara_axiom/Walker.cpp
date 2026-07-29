@@ -328,6 +328,7 @@ void Walker::assignFetch(const Ground& hf, const glm::vec3& crate,
     m_storageWorld = storage;
     m_carrying = false;
     m_leaving = false;      // a job outranks getting out of the way
+    m_waiting = false;
     m_taskTicks = 0;
 
     // No route, no job. Better to say so at once than to grind at a ridge.
@@ -339,7 +340,7 @@ void Walker::abandonTask() {
     m_path.clear();
     m_pathNodes.clear();
     m_pathIndex = 0;
-    m_hasTask = m_carrying = m_leaving = false;
+    m_hasTask = m_carrying = m_leaving = m_waiting = false;
     m_activity = Activity::Wander;
 }
 
@@ -348,6 +349,7 @@ const char* Walker::activityName() const {
         case Activity::Approach: return "driving to the crate";
         case Activity::Carry:    return "hauling it to the pile";
         case Activity::Leaving:  return "heading back outside";
+        case Activity::Waiting:  return "waiting for the ramp";
         default:                 return "wandering";
     }
 }
@@ -577,6 +579,59 @@ void Walker::update(const Ground& hf, float dt) {
         }
     }
 
+    // Waiting on a door. Re-asked every tick, because the whole point of waiting
+    // is that the thing waited for changes.
+    if (m_waiting) {
+        const Enclosure* door = hf.between(bodyCentre(hf), m_storageWorld);
+
+        // He stops waiting when there is a ROUTE, not when the door reports
+        // itself open. Those are not the same instant: the ramp calls itself open
+        // as soon as its tip is within stepping height of the ground, which is
+        // about four fifths of the way through its travel and a good half second
+        // before the far end of it is anywhere a search will cross.
+        //
+        // Asking once, at that moment, and giving up on a failure -- which is
+        // what the carry leg does everywhere else -- meant he waited a patient
+        // minute for the door, watched it open, and dropped the crate in the dirt
+        // half a second before the way through appeared. So he simply keeps
+        // asking; a door that is opening will answer shortly.
+        if (!door || door->open) {
+            m_target = nodeNear(hf, m_storageWorld);
+            if (planPath(hf, m_target - glm::ivec2(1))) {
+                m_waiting = false;
+                m_activity = Activity::Carry;
+            } else if (++m_taskTicks > params.giveUpTicks) {
+                // Open, and still no way through after a long time. Something
+                // other than the door is wrong; put it down and find other work.
+                m_hasTask = false;
+                m_carrying = false;
+                m_waiting = false;
+                m_activity = Activity::Wander;
+            }
+            m_accum = 0.0f;
+            return;
+        }
+
+        {
+            // Still shut. Walk to the waiting spot if he is not there yet; once
+            // he is, stand STILL. Not wander -- wandering would drift him back
+            // under the very door he is waiting for, which is how he got hit by
+            // it in the first place.
+            const glm::vec3 at = bodyCentre(hf);
+            const bool there = glm::length(glm::vec2(at.x - m_waitWorld.x,
+                                                     at.z - m_waitWorld.z)) < 4.0f;
+            if (there) {
+                m_accum = 0.0f;
+                return;
+            }
+            m_accum += dt * std::max(0.0f, params.stepsPerSecond);
+            int guard = 0;
+            while (m_accum >= 1.0f && guard < 64) { m_accum -= 1.0f; tick(hf); ++guard; }
+            if (guard >= 64) m_accum = 0.0f;
+            return;
+        }
+    }
+
     if (m_hasTask) {
         glm::vec2 here = glm::vec2(m_block) + 0.5f;
         float distance = glm::length(glm::vec2(m_target) - here);
@@ -590,10 +645,31 @@ void Walker::update(const Ground& hf, float dt) {
                 m_activity = Activity::Carry;
                 m_target = nodeNear(hf, m_storageWorld);
                 if (!planPath(hf, m_target - glm::ivec2(1))) {
-                    // Picked it up and cannot get it home. Put it down here.
-                    m_hasTask = false;
-                    m_carrying = false;
-                    m_activity = Activity::Wander;
+                    // No route. There are two very different reasons for that and
+                    // they want opposite answers.
+                    //
+                    // A SHUT DOOR is temporary and somebody else can open it, so
+                    // standing about holding the crate is exactly right -- he has
+                    // no hands to work a control with and nothing better to do.
+                    // WHERE he waits is not free, though: the ramp swings down
+                    // through the ground in front of its own doorway, so he waits
+                    // at the muster point, which is sited clear of that on purpose.
+                    //
+                    // Anything ELSE -- a ridge, a pocket the search cannot cross --
+                    // is not going to change, and he should put the crate down and
+                    // go find something he can actually do.
+                    const Enclosure* door = hf.between(bodyCentre(hf), m_storageWorld);
+                    if (door && !door->open) {
+                        m_waitWorld = door->outside;
+                        m_waiting = true;
+                        m_activity = Activity::Waiting;
+                        m_taskTicks = 0;
+                        planPath(hf, nodeNear(hf, m_waitWorld) - glm::ivec2(1));
+                    } else {
+                        m_hasTask = false;
+                        m_carrying = false;
+                        m_activity = Activity::Wander;
+                    }
                 }
             } else {
                 // Delivered. Letting go matters as much as picking up: without

@@ -747,6 +747,96 @@ void checkTheDoorMoving() {
         report("an opening ramp does not pin the walker", !pinned, detail);
     }
 
+    // A shut door, and the two creatures answering it completely differently --
+    // which is the point, and is a property of their bodies rather than of their
+    // programming. One has hands.
+    {
+        Scene s(0.0f, {0.0f, 0.0f}, 0.0f);
+        s.closeRamp();
+
+        const glm::vec3 pile = s.ship.bayStoragePoint();
+        const glm::vec3 muster = s.ship.rampApproachPoint();
+
+        // ---- the walker: fetch it anyway, then wait, and wait SOMEWHERE SAFE --
+        Walker w;
+        w.reset(s.ground, glm::ivec2(50, 30), 0);
+        glm::vec3 crate = muster - s.f() * 12.0f;
+        crate.y = s.terrain.heightAtWorld(crate.x, crate.z);
+        w.assignFetch(s.ground, crate, pile);
+
+        for (int i = 0; i < 60 * 60; ++i) {
+            s.ship.update(1.0f / 60.0f, s.ship.isOnRamp(w.bodyCentre(s.ground)));
+            s.republish();
+            w.update(s.ground, 1.0f / 60.0f);
+        }
+
+        const glm::vec3 held = w.bodyCentre(s.ground);
+        const bool stillHasIt = w.hasCargo();
+        const bool atTheSpot = glm::length(glm::vec2(held.x - muster.x, held.z - muster.z)) < 5.0f;
+
+        // And clear of where the door is about to land.
+        s.ship.toggleRamp();
+        for (int i = 0; i < 400; ++i) s.ship.update(1.0f / 60.0f);
+        const glm::vec3 tip = s.ship.rampFootPosition();
+        const bool clear = glm::length(glm::vec2(held.x - tip.x, held.z - tip.z)) > 2.0f;
+
+        char detail[160];
+        std::snprintf(detail, sizeof detail,
+                      "after a minute: %sholding it, %s the spot, %.1f from where the tip lands",
+                      stillHasIt ? "" : "NOT ", atTheSpot ? "at" : "NOT at",
+                      glm::length(glm::vec2(held.x - tip.x, held.z - tip.z)));
+        report("the walker waits out a shut ramp, safely",
+               stillHasIt && atTheSpot && clear, detail);
+
+        // Opened, he takes it in -- and does not drop it during the half second
+        // where the door calls itself open but the route does not exist yet.
+        bool delivered = false;
+        for (int i = 0; i < 60 * 30 && !delivered; ++i) {
+            s.ship.update(1.0f / 60.0f, s.ship.isOnRamp(w.bodyCentre(s.ground)));
+            s.republish();
+            w.update(s.ground, 1.0f / 60.0f);
+            const glm::vec3 p = w.bodyCentre(s.ground);
+            if (!w.hasCargo() && s.ground.enclosureAt(p) >= 0) delivered = true;
+        }
+        report("and takes it in when the ramp opens", delivered,
+               "kept hold of it through the moment the door reports open but is not walkable");
+    }
+
+    {
+        // ---- the biped: go and work the control -----------------------------
+        Scene s(0.0f, {0.0f, 0.0f}, 0.0f);
+        s.closeRamp();
+
+        const glm::vec3 pile = s.ship.bayStoragePoint();
+        const glm::vec3 muster = s.ship.rampApproachPoint();
+
+        Biped man;
+        glm::vec3 crate = muster - s.f() * 8.0f;
+        crate.y += 0.425f;
+        man.reset(s.ground, glm::vec2(muster.x - s.f().x * 18.0f,
+                                      muster.z - s.f().z * 18.0f), 0.0f, 1u);
+        man.assignFetch(crate, pile);
+
+        bool delivered = false;
+        for (int i = 0; i < 60 * 90 && !delivered; ++i) {
+            // The scene notices him at the panel, exactly as it notices the
+            // player there. He does not reach across the field and open a ship.
+            if (man.wayShut() && !s.ship.isOpening() &&
+                glm::length(man.hipCentre() - s.ship.controlPosition()) < 9.0f) {
+                s.ship.toggleRamp();
+            }
+            s.ship.update(1.0f / 60.0f, s.ship.isOnRamp(man.hipCentre()));
+            s.republish();
+            man.update(s.ground, 1.0f / 60.0f);
+            if (!man.hasCargo() && s.ground.enclosureAt(man.hipCentre()) >= 0) delivered = true;
+        }
+
+        char detail[128];
+        std::snprintf(detail, sizeof detail, "ramp finished at %.0f%%, crate %s",
+                      s.ship.rampProgress() * 100.0f, delivered ? "delivered" : "NOT delivered");
+        report("the biped opens the ramp himself", delivered, detail);
+    }
+
     // And swinging OPEN through somebody stood at the foot of it. That one is
     // allowed to shove -- it is a slab coming down and there is nowhere else for
     // him to be -- but it has to shove all of him. Moving a body without its

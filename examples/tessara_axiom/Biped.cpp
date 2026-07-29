@@ -280,14 +280,19 @@ bool Biped::aimAt(const Ground& hf, const glm::vec3& target) {
         return true;
     }
 
-    // Reported, not acted on. A creature holding a crate in front of a closed
-    // ramp should stand there looking at it, which is a thing you can see and
-    // therefore a thing you can fix; wandering off is the same failure with the
-    // evidence removed. The scene above decides how long to allow it.
+    // Shut is not a reason to stand still. Ground hands back the CONTROL as the
+    // next place to go when the way is closed and he is on the outside of it, so
+    // he walks to the button and works it -- which is a thing he can do and the
+    // walker cannot, because he has hands and the walker has four feet.
+    //
+    // Nothing here presses anything. He gets himself to the panel and the scene
+    // notices him standing at it, the same way it notices the player standing
+    // there. A creature that could reach into the ship and open its ramp from
+    // across the field would be a different and much worse kind of creature.
     m_wayShut = shut;
 
     m_goal = glm::vec2(door.x, door.z);
-    m_goalActive = !shut;
+    m_goalActive = true;
     return false;
 }
 
