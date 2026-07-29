@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <chrono>
 #include <cstdio>
 
 #include "eden/Input.hpp"
@@ -229,6 +230,7 @@ bool TessaraModule::playerStart(glm::vec3& outPosition, float& outYawDegrees) co
 
 void TessaraModule::update(float dt) {
     if (!m_playing || !m_ground || !m_placed || dt <= 0.0f) return;
+    const auto thinkFrom = std::chrono::steady_clock::now();
 
     // The biped works the panel when a job needs the way open. Noticed rather
     // than commanded, exactly as the standalone example does it -- he stands in
@@ -269,6 +271,11 @@ void TessaraModule::update(float dt) {
     // a crate to something that has been called in is how a rally never finishes.
     if (m_launch == Launch::Idle) updateHauling();
     updateLaunch(dt);
+
+    const float thought = std::chrono::duration<float, std::milli>(
+        std::chrono::steady_clock::now() - thinkFrom).count();
+    m_msThink += (thought - m_msThink) * 0.1f;
+
     rebuildGeometry();
 }
 
@@ -686,9 +693,20 @@ void TessaraModule::upload(const std::vector<SceneVertex>& verts,
                            const std::vector<uint32_t>& indices, uint32_t& handle) {
     if (!m_buffers || verts.empty() || indices.empty()) return;
 
-    // Rebuilt rather than updated, because the creatures are re-meshed every
-    // frame -- their feet are somewhere new and their legs are a different shape.
-    if (handle != UINT32_MAX) m_buffers->destroyMeshBuffers(handle);
+    // Refilled, not rebuilt.
+    //
+    // The creatures ARE re-meshed every frame -- their feet are somewhere new and
+    // their legs are a different shape -- but that is a reason to put new numbers
+    // in the same buffers, not to get new ones. Destroying and creating three
+    // meshes a frame cost twelve device allocations and, on the unbatched path,
+    // six vkQueueWaitIdle stalls: six full flushes of a queue with a whole planet
+    // of terrain in it. That was one frame a second.
+    if (handle != UINT32_MAX &&
+        m_buffers->updateMeshBuffers(handle,
+            verts.data(), static_cast<uint32_t>(verts.size()), sizeof(SceneVertex),
+            indices.data(), static_cast<uint32_t>(indices.size()))) {
+        return;
+    }
     handle = m_buffers->createMeshBuffers(
         verts.data(), static_cast<uint32_t>(verts.size()), sizeof(SceneVertex),
         indices.data(), static_cast<uint32_t>(indices.size()));
@@ -696,6 +714,13 @@ void TessaraModule::upload(const std::vector<SceneVertex>& verts,
 
 void TessaraModule::rebuildGeometry() {
     if (!m_buffers || !m_ground) return;
+    const auto meshFrom = std::chrono::steady_clock::now();
+
+    // All of this frame's copies into ONE submit with ONE wait at the end of it,
+    // rather than a submit and a full-queue stall per buffer. Only if nobody else
+    // has a batch open -- ending theirs would submit a level load half-recorded.
+    const bool ownBatch = !m_buffers->batching();
+    if (ownBatch) m_buffers->beginBatch();
 
     // The ship, which only changes when its ramp does.
     m_verts.clear();
@@ -738,9 +763,26 @@ void TessaraModule::rebuildGeometry() {
     m_indices.clear();
     appendShipGlass(m_ship, m_verts, m_indices);
     upload(m_verts, m_indices, m_glassHandle);
+
+    if (ownBatch) m_buffers->endBatch();
+
+    const float took = std::chrono::duration<float, std::milli>(
+        std::chrono::steady_clock::now() - meshFrom).count();
+    m_msMesh += (took - m_msMesh) * 0.1f;
 }
 
 void TessaraModule::renderWorld(const eden::ModuleRenderFrame& frame) {
+    const auto drawFrom = std::chrono::steady_clock::now();
+    struct Stop {
+        const std::chrono::steady_clock::time_point& from;
+        float& into;
+        ~Stop() {
+            const float took = std::chrono::duration<float, std::milli>(
+                std::chrono::steady_clock::now() - from).count();
+            into += (took - into) * 0.1f;
+        }
+    } stop{drawFrom, m_msDraw};
+
     if (!m_pipeline || !m_buffers || !m_placed) return;
 
     vkCmdBindPipeline(frame.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipeline->getHandle());
@@ -896,6 +938,8 @@ void TessaraModule::renderUI(float, float) {
     }
 
     ImGui::Separator();
+    ImGui::TextDisabled("this module: think %.2f ms, mesh %.2f ms, draw %.2f ms",
+                        m_msThink, m_msMesh, m_msDraw);
     if (ImGui::Button("scatter crates again")) scatterCrates();
     ImGui::SameLine();
     if (ImGui::Button("work the ramp")) m_ship.toggleRamp();

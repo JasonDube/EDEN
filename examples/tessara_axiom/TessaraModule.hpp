@@ -183,6 +183,16 @@ private:
 
     std::string m_renderError;
 
+    // What this module itself costs, smoothed, in milliseconds.
+    //
+    // Shown in the panel rather than logged, because "the frame rate died" and
+    // "the frame rate died BECAUSE OF THIS" are different claims and the second one
+    // needs a number next to it. If these are small and the frame is not, the
+    // module is not the problem and something else should be looked at.
+    float m_msThink = 0.0f;    // gait, routing, the launch sequence
+    float m_msMesh  = 0.0f;    // re-meshing and uploading
+    float m_msDraw  = 0.0f;    // recording the draw
+
     Launch m_launch = Launch::Idle;
     bool   m_atHelm = false;
 

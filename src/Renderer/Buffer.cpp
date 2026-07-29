@@ -207,6 +207,54 @@ uint32_t BufferManager::createMeshBuffers(const void* vertices, uint32_t vertexC
     return handle;
 }
 
+bool BufferManager::updateMeshBuffers(uint32_t handle, const void* vertices,
+                                     uint32_t vertexCount, size_t vertexSize,
+                                     const uint32_t* indices, uint32_t indexCount) {
+    if (handle >= m_meshBuffers.size() || !m_meshBuffers[handle]) return false;
+    MeshBuffers& mesh = *m_meshBuffers[handle];
+
+    // Reuse if it fits, and grow with half again if it does not, so a mesh that
+    // breathes around a size settles rather than reallocating every frame.
+    // The staging buffer is kept as well as the device one. Reallocating it every
+    // frame is the same driver allocation, moved -- and the whole point here is
+    // that a steady-state frame allocates nothing at all.
+    auto fill = [&](std::unique_ptr<Buffer>& dst, std::unique_ptr<Buffer>& staging,
+                    const void* data, VkDeviceSize bytes, VkBufferUsageFlags usage) {
+        if (bytes == 0) return;
+        if (!dst || dst->getSize() < bytes) {
+            dst = std::make_unique<Buffer>(m_context, bytes + bytes / 2,
+                                          VK_BUFFER_USAGE_TRANSFER_DST_BIT | usage,
+                                          VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+        }
+        if (!staging || staging->getSize() < bytes) {
+            staging = std::make_unique<Buffer>(m_context, bytes + bytes / 2,
+                            VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                            VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+        }
+        staging->upload(data, bytes);
+
+        // Recorded, never handed over: this staging buffer belongs to the mesh and
+        // outlives the batch, so it does not go on the keep-alive list. The batch's
+        // wait at the end is what makes overwriting it next frame safe.
+        if (m_batching) Buffer::recordCopy(m_batchCmd, *staging, *dst, bytes);
+        else            Buffer::copy(m_context, *staging, *dst, bytes);
+    };
+
+    fill(mesh.vertexBuffer, mesh.vertexStaging, vertices, vertexCount * vertexSize,
+         VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
+    mesh.vertexCount = vertexCount;
+
+    if (indices && indexCount > 0) {
+        fill(mesh.indexBuffer, mesh.indexStaging, indices, indexCount * sizeof(uint32_t),
+             VK_BUFFER_USAGE_INDEX_BUFFER_BIT);
+        mesh.indexCount = indexCount;
+    } else {
+        mesh.indexCount = 0;
+    }
+    return true;
+}
+
 void BufferManager::beginBatch() {
     if (m_batching) return;
     VkCommandBufferAllocateInfo allocInfo{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
