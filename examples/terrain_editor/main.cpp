@@ -8852,6 +8852,27 @@ private:
         }
         wasEscapeDown = escapeDown;
 
+        // ...and back in again. Enter, or a click on the world rather than on a
+        // panel. Escape without this is a one-way door: it frees the mouse so the
+        // interface can be used and then leaves no way back to playing except
+        // leaving play mode, which is the very thing it was pressed to avoid.
+        if (m_isPlayMode && m_playModeCursorVisible) {
+            const ImGuiIO& io = ImGui::GetIO();
+            const bool typing = io.WantTextInput;
+            const bool overPanel = io.WantCaptureMouse;
+
+            // 335 is the numeric keypad's Enter, which Input does not name.
+            const bool enter = !typing &&
+                (Input::isKeyPressed(Input::KEY_ENTER) || Input::isKeyPressed(335));
+            const bool clickedWorld = !overPanel && Input::isMouseButtonPressed(0);
+
+            if ((enter || clickedWorld) && !m_inConversation && !m_quickChatMode &&
+                !m_inPanelFocusMode && !m_agentConsole.isOpen()) {
+                m_playModeCursorVisible = false;
+                Input::setMouseCaptured(true);
+            }
+        }
+
         // F key toggles focus mode exit (edge-detected)
         {
             static bool wasFDown = false;
