@@ -210,28 +210,39 @@ static glm::ivec2 nodeNear(const Ground& hf, const glm::vec3& world) {
     return glm::clamp(glm::ivec2(x, y), glm::ivec2(0), glm::ivec2(hf.n() - 1));
 }
 
-// Can a 2x2 block at `block` step one node along `dir`? Same rule canAdvance
-// applies to the live creature, asked about a hypothetical position -- which is
-// what makes the terrain searchable rather than only walkable.
+// Can a 2x2 block at `block`, standing at height `fromY`, step one node along
+// `dir`? Same rule canAdvance applies to the live creature, asked about a
+// hypothetical position -- which is what makes the terrain searchable rather than
+// only walkable. `outY` comes back as the height the block would then be at.
 //
-// Planned on the TERRAIN, not on whatever is stacked over it. A search visits
-// sixteen thousand block positions and has no creature standing at any of them,
-// so there is no foot whose height would say which of two surfaces a node means
-// -- and carrying a candidate height along every branch of a breadth-first
-// search is a different and much larger program than this one.
+// The height has to be carried, and this is why.
 //
-// The cost of that is honest and small: a route is never planned UP the ramp, so
-// he does not deliberately haul a crate aboard. What he does get is a route that
-// never runs through the hull, because a node inside a solid is refused here the
-// same as anywhere else. Walking onto the ship is left to the live gait, which
-// does know what each foot is standing on.
-bool Walker::blockCanStep(const Ground& hf, const glm::ivec2& block, int dir) const {
+// It was planned on the terrain once, on the grounds that a search visits
+// sixteen thousand block positions with no creature standing at any of them, so
+// there is no foot to say which of two surfaces a node means. That is true and it
+// cost him the ship: the cargo deck is two units up, and at terrain level the
+// whole bay is inside a solid, so every route to the pile came back NO ROUTE. He
+// would fetch a crate perfectly well and then have nowhere to take it.
+//
+// Carrying one height per block through the search is the fix and it is barely
+// more program: the frontier already stores where it came from, and now stores
+// how high it was when it got there. It is an approximation -- a block has four
+// corners and they are not all at one height -- but the exact version is the live
+// gait's job, and the gait is what actually walks the route.
+bool Walker::blockCanStep(const Ground& hf, const glm::ivec2& block, int dir,
+                          float fromY, float& outY) const {
     static const glm::ivec2 kOffsets[4] = { {0,0}, {1,0}, {1,1}, {0,1} };
     glm::ivec2 d  = dirVec(dir);
     glm::ivec2 fl = block + kOffsets[(dir + 1) % 4];
     glm::ivec2 fr = block + kOffsets[(dir + 2) % 4];
-    return goodStep(hf, fl, fl + d, hf.terrain().heightAt(fl))
-        && goodStep(hf, fr, fr + d, hf.terrain().heightAt(fr));
+
+    if (!goodStep(hf, fl, fl + d, fromY) || !goodStep(hf, fr, fr + d, fromY)) {
+        return false;
+    }
+
+    const float reach = stepReach(hf);
+    outY = 0.5f * (hf.heightAt(fl + d, fromY, reach) + hf.heightAt(fr + d, fromY, reach));
+    return true;
 }
 
 // Breadth-first over block positions. The field is 128x128, so this is 16k
@@ -261,20 +272,33 @@ bool Walker::planPath(const Ground& hf, const glm::ivec2& goalBlock) {
     std::vector<int> cameFrom(static_cast<size_t>(span) * span, -2);
     std::vector<int> cameDir(static_cast<size_t>(span) * span, -1);
 
+    // How high the block was when the search first arrived at it. The whole
+    // reason a route can climb the ramp rather than stopping at the bottom of it.
+    std::vector<float> arrivedAt(static_cast<size_t>(span) * span, 0.0f);
+
     std::vector<glm::ivec2> frontier{start}, next;
     cameFrom[index(start)] = -1;
+
+    // Seeded from where he is actually standing, not from the terrain -- so a
+    // route planned while he is already on the deck starts on the deck.
+    arrivedAt[index(start)] = 0.25f * (m_footY[0] + m_footY[1] + m_footY[2] + m_footY[3]);
 
     bool found = (start == goal);
     while (!found && !frontier.empty()) {
         next.clear();
         for (const glm::ivec2& b : frontier) {
+            const float here = arrivedAt[index(b)];
+
             for (int dir = 0; dir < kDirCount; ++dir) {
                 glm::ivec2 to = b + dirVec(dir);
                 if (!valid(to) || cameFrom[index(to)] != -2) continue;
-                if (!blockCanStep(hf, b, dir)) continue;
 
-                cameFrom[index(to)] = index(b);
-                cameDir[index(to)]  = dir;
+                float landed;
+                if (!blockCanStep(hf, b, dir, here, landed)) continue;
+
+                cameFrom[index(to)]  = index(b);
+                cameDir[index(to)]   = dir;
+                arrivedAt[index(to)] = landed;
                 if (to == goal) { found = true; break; }
                 next.push_back(to);
             }

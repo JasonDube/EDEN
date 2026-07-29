@@ -166,7 +166,8 @@ private:
     void markVisited();
     glm::ivec2 corner(int index) const;   // 0..3 counter-clockwise from blockMin
     uint32_t nextRandom();
-    bool blockCanStep(const Ground& hf, const glm::ivec2& block, int dir) const;
+    bool blockCanStep(const Ground& hf, const glm::ivec2& block, int dir,
+                      float fromY, float& outY) const;
     bool planPath(const Ground& hf, const glm::ivec2& goalBlock);
 
     glm::ivec2 m_block{0, 0};    // min corner of the 2x2 footprint

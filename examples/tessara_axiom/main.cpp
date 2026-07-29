@@ -1431,7 +1431,9 @@ private:
     int  m_nextSlot = 0;
     int  m_stored = 0;
     int  m_crateCount = kDefaultCrates;
-    bool m_walkerHauls = false;
+    // On, now that a route to the pile can actually be planned. It defaulted off
+    // for as long as the pile was somewhere he could not be sent.
+    bool m_walkerHauls = true;
     bool        m_showBiped = true;
     bool        m_watchAlways = false;
 
