@@ -130,6 +130,7 @@ private:
     std::unique_ptr<ScenePipeline> m_pipeline;
     uint32_t m_shipHandle = UINT32_MAX;
     uint32_t m_creatureHandle = UINT32_MAX;
+    uint32_t m_glassHandle = UINT32_MAX;
 
     std::vector<SceneVertex> m_verts;
     std::vector<uint32_t>    m_indices;

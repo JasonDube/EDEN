@@ -127,6 +127,15 @@ public:
     // Reports itself shut whenever the ramp is not down far enough to walk on.
     Enclosure enclosure() const;
 
+    // ---- the bridge door ---------------------------------------------------
+    // Two panels sliding apart in the bulkhead. Opens for whoever is standing at
+    // it and shuts behind them, which is what an interior door does -- there is
+    // no button because nobody wants one on a doorway they walk through twenty
+    // times an hour.
+    void updateBridgeDoor(float dt, bool somebodyNear);
+    float bridgeDoorProgress() const { return m_bridgeDoor; }   // 0 shut, 1 open
+    glm::vec3 bridgeDoorCentre() const;
+
     // ---- the helm ----------------------------------------------------------
     // Where the ship is flown from, and where the captain stands to fly it.
     //
@@ -161,6 +170,7 @@ private:
     float m_ramp = 0.0f;       // 0 shut, 1 down
     bool  m_opening = false;
     bool  m_rampHeld = false;
+    float m_bridgeDoor = 0.0f;   // 0 shut, 1 open
     float m_rampLength = 4.4f; // the doorway height
     float m_openAngle  = 27.0f; // worked out at placement, from the two of them
 };
@@ -168,5 +178,17 @@ private:
 void appendShipMesh(const Ship& ship,
                     std::vector<SceneVertex>& outVertices,
                     std::vector<uint32_t>& outIndices);
+
+// The windows, kept OUT of the mesh above and drawn separately.
+//
+// Everything in this example goes through one pipeline, and alpha lives in the
+// per-draw tint rather than per-vertex -- SceneVertex has no alpha channel. So a
+// pane mixed in with the hull is drawn at the hull's opacity, which is to say
+// none, and a "window" you cannot see through is a wall painted blue. Split out,
+// the glass can be drawn last, translucent, through the pipeline variant that
+// already exists for the creature's see-through panels.
+void appendShipGlass(const Ship& ship,
+                     std::vector<SceneVertex>& outVertices,
+                     std::vector<uint32_t>& outIndices);
 
 } // namespace tessara

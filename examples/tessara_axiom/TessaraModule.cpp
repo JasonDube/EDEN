@@ -243,6 +243,18 @@ void TessaraModule::update(float dt) {
                           m_ship.isOnRamp(m_walker.bodyCentre(*m_ground)) ||
                           m_ship.isOnRamp(m_playerPosition);
 
+    // The bridge door opens for whoever is standing at it. Proximity rather than
+    // a button: nobody wants a control on a doorway they walk through twenty
+    // times an hour, and a door that opens as you reach it is invisible in the
+    // right way.
+    const glm::vec3 doorAt = m_ship.bridgeDoorCentre();
+    auto nearDoor = [&](const glm::vec3& who) {
+        return glm::length(glm::vec2(who.x - doorAt.x, who.z - doorAt.z)) < 5.0f;
+    };
+    m_ship.updateBridgeDoor(dt, nearDoor(m_playerPosition) ||
+                                nearDoor(m_biped.hipCentre()) ||
+                                nearDoor(m_walker.bodyCentre(*m_ground)));
+
     m_ship.update(dt, rampBusy);
     republishGround();
 
@@ -433,8 +445,9 @@ void TessaraModule::detachRenderer() {
     if (m_buffers) {
         if (m_shipHandle != UINT32_MAX)     m_buffers->destroyMeshBuffers(m_shipHandle);
         if (m_creatureHandle != UINT32_MAX) m_buffers->destroyMeshBuffers(m_creatureHandle);
+        if (m_glassHandle != UINT32_MAX)     m_buffers->destroyMeshBuffers(m_glassHandle);
     }
-    m_shipHandle = m_creatureHandle = UINT32_MAX;
+    m_shipHandle = m_creatureHandle = m_glassHandle = UINT32_MAX;
     m_pipeline.reset();
     m_buffers = nullptr;
 }
@@ -489,6 +502,12 @@ void TessaraModule::rebuildGeometry() {
     static const HeadModel kNoHead;
     appendBipedMesh(m_biped, kNoHead, m_verts, m_indices);
     upload(m_verts, m_indices, m_creatureHandle);
+
+    // The windows, on their own so they can be drawn translucent afterwards.
+    m_verts.clear();
+    m_indices.clear();
+    appendShipGlass(m_ship, m_verts, m_indices);
+    upload(m_verts, m_indices, m_glassHandle);
 }
 
 void TessaraModule::renderWorld(const eden::ModuleRenderFrame& frame) {
@@ -518,6 +537,24 @@ void TessaraModule::renderWorld(const eden::ModuleRenderFrame& frame) {
 
     draw(m_shipHandle);
     draw(m_creatureHandle);
+
+    // Glass last, through the variant that tests depth but does not WRITE it --
+    // the same one the creature's see-through panels use. A pane that wrote depth
+    // would hide whatever is behind it, which is the one thing a window must not
+    // do. Alpha is per-draw here rather than per-vertex, which is exactly why the
+    // glass had to be split out of the hull mesh to stop being a blue wall.
+    if (m_glassHandle != UINT32_MAX) {
+        vkCmdBindPipeline(frame.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                          m_pipeline->getGhostHandle());
+        ScenePush glass{};
+        glass.mvp  = frame.viewProj;
+        glass.tint = glm::vec4(1.0f, 1.0f, 1.0f, 0.16f);
+        glass.eye  = glm::vec4(frame.eye, 0.0f);
+        vkCmdPushConstants(frame.cmd, m_pipeline->getLayout(),
+                           VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                           0, sizeof(ScenePush), &glass);
+        draw(m_glassHandle);
+    }
 }
 
 void TessaraModule::renderUI(float, float) {

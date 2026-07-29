@@ -127,11 +127,51 @@ void checkShipSolids() {
     // the grounds that nobody could get there. Now they can, and the point of
     // going is to see out -- so both halves of that are checked: a way through,
     // and a sightline over the bulwark from where the captain stands.
+    // With the door OPEN, which is its state when somebody is walking through it.
+    // Shut it blocks, and that is the next check along -- this one asks whether
+    // there is a room on the far side worth opening it for.
+    for (int i = 0; i < 120; ++i) s.ship.updateBridgeDoor(1.0f / 60.0f, true);
+    s.republish();
+
     const bool doorway = !solid(at(0.0f, 11.8f), deck);
     const bool bridgeFloor = !solid(at(0.0f, 14.0f), deck) &&
                              !solid(s.ship.helmStation(), deck);
     report("the bridge is a room you can walk into", doorway && bridgeFloor,
            "doorway through the bulkhead, floor beyond it, standing room at the helm");
+
+    // The bridge door: shut it blocks, open it does not, and it opens for
+    // somebody walking up to it rather than for a button.
+    {
+        Scene d(0.0f, {0.0f, 0.0f}, 0.0f);
+        const glm::vec3 doorAt = d.ship.bridgeDoorCentre();
+
+        for (int i = 0; i < 120; ++i) d.ship.updateBridgeDoor(1.0f / 60.0f, false);
+        d.republish();
+        const bool shutBlocks = d.ground.blocked(doorAt.x, doorAt.z, d.deckY(), H, R);
+        const float shutAt = d.ship.bridgeDoorProgress();
+
+        for (int i = 0; i < 120; ++i) d.ship.updateBridgeDoor(1.0f / 60.0f, true);
+        d.republish();
+        const bool openClears = !d.ground.blocked(doorAt.x, doorAt.z, d.deckY(), H, R);
+        const float openAt = d.ship.bridgeDoorProgress();
+
+        char detail[144];
+        std::snprintf(detail, sizeof detail,
+                      "shut at %.2f blocks, open at %.2f clears", shutAt, openAt);
+        report("the bridge door opens and shuts", shutBlocks && openClears, detail);
+    }
+
+    // The helm has to be something you look OVER, not at -- having lowered the
+    // bow to see out, a console at chest height is the same mistake one object
+    // further in.
+    {
+        const float eye = deck + 1.7f;
+        const float consoleTop = s.ship.helmPosition().y + 0.34f;
+        char detail[128];
+        std::snprintf(detail, sizeof detail, "eye at %.2f, console tops out at %.2f",
+                      eye, consoleTop);
+        report("you can see over the helm console", consoleTop < eye - 0.4f, detail);
+    }
 
     // Eye height on this planet is 1.7 above the feet. The bulwark has to come
     // BELOW that from the helm, or the view forward is hull -- which is what it

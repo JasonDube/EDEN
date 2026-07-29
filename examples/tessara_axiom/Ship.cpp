@@ -371,6 +371,20 @@ void Ship::appendBlockers(std::vector<Blocker>& out) const {
         }
     }
 
+    // ---- the bridge door ---------------------------------------------------
+    // Solid across the doorway until it is most of the way open. Most, not fully:
+    // a door you have to wait to finish opening reads as a door that is stuck,
+    // and the last hand's width of travel is not what was stopping you.
+    if (m_bridgeDoor < 0.75f) {
+        Blocker b = base;
+        b.origin     = bridgeDoorCentre();
+        b.halfWidth  = 2.5f;
+        b.halfLength = 0.9f;
+        b.floorY     = m_origin.y + split;
+        b.ceilingY   = m_origin.y + roof;
+        out.push_back(b);
+    }
+
     // ---- the bulwark across the nose ---------------------------------------
     // Waist high, and that is the whole point of it. The nose used to be solid
     // from below the deck to well above head height, so standing at the front of
@@ -441,8 +455,23 @@ Enclosure Ship::enclosure() const {
     return e;
 }
 
+glm::vec3 Ship::bridgeDoorCentre() const {
+    return m_origin + up() * params.deckHeight + forward() * (params.length * 0.31f);
+}
+
+void Ship::updateBridgeDoor(float dt, bool somebodyNear) {
+    // Quick, because it is a door in a corridor and nobody should have to wait
+    // for it. Half the ramp's travel, and the ramp is a cargo lift.
+    const float rate = dt / 0.55f;
+    m_bridgeDoor = std::clamp(m_bridgeDoor + (somebodyNear ? rate : -rate), 0.0f, 1.0f);
+}
+
 glm::vec3 Ship::helmPosition() const {
-    return m_origin + up() * (params.deckHeight + 1.10f)
+    // Desk height, not chest-and-then-some. At 1.10 its top came to 3.85 with a
+    // standing eye at 3.90 -- so having just lowered the bow to see over, the
+    // console was the next thing in the way. A helm you look AT instead of over
+    // is the same mistake one object further in.
+    return m_origin + up() * (params.deckHeight + 0.62f)
                     + forward() * (params.length * 0.42f);
 }
 
@@ -617,20 +646,33 @@ void appendShipMesh(const Ship& ship,
               at(0.0f, p.deckHeight + p.bayHeight - 0.35f, halfL * 0.62f), r, u, f,
               glm::vec3(doorHalf + 0.3f, 0.35f, 0.22f), kTrim);
 
+    // The two panels of the bridge door, slid apart by however open it is. They
+    // retract INTO the posts rather than vanishing, which is why the travel is
+    // the door's own half-width -- at full open each panel is exactly hidden.
+    {
+        const glm::vec3 doorAt = ship.bridgeDoorCentre();
+        const float panelHalf = 1.25f;
+        const float travel = ship.bridgeDoorProgress() * (panelHalf * 2.0f);
+        const float panelH = (p.bayHeight - 0.7f) * 0.5f;
+
+        for (int side = 0; side < 2; ++side) {
+            const float sx = side ? 1.0f : -1.0f;
+            appendBox(verts, indices,
+                      doorAt + u * panelH + r * (sx * (panelHalf + travel)),
+                      r, u, f,
+                      glm::vec3(panelHalf, panelH, 0.14f), kHull);
+            // A rib down the leading edge, so you can see which way it moves.
+            appendBox(verts, indices,
+                      doorAt + u * panelH + r * (sx * (travel + 0.06f)),
+                      r, u, f,
+                      glm::vec3(0.10f, panelH * 0.96f, 0.17f), kTrim);
+        }
+    }
+
     // ---- bridge -----------------------------------------------------------
     const float bridgeY = roofY + 1.35f;
     appendBox(verts, indices, at(0.0f, bridgeY, halfL * 0.66f), r, u, f,
               glm::vec3(halfW * 0.62f, 1.35f, halfL * 0.30f), kHull);
-
-    // Canopy: three faces so it reads as a windscreen rather than a slab.
-    appendBox(verts, indices, at(0.0f, bridgeY + 0.35f, halfL * 0.95f), r, u, f,
-              glm::vec3(halfW * 0.50f, 0.70f, 0.16f), kGlass);
-    for (int side = 0; side < 2; ++side) {
-        float sx = side ? 1.0f : -1.0f;
-        appendBox(verts, indices,
-                  at(sx * halfW * 0.52f, bridgeY + 0.35f, halfL * 0.80f), r, u, f,
-                  glm::vec3(0.14f, 0.60f, halfL * 0.14f), kGlass);
-    }
 
     // Nose. A bulwark you can see over rather than a wall you cannot -- it used
     // to run from below the deck to a metre above standing eye height, so the
@@ -643,13 +685,6 @@ void appendShipMesh(const Ship& ship,
               r, u, f,
               glm::vec3(halfW * 0.80f, (bulwarkTop - p.deckHeight + 0.3f) * 0.5f,
                         1.2f + eps), kHull);
-
-    // And glass above it, which is what makes the bridge a bridge. Not collision:
-    // the bulwark is what stops you, and a windscreen you cannot see out of is a
-    // wall with extra steps.
-    appendBox(verts, indices,
-              at(0.0f, bulwarkTop + 1.5f, halfL * 0.95f + eps), r, u, f,
-              glm::vec3(halfW * 0.78f, 1.5f, 0.10f), kGlass);
 
     // Corner posts, so the windscreen has something to be held in.
     for (int side = 0; side < 2; ++side) {
@@ -667,16 +702,19 @@ void appendShipMesh(const Ship& ship,
     {
         const glm::vec3 helm = ship.helmPosition();
         appendBox(verts, indices, helm, r, u, f,
-                  glm::vec3(1.9f, 0.55f, 0.42f), kHullDark);
-        appendBox(verts, indices, helm + u * 0.50f - f * 0.10f, r, u, f,
-                  glm::vec3(1.55f, 0.09f, 0.30f), kPanelOn);
+                  glm::vec3(1.9f, 0.34f, 0.42f), kHullDark);
+
+        // The panel lies BACK toward the captain rather than standing up facing
+        // the bow, so it is a thing you read by looking down at it.
+        appendBox(verts, indices, helm + u * 0.30f - f * 0.12f, r, u, f,
+                  glm::vec3(1.55f, 0.07f, 0.32f), kPanelOn);
 
         // Legs, so it stands on the deck rather than floating over it.
         for (int side = 0; side < 2; ++side) {
             const float sx = side ? 1.0f : -1.0f;
             appendBox(verts, indices,
-                      helm + r * (sx * 1.55f) - u * 0.85f, r, u, f,
-                      glm::vec3(0.16f, 0.55f, 0.16f), kTrim);
+                      helm + r * (sx * 1.55f) - u * 0.46f, r, u, f,
+                      glm::vec3(0.16f, 0.32f, 0.16f), kTrim);
         }
     }
 
@@ -739,6 +777,39 @@ void appendShipMesh(const Ship& ship,
     appendBox(verts, indices, inner - r * 0.09f, r, u, f,
               glm::vec3(0.05f, 0.22f, 0.18f),
               ship.isOpening() ? kPanelOn : kPanelOff);
+}
+
+void appendShipGlass(const Ship& ship,
+                     std::vector<SceneVertex>& verts,
+                     std::vector<uint32_t>& indices)
+{
+    const Ship::Params& p = ship.params;
+
+    const glm::vec3 o = ship.origin();
+    const glm::vec3 f = ship.forward();
+    const glm::vec3 r = ship.right();
+    const glm::vec3 u = Ship::up();
+
+    const float halfL = p.length * 0.5f;
+    const float halfW = p.width * 0.5f;
+    auto at = [&](float x, float y, float z) { return o + r * x + u * y + f * z; };
+
+    // The windscreen the bridge looks out of.
+    const float bulwarkTop = p.deckHeight + 1.15f;
+    appendBox(verts, indices,
+              at(0.0f, bulwarkTop + 1.5f, halfL * 0.95f + 0.09f), r, u, f,
+              glm::vec3(halfW * 0.78f, 1.5f, 0.06f), kGlass);
+
+    // And the raised cabin's canopy, which is styling seen from outside.
+    const float bridgeY = p.deckHeight + p.bayHeight + 0.3f + 1.35f;
+    appendBox(verts, indices, at(0.0f, bridgeY + 0.35f, halfL * 0.95f), r, u, f,
+              glm::vec3(halfW * 0.50f, 0.70f, 0.10f), kGlass);
+    for (int side = 0; side < 2; ++side) {
+        const float sx = side ? 1.0f : -1.0f;
+        appendBox(verts, indices,
+                  at(sx * halfW * 0.52f, bridgeY + 0.35f, halfL * 0.80f), r, u, f,
+                  glm::vec3(0.10f, 0.60f, halfL * 0.14f), kGlass);
+    }
 }
 
 } // namespace tessara
