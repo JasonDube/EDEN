@@ -342,6 +342,7 @@ void Walker::assignFetch(const Ground& hf, const glm::vec3& crate,
     m_carrying = false;
     m_leaving = false;      // a job outranks getting out of the way
     m_waiting = false;
+    m_goingHome = false;
     m_taskTicks = 0;
 
     // No route, no job. Better to say so at once than to grind at a ridge.
@@ -353,7 +354,7 @@ void Walker::abandonTask() {
     m_path.clear();
     m_pathNodes.clear();
     m_pathIndex = 0;
-    m_hasTask = m_carrying = m_leaving = m_waiting = false;
+    m_hasTask = m_carrying = m_leaving = m_waiting = m_goingHome = false;
     m_activity = Activity::Wander;
 }
 
@@ -550,6 +551,40 @@ void Walker::update(const Ground& hf, float dt) {
     if (m_visited.empty()) return;
 
     escapeIfBuried(hf);
+
+    // Strayed too far: come back.
+    //
+    // Checked before the wander rule gets a say, because the wander rule is what
+    // took him out there -- it scores a heading by how much unwalked ground it
+    // opens, and the unwalked ground is always further from home. Left to it he
+    // walks in a straight line for as long as you watch.
+    //
+    // Planned rather than steered, like every other trip he makes: he has a
+    // pathfinder and coming home is exactly the sort of thing it is for. Not a
+    // task, so a crate coming up on the way back simply replaces it.
+    if (m_homeRadius > 0.0f && !m_hasTask && !m_waiting) {
+        const glm::vec3 at = bodyCentre(hf);
+        const float out = glm::length(glm::vec2(at.x - m_home.x, at.z - m_home.z));
+
+        if (!m_goingHome && out > m_homeRadius) {
+            m_target = nodeNear(hf, m_home);
+            if (planPath(hf, m_target - glm::ivec2(1))) {
+                m_goingHome = true;
+                m_leaving = true;             // rides the same "under my own steam" path
+                m_activity = Activity::Leaving;
+                m_taskTicks = 0;
+            }
+        } else if (m_goingHome && out < m_homeRadius * 0.6f) {
+            // Well back inside before letting go, or he turns round on the line
+            // and spends the rest of the day crossing it.
+            m_goingHome = false;
+            m_leaving = false;
+            m_activity = Activity::Wander;
+            m_path.clear();
+            m_pathNodes.clear();
+            m_pathIndex = 0;
+        }
+    }
 
     // Nothing to do and indoors: go outside.
     //

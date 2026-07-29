@@ -92,6 +92,31 @@ public:
         return false;
     }
 
+    // ---- things the module puts underfoot ---------------------------------
+    // A module that builds its own geometry -- a landed ship, a bridge, a lift --
+    // has floors and walls the host knows nothing about. The host already stands
+    // the player on terrain and on placed objects; these let a module join in
+    // without becoming one.
+    //
+    // groundHeight: what is under this point, given feet currently at `fromY`.
+    // The `fromY` matters: it is what stops a floor two units up being something
+    // you step onto from beside it, and it is the module's own rule to apply.
+    // False means "nothing of mine here", not "nothing here".
+    virtual bool groundHeight(float x, float z, float fromY, float& outHeight) const {
+        (void)x; (void)z; (void)fromY; (void)outHeight;
+        return false;
+    }
+
+    // resolvePosition: push a body out of anything solid it has ended up inside.
+    // Returns true if it moved. Walls, in other words -- without it a player can
+    // stand on a module's roof and walk through its walls, which is worse than
+    // neither.
+    virtual bool resolvePosition(float& x, float& z, float footY, float height,
+                                 float radius) const {
+        (void)x; (void)z; (void)footY; (void)height; (void)radius;
+        return false;
+    }
+
     // Input handling - return true if module consumed the input
     virtual bool wantsCaptureKeyboard() const { return false; }
     virtual bool wantsCaptureMouse() const { return false; }

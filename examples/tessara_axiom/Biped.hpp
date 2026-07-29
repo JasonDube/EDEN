@@ -282,6 +282,14 @@ public:
     bool wayShut() const { return m_wayShut; }
     void abandonTask();
 
+    // How far he will wander from a place. See Walker::setHome -- his drift is
+    // gentler than the walker's heading rule but it is still a random walk, and a
+    // random walk on a planet goes to the horizon eventually.
+    void setHome(const glm::vec3& centre, float radius) {
+        m_home = centre;
+        m_homeRadius = radius;
+    }
+
     // Stand still and face whoever is watching, so the thing can be looked at.
     // Not a pause: the head still tracks, the ankles still settle, the arms
     // still hang. Freezing everything shows you a statue rather than the
@@ -378,6 +386,9 @@ private:
     glm::vec3 m_routedTo{0.0f};
     bool      m_replan = true;
     bool      m_routeFailed = false;
+
+    glm::vec3 m_home{0.0f};
+    float     m_homeRadius = 0.0f;
 
     glm::vec2 m_goal{0.0f};
     bool      m_goalActive = false;

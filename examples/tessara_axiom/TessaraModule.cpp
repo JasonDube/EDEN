@@ -23,6 +23,20 @@ constexpr int   kDefaultCrates  = 6;
 constexpr int   kCratesPerLayer = 4;
 constexpr float kPanelRange     = 9.0f;
 
+// How high a ledge the PLAYER will step onto. The creatures each have their own;
+// this is the host's body, and it wants the same treatment for the same reason --
+// a ramp is a slope you walk up, a deck is a wall you do not climb.
+constexpr float kPlayerStepUp   = 0.90f;
+
+// How far from the ship either of them will get before turning back.
+//
+// A quarter of a kilometre, which is a working area rather than a planet. Both
+// of them wander by scoring how much unwalked ground a direction opens, and on
+// four thousand units of terrain the freshest ground is always further out --
+// so without a leash they set off in a straight line and are specks inside a
+// minute. On the generated field the edge of the world did this job.
+constexpr float kHomeRange      = 250.0f;
+
 } // namespace
 
 TessaraModule::TessaraModule() = default;
@@ -80,6 +94,30 @@ void TessaraModule::setTerrain(eden::Terrain* terrain) {
     m_ground = std::make_unique<Ground>(*m_source);
 }
 
+bool TessaraModule::groundHeight(float x, float z, float fromY, float& outHeight) const {
+    if (!m_ground || !m_placed) return false;
+
+    // Only worth answering if we actually have something here. Everywhere else
+    // Ground falls back to the terrain, which the host has already asked.
+    const float mine = m_ground->heightAt(x, z, fromY, kPlayerStepUp);
+    if (!m_ground->onPatch(x, z, fromY, kPlayerStepUp)) return false;
+
+    outHeight = mine;
+    return true;
+}
+
+bool TessaraModule::resolvePosition(float& x, float& z, float footY, float height,
+                                    float radius) const {
+    if (!m_ground || !m_placed) return false;
+
+    const glm::vec2 fixed = m_ground->resolve(glm::vec2(x, z), footY, height, radius);
+    if (glm::length(fixed - glm::vec2(x, z)) < 1e-4f) return false;
+
+    x = fixed.x;
+    z = fixed.y;
+    return true;
+}
+
 void TessaraModule::placeShip() {
     if (!m_source || !m_ground) return;
 
@@ -99,6 +137,10 @@ void TessaraModule::placeShip() {
 
     m_walker.reset(*m_ground, m_ground->nodeNear(o + back * 40.0f) - glm::ivec2(1), 0);
     m_biped.reset(*m_ground, glm::vec2(o.x + back.x * 30.0f, o.z + back.z * 30.0f), 0.0f, 1u);
+
+    // Both of them work the ground around the ship rather than the whole planet.
+    m_walker.setHome(m_ship.origin(), kHomeRange);
+    m_biped.setHome(m_ship.origin(), kHomeRange);
 
     scatterCrates();
     m_placed = true;

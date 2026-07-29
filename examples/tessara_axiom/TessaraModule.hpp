@@ -63,6 +63,13 @@ public:
     // any of this is working.
     bool playerStart(glm::vec3& outPosition, float& outYawDegrees) const override;
 
+    // The deck and the ramp, offered to whoever the host is standing up -- so the
+    // player walks aboard on the same terms the creatures do, by the same rules,
+    // up the same ramp. And the hull, so they cannot simply walk through it.
+    bool groundHeight(float x, float z, float fromY, float& outHeight) const override;
+    bool resolvePosition(float& x, float& z, float footY, float height,
+                         float radius) const override;
+
     bool isReady() const override { return m_terrain != nullptr; }
     std::string getStatusMessage() const override;
 

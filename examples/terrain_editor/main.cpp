@@ -8188,6 +8188,19 @@ private:
             const float playerRadius = 0.15f;
             glm::vec3 camPos = m_camera.getPosition();
 
+            // Floors belonging to a game module -- a ship's deck, its ramp. Asked
+            // from where the player's feet actually are, so the module applies its
+            // own rule about what is a step and what is a wall, and the player
+            // climbs a ramp on exactly the terms its creatures do.
+            if (m_gameModule && m_isPlayMode) {
+                const float feet = camPos.y - m_playerEyeHeight;
+                float moduleHeight = 0.0f;
+                if (m_gameModule->groundHeight(x, z, feet, moduleHeight) &&
+                    moduleHeight > height) {
+                    height = moduleHeight;
+                }
+            }
+
             // Check AABB objects we can stand on
             for (const auto& obj : m_sceneObjects) {
                 if (!obj || !obj->isVisible() || !obj->hasCollision()) continue;
@@ -8813,7 +8826,15 @@ private:
                 m_agentConsole.close();
                 wasEscapeDown = escapeDown;
                 return;
+            } else if (m_isPlayMode && !m_playModeCursorVisible) {
+                // First Escape frees the mouse so the panels can be used. It used
+                // to leave play mode outright, which meant the only way to touch
+                // the interface was to stop playing -- and getting back in put you
+                // wherever the module said to start, so you lost your place too.
+                m_playModeCursorVisible = true;
+                Input::setMouseCaptured(false);
             } else if (m_isPlayMode) {
+                // Second Escape, with the cursor already free, leaves play mode.
                 exitPlayMode();
             }
         }

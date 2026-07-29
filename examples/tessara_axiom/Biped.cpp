@@ -483,6 +483,17 @@ void Biped::updateTask(const Ground& hf, float dt) {
 
     if (!m_hasTask) {
         m_activity = Activity::Wander;
+
+        // Idle, and too far out: walk back. Routed rather than aimed, so a hill
+        // between him and home is something he goes round rather than into.
+        if (m_homeRadius > 0.0f) {
+            const float out = glm::length(glm::vec2(m_pos.x - m_home.x, m_pos.y - m_home.z));
+            if (out > m_homeRadius) {
+                aimAt(hf, m_home);
+                m_squat += (0.0f - m_squat) * std::min(1.0f, dt * params.bendRate);
+                return;
+            }
+        }
         m_squat += (0.0f - m_squat) * std::min(1.0f, dt * params.bendRate);
         return;
     }

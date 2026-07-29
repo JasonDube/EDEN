@@ -117,6 +117,21 @@ public:
     // Fixed by default, so a run is still repeatable exactly.
     void setSeed(uint32_t seed) { m_rngState = seed ? seed : 1u; }
 
+    // How far he will get from a place before he thinks better of it.
+    //
+    // His heading rule scores a direction by how much UNWALKED ground it opens,
+    // and on a planet four thousand units across that is an invitation to walk
+    // to the horizon: the freshest ground is always further out, so he leaves and
+    // does not come back. On the field this example grew up on the edge of the
+    // world was the leash. Out here he needs a real one.
+    //
+    // A radius of zero is no leash at all, which is what the gait sweep wants --
+    // its whole measurement is how much of a field he covers.
+    void setHome(const glm::vec3& centre, float radius) {
+        m_home = centre;
+        m_homeRadius = radius;
+    }
+
     Params params;
 
     void reset(const Ground& hf, glm::ivec2 blockMin, int heading = 0);
@@ -211,6 +226,10 @@ private:
     // front of itself.
     bool       m_waiting  = false;
     glm::vec3  m_waitWorld{0.0f};
+
+    glm::vec3  m_home{0.0f};
+    float      m_homeRadius = 0.0f;
+    bool       m_goingHome = false;
     glm::ivec2 m_target{0, 0};
     glm::vec3  m_storageWorld{0.0f};
     // A planned route, not a greedy heading. Greedy scored 7 of 24 deliveries;
