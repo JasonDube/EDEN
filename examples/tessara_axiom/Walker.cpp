@@ -1,0 +1,430 @@
+#include "Walker.hpp"
+
+#include <algorithm>
+#include <cmath>
+
+namespace tessara {
+
+namespace {
+
+constexpr int kDirCount = 4;
+const int kDirX[kDirCount] = { 1, 0, -1, 0 };
+const int kDirY[kDirCount] = { 0, 1,  0, -1 };
+
+constexpr float kPi = 3.14159265f;
+
+} // namespace
+
+// xorshift32. Deliberately not <random>: this has to give the same sequence in
+// the sim and in the game, on any standard library.
+uint32_t Walker::nextRandom() {
+    m_rngState ^= m_rngState << 13;
+    m_rngState ^= m_rngState >> 17;
+    m_rngState ^= m_rngState << 5;
+    return m_rngState;
+}
+
+glm::ivec2 Walker::dirVec(int dir) {
+    int d = ((dir % kDirCount) + kDirCount) % kDirCount;
+    return glm::ivec2(kDirX[d], kDirY[d]);
+}
+
+// The 2x2 footprint's corners, counter-clockwise from the min corner. Turning is
+// a rotation of role over this ring, which is why it costs no ground.
+glm::ivec2 Walker::corner(int index) const {
+    static const glm::ivec2 kOffsets[4] = {
+        {0, 0}, {1, 0}, {1, 1}, {0, 1}
+    };
+    return m_block + kOffsets[((index % 4) + 4) % 4];
+}
+
+void Walker::recomputeFeet() {
+    // frontLeft, frontRight, backRight, backLeft -- one step apart around the
+    // ring, offset by the heading. For heading +x this puts the front pair on
+    // the +x side; rotating the heading rotates the whole assignment.
+    m_feet[0] = corner(m_dir + 1);   // front left
+    m_feet[1] = corner(m_dir + 2);   // front right
+    m_feet[2] = corner(m_dir + 3);   // back right
+    m_feet[3] = corner(m_dir + 0);   // back left
+
+    if (m_phase == 1) {
+        glm::ivec2 d = dirVec(m_dir);
+        m_feet[0] += d;
+        m_feet[1] += d;
+    }
+}
+
+void Walker::reset(const Heightfield& hf, glm::ivec2 blockMin, int heading) {
+    m_gridN = hf.n();
+    m_visited.assign(static_cast<size_t>(m_gridN) * m_gridN, 0);
+
+    m_block = glm::clamp(blockMin, glm::ivec2(0), glm::ivec2(m_gridN - 2));
+    m_dir   = ((heading % kDirCount) + kDirCount) % kDirCount;
+    m_phase = 0;
+    m_accum = 0.0f;
+    m_steps = m_turns = m_stuck = 0;
+
+    recomputeFeet();
+    for (int i = 0; i < 4; ++i) m_prevFeet[i] = m_feet[i];
+    markVisited();
+}
+
+void Walker::markVisited() {
+    for (int i = 0; i < 4; ++i) {
+        const glm::ivec2& n = m_feet[i];
+        if (n.x >= 0 && n.y >= 0 && n.x < m_gridN && n.y < m_gridN) {
+            m_visited[static_cast<size_t>(n.y) * m_gridN + n.x] = 1;
+        }
+    }
+}
+
+bool Walker::visited(const glm::ivec2& node) const {
+    if (node.x < 0 || node.y < 0 || node.x >= m_gridN || node.y >= m_gridN) {
+        return true;   // off the field counts as seen, so it never draws him outward
+    }
+    return m_visited[static_cast<size_t>(node.y) * m_gridN + node.x] != 0;
+}
+
+float Walker::coverage() const {
+    if (m_visited.empty()) return 0.0f;
+    size_t hit = 0;
+    for (uint8_t v : m_visited) hit += v ? 1 : 0;
+    return static_cast<float>(hit) / static_cast<float>(m_visited.size());
+}
+
+// A step is good if the target exists and the ground does not rise or fall more
+// steeply than the limit. At 45 degrees on unit spacing that is a height change
+// of one spacing -- so he walks slopes and refuses walls.
+bool Walker::goodStep(const Heightfield& hf, const glm::ivec2& from, const glm::ivec2& to) const {
+    if (!hf.inBounds(to)) return false;
+
+    float run = hf.spacing() * static_cast<float>(std::abs(to.x - from.x) + std::abs(to.y - from.y));
+    if (run < 1e-6f) return false;
+
+    float rise    = std::abs(hf.heightAt(to) - hf.heightAt(from));
+    float maxRise = run * std::tan(glm::radians(params.maxSlopeDeg));
+    return rise <= maxRise;
+}
+
+// Both front feet must be able to step, or the whole move is refused. Half a
+// step forward would tear the body.
+bool Walker::canAdvance(const Heightfield& hf, int dir) const {
+    glm::ivec2 d = dirVec(dir);
+    glm::ivec2 fl = corner(dir + 1);
+    glm::ivec2 fr = corner(dir + 2);
+    return goodStep(hf, fl, fl + d) && goodStep(hf, fr, fr + d);
+}
+
+// Nearest lattice node to a world point, which is how anything out in continuous
+// space gets expressed to a creature that only understands nodes.
+static glm::ivec2 nodeNear(const Heightfield& hf, const glm::vec3& world) {
+    float half = hf.n() * 0.5f * hf.spacing();
+    int x = static_cast<int>(std::round((world.x + half) / hf.spacing()));
+    int y = static_cast<int>(std::round((world.z + half) / hf.spacing()));
+    return glm::clamp(glm::ivec2(x, y), glm::ivec2(0), glm::ivec2(hf.n() - 1));
+}
+
+// Can a 2x2 block at `block` step one node along `dir`? Same rule canAdvance
+// applies to the live creature, asked about a hypothetical position -- which is
+// what makes the terrain searchable rather than only walkable.
+bool Walker::blockCanStep(const Heightfield& hf, const glm::ivec2& block, int dir) const {
+    static const glm::ivec2 kOffsets[4] = { {0,0}, {1,0}, {1,1}, {0,1} };
+    glm::ivec2 d  = dirVec(dir);
+    glm::ivec2 fl = block + kOffsets[(dir + 1) % 4];
+    glm::ivec2 fr = block + kOffsets[(dir + 2) % 4];
+    return goodStep(hf, fl, fl + d) && goodStep(hf, fr, fr + d);
+}
+
+// Breadth-first over block positions. The field is 128x128, so this is 16k
+// nodes and finishes instantly; there is nothing here that needs A*'s heuristic
+// and BFS has the advantage of being obviously correct.
+//
+// It also answers a question greedy never could: whether the crate is reachable
+// AT ALL. Past a certain relief the ridge genuinely cuts the field in two, and
+// knowing that up front is the difference between giving up immediately and
+// grinding at a wall for half a minute.
+bool Walker::planPath(const Heightfield& hf, const glm::ivec2& goalBlock) {
+    m_path.clear();
+    m_pathNodes.clear();
+    m_pathIndex = 0;
+    m_pathFailed = false;
+
+    const int span = hf.n() - 1;            // valid block positions per axis
+    auto index = [span](const glm::ivec2& b) { return b.y * span + b.x; };
+    auto valid = [span](const glm::ivec2& b) {
+        return b.x >= 0 && b.y >= 0 && b.x < span && b.y < span;
+    };
+
+    const glm::ivec2 start = m_block;
+    const glm::ivec2 goal  = glm::clamp(goalBlock, glm::ivec2(0), glm::ivec2(span - 1));
+    if (!valid(start)) { m_pathFailed = true; return false; }
+
+    std::vector<int> cameFrom(static_cast<size_t>(span) * span, -2);
+    std::vector<int> cameDir(static_cast<size_t>(span) * span, -1);
+
+    std::vector<glm::ivec2> frontier{start}, next;
+    cameFrom[index(start)] = -1;
+
+    bool found = (start == goal);
+    while (!found && !frontier.empty()) {
+        next.clear();
+        for (const glm::ivec2& b : frontier) {
+            for (int dir = 0; dir < kDirCount; ++dir) {
+                glm::ivec2 to = b + dirVec(dir);
+                if (!valid(to) || cameFrom[index(to)] != -2) continue;
+                if (!blockCanStep(hf, b, dir)) continue;
+
+                cameFrom[index(to)] = index(b);
+                cameDir[index(to)]  = dir;
+                if (to == goal) { found = true; break; }
+                next.push_back(to);
+            }
+            if (found) break;
+        }
+        frontier.swap(next);
+    }
+
+    if (!found) { m_pathFailed = true; return false; }
+
+    // Walk the parents back, then reverse.
+    for (glm::ivec2 at = goal; at != start; ) {
+        int i = index(at);
+        m_path.push_back(cameDir[i]);
+        m_pathNodes.push_back(at);
+        int parent = cameFrom[i];
+        at = glm::ivec2(parent % span, parent / span);
+    }
+    std::reverse(m_path.begin(), m_path.end());
+    std::reverse(m_pathNodes.begin(), m_pathNodes.end());
+    return true;
+}
+
+void Walker::assignFetch(const Heightfield& hf, const glm::vec3& crate,
+                         const glm::vec3& storage) {
+    m_target = nodeNear(hf, crate);
+    m_storageWorld = storage;
+    m_carrying = false;
+    m_taskTicks = 0;
+
+    // No route, no job. Better to say so at once than to grind at a ridge.
+    m_hasTask = planPath(hf, m_target - glm::ivec2(1));
+    m_activity = m_hasTask ? Activity::Approach : Activity::Wander;
+}
+
+void Walker::abandonTask() {
+    m_path.clear();
+    m_pathNodes.clear();
+    m_pathIndex = 0;
+    m_hasTask = m_carrying = false;
+    m_activity = Activity::Wander;
+}
+
+const char* Walker::activityName() const {
+    switch (m_activity) {
+        case Activity::Approach: return "driving to the crate";
+        case Activity::Carry:    return "hauling it to the pile";
+        default:                 return "wandering";
+    }
+}
+
+glm::vec3 Walker::cargoPosition(const Heightfield& hf) const {
+    // Riding on his back, so it tilts with the shell -- which means on a slope
+    // you can see the crate lean before you notice the machine has.
+    return bodyCentre(hf) + bodyUp(hf) * (params.cargoRise * hf.spacing());
+}
+
+void Walker::tick(const Heightfield& hf) {
+    for (int i = 0; i < 4; ++i) m_prevFeet[i] = m_feet[i];
+
+    if (m_phase == 0) {
+        // ---- choose a heading, then the front pair reaches ------------------
+        //
+        // He reconsiders EVERY step, not only when blocked. Only turning at
+        // walls looks sensible and is useless: simulated over 100k steps it
+        // covered 5-11% of the field, because walking straight until something
+        // stops you traces lines rather than area, and with every direction
+        // equally stale he just circles in a rut.
+        //
+        // Scoring how much unwalked ground each heading opens over the next few
+        // nodes took that to 100%, and still only turns on about 1.6% of steps,
+        // so he reads as purposeful rather than twitchy.
+        // Hauling: follow the planned route. Each entry is the heading for one
+        // step, so "am I going the right way" is an equality test rather than a
+        // search, and he cannot wedge in a local minimum because the route was
+        // proved to exist before he set off.
+        if (m_hasTask && m_pathIndex < m_path.size()) {
+            int want = m_path[m_pathIndex];
+
+            if (want != m_dir) {
+                m_dir = want;
+                ++m_turns;
+                recomputeFeet();
+                markVisited();
+                return;
+            }
+            if (!canAdvance(hf, m_dir)) { ++m_stuck; return; }
+
+            m_phase = 1;
+            recomputeFeet();
+            markVisited();
+            return;
+        }
+
+        int bestDir = -1;
+        int bestScore = -1000;
+        int tied = 0;
+
+        for (int k = 0; k < kDirCount; ++k) {
+            int cand = (m_dir + k) % kDirCount;
+            if (!canAdvance(hf, cand)) continue;
+
+            glm::ivec2 d = dirVec(cand);
+            glm::ivec2 fl = corner(cand + 1);
+            glm::ivec2 fr = corner(cand + 2);
+
+            int score = 0;
+            for (int look = 1; look <= params.lookahead; ++look) {
+                if (!visited(fl + d * look)) score += (params.lookahead + 1 - look);
+                if (!visited(fr + d * look)) score += (params.lookahead + 1 - look);
+            }
+            if (cand == m_dir) score += params.straightBias;
+
+            if (score > bestScore) {
+                bestScore = score;
+                bestDir = cand;
+                tied = 1;
+            } else if (score == bestScore && params.randomTieBreak) {
+                // Reservoir sample, so every tied heading is equally likely
+                // however many there are.
+                ++tied;
+                if (nextRandom() % static_cast<uint32_t>(tied) == 0) bestDir = cand;
+            }
+        }
+
+        if (bestDir < 0) {
+            ++m_stuck;              // boxed in on all four sides
+            return;
+        }
+        if (bestDir != m_dir) {
+            m_dir = bestDir;
+            ++m_turns;
+            recomputeFeet();        // the pivot: same four nodes, roles rotated
+            markVisited();
+            return;                 // turning costs a tick, which reads as hesitation
+        }
+
+        m_phase = 1;
+        recomputeFeet();
+        markVisited();
+        return;
+    }
+
+    // ---- phase 2: the back pair closes up ---------------------------------
+    // Sliding the block one node along the heading puts the back feet exactly
+    // where the front feet were standing a moment ago. Those nodes are known
+    // good, so this phase can never fail, and the body ends the cycle the same
+    // shape it started.
+    m_block += dirVec(m_dir);
+    m_phase = 0;
+    ++m_steps;
+    if (m_pathIndex < m_path.size()) ++m_pathIndex;
+
+    recomputeFeet();
+    markVisited();
+}
+
+void Walker::update(const Heightfield& hf, float dt) {
+    if (m_visited.empty()) return;
+
+    if (m_hasTask) {
+        glm::vec2 here = glm::vec2(m_block) + 0.5f;
+        float distance = glm::length(glm::vec2(m_target) - here);
+
+        // Arrived when the route is spent, or near enough by distance.
+        bool arrived = (m_pathIndex >= m_path.size()) || distance <= params.pickupNodes;
+        if (arrived) {
+            if (!m_carrying) {
+                // Over the crate: it clamps on, and the goal becomes the pile.
+                m_carrying = true;
+                m_activity = Activity::Carry;
+                m_target = nodeNear(hf, m_storageWorld);
+                if (!planPath(hf, m_target - glm::ivec2(1))) {
+                    // Picked it up and cannot get it home. Put it down here.
+                    m_hasTask = false;
+                    m_carrying = false;
+                    m_activity = Activity::Wander;
+                }
+            } else {
+                // Delivered. Letting go matters as much as picking up: without
+                // clearing this he ends the task, goes back to wandering, and
+                // carries the crate around on his back forever.
+                m_carrying = false;
+                m_hasTask = false;
+                m_activity = Activity::Wander;
+            }
+        }
+
+        if (++m_taskTicks > params.giveUpTicks) abandonTask();
+    }
+
+    m_accum += dt * std::max(0.0f, params.stepsPerSecond);
+
+    int guard = 0;
+    while (m_accum >= 1.0f && guard < 64) {
+        m_accum -= 1.0f;
+        tick(hf);
+        ++guard;
+    }
+    if (guard >= 64) m_accum = 0.0f;   // fell far behind; do not spiral
+}
+
+glm::vec3 Walker::footWorld(const Heightfield& hf, int i) const {
+    const glm::ivec2& from = m_prevFeet[i];
+    const glm::ivec2& to   = m_feet[i];
+
+    glm::vec3 a = hf.worldAt(from);
+    glm::vec3 b = hf.worldAt(to);
+
+    if (from == to) return a;
+
+    float t = std::clamp(m_accum, 0.0f, 1.0f);
+    glm::vec3 p = a + (b - a) * t;
+    p.y += std::sin(t * kPi) * params.legLiftFrac * hf.spacing();
+    return p;
+}
+
+glm::vec3 Walker::bodyCentre(const Heightfield& hf) const {
+    glm::vec3 sum(0.0f);
+    for (int i = 0; i < 4; ++i) sum += footWorld(hf, i);
+    glm::vec3 c = sum * 0.25f;
+    c += bodyUp(hf) * (params.bodyHoverFrac * hf.spacing());
+    return c;
+}
+
+// Taken from the feet rather than from the terrain, so the body tilts with what
+// he is actually standing on -- including mid-stretch, when the front pair is a
+// node further up the slope than the back pair.
+glm::vec3 Walker::bodyUp(const Heightfield& hf) const {
+    glm::vec3 fl = footWorld(hf, 0), fr = footWorld(hf, 1);
+    glm::vec3 br = footWorld(hf, 2), bl = footWorld(hf, 3);
+
+    glm::vec3 n = glm::cross(fr - fl, bl - fl) + glm::cross(bl - br, fr - br);
+    if (glm::dot(n, n) < 1e-8f) return glm::vec3(0, 1, 0);
+
+    n = glm::normalize(n);
+    return n.y < 0.0f ? -n : n;
+}
+
+glm::vec3 Walker::bodyForward(const Heightfield& hf) const {
+    glm::vec3 front = (footWorld(hf, 0) + footWorld(hf, 1)) * 0.5f;
+    glm::vec3 back  = (footWorld(hf, 2) + footWorld(hf, 3)) * 0.5f;
+
+    glm::vec3 f = front - back;
+    if (glm::dot(f, f) < 1e-8f) {
+        glm::ivec2 d = dirVec(m_dir);
+        return glm::vec3(d.x, 0.0f, d.y);
+    }
+    return glm::normalize(f);
+}
+
+} // namespace tessara

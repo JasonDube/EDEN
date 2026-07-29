@@ -298,6 +298,8 @@ compile_shaders(eden
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/skinned_model.frag
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/particle.vert
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/particle.frag
+    ${CMAKE_CURRENT_SOURCE_DIR}/shaders/tessara.vert
+    ${CMAKE_CURRENT_SOURCE_DIR}/shaders/tessara.frag
 )
 
 # Copy compiled shaders to build directory
@@ -349,3 +351,4 @@ add_subdirectory(examples/slag_legion)
 add_subdirectory(examples/project_simulacra)
 add_subdirectory(examples/tearsheet3d)
 add_subdirectory(examples/vieuphoria)
+add_subdirectory(examples/tessara_axiom)

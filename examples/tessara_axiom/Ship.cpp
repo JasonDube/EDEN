@@ -1,0 +1,334 @@
+#include "Ship.hpp"
+#include "MeshBuild.hpp"
+
+#include <algorithm>
+#include <cmath>
+
+namespace tessara {
+
+namespace {
+
+const glm::vec3 kHull    {0.30f, 0.33f, 0.37f};
+const glm::vec3 kHullDark{0.19f, 0.21f, 0.24f};
+const glm::vec3 kBayFloor{0.24f, 0.25f, 0.27f};
+const glm::vec3 kTrim    {0.46f, 0.49f, 0.53f};
+const glm::vec3 kGlass   {0.30f, 0.72f, 0.86f};
+const glm::vec3 kRamp    {0.26f, 0.28f, 0.31f};
+const glm::vec3 kHazard  {0.95f, 0.66f, 0.10f};
+const glm::vec3 kPanelOff{0.55f, 0.20f, 0.16f};
+const glm::vec3 kPanelOn {0.35f, 0.85f, 0.45f};
+
+float smoothStep(float t) {
+    t = std::clamp(t, 0.0f, 1.0f);
+    return t * t * (3.0f - 2.0f * t);
+}
+
+} // namespace
+
+glm::vec3 Ship::forward() const {
+    float y = glm::radians(m_yaw);
+    return glm::vec3(std::sin(y), 0.0f, std::cos(y));
+}
+
+glm::vec3 Ship::right() const {
+    float y = glm::radians(m_yaw);
+    return glm::vec3(std::cos(y), 0.0f, -std::sin(y));
+}
+
+void Ship::place(Heightfield& hf, glm::vec2 near, float yawDegrees) {
+    m_yaw = yawDegrees;
+
+    // Something this size sitting on a hillside looks wrong however carefully it
+    // is placed, so find the flattest patch nearby rather than trusting a point
+    // sample. Cost is a few hundred height lookups, once.
+    const float half = hf.n() * 0.5f * hf.spacing() - 24.0f;
+    const float probe = std::max(params.length, params.width) * 0.5f;
+
+    glm::vec2 best = near;
+    float bestSpread = 1e9f;
+
+    for (int ring = 0; ring < 10; ++ring) {
+        for (int step = 0; step < 12; ++step) {
+            float angle = step * (6.2831853f / 12.0f);
+            glm::vec2 at = near + glm::vec2(std::cos(angle), std::sin(angle)) * (ring * 5.0f);
+            if (std::fabs(at.x) > half || std::fabs(at.y) > half) continue;
+
+            float lo = 1e9f, hi = -1e9f;
+            for (int sx = -1; sx <= 1; ++sx) {
+                for (int sz = -1; sz <= 1; ++sz) {
+                    float h = hf.heightAtWorld(at.x + sx * probe, at.y + sz * probe);
+                    lo = std::min(lo, h);
+                    hi = std::max(hi, h);
+                }
+            }
+            float spread = hi - lo;
+            if (spread < bestSpread) { bestSpread = spread; best = at; }
+            if (spread < 0.35f) { ring = 99; break; }   // flat enough, stop looking
+        }
+    }
+
+    // Level the site, then sit on it. Searching alone was not enough: the
+    // flattest patch this terrain offers still varied nearly two units under the
+    // hull, and a ramp swung down onto sloping ground finished up to 3.7 units
+    // underneath it.
+    float height = hf.heightAtWorld(best.x, best.y);
+    float radius = std::max(params.length, params.width) * 0.62f + m_rampLength;
+    hf.levelPatch(best, radius, 14.0f, height);
+
+    m_origin = glm::vec3(best.x, height, best.y);
+
+    // Length is fixed by the doorway; the angle is then whatever gets the tip to
+    // the ground. Clamped, so a silly deck height gives a steep ramp rather than
+    // an impossible one.
+    m_rampLength = params.bayHeight;
+
+    // Aimed a little BELOW the ground for the same reason: a ramp tip landing
+    // exactly level with a flat pad is a coplanar face, and it flickers.
+    m_openAngle = glm::degrees(std::asin(
+        std::clamp((params.deckHeight + params.groundBite) / m_rampLength, 0.0f, 0.95f)));
+}
+
+void Ship::update(float dt) {
+    float rate = dt / std::max(0.05f, params.rampSeconds);
+    m_ramp = std::clamp(m_ramp + (m_opening ? rate : -rate), 0.0f, 1.0f);
+}
+
+glm::vec3 Ship::controlPosition() const {
+    // On the outside of the hull by the rear quarter, where somebody walking up
+    // to the back of the ship would find it.
+    return m_origin
+         + right() * (params.width * 0.5f + 0.25f)
+         - forward() * (params.length * 0.22f)
+         + up() * params.controlRise;
+}
+
+glm::vec3 Ship::rampFootPosition() const {
+    // Shut, it stands straight up sealing the doorway; down, it lies back at the
+    // ramp angle. One sweep between the two.
+    float shut = 90.0f;
+    float down = -m_openAngle;
+    float angle = glm::radians(shut + (down - shut) * smoothStep(m_ramp));
+
+    glm::vec3 hinge = m_origin + up() * params.deckHeight - forward() * (params.length * 0.5f);
+    glm::vec3 dir = -forward() * std::cos(angle) + up() * std::sin(angle);
+    return hinge + dir * m_rampLength;
+}
+
+SurfacePatch Ship::deckPatch() const {
+    const float halfL = params.length * 0.5f;
+
+    SurfacePatch patch;
+    patch.right  = right();
+    patch.along  = forward();
+    // Matches the deck box in the mesh, minus a hand's width at the edges so you
+    // cannot stand on the join with the wall.
+    patch.origin = m_origin + up() * params.deckHeight
+                 + forward() * (-halfL * 0.1f);
+    patch.halfWidth  = params.bayWidth * 0.5f - 0.15f;
+    patch.halfLength = halfL * 0.9f - 0.15f;
+    return patch;
+}
+
+SurfacePatch Ship::rampPatch() const {
+    const glm::vec3 hinge = m_origin + up() * params.deckHeight
+                          - forward() * (params.length * 0.5f);
+    const glm::vec3 foot  = rampFootPosition();
+
+    glm::vec3 span = hinge - foot;          // up the ramp
+    float length = glm::length(span);
+
+    SurfacePatch patch;
+    patch.right  = right();
+    patch.along  = length > 1e-4f ? span / length : forward();
+    patch.origin = (hinge + foot) * 0.5f + up() * 0.16f;   // the top face, not the middle
+    patch.halfWidth  = params.bayWidth * 0.46f;
+    patch.halfLength = length * 0.5f;
+
+    // Shut, it is a vertical door; there is nothing to walk on until it has come
+    // down far enough to be a slope rather than a wall. No angle test needed --
+    // the step-up rule in Ground refuses anything too steep on its own -- but a
+    // door standing straight up is not a floor in any sense and should not be
+    // offered as one.
+    patch.enabled = m_ramp > 0.15f;
+    return patch;
+}
+
+glm::vec3 Ship::bayStoragePoint() const {
+    // Rear third of the bay, so a stack does not block the way in.
+    return m_origin + up() * params.deckHeight
+         - forward() * (params.length * 0.24f);
+}
+
+glm::vec3 Ship::rampApproachPoint() const {
+    // Just beyond the foot of the ramp, on the ground, lined up with it. Walking
+    // AT the bay from anywhere else means walking into the hull.
+    glm::vec3 foot = rampFootPosition();
+    return glm::vec3(foot.x, m_origin.y, foot.z) - forward() * 3.0f;
+}
+
+bool Ship::isAboard(const glm::vec3& p) const {
+    glm::vec3 d = p - m_origin;
+    float along  = glm::dot(d, forward());
+    float across = glm::dot(d, right());
+    return std::fabs(along) < params.length * 0.5f
+        && std::fabs(across) < params.width * 0.5f
+        && p.y > m_origin.y + params.deckHeight - 1.0f;
+}
+
+void appendShipMesh(const Ship& ship,
+                    std::vector<SceneVertex>& verts,
+                    std::vector<uint32_t>& indices)
+{
+    const Ship::Params& p = ship.params;
+
+    const glm::vec3 o  = ship.origin();
+    const glm::vec3 f  = ship.forward();
+    const glm::vec3 r  = ship.right();
+    const glm::vec3 u  = Ship::up();
+
+    const float halfL = p.length * 0.5f;
+    const float halfW = p.width * 0.5f;
+
+    // Anything positioned in ship space goes through here, so the whole thing
+    // moves and turns as one.
+    auto at = [&](float x, float y, float z) { return o + r * x + u * y + f * z; };
+
+    // ---- landing struts ---------------------------------------------------
+    for (int i = 0; i < 4; ++i) {
+        float sx = (i & 1) ? 1.0f : -1.0f;
+        float sz = (i & 2) ? 1.0f : -1.0f;
+        glm::vec3 foot = at(sx * halfW * 0.72f, 0.0f, sz * halfL * 0.58f);
+
+        // Sunk in, not sat on. Bottom face below the terrain, top face above.
+        appendBox(verts, indices, foot + u * (0.18f - p.groundBite), r, u, f,
+                  glm::vec3(0.85f, 0.18f + p.groundBite, 1.15f), kHullDark);
+        appendTaperedStrut(verts, indices, foot + u * 0.30f,
+                           foot + u * (p.deckHeight + 0.2f), 0.34f, 0.26f, kTrim);
+    }
+
+    // Every piece below is nudged so that NO TWO SHARE A FACE PLANE.
+    //
+    // Boxes built from the same handful of dimensions land on the same planes by
+    // default -- the belly's top at exactly the deck's top, the nose's front at
+    // exactly the hull's front -- and two coplanar faces have no depth between
+    // them to resolve, so the depth test picks a winner per pixel and the seam
+    // crawls. Overlap them instead and there is always an answer.
+    const float eps = 0.09f;
+
+    // ---- belly and hull sides --------------------------------------------
+    // Top tucked UNDER the cargo deck, ends pulled in from the hull's.
+    appendBox(verts, indices, at(0.0f, p.deckHeight - 0.57f, 0.0f), r, u, f,
+              glm::vec3(halfW, 0.35f, halfL - eps), kHullDark);          // top 1.78
+
+    const float wallY = p.deckHeight + p.bayHeight * 0.5f;
+    const float wallT = (halfW - p.bayWidth * 0.5f) * 0.5f;
+
+    // Walls run from just BELOW the deck's top surface, not level with it.
+    const float wallTop = p.deckHeight + p.bayHeight;
+    const float wallBot = p.deckHeight - 0.10f;                          // 1.90
+    for (int side = 0; side < 2; ++side) {
+        float sx = side ? 1.0f : -1.0f;
+        appendBox(verts, indices,
+                  at(sx * (p.bayWidth * 0.5f + wallT), (wallTop + wallBot) * 0.5f, 0.0f),
+                  r, u, f,
+                  glm::vec3(wallT, (wallTop - wallBot) * 0.5f, halfL), kHull);
+    }
+
+    // Roof over the bay: slightly wider than the walls and dropped a little
+    // into them, so neither its sides nor its underside line up with theirs.
+    const float roofY = p.deckHeight + p.bayHeight;
+    appendBox(verts, indices, at(0.0f, roofY + 0.3f - eps, -halfL * 0.15f + eps), r, u, f,
+              glm::vec3(halfW + eps, 0.3f, halfL * 0.85f - eps), kHull);
+
+    // ---- cargo bay --------------------------------------------------------
+    // The deck is inset from the walls so it reads as a floor you could stand
+    // on rather than as the underside of the roof.
+    // Wider than the doorway so its edges tuck INSIDE the walls rather than
+    // stopping flush against them, and pulled in from the stern.
+    appendBox(verts, indices,
+              at(0.0f, p.deckHeight - 0.19f, -halfL * 0.1f + eps * 0.5f), r, u, f,
+              glm::vec3(p.bayWidth * 0.5f + eps, 0.19f, halfL * 0.9f - eps),
+              kBayFloor);                                                // 1.62 - 2.00
+
+    // Rib frames down the bay, which is most of what makes an interior read.
+    for (int i = -2; i <= 2; ++i) {
+        float z = i * (halfL * 0.34f);
+        for (int side = 0; side < 2; ++side) {
+            float sx = side ? 1.0f : -1.0f;
+            // Kept clear of the deck below and the roof above: decorative
+            // framing has no business sharing a plane with structure.
+            appendBox(verts, indices, at(sx * p.bayWidth * 0.5f, wallY, z), r, u, f,
+                      glm::vec3(0.10f, p.bayHeight * 0.5f - 0.20f, 0.22f), kTrim);
+        }
+        appendBox(verts, indices, at(0.0f, roofY - 0.06f, z), r, u, f,
+                  glm::vec3(p.bayWidth * 0.5f - 0.19f, 0.15f, 0.22f), kTrim);
+    }
+
+    // Front bulkhead -- the bay stops here and the bridge begins. Oversized on
+    // every axis so it buries into the walls, the deck and the roof.
+    const float bulkTop = p.deckHeight + p.bayHeight + eps;
+    const float bulkBot = p.deckHeight - 0.30f;                          // 1.70
+    appendBox(verts, indices,
+              at(0.0f, (bulkTop + bulkBot) * 0.5f, halfL * 0.62f), r, u, f,
+              glm::vec3(p.bayWidth * 0.5f + eps * 2.0f,
+                        (bulkTop - bulkBot) * 0.5f, 0.25f), kHullDark);
+
+    // ---- bridge -----------------------------------------------------------
+    const float bridgeY = roofY + 1.35f;
+    appendBox(verts, indices, at(0.0f, bridgeY, halfL * 0.66f), r, u, f,
+              glm::vec3(halfW * 0.62f, 1.35f, halfL * 0.30f), kHull);
+
+    // Canopy: three faces so it reads as a windscreen rather than a slab.
+    appendBox(verts, indices, at(0.0f, bridgeY + 0.35f, halfL * 0.95f), r, u, f,
+              glm::vec3(halfW * 0.50f, 0.70f, 0.16f), kGlass);
+    for (int side = 0; side < 2; ++side) {
+        float sx = side ? 1.0f : -1.0f;
+        appendBox(verts, indices,
+                  at(sx * halfW * 0.52f, bridgeY + 0.35f, halfL * 0.80f), r, u, f,
+                  glm::vec3(0.14f, 0.60f, halfL * 0.14f), kGlass);
+    }
+
+    // Nose, pushed out PAST the hull front rather than finishing flush with it
+    // -- that shared vertical plane was the second seam.
+    appendBox(verts, indices, at(0.0f, p.deckHeight + 1.2f, halfL * 0.86f + eps), r, u, f,
+              glm::vec3(halfW * 0.80f, 1.5f, halfL * 0.14f + eps), kHull);
+
+    // ---- ramp -------------------------------------------------------------
+    const float shut = 90.0f;
+    const float down = -ship.openAngleDegrees();
+    const float angle = glm::radians(shut + (down - shut) * smoothStep(ship.rampProgress()));
+
+    const glm::vec3 hinge = at(0.0f, p.deckHeight, -halfL);
+    const glm::vec3 dir   = -f * std::cos(angle) + u * std::sin(angle);
+    const glm::vec3 foot  = ship.rampFootPosition();
+
+    // Its own frame: `dir` is along the slab, and the axis across it is the
+    // ship's right, so the ramp turns with the ship for free.
+    const glm::vec3 rampUp = glm::normalize(glm::cross(r, dir));
+    appendBox(verts, indices, (hinge + foot) * 0.5f, r, rampUp, dir,
+              glm::vec3(p.bayWidth * 0.46f, 0.16f, glm::length(foot - hinge) * 0.5f),
+              kRamp);
+
+    // Hazard stripes across it, so which way is up is never in doubt.
+    for (int i = 0; i < 4; ++i) {
+        float t = 0.18f + i * 0.21f;
+        appendBox(verts, indices, hinge + dir * (glm::length(foot - hinge) * t)
+                                       + rampUp * 0.17f,
+                  r, rampUp, dir,
+                  glm::vec3(p.bayWidth * 0.44f, 0.03f, 0.22f), kHazard);
+    }
+
+    // Hinge housing, so the ramp does not appear to pivot around nothing.
+    appendBox(verts, indices, hinge, r, u, f,
+              glm::vec3(p.bayWidth * 0.48f, 0.26f, 0.26f), kTrim);
+
+    // ---- ramp control -----------------------------------------------------
+    const glm::vec3 control = ship.controlPosition();
+    appendBox(verts, indices, control, r, u, f,
+              glm::vec3(0.10f, 0.42f, 0.34f), kHullDark);
+    appendBox(verts, indices, control + r * 0.09f, r, u, f,
+              glm::vec3(0.05f, 0.22f, 0.18f),
+              ship.isOpening() ? kPanelOn : kPanelOff);
+}
+
+} // namespace tessara
