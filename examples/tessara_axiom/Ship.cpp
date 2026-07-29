@@ -389,10 +389,26 @@ glm::vec3 Ship::bayStoragePoint() const {
 }
 
 glm::vec3 Ship::rampApproachPoint() const {
-    // Just beyond the foot of the ramp, on the ground, lined up with it. Walking
-    // AT the bay from anywhere else means walking into the hull.
-    glm::vec3 foot = rampFootPosition();
-    return glm::vec3(foot.x, m_origin.y, foot.z) - forward() * 3.0f;
+    // Just beyond where the foot of the ramp COMES TO REST, on the ground, lined
+    // up with it. Walking at the bay from anywhere else means walking into the
+    // hull.
+    //
+    // Measured from the ramp lying fully down, not from wherever it happens to be
+    // -- and that is not a detail. Taken from the live foot the muster point moves
+    // with the door: six units further forward with the ramp shut, which puts it
+    // directly under the arc the ramp sweeps on its way open. So a creature that
+    // waited there for the door to open was standing exactly where the door was
+    // about to land, every time, by construction. It came down on his head and
+    // pinned him, and the better he behaved -- the more properly he waited -- the
+    // more reliably it happened.
+    //
+    // Where you wait for a door is not somewhere the door goes.
+    const float a = glm::radians(m_openAngle);
+    const glm::vec3 hinge = m_origin + up() * params.deckHeight
+                          - forward() * (params.length * 0.5f);
+    const glm::vec3 rest = hinge - forward() * (m_rampLength * std::cos(a));
+
+    return glm::vec3(rest.x, m_origin.y, rest.z) - forward() * 3.0f;
 }
 
 bool Ship::isAboard(const glm::vec3& p) const {

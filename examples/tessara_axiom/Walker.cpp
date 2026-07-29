@@ -467,8 +467,74 @@ void Walker::tick(const Ground& hf) {
     markVisited();
 }
 
+// Is he underneath something, rather than standing on it?
+//
+// Tested with slack, because the ramp's top face sits a hand's width proud of the
+// deck where the two overlap, and a foot on the deck at the doorway is fractionally
+// below the ramp beside it without being in any trouble at all.
+bool Walker::buried(const Ground& hf) const {
+    for (int i = 0; i < 4; ++i) {
+        const glm::vec3 w = hf.terrain().worldAt(m_feet[i]);
+        if (hf.blocked(w.x, w.z, m_footY[i] + 0.35f, params.bodyRise)) return true;
+    }
+    return false;
+}
+
+// Something arrived on top of him. Get out from under it.
+//
+// The ramp is the only thing in this world that moves, and it sweeps down through
+// ground a creature may perfectly reasonably be standing on. The biped is shoved
+// clear; the walker cannot be, because he has no position to nudge -- he has four
+// feet on lattice nodes two units apart, and being moved by half a node is not a
+// thing that can happen to him. So nothing happened to him at all: he stood there
+// while the slab came down, every step refused, and stayed.
+//
+// He steps out a whole block at a time instead, to the nearest placing that is
+// clear. It is a lurch rather than a walk, and it should be -- being under a
+// descending ramp is not a situation with a graceful exit.
+void Walker::escapeIfBuried(const Ground& hf) {
+    if (!buried(hf)) return;
+
+    const glm::ivec2 was = m_block;
+    const float reach = stepReach(hf);
+
+    for (int distance = 1; distance <= 4; ++distance) {
+        for (int d = 0; d < kDirCount; ++d) {
+            const glm::ivec2 candidate = was + dirVec(d) * distance;
+            if (candidate.x < 0 || candidate.y < 0 ||
+                candidate.x > m_gridN - 2 || candidate.y > m_gridN - 2) continue;
+
+            m_block = candidate;
+            recomputeFeet(hf);
+
+            // Reached for from the terrain, because a creature climbing out from
+            // under something is not standing on anything worth measuring from.
+            for (int i = 0; i < 4; ++i) {
+                m_footY[i] = hf.heightAt(m_feet[i], hf.terrain().heightAt(m_feet[i]), reach);
+            }
+
+            if (!buried(hf)) {
+                for (int i = 0; i < 4; ++i) {
+                    m_prevFeet[i]  = m_feet[i];       // no interpolating across a lurch
+                    m_prevFootY[i] = m_footY[i];
+                }
+                m_accum = 0.0f;
+                markVisited();
+                return;
+            }
+        }
+    }
+
+    // Nowhere clear within two blocks. Put him back and let him wait it out; the
+    // ramp is going somewhere, and when it gets there this will be asked again.
+    m_block = was;
+    recomputeFeet(hf);
+}
+
 void Walker::update(const Ground& hf, float dt) {
     if (m_visited.empty()) return;
+
+    escapeIfBuried(hf);
 
     // Nothing to do and indoors: go outside.
     //

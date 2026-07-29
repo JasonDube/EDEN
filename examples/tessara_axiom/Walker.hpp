@@ -163,6 +163,8 @@ private:
     void recomputeFeet(const Ground& hf);
     float stepReach(const Ground& hf) const;
     float surfaceUnder(const Ground& hf, const glm::ivec2& node) const;
+    bool  buried(const Ground& hf) const;
+    void  escapeIfBuried(const Ground& hf);
     void markVisited();
     glm::ivec2 corner(int index) const;   // 0..3 counter-clockwise from blockMin
     uint32_t nextRandom();

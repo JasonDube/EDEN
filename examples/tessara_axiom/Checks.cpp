@@ -677,6 +677,76 @@ void checkTheDoorMoving() {
         report("the ramp will not shut on anybody", caught && s.ship.rampProgress() > 0.9f, detail);
     }
 
+    // Where you WAIT for a door must not be somewhere the door goes.
+    //
+    // The muster point used to be measured from the ramp's live foot, so it moved
+    // with the door -- six units further forward with the ramp shut, which put it
+    // squarely under the arc the ramp sweeps on its way open. Anything that waited
+    // there for the door to open was standing exactly where the door was about to
+    // land, by construction, and the more properly it waited the more reliably it
+    // got pinned.
+    {
+        Scene s(0.0f, {0.0f, 0.0f}, 0.0f);
+        const glm::vec3 whenOpen = s.ship.rampApproachPoint();
+        s.closeRamp();
+        const glm::vec3 whenShut = s.ship.rampApproachPoint();
+
+        const float moved = glm::length(whenOpen - whenShut);
+        // And it has to be clear of where the tip comes to rest, not merely fixed.
+        s.ship.toggleRamp();
+        for (int i = 0; i < 400; ++i) { s.ship.update(1.0f / 60.0f); }
+        const glm::vec3 tip = s.ship.rampFootPosition();
+        const float clearance = glm::length(glm::vec2(whenOpen.x - tip.x, whenOpen.z - tip.z));
+
+        char detail[128];
+        std::snprintf(detail, sizeof detail,
+                      "moves %.2f as the door works, and sits %.1f clear of the tip",
+                      moved, clearance);
+        report("the muster point does not move with the door",
+               moved < 0.01f && clearance > 2.0f, detail);
+    }
+
+    // And the walker climbing out from under one that is coming down on him. He
+    // cannot be shoved -- his feet are on lattice nodes two units apart, and being
+    // moved half a node is not a thing that can happen to him -- so he steps out a
+    // whole block at a time instead.
+    {
+        Scene s(0.0f, {0.0f, 0.0f}, 0.0f);
+        s.closeRamp();
+
+        Walker w;
+        w.reset(s.ground, glm::ivec2(50, 30), 0);
+        const glm::vec3 pile = s.ship.bayStoragePoint();
+
+        // Park him under the arc: the shut ramp's tip sweeps down through here.
+        glm::vec3 under = s.ship.origin() - s.f() * 21.0f;
+        under.y = s.terrain.heightAtWorld(under.x, under.z);
+        w.assignFetch(s.ground, under, pile);
+        for (int i = 0; i < 40000 && !w.hasCargo(); ++i) w.update(s.ground, 1.0f / 60.0f);
+
+        const glm::vec3 before = w.bodyCentre(s.ground);
+
+        s.ship.toggleRamp();                  // open it onto him
+        for (int i = 0; i < 60 * 8; ++i) {
+            s.ship.update(1.0f / 60.0f, s.ship.isOnRamp(w.bodyCentre(s.ground)));
+            s.republish();
+            w.update(s.ground, 1.0f / 60.0f);
+        }
+
+        const glm::vec3 after = w.bodyCentre(s.ground);
+        const float surface = s.ground.heightAt(after.x, after.z, 9.0f, 9.0f);
+        const float feet = w.footHeight(0);
+
+        // Free means: not standing on the ground with the slab over his head.
+        const bool pinned = surface > feet + 0.5f;
+
+        char detail[128];
+        std::snprintf(detail, sizeof detail,
+                      "moved %.1f while it came down, ended %s",
+                      glm::length(after - before), pinned ? "PINNED" : "in the clear");
+        report("an opening ramp does not pin the walker", !pinned, detail);
+    }
+
     // And swinging OPEN through somebody stood at the foot of it. That one is
     // allowed to shove -- it is a slab coming down and there is nowhere else for
     // him to be -- but it has to shove all of him. Moving a body without its
