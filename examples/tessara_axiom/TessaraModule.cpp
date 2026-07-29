@@ -693,6 +693,25 @@ void TessaraModule::renderUI(float, float) {
         return;
     }
 
+    // Where you are standing, always, whatever the ship is doing.
+    //
+    // This lived inside the Ready state, which meant it was invisible unless you
+    // had already rallied and sealed -- so somebody stood in the hold wondering
+    // what they were supposed to be reading saw nothing at all. It is a fact
+    // about the world, not a step in a sequence, and it belongs at the top where
+    // it can answer the question before it is asked.
+    {
+        const bool aboard = playerAboard();
+        const glm::vec3 feet = m_playerPosition - glm::vec3(0.0f, 1.7f, 0.0f);
+        ImGui::TextColored(aboard ? ImVec4(0.35f, 0.9f, 0.45f, 1.0f)
+                                  : ImVec4(0.95f, 0.45f, 0.35f, 1.0f),
+                           "YOU: %s", aboard ? "aboard" : "on the ground");
+        ImGui::TextDisabled("  your feet %.2f   deck %.2f   (%.0f, %.0f)",
+                            feet.y, m_ship.origin().y + m_ship.params.deckHeight,
+                            feet.x, feet.z);
+        ImGui::Separator();
+    }
+
     const glm::vec3 o = m_ship.origin();
     ImGui::Text("ship down at (%.0f, %.1f, %.0f)", o.x, o.y, o.z);
     ImGui::Text("pile: %d of %d", m_stored, static_cast<int>(m_crates.size()));
@@ -720,15 +739,6 @@ void TessaraModule::renderUI(float, float) {
         ImGui::Text("  walker: %s", m_walker.onStation() ? "on station" : "coming");
         if (m_launch == Launch::Ready) {
             const bool aboard = playerAboard();
-
-            // Shown BEFORE the button, not discovered after it. A ship that lifts
-            // off without you and says nothing is a bug you have to reproduce to
-            // understand; a button that says why it will not go is one you fix by
-            // walking six steps.
-            ImGui::TextColored(aboard ? ImVec4(0.35f, 0.9f, 0.45f, 1.0f)
-                                      : ImVec4(0.95f, 0.45f, 0.35f, 1.0f),
-                               "  you are %s",
-                               aboard ? "aboard" : "NOT aboard - step into the hold first");
 
             if (aboard) {
                 if (ImGui::Button("LAUNCH")) launch();
