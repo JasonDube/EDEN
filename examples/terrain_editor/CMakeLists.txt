@@ -35,6 +35,9 @@ add_custom_command(TARGET terrain_editor POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
         ${CMAKE_BINARY_DIR}/shaders/default.vert.spv
         ${CMAKE_BINARY_DIR}/shaders/default.frag.spv
+        # A game module brings its own pipeline, so it brings its own shaders.
+        ${CMAKE_BINARY_DIR}/shaders/tessara.vert.spv
+        ${CMAKE_BINARY_DIR}/shaders/tessara.frag.spv
         ${CMAKE_BINARY_DIR}/shaders/terrain.vert.spv
         ${CMAKE_BINARY_DIR}/shaders/terrain.frag.spv
         ${CMAKE_BINARY_DIR}/shaders/skybox.vert.spv

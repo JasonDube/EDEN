@@ -10,6 +10,7 @@
 #include "GameModules/GameModule.hpp"
 
 #include <memory>
+#include <string>
 #include <vector>
 
 namespace eden { class Terrain; class BufferManager; }
@@ -106,6 +107,8 @@ private:
 
     std::vector<SceneVertex> m_verts;
     std::vector<uint32_t>    m_indices;
+
+    std::string m_renderError;
 
     bool m_playing = false;
     bool m_placed = false;

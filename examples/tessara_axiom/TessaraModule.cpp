@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <stdexcept>
 
 namespace tessara {
 
@@ -38,6 +39,7 @@ void TessaraModule::shutdown() {
 }
 
 std::string TessaraModule::getStatusMessage() const {
+    if (!m_renderError.empty()) return "no world rendering: " + m_renderError;
     if (!m_terrain) return "waiting for a level with terrain in it";
     if (!m_placed)  return "ship not set down yet";
     char buf[96];
@@ -261,7 +263,20 @@ void TessaraModule::updateHauling() {
 void TessaraModule::attachRenderer(const eden::ModuleRenderSetup& setup) {
     detachRenderer();
     m_buffers = &setup.buffers;
-    m_pipeline = std::make_unique<ScenePipeline>(setup.context, setup.renderPass, setup.extent);
+
+    // A module that cannot build its pipeline goes quiet. It does NOT take the
+    // host down with it, which is what happened the first time this ran: the
+    // shaders had not been copied next to the editor, ScenePipeline threw out of
+    // attachRenderer, and the whole application failed to start on a level it
+    // had otherwise loaded perfectly. An editor must survive its plugins.
+    try {
+        m_pipeline = std::make_unique<ScenePipeline>(setup.context, setup.renderPass, setup.extent);
+        m_renderError.clear();
+    } catch (const std::exception& e) {
+        m_pipeline.reset();
+        m_renderError = e.what();
+        std::fprintf(stderr, "[tessara] no world rendering: %s\n", m_renderError.c_str());
+    }
 }
 
 void TessaraModule::detachRenderer() {
