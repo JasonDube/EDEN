@@ -1380,6 +1380,16 @@ protected:
     }
 
     void onCleanup() override {
+        // A game module owns GPU objects, so it has to give them back while there
+        // is still a device to give them back to. Left to its own destructor it
+        // runs after the base class has torn Vulkan down, and vkDestroyPipeline
+        // aborts on a dead device -- which is how a clean exit became a crash.
+        if (m_gameModule) {
+            m_gameModule->detachRenderer();
+            m_gameModule->shutdown();
+            m_gameModule.reset();
+        }
+
         // Stop AI generation thread
         m_aiGenerateCancelled = true;
         if (m_aiGenerateThread.joinable()) {
@@ -25963,6 +25973,29 @@ private:
         std::cout << "[PlayMode] Camera: " << (m_playRTSCamera ? "RTS/battle (F6 for first-person)"
                                                                : "first-person WASD (F6 for RTS)") << std::endl;
 
+        // Tell the game module, and go where it says its game is.
+        //
+        // This lived at the bottom of checkGameTimeTriggers, which runs only when
+        // the clock crosses a behaviour trigger -- so a module was told it had
+        // entered play mode at some arbitrary minute, or never. It belongs here,
+        // in the function that actually enters play mode.
+        //
+        // The start position is asked for AFTER the module is told, because that
+        // is when a module decides where it has put things, and it cannot say
+        // where to stand to see them before it knows.
+        if (m_gameModule) {
+            m_gameModule->onEnterPlayMode();
+
+            glm::vec3 start(0.0f);
+            float startYaw = 0.0f;
+            if (m_gameModule->playerStart(start, startYaw)) {
+                m_camera.setPosition(start);
+                m_camera.setYaw(startYaw);
+                std::cout << "[GameModule] start: (" << start.x << ", " << start.y
+                          << ", " << start.z << ") yaw " << startYaw << std::endl;
+            }
+        }
+
         // Clear all editor selections so yellow outlines don't carry over
         for (auto& obj : m_sceneObjects) {
             if (obj) obj->setSelected(false);
@@ -26604,23 +26637,6 @@ private:
             }
         }
 
-        // Notify game module we're entering play mode
-        if (m_gameModule) {
-            m_gameModule->onEnterPlayMode();
-
-            // And put the player where the module says its game is. Asked after
-            // onEnterPlayMode because that is when a module decides where it has
-            // put things -- and on a level this size, "somewhere on the planet"
-            // is not a starting position.
-            glm::vec3 start(0.0f);
-            float yaw = 0.0f;
-            if (m_gameModule->playerStart(start, yaw)) {
-                m_camera.setPosition(start);
-                m_camera.setYaw(yaw);
-                std::cout << "[GameModule] start: (" << start.x << ", " << start.y
-                          << ", " << start.z << ")" << std::endl;
-            }
-        }
     }
 
     void exitPlayMode() {

@@ -153,6 +153,12 @@ void TessaraModule::republishGround() {
 void TessaraModule::onEnterPlayMode() {
     m_playing = true;
     if (m_ground && !m_placed) placeShip();
+
+    // Said out loud, because on a planet two and a half miles across a ship you
+    // cannot find and a ship that was never placed look identical.
+    const glm::vec3 o = m_ship.origin();
+    std::printf("[tessara] ship at (%.0f, %.1f, %.0f), %d crates scattered\n",
+                o.x, o.y, o.z, static_cast<int>(m_crates.size()));
 }
 
 void TessaraModule::onExitPlayMode() { m_playing = false; }
