@@ -75,6 +75,10 @@ public:
     // so the same W that walks you about the hold does not also walk you about
     // the hold WHILE steering the ship you are standing in.
     bool wantsCaptureKeyboard() const override { return m_atHelm; }
+
+    // The deck moved and the player was standing on it.
+    bool carriedPlayer(glm::vec3& outMove, float& outTurnDegrees,
+                       glm::vec3& outAbout) const override;
     Launch launchState() const { return m_launch; }
 
     // Standing at the foot of the ramp looking up it -- which is both the most
@@ -147,6 +151,13 @@ private:
 
     Launch m_launch = Launch::Idle;
     bool   m_atHelm = false;
+
+    // What the ship did to its own floor this frame, and whether the player was
+    // standing on it when it did.
+    glm::vec3 m_carryMove{0.0f};
+    glm::vec3 m_carryAbout{0.0f};
+    float     m_carryTurn = 0.0f;
+    bool      m_carriedPlayer = false;
 
     bool m_playing = false;
     bool m_placed = false;

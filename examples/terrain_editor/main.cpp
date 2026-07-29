@@ -13043,6 +13043,31 @@ private:
         if (m_gameModule) {
             m_gameModule->update(deltaTime);
             m_gameModule->setPlayerPosition(m_camera.getPosition());
+
+            // And go where its floor went. A ship in flight moves the deck the
+            // player is standing on, and nothing else in the engine knows that
+            // the ground under somebody can move -- terrain does not, and placed
+            // objects do not. Applied as a displacement rather than a position so
+            // it composes with gravity and the controllers instead of fighting
+            // them.
+            glm::vec3 move(0.0f), about(0.0f);
+            float spun = 0.0f;
+            if (m_gameModule->carriedPlayer(move, spun, about)) {
+                auto shift = [&](glm::vec3 p) {
+                    const float a = glm::radians(spun);
+                    const glm::vec3 d = p - about;
+                    return about + glm::vec3(d.x * std::cos(a) + d.z * std::sin(a), d.y,
+                                             -d.x * std::sin(a) + d.z * std::cos(a)) + move;
+                };
+                m_camera.setPosition(shift(m_camera.getPosition()));
+                m_playerTransform.setPosition(shift(m_playerTransform.getPosition()));
+                if (m_characterController) {
+                    m_characterController->setPosition(shift(m_characterController->getPosition()));
+                }
+                // Turned with the deck, or a quarter turn of the ship leaves you
+                // facing the wall you were flying past.
+                if (std::fabs(spun) > 1e-5f) m_camera.setYaw(m_camera.getYaw() + spun);
+            }
         }
         
         // Update AI motor control actions (look_around, turn_to, etc.) + auto-face player

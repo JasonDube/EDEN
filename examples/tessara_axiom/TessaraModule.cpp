@@ -380,9 +380,19 @@ void TessaraModule::standDown() {
     m_launch = Launch::Idle;
 }
 
+bool TessaraModule::carriedPlayer(glm::vec3& outMove, float& outTurnDegrees,
+                                  glm::vec3& outAbout) const {
+    if (!m_carriedPlayer) return false;
+    outMove = m_carryMove;
+    outTurnDegrees = m_carryTurn;
+    outAbout = m_carryAbout;
+    return true;
+}
+
 void TessaraModule::launch() {
     if (m_launch != Launch::Ready) return;
     m_ship.setAirborne(true);
+    m_carriedPlayer = false;
 
     // Recorded in the SHIP's frame, so that wherever the ship goes he is still
     // standing where he was standing. There is no other way to carry him.
@@ -391,6 +401,7 @@ void TessaraModule::launch() {
 }
 
 void TessaraModule::setDown() {
+    m_carriedPlayer = false;
     m_ship.setAirborne(false);
     m_walker.unpark();
     m_launch = Launch::Ready;
@@ -477,6 +488,19 @@ void TessaraModule::updateLaunch(float dt) {
             m_ship.fly(dt, forward, turn, lift, *m_source);
             const glm::vec3 move = m_ship.lastMove();
             const float spun = m_ship.lastTurn();
+
+            // The player rides too, and had been the one thing that did not.
+            // The host owns where he is, so this is reported rather than applied
+            // -- see GameModule::carriedPlayer. Asked of his FEET, because his
+            // reported position is his eye and the enclosure's floor is the deck:
+            // stood on the deck his eye is a metre and a half above it, which is
+            // inside the hold either way, but on the ramp it is the difference
+            // between being aboard and not.
+            const glm::vec3 feet = m_playerPosition - glm::vec3(0.0f, 1.7f, 0.0f);
+            m_carriedPlayer = m_ground->enclosureAt(feet) >= 0;
+            m_carryMove = move;
+            m_carryTurn = spun;
+            m_carryAbout = m_ship.origin() - move;
 
             if (glm::dot(move, move) > 1e-10f || std::fabs(spun) > 1e-5f) {
                 carryPassengers(move, spun);

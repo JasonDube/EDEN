@@ -107,6 +107,23 @@ public:
         return false;
     }
 
+    // carriedPlayer: the module moved the ground the player was standing on.
+    //
+    // A lift, a moving walkway, a ship in flight. The host owns where the player
+    // is and the module owns where its floor went, so the module reports the
+    // transform it applied and the host applies the same one to the player. False
+    // means nothing moved, or the player was not on it.
+    //
+    // Reported rather than applied because a module setting the player's position
+    // outright would fight everything else that does -- gravity, the character
+    // controller, the scripted controller -- whereas a displacement composes with
+    // all of them.
+    virtual bool carriedPlayer(glm::vec3& outMove, float& outTurnDegrees,
+                               glm::vec3& outAbout) const {
+        (void)outMove; (void)outTurnDegrees; (void)outAbout;
+        return false;
+    }
+
     // resolvePosition: push a body out of anything solid it has ended up inside.
     // Returns true if it moved. Walls, in other words -- without it a player can
     // stand on a module's roof and walk through its walls, which is worse than

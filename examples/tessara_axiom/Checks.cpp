@@ -1257,6 +1257,24 @@ void checkFlight() {
     const float went = glm::length(glm::vec2(s.ship.origin().x - from.x,
                                              s.ship.origin().z - from.z));
 
+    // And the player. He is the one thing the module cannot move itself -- the
+    // host owns where he is -- so what is checked here is that the module would
+    // ASK to move him, and that it only asks while he is actually aboard. A
+    // player left standing on the pad watching his ship leave is what happens
+    // when nobody asks.
+    {
+        Scene p(0.0f, {0.0f, 0.0f}, 0.0f);
+        const glm::vec3 inHold = p.ship.stationPosition(2);
+        const glm::vec3 onField = p.ship.origin() - p.f() * 60.0f;
+
+        const bool aboardCounts = p.ground.enclosureAt(inHold) >= 0;
+        const bool ashoreDoesNot = p.ground.enclosureAt(
+            glm::vec3(onField.x, p.terrain.heightAtWorld(onField.x, onField.z), onField.z)) < 0;
+
+        report("the ship knows who is standing in it", aboardCounts && ashoreDoesNot,
+               "a spot on the deck is aboard, a spot on the field is not");
+    }
+
     char detail[176];
     std::snprintf(detail, sizeof detail,
                   "circuit put it %.0f from the pad, cleared %.1f at worst, "
