@@ -143,6 +143,12 @@ public:
     int getResolution() const { return m_resolution; }
     float getTileSize() const { return m_tileSize; }
     float getChunkWorldSize() const { return m_chunkWorldSize; }
+
+    // The lowest and highest ground in this chunk, kept up to date whenever the
+    // heightmap is rebuilt. Wanted for one reason: a chunk you can put a box
+    // around is a chunk you can decide not to draw.
+    float getMinHeight() const { return m_minHeight; }
+    float getMaxHeight() const { return m_maxHeight; }
     bool hasSelection() const;
 
     // Check if world position is within this chunk
@@ -177,6 +183,11 @@ private:
     void rebuildIndices();
     glm::vec3 getTerrainColor(float normalizedHeight);
     glm::vec3 calculateNormal(int x, int z);
+
+    void refreshHeightBounds();
+
+    float m_minHeight = 0.0f;
+    float m_maxHeight = 0.0f;
 
     glm::ivec2 m_coord;
     int m_resolution;

@@ -147,6 +147,7 @@ void TerrainChunk::resetToDefaults() {
 }
 
 void TerrainChunk::rebuildVerticesFromHeightmap() {
+    refreshHeightBounds();
     float worldOffsetX = m_coord.x * (m_resolution - 1) * m_tileSize;
     float worldOffsetZ = m_coord.y * (m_resolution - 1) * m_tileSize;
 
@@ -222,7 +223,20 @@ void TerrainChunk::rebuildVerticesFromHeightmap() {
     m_needsUpload = true;
 }
 
+// Cheap: one pass over a heightmap that has just been walked anyway. Done here
+// rather than lazily so nothing has to remember to ask.
+void TerrainChunk::refreshHeightBounds() {
+    m_minHeight = 1e30f;
+    m_maxHeight = -1e30f;
+    for (float h : m_heightmap) {
+        m_minHeight = std::min(m_minHeight, h);
+        m_maxHeight = std::max(m_maxHeight, h);
+    }
+    if (m_heightmap.empty()) { m_minHeight = m_maxHeight = 0.0f; }
+}
+
 void TerrainChunk::regenerateMesh() {
+    refreshHeightBounds();
     rebuildVerticesFromHeightmap();
     if (m_triMode == TriangulationMode::Adaptive) {
         rebuildIndices();

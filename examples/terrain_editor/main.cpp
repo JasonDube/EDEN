@@ -3033,8 +3033,58 @@ protected:
                 for (const auto& [coord, chunk] : m_terrain.getAllChunks())
                     draws.emplace_back(chunk.get(), glm::vec3(0.0f));
             } else {
-                for (const auto& vc : m_terrain.getVisibleChunks())
-                    draws.emplace_back(vc.chunk.get(), vc.renderOffset);
+                // Frustum culled, which the visible set is NOT.
+                //
+                // getVisibleChunks is a square of (2*viewDistance+1)^2 chunks
+                // around the camera, chosen when the camera crosses a chunk
+                // boundary and never reconsidered when it turns. So everything
+                // behind you was being drawn, every frame -- and a chunk is eight
+                // thousand triangles through a sixteen-weight splatmap shader, so
+                // it is paid for in fragments whether or not it is on screen.
+                //
+                // Six planes out of the view-projection and an AABB test each. The
+                // Y span is the chunk's own measured height range, which is why
+                // TerrainChunk keeps one.
+                const glm::mat4& m = vp;
+                auto row = [&m](int i) {
+                    return glm::vec4(m[0][i], m[1][i], m[2][i], m[3][i]);
+                };
+                const glm::vec4 w = row(3);
+                const glm::vec4 planes[6] = {
+                    w + row(0), w - row(0),    // left, right
+                    w + row(1), w - row(1),    // bottom, top
+                    w + row(2), w - row(2),    // near, far
+                };
+
+                for (const auto& vc : m_terrain.getVisibleChunks()) {
+                    eden::TerrainChunk* chunk = vc.chunk.get();
+                    const float side = chunk->getChunkWorldSize();
+                    const glm::vec3 base = chunk->getWorldPosition() + vc.renderOffset;
+
+                    // A slab, not a cube: flat ground gives a flat box and the test
+                    // stays tight. A margin of a tile so a chunk whose edge vertex
+                    // sits exactly on a plane is never clipped away.
+                    const glm::vec3 lo(base.x - chunk->getTileSize(),
+                                       chunk->getMinHeight() - chunk->getTileSize(),
+                                       base.z - chunk->getTileSize());
+                    const glm::vec3 hi(base.x + side + chunk->getTileSize(),
+                                       chunk->getMaxHeight() + chunk->getTileSize(),
+                                       base.z + side + chunk->getTileSize());
+
+                    bool outside = false;
+                    for (const glm::vec4& p : planes) {
+                        // The AABB corner furthest along the plane normal. If even
+                        // that one is behind the plane, nothing in the box is in
+                        // front of it.
+                        const glm::vec3 far(p.x >= 0.0f ? hi.x : lo.x,
+                                            p.y >= 0.0f ? hi.y : lo.y,
+                                            p.z >= 0.0f ? hi.z : lo.z);
+                        if (glm::dot(glm::vec3(p), far) + p.w < 0.0f) { outside = true; break; }
+                    }
+                    if (!outside) draws.emplace_back(chunk, vc.renderOffset);
+                }
+                m_chunksDrawn = static_cast<int>(draws.size());
+                m_chunksConsidered = static_cast<int>(m_terrain.getVisibleChunks().size());
             }
             for (const auto& [chunk, offset] : draws) {
                 auto* buffers = getBufferManager().getMeshBuffers(chunk->getBufferHandle());
@@ -20527,6 +20577,7 @@ private:
                 const FrameCost& cost = frameCost();
                 ImGui::TextDisabled("upd %.1f  acq %.1f  rec %.1f  pre %.1f",
                                     cost.update, cost.acquire, cost.record, cost.present);
+                ImGui::TextDisabled("chunks: %d of %d drawn", m_chunksDrawn, m_chunksConsidered);
             }
 
             // RAM with color coding
@@ -32270,6 +32321,8 @@ private:
     // Loading state
     int m_chunksLoaded = 0;
     int m_totalChunks = 0;
+    int m_chunksDrawn = 0;
+    int m_chunksConsidered = 0;
 
     // FPS tracking
     float m_fps = 0.0f;
