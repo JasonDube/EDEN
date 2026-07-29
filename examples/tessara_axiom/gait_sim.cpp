@@ -6,11 +6,22 @@
 // from running the gait without a renderer, and the sliders' defaults are only
 // defensible for as long as that keeps being true.
 //
-// Run it after touching Walker.cpp:
-//   ./build/examples/tessara_axiom/gait_sim [ticks]
+// It also runs the ship checks in Checks.cpp, for the same reason: whether a
+// creature can walk up the ramp is not something looking at the code will tell
+// you either, and that particular question has already been got wrong five ways.
+//
+// Run it after touching Walker.cpp, Biped.cpp, Ground.cpp or Ship.cpp:
+//   ./build/examples/tessara_axiom/tessara_gait_sim [ticks]
+//   ./build/examples/tessara_axiom/tessara_gait_sim --check    (checks only, quick)
+//   ./build/examples/tessara_axiom/tessara_gait_sim --check -v (and say what passed)
+//
+// Exits non-zero if a check fails, so it can be run as one.
 
+#include "Checks.hpp"
 #include "Ground.hpp"
 #include "Walker.hpp"
+
+#include <cstring>
 
 #include <algorithm>
 #include <cstdio>
@@ -81,7 +92,20 @@ Result run(int gridN, float spacing, float relief,
 } // namespace
 
 int main(int argc, char** argv) {
-    const int ticks = argc > 1 ? std::atoi(argv[1]) : 100000;
+    bool checkOnly = false, verbose = false;
+    int ticks = 100000;
+
+    for (int i = 1; i < argc; ++i) {
+        if      (std::strcmp(argv[i], "--check") == 0) checkOnly = true;
+        else if (std::strcmp(argv[i], "-v") == 0)      verbose = true;
+        else                                           ticks = std::atoi(argv[i]);
+    }
+
+    // Checks first, and always. They take a couple of seconds against the sweep's
+    // couple of minutes, and a gait number measured in a world whose ramp is
+    // broken is a number about nothing.
+    const int failed = tessara::runShipChecks(verbose);
+    if (checkOnly) return failed ? 1 : 0;
 
     const int   kGridN   = 128;
     const float kSpacing = 2.0f;
@@ -225,5 +249,5 @@ int main(int argc, char** argv) {
                     100.0f * isolated / ((kGridN - 2) * (kGridN - 2)));
     }
 
-    return 0;
+    return failed ? 1 : 0;
 }

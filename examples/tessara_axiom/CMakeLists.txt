@@ -13,13 +13,18 @@ add_executable(tessara_axiom
 
 target_link_libraries(tessara_axiom PRIVATE eden)
 
-# The gait's two knobs are not guessable by eye, so they get measured instead.
-# No Vulkan, no window: the walker and the heightfield have no renderer in them.
+# The gait's two knobs are not guessable by eye, so they get measured instead --
+# and neither is whether anything can walk up the ramp, so Checks.cpp rides along
+# in the same binary. No Vulkan, no window: none of the creatures, the ground or
+# the ship have a renderer in them, which is exactly why they can be tested.
 add_executable(tessara_gait_sim
     gait_sim.cpp
+    Checks.cpp
     Heightfield.cpp
     Ground.cpp
     Walker.cpp
+    Biped.cpp
+    Ship.cpp
 )
 target_link_libraries(tessara_gait_sim PRIVATE eden)
 target_include_directories(tessara_gait_sim PRIVATE ${CMAKE_SOURCE_DIR}/src)
