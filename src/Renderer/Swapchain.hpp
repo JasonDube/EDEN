@@ -36,6 +36,15 @@ public:
     // look identical, and only one of them is worth optimising.
     VkPresentModeKHR getPresentMode() const { return m_presentMode; }
     const char* getPresentModeName() const;
+
+    // Whether to wait for the display. Static because a swapchain is destroyed and
+    // rebuilt to change it, so the preference has to outlive the object -- and
+    // because there is only ever one of these.
+    //
+    // Read from EDEN_VSYNC the first time it is asked, so the environment still
+    // sets the initial state and the UI can override it afterwards.
+    static void preferVsync(bool on);
+    static bool vsyncPreferred();
     VkFormat getDepthFormat() const { return m_depthFormat; }
     const std::vector<VkImage>& getImages() const { return m_images; }
 

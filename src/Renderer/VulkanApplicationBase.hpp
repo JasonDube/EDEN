@@ -54,8 +54,27 @@ public:
         float record  = 0.0f;   // building this frame's command buffer
         float present = 0.0f;   // submit and hand it over
         float total   = 0.0f;
+
+        // The WORST whole frame in the last second, and what phase it was in.
+        //
+        // Averages cannot show a spike, and a spike is the thing that matters
+        // under vsync: one frame over the refresh budget costs a whole refresh, so
+        // a scene doing 11 ms of work with an occasional 20 ms frame reads as the
+        // fifties rather than a solid sixty. The average says everything is fine.
+        float worst      = 0.0f;
+        float worstPhase = 0.0f;   // the biggest single phase in that frame
+        const char* worstName = "-";
     };
     const FrameCost& frameCost() const { return m_frameCost; }
+
+    // Wait for the display, or do not. Rebuilds the swapchain, so it is a request
+    // rather than a setter -- the change lands on the next frame.
+    void setVsync(bool on) {
+        if (Swapchain::vsyncPreferred() == on) return;
+        Swapchain::preferVsync(on);
+        m_framebufferResized = true;   // the existing path for "rebuild the swapchain"
+    }
+    bool vsync() const { return Swapchain::vsyncPreferred(); }
 
 protected:
     // Override these in derived classes

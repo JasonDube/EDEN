@@ -358,9 +358,24 @@ VkSurfaceFormatKHR Swapchain::chooseSwapSurfaceFormat(const std::vector<VkSurfac
 //
 // So it is selectable, and it says which one it picked. EDEN_VSYNC=0 asks for
 // uncapped.
+namespace {
+// -1 not yet decided, 0 uncapped, 1 wait for the display.
+int g_vsyncPreference = -1;
+
+bool vsyncWanted() {
+    if (g_vsyncPreference < 0) {
+        const char* env = std::getenv("EDEN_VSYNC");
+        g_vsyncPreference = (env && env[0] == '0') ? 0 : 1;
+    }
+    return g_vsyncPreference != 0;
+}
+} // namespace
+
+void Swapchain::preferVsync(bool on) { g_vsyncPreference = on ? 1 : 0; }
+bool Swapchain::vsyncPreferred() { return vsyncWanted(); }
+
 VkPresentModeKHR Swapchain::chooseSwapPresentMode(const std::vector<VkPresentModeKHR>& availablePresentModes) {
-    const char* vsync = std::getenv("EDEN_VSYNC");
-    const bool uncapped = vsync && vsync[0] == '0';
+    const bool uncapped = !vsyncWanted();
 
     auto has = [&](VkPresentModeKHR want) {
         for (const auto& mode : availablePresentModes) if (mode == want) return true;

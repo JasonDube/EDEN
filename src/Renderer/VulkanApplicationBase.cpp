@@ -101,6 +101,9 @@ void VulkanApplicationBase::mainLoop() {
         since = now;
     };
 
+    float peakWhole = 0.0f, peakWindow = 0.0f, peakPhase = 0.0f;
+    const char* peakName = "-";
+
     while (!shouldClose()) {
         auto phase = std::chrono::high_resolution_clock::now();
         const auto frameBegan = phase;
@@ -132,6 +135,31 @@ void VulkanApplicationBase::mainLoop() {
         const float whole = std::chrono::duration<float, std::milli>(
             std::chrono::high_resolution_clock::now() - frameBegan).count();
         m_frameCost.total += (whole - m_frameCost.total) * 0.1f;
+
+        // The worst frame in the last second, kept rather than averaged away, with
+        // the phase that made it worst. Reset each second so it tracks the scene
+        // instead of remembering one bad frame at startup forever.
+        if (whole > peakWhole) {
+            peakWhole = whole;
+            const std::pair<const char*, float> phases[] = {
+                {"poll", m_frameCost.poll}, {"update", m_frameCost.update},
+                {"acquire", m_frameCost.acquire}, {"record", m_frameCost.record},
+                {"present", m_frameCost.present},
+            };
+            peakName = "-";
+            peakPhase = 0.0f;
+            for (const auto& [name, ms] : phases) {
+                if (ms > peakPhase) { peakPhase = ms; peakName = name; }
+            }
+        }
+        peakWindow += whole;
+        if (peakWindow > 1000.0f) {
+            m_frameCost.worst = peakWhole;
+            m_frameCost.worstPhase = peakPhase;
+            m_frameCost.worstName = peakName;
+            peakWhole = 0.0f;
+            peakWindow = 0.0f;
+        }
     }
 
     m_context->waitIdle();

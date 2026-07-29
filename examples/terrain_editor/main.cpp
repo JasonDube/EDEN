@@ -20036,6 +20036,17 @@ private:
                 }
                 if (ImGui::MenuItem("Performance", nullptr, m_showPerfWindow))
                     m_showPerfWindow = !m_showPerfWindow;
+
+                // The performance overlay is click-through on purpose, so the one
+                // control that belongs with it lives here instead.
+                //
+                // OFF is the honest measurement and it TEARS -- immediate present
+                // hands a frame over the instant it is ready, so the screen shows
+                // the top of one and the bottom of the next. On this machine that
+                // is the only alternative: mailbox, which gives uncapped rendering
+                // without tearing, is not offered by the compositor.
+                if (ImGui::MenuItem("Vertical sync", nullptr, vsync()))
+                    setVsync(!vsync());
                 ImGui::EndMenu();
             }
             ImGui::EndMainMenuBar();
@@ -20581,6 +20592,12 @@ private:
                 ImGui::TextDisabled("present: %s, %u images",
                                     getSwapchain().getPresentModeName(),
                                     getSwapchain().getImageCount());
+                // The worst frame of the last second, which is the one you feel.
+                // Under vsync a single frame over budget costs a whole refresh, so
+                // this is what turns a solid sixty into the fifties while every
+                // average on screen still looks fine.
+                ImGui::TextDisabled("worst frame: %.1f ms (%s %.1f)",
+                                    cost.worst, cost.worstName, cost.worstPhase);
             }
 
             // RAM with color coding
