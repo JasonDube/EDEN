@@ -1300,6 +1300,119 @@ void checkFlight() {
 }
 
 // ---------------------------------------------------------------------------
+// 5c-ii. A rally works from every way he can be standing when it is called.
+//
+// Reported as "sometimes the walker gets stuck at the foot of the ramp, three or
+// four times now". Sometimes is not a case you can sit down and reproduce, so it
+// is not tested as one: this runs every approach on a grid around the ramp foot,
+// at several ship headings and every walker heading, and counts the ones that
+// stop. Before the fix, 28 of these stalled with a perfectly good route in hand.
+//
+// Two things were wrong, and both are about a route being a list of HEADINGS
+// rather than of places -- "north, north, east" is only true from the block it
+// was planned at:
+//
+//   - escapeIfBuried moves him out from under the closing ramp, two nodes
+//     sideways, and left the plan alone. He then walked a heading list counted
+//     from a block he was no longer standing on, which near a ship means into
+//     the hull. It throws the plan away now.
+//   - a routed step that had become impossible was counted and returned from,
+//     forever. It gets a few ticks' grace and then the route goes.
+// ---------------------------------------------------------------------------
+void checkRallyApproaches() {
+    int tried = 0, stalled = 0, worstSteps = 0;
+    float worstDistance = 0.0f;
+
+    for (float yaw : {0.0f, 34.0f, 90.0f}) {
+        for (float back : {4.0f, 12.0f}) {
+            for (float across = -6.0f; across <= 6.0f; across += 2.0f) {
+                for (int heading = 0; heading < 4; heading += 2) {
+                    Scene s(0.0f, {0.0f, 0.0f}, yaw);
+                    const glm::vec3 station = s.ship.stationPosition(1);
+                    const glm::vec3 from = s.ship.rampApproachPoint()
+                                         - s.f() * (back - 6.0f) + s.r() * across;
+
+                    Walker w;
+                    w.reset(s.ground, s.ground.nodeNear(from), heading);
+                    w.setHome(s.ship.origin(), 250.0f);
+                    w.orderTo(s.ground, station);
+
+                    ++tried;
+                    bool aboard = false;
+                    for (int i = 0; i < 60 * 90; ++i) {
+                        s.ship.update(1.0f / 60.0f,
+                                      s.ship.isOnRamp(w.bodyCentre(s.ground)));
+                        s.republish();
+                        w.update(s.ground, 1.0f / 60.0f);
+                        if (w.onStation() &&
+                            s.ground.enclosureAt(w.bodyCentre(s.ground)) >= 0) {
+                            aboard = true;
+                            break;
+                        }
+                    }
+
+                    if (aboard) continue;
+                    ++stalled;
+                    const glm::vec3 at = w.bodyCentre(s.ground);
+                    const float d = glm::length(glm::vec2(at.x - station.x,
+                                                          at.z - station.z));
+                    if (d > worstDistance) { worstDistance = d; worstSteps = w.steps(); }
+                }
+            }
+        }
+    }
+
+    char detail[176];
+    std::snprintf(detail, sizeof detail,
+                  "%d approaches, %d stalled%s", tried, stalled,
+                  stalled ? " -- worst stopped after some steps far from the deck" : "");
+    (void)worstSteps;
+    report("a rally works from wherever he is standing", stalled == 0, detail);
+}
+
+// ---------------------------------------------------------------------------
+// 5c-iii. And he never claims to be somewhere he is not.
+//
+// Giving up is allowed; reporting success is not. The give-up branch used to
+// latch onStation() whatever the distance, so a walker who could not plan a
+// route stood out on the dirt saying he was aboard, and the launch sequence
+// waited on a hold he was never going to be in. That failure is indistinguish-
+// able from a slow walk, which is the worst kind: the thing looks like it is
+// still working.
+// ---------------------------------------------------------------------------
+void checkStationHonesty() {
+    // Forty-five degrees, where the ramp lies diagonally across his lattice and
+    // he genuinely cannot get up it -- see the note on checkTheDiagonalRamp. A
+    // station he cannot reach is exactly the case the give-up branch handles, so
+    // it is the case worth asking him about.
+    Scene s(0.0f, {0.0f, 0.0f}, 45.0f);
+
+    Walker w;
+    const glm::vec3 o = s.ship.origin();
+    const glm::vec3 station = s.ship.stationPosition(1);
+    w.reset(s.ground, s.ground.nodeNear(o - s.f() * 40.0f), 0);
+    w.setHome(o, 250.0f);
+    w.orderTo(s.ground, station);
+
+    for (int i = 0; i < 60 * 60; ++i) {
+        s.ship.update(1.0f / 60.0f, s.ship.isOnRamp(w.bodyCentre(s.ground)));
+        s.republish();
+        w.update(s.ground, 1.0f / 60.0f);
+    }
+
+    const glm::vec3 at = w.bodyCentre(s.ground);
+    const float away = glm::length(glm::vec2(at.x - station.x, at.z - station.z));
+    const bool lying = w.onStation() && away > 3.0f;
+
+    char detail[176];
+    std::snprintf(detail, sizeof detail,
+                  "sent to a station he cannot reach: ended %.1f away, "
+                  "says on station %d, says stalled %d",
+                  away, (int)w.onStation(), (int)w.stationStalled());
+    report("he does not report a station he never reached", !lying, detail);
+}
+
+// ---------------------------------------------------------------------------
 // 5d. The player rides too -- driven through the MODULE, in the host's order.
 //
 // Everything above tests the content. This tests the thing the content is bolted
@@ -1585,6 +1698,8 @@ int runShipChecks(bool verbose) {
     checkRoutesAndDeliveries();
     checkTheRally();
     checkFlight();
+    checkRallyApproaches();
+    checkStationHonesty();
     checkThePlayerRides();
     checkTheHelmView();
     checkTheRealPlanet();

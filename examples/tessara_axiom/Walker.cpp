@@ -8,6 +8,12 @@ namespace tessara {
 namespace {
 
 constexpr int kDirCount = 4;
+
+// How many ticks of a refused route-step to sit through before throwing the
+// route away. Long enough that a ramp finishing its travel is waited out rather
+// than replanned around; short enough that a genuinely dead route costs him
+// under a second.
+constexpr int kStallTicks = 6;
 const int kDirX[kDirCount] = { 1, 0, -1, 0 };
 const int kDirY[kDirCount] = { 0, 1,  0, -1 };
 
@@ -102,6 +108,8 @@ void Walker::reset(const Ground& hf, glm::ivec2 blockMin, int heading) {
     m_phase = 0;
     m_accum = 0.0f;
     m_steps = m_turns = m_stuck = 0;
+    m_routeStall = 0;
+    m_stationStalled = false;
 
     // Dropped onto the terrain, always. Being set down inside the ship is not a
     // thing anyone asks for, and starting on the dirt means the first step out
@@ -251,12 +259,27 @@ bool Walker::blockCanStep(const Ground& hf, const glm::ivec2& block, int dir,
     glm::ivec2 fl = block + kOffsets[(dir + 1) % 4];
     glm::ivec2 fr = block + kOffsets[(dir + 2) % 4];
 
-    if (!goodStep(hf, fl, fl + d, fromY) || !goodStep(hf, fr, fr + d, fromY)) {
+    // Each front foot measured from the surface under THAT foot, which is what
+    // canAdvance does when he actually takes the step. It used to measure both
+    // from the block's one height, and the two rules disagreed in exactly one
+    // place: the edge of the ramp, where one front foot is up on the slope and
+    // the other is still on the dirt beside it. Averaged, both look reachable.
+    // Taken separately, the foot on the dirt cannot make the rise.
+    //
+    // So the planner handed him routes along the lip of the ramp that he could
+    // never walk, and he stood at the foot of it straddling the kerb until the
+    // rally gave up. A planner that lies about one step in a hundred is worse
+    // than one that refuses: a refusal routes him round to the ramp's foot,
+    // which is the way in the kerbs exist to force.
+    const float reach = stepReach(hf);
+    const float flY = hf.heightAt(fl, fromY, reach);
+    const float frY = hf.heightAt(fr, fromY, reach);
+
+    if (!goodStep(hf, fl, fl + d, flY) || !goodStep(hf, fr, fr + d, frY)) {
         return false;
     }
 
-    const float reach = stepReach(hf);
-    outY = 0.5f * (hf.heightAt(fl + d, fromY, reach) + hf.heightAt(fr + d, fromY, reach));
+    outY = 0.5f * (hf.heightAt(fl + d, flY, reach) + hf.heightAt(fr + d, frY, reach));
     return true;
 }
 
@@ -371,6 +394,7 @@ void Walker::orderTo(const Ground& hf, const glm::vec3& spot) {
     m_stationed = true;
     m_atStation = false;
     m_stationTries = 0;
+    m_stationStalled = false;
     m_stationWorld = spot;
     m_activity = Activity::Stationed;
 
@@ -384,6 +408,7 @@ void Walker::orderTo(const Ground& hf, const glm::vec3& spot) {
 void Walker::standDown() {
     m_stationed = false;
     m_atStation = false;
+    m_stationStalled = false;
     m_activity = Activity::Wander;
     m_path.clear();
     m_pathNodes.clear();
@@ -453,7 +478,27 @@ void Walker::tick(const Ground& hf) {
                 markVisited();
                 return;
             }
-            if (!canAdvance(hf, m_dir)) { ++m_stuck; return; }
+            if (!canAdvance(hf, m_dir)) {
+                ++m_stuck;
+
+                // A route is proved when it is planned, and the world does not
+                // hold still: the ramp is still coming down, the ship has been
+                // republished, the ground under a foot is not what it was. A step
+                // that has become impossible has to be ANSWERED. Counting it and
+                // returning is what left him at the foot of the ramp until the
+                // rally gave up on him.
+                //
+                // Give it a moment first -- most of these clear on their own,
+                // because the thing in the way is a door finishing its travel.
+                if (++m_routeStall >= kStallTicks) {
+                    m_routeStall = 0;
+                    m_path.clear();
+                    m_pathNodes.clear();
+                    m_pathIndex = 0;
+                }
+                return;
+            }
+            m_routeStall = 0;
 
             m_phase = 1;
             recomputeFeet(hf);
@@ -577,6 +622,22 @@ void Walker::escapeIfBuried(const Ground& hf) {
                 }
                 m_accum = 0.0f;
                 markVisited();
+
+                // And the route he was following is now nonsense.
+                //
+                // A route here is a list of HEADINGS, not of places: "north,
+                // north, east". Followed from the block it was planned at it
+                // arrives; followed from a block two nodes away it arrives two
+                // nodes away, which near a ship means inside the hull. He would
+                // turn onto the first heading, find it refused, and stand at the
+                // foot of the ramp for the rest of the rally.
+                //
+                // So a lurch throws the plan away. Whoever wanted him somewhere
+                // will plan again from where he actually is, which is the only
+                // place a heading list can be honestly counted from.
+                m_path.clear();
+                m_pathNodes.clear();
+                m_pathIndex = 0;
                 return;
             }
         }
@@ -632,10 +693,20 @@ void Walker::update(const Ground& hf, float dt) {
             // ramp still coming down is the usual reason and it passes -- but
             // count the attempts, because a station he cannot quite reach must
             // end with him standing still near it rather than trying forever.
+            // Giving up is allowed. Claiming to have arrived is not.
+            //
+            // This used to latch m_atStation whatever the distance, so a walker
+            // who could not plan a route at all stood nine units out on the dirt
+            // reporting himself on station, and the rally waited on a hold he was
+            // never going to be inside. Only the branch above -- the one that
+            // checks he is actually on the block -- may say he arrived. Out here
+            // he keeps trying, more slowly, and says he is stalled so that
+            // something can show it, and tries again every few seconds in case
+            // the thing in his way was a door.
             if (++m_stationTries > 3) {
-                m_atStation = true;
-                m_accum = 0.0f;
-                return;
+                m_stationStalled = true;
+                if (m_stationTries < 240) { m_accum = 0.0f; return; }
+                m_stationTries = 4;       // and round again, every few seconds
             }
             m_target = nodeNear(hf, m_stationWorld);
             planPath(hf, blockNearest(hf, m_stationWorld));

@@ -128,6 +128,11 @@ public:
     void orderTo(const Ground& hf, const glm::vec3& spot);
     bool ordered() const { return m_stationed; }
     bool onStation() const { return m_stationed && m_atStation; }
+
+    // Called in, and cannot get there. He keeps trying every few seconds, but
+    // something wants to be able to SAY so -- a rally that waits forever on a
+    // walker wedged behind the hull looks identical to one that is merely slow.
+    bool stationStalled() const { return m_stationed && !m_atStation && m_stationStalled; }
     void standDown();
 
     Activity  activity() const { return m_activity; }
@@ -233,6 +238,11 @@ private:
     // ground beside the hull.
     float m_footY[4]{};
     float m_prevFootY[4]{};
+
+    // Consecutive ticks a routed step has been refused. See tick(): a plan is
+    // only true of the world it was made in.
+    int m_routeStall = 0;
+    bool m_stationStalled = false;
 
     float m_accum = 0.0f;        // fraction of the way to the next tick
     uint32_t m_rngState = 0x9E3779B9u;

@@ -794,7 +794,12 @@ void TessaraModule::renderUI(float, float) {
                                                      : ImVec4(0.95f, 0.82f, 0.35f, 1.0f),
                            "%s", launchLabel());
         ImGui::Text("  biped:  %s", m_biped.onStation() ? "on station" : "coming");
-        ImGui::Text("  walker: %s", m_walker.onStation() ? "on station" : "coming");
+        // "cannot get there" rather than "coming", because a rally that will
+        // never finish and one that is merely slow look identical from here, and
+        // the first is the one worth interrupting.
+        ImGui::Text("  walker: %s", m_walker.onStation()      ? "on station"
+                                  : m_walker.stationStalled() ? "cannot reach his spot"
+                                                              : "coming");
         if (m_launch == Launch::Ready) {
             const bool aboard = playerAboard();
 
