@@ -389,9 +389,21 @@ bool TessaraModule::playerAboard() const {
     // They disagree only at the edges -- the doorway, the ramp, the lip of the
     // deck -- which is exactly where somebody standing aboard is most likely to
     // be told they are not.
-    const glm::vec3 feet = m_playerPosition - glm::vec3(0.0f, 1.7f, 0.0f);
-    return m_ground->enclosureAt(feet) >= 0
+    // Asked of his EYE as well as his feet, and either will do.
+    //
+    // The biped is carried on the strength of his HIP height passing exactly this
+    // test, and he rides correctly -- so the test works on a point well up a
+    // body. Deriving the player's feet by subtracting an eye height is one
+    // assumption too many: it is right only while whatever owns his position
+    // agrees about that offset, and when it does not the result is a player who
+    // is plainly standing in the hold and reported as not.
+    const glm::vec3 eye = m_playerPosition;
+    const glm::vec3 feet = eye - glm::vec3(0.0f, 1.7f, 0.0f);
+
+    return m_ground->enclosureAt(eye) >= 0
+        || m_ground->enclosureAt(feet) >= 0
         || m_ground->onPatch(feet.x, feet.z, feet.y, kPlayerStepUp)
+        || m_ship.isAboard(eye)
         || m_ship.isAboard(feet + glm::vec3(0.0f, 0.4f, 0.0f));
 }
 
@@ -524,6 +536,21 @@ void TessaraModule::updateLaunch(float dt) {
             // floor, and somebody in the doorway is on it whichever side of the
             // enclosure's edge their feet happen to fall.
             m_carriedPlayer = playerAboard();
+
+            // Once a second while airborne, so a launch that leaves somebody
+            // behind says why without them having to go looking.
+            m_reportAt += dt;
+            if (m_reportAt > 1.0f) {
+                m_reportAt = 0.0f;
+                const glm::vec3 e = m_playerPosition;
+                std::printf("[tessara] flying: you %s | eye (%.1f,%.1f,%.1f) "
+                            "deck %.1f ship (%.1f,%.1f,%.1f) room %d\n",
+                            m_carriedPlayer ? "RIDING" : "left behind",
+                            e.x, e.y, e.z,
+                            m_ship.origin().y + m_ship.params.deckHeight,
+                            m_ship.origin().x, m_ship.origin().y, m_ship.origin().z,
+                            m_ground->enclosureAt(e));
+            }
             m_carryMove = move;
             m_carryTurn = spun;
             m_carryAbout = m_ship.origin() - move;

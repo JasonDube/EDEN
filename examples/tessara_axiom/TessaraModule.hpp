@@ -163,6 +163,7 @@ private:
     glm::vec3 m_carryAbout{0.0f};
     float     m_carryTurn = 0.0f;
     bool      m_carriedPlayer = false;
+    float     m_reportAt = 0.0f;
 
     bool m_playing = false;
     bool m_placed = false;
