@@ -102,6 +102,11 @@ private:
     void republishGround();
     void updateHauling();
     void updateLaunch(float dt);
+
+    // Is the player standing on this ship? Asked in three ways, because the
+    // answer decides whether he flies or watches, and being nearly aboard is not
+    // a thing that should quietly resolve to no.
+    bool playerAboard() const;
     void carryPassengers(const glm::vec3& move, float turn);
     const char* launchLabel() const;
     void rebuildGeometry();

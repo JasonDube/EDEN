@@ -380,6 +380,21 @@ void TessaraModule::standDown() {
     m_launch = Launch::Idle;
 }
 
+bool TessaraModule::playerAboard() const {
+    if (!m_ground || !m_placed) return false;
+
+    // His reported position is his EYE; the floor he is on is a metre and seven
+    // below it. Asked three ways and any will do: in the hold's room, on one of
+    // the ship's own surfaces, or within the hull by the ship's own reckoning.
+    // They disagree only at the edges -- the doorway, the ramp, the lip of the
+    // deck -- which is exactly where somebody standing aboard is most likely to
+    // be told they are not.
+    const glm::vec3 feet = m_playerPosition - glm::vec3(0.0f, 1.7f, 0.0f);
+    return m_ground->enclosureAt(feet) >= 0
+        || m_ground->onPatch(feet.x, feet.z, feet.y, kPlayerStepUp)
+        || m_ship.isAboard(feet + glm::vec3(0.0f, 0.4f, 0.0f));
+}
+
 bool TessaraModule::carriedPlayer(glm::vec3& outMove, float& outTurnDegrees,
                                   glm::vec3& outAbout) const {
     if (!m_carriedPlayer) return false;
@@ -401,11 +416,9 @@ void TessaraModule::launch() {
     // Said out loud, because "it left without me" and "it did not carry me" look
     // identical from the pad and have completely different causes.
     const glm::vec3 feet = m_playerPosition - glm::vec3(0.0f, 1.7f, 0.0f);
-    const bool aboard = m_ground->enclosureAt(feet) >= 0 ||
-                        m_ground->onPatch(feet.x, feet.z, feet.y, kPlayerStepUp);
     std::printf("[tessara] launch: player feet at (%.1f, %.1f, %.1f), deck at %.1f -> %s\n",
                 feet.x, feet.y, feet.z, m_ship.origin().y + m_ship.params.deckHeight,
-                aboard ? "ABOARD" : "NOT ABOARD");
+                playerAboard() ? "ABOARD" : "NOT ABOARD");
 
     m_launch = Launch::Flying;
 }
@@ -510,9 +523,7 @@ void TessaraModule::updateLaunch(float dt) {
             // being in the hold. The deck, the bridge and the ramp are all its
             // floor, and somebody in the doorway is on it whichever side of the
             // enclosure's edge their feet happen to fall.
-            const glm::vec3 feet = m_playerPosition - glm::vec3(0.0f, 1.7f, 0.0f);
-            m_carriedPlayer = m_ground->enclosureAt(feet) >= 0 ||
-                              m_ground->onPatch(feet.x, feet.z, feet.y, kPlayerStepUp);
+            m_carriedPlayer = playerAboard();
             m_carryMove = move;
             m_carryTurn = spun;
             m_carryAbout = m_ship.origin() - move;
@@ -708,7 +719,26 @@ void TessaraModule::renderUI(float, float) {
         ImGui::Text("  biped:  %s", m_biped.onStation() ? "on station" : "coming");
         ImGui::Text("  walker: %s", m_walker.onStation() ? "on station" : "coming");
         if (m_launch == Launch::Ready) {
-            if (ImGui::Button("LAUNCH")) launch();
+            const bool aboard = playerAboard();
+
+            // Shown BEFORE the button, not discovered after it. A ship that lifts
+            // off without you and says nothing is a bug you have to reproduce to
+            // understand; a button that says why it will not go is one you fix by
+            // walking six steps.
+            ImGui::TextColored(aboard ? ImVec4(0.35f, 0.9f, 0.45f, 1.0f)
+                                      : ImVec4(0.95f, 0.45f, 0.35f, 1.0f),
+                               "  you are %s",
+                               aboard ? "aboard" : "NOT aboard - step into the hold first");
+
+            if (aboard) {
+                if (ImGui::Button("LAUNCH")) launch();
+            } else {
+                ImGui::BeginDisabled();
+                ImGui::Button("LAUNCH");
+                ImGui::EndDisabled();
+                ImGui::SameLine();
+                if (ImGui::Button("launch anyway")) launch();
+            }
             ImGui::SameLine();
         }
         if (m_launch == Launch::Flying) {
