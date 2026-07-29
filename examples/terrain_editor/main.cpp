@@ -8133,7 +8133,13 @@ private:
         // During conversation: use arrow keys for movement (WASD needed for typing)
         // Outside conversation: normal WASD movement
         // When ImGui wants keyboard (text fields, menus): suppress all movement keys
-        bool imguiWantsKeyboard = ImGui::GetIO().WantCaptureKeyboard;
+        // ...and so does a module that has taken the movement keys. Standing at
+        // the helm of a ship, A and D turn the SHIP; if this controller reads them
+        // too, the player strafes across the bridge at the same time and the ship
+        // barely answers. The scripted-player path already honoured
+        // wantsCaptureKeyboard; this one is the other half, and both run.
+        bool imguiWantsKeyboard = ImGui::GetIO().WantCaptureKeyboard ||
+                                  (m_gameModule && m_gameModule->wantsCaptureKeyboard());
 
         float speedMult = (!imguiWantsKeyboard && Input::isKeyDown(Input::KEY_LEFT_CONTROL)) ? 3.0f : 1.0f;
         glm::vec3 camPos = m_camera.getPosition();

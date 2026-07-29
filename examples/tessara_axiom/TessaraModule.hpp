@@ -74,7 +74,12 @@ public:
     // The module takes the movement keys while somebody is flying from the helm,
     // so the same W that walks you about the hold does not also walk you about
     // the hold WHILE steering the ship you are standing in.
-    bool wantsCaptureKeyboard() const override { return m_atHelm; }
+    // ...and only while it is actually flying. m_atHelm is worked out in the
+    // flying branch and nowhere else, so on its own it stays true after landing
+    // and quietly keeps the movement keys forever.
+    bool wantsCaptureKeyboard() const override {
+        return m_atHelm && m_launch == Launch::Flying;
+    }
 
     // The deck moved and the player was standing on it.
     bool carriedPlayer(glm::vec3& outMove, float& outTurnDegrees,

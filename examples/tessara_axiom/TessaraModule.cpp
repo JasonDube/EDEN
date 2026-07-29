@@ -535,7 +535,7 @@ void TessaraModule::updateLaunch(float dt) {
                 if (Input::isKeyDown(Input::KEY_D)) turn += 1.0f;
                 if (Input::isKeyDown(Input::KEY_A)) turn -= 1.0f;
                 if (Input::isKeyDown(Input::KEY_SPACE)) lift += 1.0f;
-                if (Input::isKeyDown(Input::KEY_LEFT_CONTROL)) lift -= 1.0f;
+                if (Input::isKeyDown(Input::KEY_LEFT_SHIFT)) lift -= 1.0f;
             }
 
             // The manifest is taken FIRST, and then the ship moves. See
@@ -816,7 +816,7 @@ void TessaraModule::renderUI(float, float) {
                                                : ImVec4(0.95f, 0.45f, 0.35f, 1.0f),
                                "  you are %s", m_carriedPlayer ? "aboard - riding with it"
                                                                : "NOT ABOARD - it left without you");
-            ImGui::TextDisabled(m_atHelm ? "  at the helm: WASD to fly, space/ctrl for height"
+            ImGui::TextDisabled(m_atHelm ? "  at the helm: WASD to fly, space/shift for height"
                                          : "  nobody at the helm - holding course");
             if (ImGui::Button("SET DOWN")) setDown();
         } else if (ImGui::Button("stand down")) {
