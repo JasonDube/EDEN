@@ -18,6 +18,7 @@ target_link_libraries(tessara_axiom PRIVATE eden)
 add_executable(tessara_gait_sim
     gait_sim.cpp
     Heightfield.cpp
+    Ground.cpp
     Walker.cpp
 )
 target_link_libraries(tessara_gait_sim PRIVATE eden)

@@ -253,4 +253,35 @@ void appendStoragePad(const glm::vec3& centre, float radius, bool occupied,
     }
 }
 
+void appendApproachMark(const glm::vec3& centre, float radius, bool claimed,
+                        std::vector<SceneVertex>& verts, std::vector<uint32_t>& indices)
+{
+    // Blue, because nothing else out here is. This is the muster point at the
+    // foot of the ramp -- the one place on the ground from which the way up is
+    // open -- and being able to SEE it is the difference between watching a
+    // creature navigate and watching it mill about.
+    const glm::vec3 idle {0.16f, 0.42f, 0.82f};
+    const glm::vec3 live {0.35f, 0.72f, 1.00f};
+    const glm::vec3 c = claimed ? live : idle;
+
+    const glm::vec3 right(1, 0, 0), up(0, 1, 0), fwd(0, 0, 1);
+
+    // A ring rather than a disc, so it reads as somewhere to stand rather than
+    // as something to stand on -- and so it does not fight the ground for depth
+    // across its whole area.
+    const int kSegments = 16;
+    for (int i = 0; i < kSegments; ++i) {
+        const float a = (6.2831853f * i) / kSegments;
+        const glm::vec3 at = centre + glm::vec3(std::cos(a), 0.0f, std::sin(a)) * radius;
+
+        appendBox(verts, indices, at + up * 0.07f, right, up, fwd,
+                  glm::vec3(0.17f, 0.07f, 0.17f), c);
+    }
+
+    // A short post in the middle, so it is findable across the field and from
+    // above, where a flat ring on flat ground disappears.
+    appendBox(verts, indices, centre + up * 0.55f, right, up, fwd,
+              glm::vec3(0.09f, 0.55f, 0.09f), c * 1.4f);
+}
+
 } // namespace tessara

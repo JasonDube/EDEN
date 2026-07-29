@@ -93,6 +93,15 @@ constexpr uint32_t kMaxCreatureIndices = 98304;
 // looking up at a machine three times your size -- the scale of the creatures
 // against each other is most of what there is to judge here.
 constexpr float kPlayerEyeHeight = 4.0f;
+
+// How wide you are, for the sake of anything solid. Narrower than the biped:
+// you are a camera and you would rather squeeze than be held off a wall you can
+// see you would fit through.
+constexpr float kPlayerRadius    = 0.45f;
+
+// How high a ledge you will step onto. Same distinction the biped draws between a
+// slope and a step, and the same reason.
+constexpr float kPlayerStepUp    = 0.90f;
 constexpr float kCrateSize       = 0.85f;
 constexpr float kTalkRange       = 7.0f;
 constexpr float kPanelRange      = 4.5f;
@@ -134,7 +143,7 @@ protected:
         // The ship LEVELS the ground it lands on, so it has to be sited before
         // the terrain mesh is built -- otherwise the pad is carved into the
         // heightfield and the thing you can see is still the old hillside.
-        glm::vec3 walkerAt = m_walker.bodyCentre(m_field);
+        glm::vec3 walkerAt = m_walker.bodyCentre(m_ground);
         m_ship.place(m_field, glm::vec2(walkerAt.x + 34.0f, walkerAt.z - 18.0f), 34.0f);
 
         // Down on arrival. A shut ramp is a sealed hold, and the biped's whole
@@ -215,14 +224,29 @@ protected:
         handleKeys();
 
         if (!m_paused) {
-            m_walker.update(m_field, deltaTime);
             m_ship.update(deltaTime);
 
-            // Republished each frame because the ramp swings. Two patches today;
-            // when the interior becomes real geometry it is more of the same.
+            // Republished each frame because the ramp swings, and BEFORE anything
+            // walks -- both creatures read this now, and a frame where the ship
+            // has moved but its surfaces have not been re-published is a frame
+            // where they are standing on where it used to be.
+            // Two patches today; when the interior becomes real geometry it is
+            // more of the same.
             m_ground.clearPatches();
             m_ground.addPatch(m_ship.deckPatch());
             m_ground.addPatch(m_ship.rampPatch());
+
+            // The solids do not move -- but they are republished on the same
+            // line as the patches anyway, because the alternative is remembering
+            // to rebuild them from the two places that set the ship down, and
+            // that is the kind of thing nobody remembers the second time.
+            std::vector<Blocker> solids;
+            m_ship.appendBlockers(solids);
+
+            m_ground.clearBlockers();
+            for (const Blocker& b : solids) m_ground.addBlocker(b);
+
+            m_walker.update(m_ground, deltaTime);
 
             if (m_showBiped) {
                 // He can only notice somebody who is actually in the world.
@@ -266,7 +290,7 @@ protected:
         // after the fence for this frame index has been waited on. Writing the
         // host-visible buffer any earlier could land while the GPU is still
         // reading the previous submission that used it.
-        buildCreatureMesh(m_field, m_walker, m_creatureVertices, m_creatureIndices);
+        buildCreatureMesh(m_ground, m_walker, m_creatureVertices, m_creatureIndices);
         if (m_showBiped) appendBipedMesh(m_biped, m_head, m_creatureVertices, m_creatureIndices);
         appendScenery();
         appendShipMesh(m_ship, m_creatureVertices, m_creatureIndices);
@@ -476,6 +500,14 @@ private:
         appendStoragePad(m_storage, 1.6f, m_stored > 0,
                          m_creatureVertices, m_creatureIndices);
 
+        // The foot of the ramp, marked. Only worth drawing while there is a way
+        // up to muster for -- with the ramp shut it is a circle on the dirt in
+        // front of a closed door.
+        if (m_ship.rampProgress() > 0.15f) {
+            appendApproachMark(m_ship.rampApproachPoint(), 1.5f, m_biped.hasCargo(),
+                               m_creatureVertices, m_creatureIndices);
+        }
+
         for (const Crate& crate : m_crates) {
             // Carried, it turns with him; otherwise it keeps the facing it was
             // put down with.
@@ -490,8 +522,8 @@ private:
                 fwd   = m_biped.forward();
             } else if (index == m_haul[1].crate && m_walker.hasCargo()) {
                 // Riding the shell, so it tilts with him on a slope.
-                up    = m_walker.bodyUp(m_field);
-                fwd   = m_walker.bodyForward(m_field);
+                up    = m_walker.bodyUp(m_ground);
+                fwd   = m_walker.bodyForward(m_ground);
                 right = glm::normalize(glm::cross(up, fwd));   // up x forward: right-handed
             }
 
@@ -633,11 +665,11 @@ private:
 
         runHauler(1, m_walkerHauls, m_walker.hasCargo(),
                   [this] { return m_walker.hasTask(); },
-                  m_walker.bodyCentre(m_field), 0.0f,
+                  m_walker.bodyCentre(m_ground), 0.0f,
                   [this](const glm::vec3& c, const glm::vec3& s) {
-                      m_walker.assignFetch(m_field, c, s);
+                      m_walker.assignFetch(m_ground, c, s);
                   },
-                  [this] { return m_walker.cargoPosition(m_field); });
+                  [this] { return m_walker.cargoPosition(m_ground); });
     }
 
     void bindAndDraw(VkCommandBuffer cmd, VkBuffer vertexBuffer, VkBuffer indexBuffer,
@@ -660,16 +692,16 @@ private:
 
         for (int attempt = 0; attempt < 512; ++attempt) {
             glm::ivec2 block(pick(m_rng), pick(m_rng));
-            m_walker.reset(m_field, block, attempt % 4);
-            if (m_walker.canAdvance(m_field, m_walker.heading())) return;
+            m_walker.reset(m_ground, block, attempt % 4);
+            if (m_walker.canAdvance(m_ground, m_walker.heading())) return;
         }
-        m_walker.reset(m_field, glm::ivec2(m_field.n() / 2, m_field.n() / 3), 0);
+        m_walker.reset(m_ground, glm::ivec2(m_field.n() / 2, m_field.n() / 3), 0);
     }
 
     // Put him down near the walker, so you do not have to go looking for two
     // creatures at opposite ends of a 256-unit field.
     void dropBiped() {
-        glm::vec3 near = m_walker.bodyCentre(m_field);
+        glm::vec3 near = m_walker.bodyCentre(m_ground);
         std::uniform_real_distribution<float> offset(-16.0f, 16.0f);
         std::uniform_real_distribution<float> heading(0.0f, 360.0f);
 
@@ -733,11 +765,15 @@ private:
     // Put the player on the ground, standing a little way off from the walker
     // and looking straight at him.
     void enterWalkMode() {
-        const glm::vec3 subject = m_walker.bodyCentre(m_field);
+        const glm::vec3 subject = m_walker.bodyCentre(m_ground);
 
         const float back = 14.0f;
         glm::vec3 stand = subject + glm::vec3(back * 0.7f, 0.0f, back * 0.7f);
         stand.y = m_field.heightAtWorld(stand.x, stand.z) + kPlayerEyeHeight;
+
+        // Seeded here, because a tracked floor has to start somewhere and this is
+        // the one place he is put down rather than walking.
+        m_playerFloor = stand.y - kPlayerEyeHeight;
 
         m_camera.setPosition(stand);
         m_camera.setEyeHeight(kPlayerEyeHeight);
@@ -788,9 +824,59 @@ private:
             // The one line that lets the player walk into the ship. He asks what
             // is under his feet, not what the terrain is doing.
             [this](float x, float z) {
-                float feet = m_camera.getPosition().y - kPlayerEyeHeight;
-                return m_ground.heightAt(x, z, feet);
+                return m_ground.heightAt(x, z, playerFloorReference(), kPlayerStepUp);
             });
+
+        // Then advance the tracked floor to wherever he has ended up.
+        {
+            const glm::vec3 eye = m_camera.getPosition();
+            m_playerFloor = m_ground.heightAt(eye.x, eye.z, playerFloorReference(),
+                                              kPlayerStepUp);
+        }
+
+        // The camera's walk mode asks what is under its feet and nothing else,
+        // so being stopped by a wall is not something it can do -- it is done to
+        // it, here, after the fact. Pushing the eye back out of a solid reads
+        // exactly like being stopped by it, because a frame is short enough that
+        // the overlap never gets deep enough to see.
+        //
+        // Done out here rather than inside eden::Camera on purpose: every other
+        // example is happy with a height function, and a collision world is a
+        // much bigger thing to ask the engine's camera to know about than this
+        // example has earned yet.
+        {
+            glm::vec3 eye = m_camera.getPosition();
+
+            glm::vec2 fixed = m_ground.resolve(glm::vec2(eye.x, eye.z), m_playerFloor,
+                                               kPlayerEyeHeight + 0.5f, kPlayerRadius);
+            if (fixed != glm::vec2(eye.x, eye.z)) {
+                m_camera.setPosition(glm::vec3(fixed.x, eye.y, fixed.y));
+            }
+        }
+    }
+
+    // What the player is standing on, measured from -- and this is the point --
+    // the floor he was standing on a moment ago, not from where his eye is.
+    //
+    // eden::Camera smooths its height toward the ground and never snaps, which is
+    // what stops a walk over rough terrain juddering. The cost is that the eye
+    // TRAILS the floor whenever it climbs: at 14 units a second up a 21-degree
+    // ramp it trails by about 1.2, which is most of the lower half of the ramp.
+    //
+    // So `eye.y - eyeHeight` is not an answer to "what am I standing on". It says
+    // the floor is a unit below where the floor is -- and a body a unit below the
+    // ramp is a body UNDER the ramp, which is how the one surface you are trying
+    // to walk up becomes the one surface that keeps throwing you off it. It also
+    // fed the camera's own slope check, which then compared the terrain against
+    // the terrain, found a two-unit cliff where the ramp meets the deck, and
+    // refused to climb it.
+    //
+    // Chained from the last known floor instead -- the same trick as the walker's
+    // per-foot heights -- and the eye is left free to follow at its own pace.
+    // Airborne, the reference reverts to the feet, or a jump could never find
+    // anything to land on that was higher than the floor it left.
+    float playerFloorReference() const {
+        return std::max(m_playerFloor, m_camera.getPosition().y - kPlayerEyeHeight);
     }
 
     void updateCamera(float deltaTime) {
@@ -888,7 +974,7 @@ private:
             // Regenerating wipes the landing pad, so the ship has to re-level
             // before the mesh is rebuilt or it ends up buried in the new hills.
             dropWalker();
-            glm::vec3 walkerAt = m_walker.bodyCentre(m_field);
+            glm::vec3 walkerAt = m_walker.bodyCentre(m_ground);
             m_ship.place(m_field, glm::vec2(walkerAt.x + 34.0f, walkerAt.z - 18.0f), 34.0f);
 
             uploadTerrain();
@@ -1268,7 +1354,7 @@ private:
         ImVec2 s[4];
         bool allVisible = true;
         for (int i = 0; i < 4; ++i) {
-            if (!toScreen(m_walker.footWorld(m_field, i), s[i])) allVisible = false;
+            if (!toScreen(m_walker.footWorld(m_ground, i), s[i])) allVisible = false;
         }
         if (allVisible) {
             dl->AddQuadFilled(s[0], s[1], s[2], s[3], IM_COL32(183, 224, 74, 70));
@@ -1278,7 +1364,7 @@ private:
         // Feet. Front ones bright, so which end is leading is never in doubt.
         auto drawFoot = [&](int i, ImU32 col, float r) {
             ImVec2 p;
-            if (!toScreen(m_walker.footWorld(m_field, i), p)) return;
+            if (!toScreen(m_walker.footWorld(m_ground, i), p)) return;
             dl->AddCircleFilled(p, r, col, 12);
             dl->AddCircle(p, r + 2.5f, IM_COL32(255, 255, 255, 120), 12, 1.2f);
         };
@@ -1292,11 +1378,14 @@ private:
         for (int i = 0; i < 2; ++i) {
             const glm::ivec2 from = m_walker.footNode(i);
             const glm::ivec2 to   = from + d;
-            const bool ok = m_walker.goodStep(m_field, from, to);
+            // Asked from where that foot actually is, so the probe drawn on the
+            // ramp is the same question he is asking himself there.
+            const bool ok = m_walker.goodStep(m_ground, from, to, m_walker.footHeight(i));
             const ImU32 col = ok ? IM_COL32(140, 255, 160, 220) : IM_COL32(255, 80, 80, 220);
 
             ImVec2 a, b;
-            if (toScreen(m_field.worldAt(from), a) && toScreen(m_field.worldAt(to), b)) {
+            if (toScreen(m_walker.footWorld(m_ground, i), a) &&
+                toScreen(m_ground.worldAt(to, m_walker.footHeight(i), 2.0f), b)) {
                 dl->AddLine(a, b, col, 2.0f);
                 dl->AddCircle(b, 4.0f, col, 10, 1.6f);
             }
@@ -1306,6 +1395,9 @@ private:
     // ----------------------------------------------------------------- state
     Heightfield m_field;
     Ground      m_ground{m_field};
+
+    // See playerFloorReference().
+    float m_playerFloor = 0.0f;
     Walker      m_walker;
     Biped       m_biped;
     HeadModel   m_head;

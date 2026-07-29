@@ -117,15 +117,35 @@ glm::vec3 Ship::rampFootPosition() const {
 SurfacePatch Ship::deckPatch() const {
     const float halfL = params.length * 0.5f;
 
+    // The deck runs from under the ramp's hinge to the front of the bay.
+    //
+    // That aft end is the important number and it is NOT where the deck is drawn.
+    // Matched to the mesh it stopped 0.15 short of the hull's rear edge, and the
+    // ramp hangs from a hinge exactly ON that edge -- so between the two there
+    // was a strip of nothing 0.15 wide, and a strip of nothing reads as terrain,
+    // two units down.
+    //
+    // A body is not a point but a FOOT is, and it only has to come down once in
+    // the gap to be told the floor is on the ground. What it looks like is a
+    // creature that walks all the way up the ramp and then stands in the doorway
+    // refusing to go in, because from where he is the bay is a 2.2-unit cliff and
+    // his slope rule is doing exactly what it should.
+    //
+    // So they OVERLAP rather than meet. Abutting surfaces are the same mistake as
+    // coplanar faces one file over -- exact adjacency is not something float
+    // arithmetic will hold for you, and there is no reason to ask it to.
+    const float aft  = -halfL - 0.6f;
+    const float fore = -halfL * 0.1f + halfL * 0.9f - 0.15f;
+
     SurfacePatch patch;
     patch.right  = right();
     patch.along  = forward();
-    // Matches the deck box in the mesh, minus a hand's width at the edges so you
-    // cannot stand on the join with the wall.
     patch.origin = m_origin + up() * params.deckHeight
-                 + forward() * (-halfL * 0.1f);
+                 + forward() * ((aft + fore) * 0.5f);
+    // A hand's width in at the sides, so you cannot stand on the join with the
+    // wall. Only the sides: pulling the ENDS in is what caused the gap.
     patch.halfWidth  = params.bayWidth * 0.5f - 0.15f;
-    patch.halfLength = halfL * 0.9f - 0.15f;
+    patch.halfLength = (fore - aft) * 0.5f;
     return patch;
 }
 
@@ -144,6 +164,11 @@ SurfacePatch Ship::rampPatch() const {
     patch.halfWidth  = params.bayWidth * 0.46f;
     patch.halfLength = length * 0.5f;
 
+    // You cannot walk through it side-on. The way up is the foot of it, which is
+    // the only place along its length where its surface is at your feet rather
+    // than through your chest.
+    patch.solidUnder = true;
+
     // Shut, it is a vertical door; there is nothing to walk on until it has come
     // down far enough to be a slope rather than a wall. No angle test needed --
     // the step-up rule in Ground refuses anything too steep on its own -- but a
@@ -151,6 +176,137 @@ SurfacePatch Ship::rampPatch() const {
     // offered as one.
     patch.enabled = m_ramp > 0.15f;
     return patch;
+}
+
+void Ship::appendBlockers(std::vector<Blocker>& out) const {
+    const float halfL = params.length * 0.5f;
+    const float halfW = params.width * 0.5f;
+    const float halfB = params.bayWidth * 0.5f;
+
+    // The one seam everything else is measured from. Below it the hull is solid
+    // right across; above it there is a bay with walls either side. Put the
+    // belly's top and the walls' bottoms at the SAME height and there is no
+    // sliver between them for a foot to find.
+    const float split = params.deckHeight - 0.25f;
+    const float roof  = params.deckHeight + params.bayHeight + 0.6f;
+
+    Blocker base;
+    base.right = right();
+    base.along = forward();
+
+    // ---- everything below the deck ----------------------------------------
+    // Belly, struts and all, as one solid. Its floor is well under the terrain
+    // rather than level with it: a solid that stops exactly at the ground has a
+    // bottom edge, and something walking downhill into the hull would find it.
+    {
+        Blocker b = base;
+        b.origin     = m_origin;
+        b.halfWidth  = halfW;
+        b.halfLength = halfL;
+        b.floorY     = m_origin.y - 6.0f;
+        b.ceilingY   = m_origin.y + split;
+        out.push_back(b);
+    }
+
+    // ---- the two hull walls the bay runs between ---------------------------
+    const float wallT = (halfW - halfB) * 0.5f;
+    for (int side = 0; side < 2; ++side) {
+        const float sx = side ? 1.0f : -1.0f;
+
+        Blocker b = base;
+        b.origin     = m_origin + right() * (sx * (halfB + wallT));
+        b.halfWidth  = wallT;
+        b.halfLength = halfL;
+        b.floorY     = m_origin.y + split;
+        b.ceilingY   = m_origin.y + roof;
+        out.push_back(b);
+    }
+
+    // ---- the ramp's side rails ---------------------------------------------
+    // Why a ramp in a game about walking needs rails.
+    //
+    // This slope rises 0.38 a unit. Two units ALONG it is 0.76 up. Two units
+    // ACROSS onto its flank is also 0.76 up. They are the same number, so no rule
+    // about how high a surface is can tell walking up the ramp from climbing onto
+    // the side of it -- and every attempt to separate them by tightening the
+    // height either let him mount the flank or stopped him climbing the slope,
+    // because they are the same measurement.
+    //
+    // What actually distinguishes them is DIRECTION, and the honest way to say a
+    // direction in a world made of solids is to put something in the way of all
+    // the others. So the flank gets a kerb and the low end does not. Nothing has
+    // to be told to approach from behind: behind is the only gap left.
+    //
+    // It is also the only version that works for the walker, who is a low machine
+    // and has no business stepping up onto anything.
+    if (m_ramp > 0.15f) {
+        const glm::vec3 hinge = m_origin + up() * params.deckHeight
+                              - forward() * halfL;
+        const glm::vec3 span = hinge - rampFootPosition();
+        const glm::vec3 flat(span.x, 0.0f, span.z);
+        const float run = glm::length(flat);
+
+        if (run > 1e-3f) {
+            const int   kSlices  = 6;
+            const float railRise = 0.85f;   // how far it stands proud of the slab
+            const float rampHalf = params.bayWidth * 0.46f;
+
+            // A kerb rather than a strip of paint, and the width is not taste.
+            //
+            // The walker's feet are POINTS on a lattice two units apart, so a
+            // rail thinner than a step is one he strides straight over without
+            // ever sampling it -- the same tunnelling that let the biped straddle
+            // the bulkhead. A wide kerb is a kerb a point-sampled foot cannot
+            // miss, and it still leaves eight units of ramp to walk up, which is
+            // four times what either of them needs.
+            const float railT = 0.6f;
+
+            // Upright slices up a tilted rail. Each one's ceiling is taken from
+            // its HIGH end, so the rail is proud of the slab everywhere inside
+            // it -- nobody is meant to stand on a rail, so there is no reason to
+            // follow its top face exactly, and every reason not to leave a notch
+            // between slices where a foot would fit.
+            for (int s = 0; s < kSlices; ++s) {
+                const glm::vec3 a = rampFootPosition() + span * (float(s)     / kSlices);
+                const glm::vec3 b = rampFootPosition() + span * (float(s + 1) / kSlices);
+
+                for (int side = 0; side < 2; ++side) {
+                    const float sx = side ? 1.0f : -1.0f;
+
+                    Blocker rail = base;
+                    rail.along      = flat / run;
+                    rail.origin     = (a + b) * 0.5f + right() * (sx * (rampHalf - railT));
+                    rail.halfWidth  = railT;
+                    rail.halfLength = run / (2.0f * kSlices);
+                    rail.floorY     = m_origin.y - 6.0f;
+                    rail.ceilingY   = std::max(a.y, b.y) + railRise;
+                    out.push_back(rail);
+                }
+            }
+        }
+    }
+
+    // ---- everything forward of the bulkhead --------------------------------
+    // Where the hold ends and the bridge begins. Solid all the way to the nose
+    // rather than a thin partition at the bulkhead's own thickness, for two
+    // reasons. The bridge is not somewhere anyone walks -- there is no door to
+    // it and no floor drawn in it -- so a wall with a hollow behind it would be
+    // modelling a room nobody can reach. And a thin wall is a wall you can walk
+    // through: the biped checks his path at four points along it, which at
+    // walking pace is a sample every couple of units, and the bulkhead drawn in
+    // the mesh is barely half a unit thick. He would straddle it. A solid seven
+    // units deep cannot be stepped over by anything that takes steps.
+    {
+        const float face = halfL * 0.62f;
+
+        Blocker b = base;
+        b.origin     = m_origin + forward() * ((face + halfL) * 0.5f);
+        b.halfWidth  = halfB + 0.3f;
+        b.halfLength = (halfL - face) * 0.5f;
+        b.floorY     = m_origin.y + split;
+        b.ceilingY   = m_origin.y + roof;
+        out.push_back(b);
+    }
 }
 
 glm::vec3 Ship::bayStoragePoint() const {
@@ -316,6 +472,19 @@ void appendShipMesh(const Ship& ship,
                                        + rampUp * 0.17f,
                   r, rampUp, dir,
                   glm::vec3(p.bayWidth * 0.44f, 0.03f, 0.22f), kHazard);
+    }
+
+    // Side rails. These are collision before they are decoration -- they are what
+    // makes the foot of the ramp the only way onto it -- and a thing that stops
+    // you has no business being invisible.
+    const float rampHalfW = p.bayWidth * 0.46f;
+    for (int side = 0; side < 2; ++side) {
+        const float sx = side ? 1.0f : -1.0f;
+        appendBox(verts, indices,
+                  (hinge + foot) * 0.5f + r * (sx * (rampHalfW - 0.6f)) + rampUp * 0.42f,
+                  r, rampUp, dir,
+                  glm::vec3(0.6f, 0.42f, glm::length(foot - hinge) * 0.5f),
+                  kTrim);
     }
 
     // Hinge housing, so the ramp does not appear to pivot around nothing.

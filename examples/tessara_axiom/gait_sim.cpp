@@ -9,7 +9,7 @@
 // Run it after touching Walker.cpp:
 //   ./build/examples/tessara_axiom/gait_sim [ticks]
 
-#include "Heightfield.hpp"
+#include "Ground.hpp"
 #include "Walker.hpp"
 
 #include <algorithm>
@@ -36,7 +36,10 @@ Result run(int gridN, float spacing, float relief,
            float slopeDeg, int lookahead, int bias, int ticks,
            bool tieBreak = true, uint32_t seed = 1u, glm::ivec2 start = {-1, -1})
 {
-    Heightfield field(gridN, spacing, relief);
+    Heightfield terrain(gridN, spacing, relief);
+    // No ship in the sim: a bare Ground over the terrain is the same world the
+    // walker had before there was one to stand on.
+    Ground field(terrain);
 
     Walker walker;
     walker.params.maxSlopeDeg     = slopeDeg;
@@ -152,7 +155,10 @@ int main(int argc, char** argv) {
         // limit never binds, the probe rays are always green, and the creature
         // never looks like it is refusing anything -- which is most of what
         // makes it read as alive.
-        Heightfield field(kGridN, kSpacing, kRelief);
+        Heightfield terrain(kGridN, kSpacing, kRelief);
+        // No ship in the sim: a bare Ground over the terrain is the same world the
+        // walker had before there was one to stand on.
+        Ground field(terrain);
         Walker probe;
         probe.params.maxSlopeDeg = slope;
         probe.reset(field, glm::ivec2(2, 2), 0);
@@ -162,7 +168,7 @@ int main(int argc, char** argv) {
                 for (int d = 0; d < 4; ++d) {
                     glm::ivec2 from(x, y);
                     ++tested;
-                    if (!probe.goodStep(field, from, from + Walker::dirVec(d))) ++blocked;
+                    if (!probe.goodStep(field, from, from + Walker::dirVec(d), terrain.heightAt(from))) ++blocked;
                 }
             }
         }
@@ -191,7 +197,10 @@ int main(int argc, char** argv) {
             sum += r.coverage;
         }
 
-        Heightfield field(kGridN, kSpacing, relief);
+        Heightfield terrain(kGridN, kSpacing, relief);
+        // No ship in the sim: a bare Ground over the terrain is the same world the
+        // walker had before there was one to stand on.
+        Ground field(terrain);
         Walker probe;
         probe.params.maxSlopeDeg = 45.0f;
         probe.reset(field, glm::ivec2(2, 2), 0);
@@ -203,7 +212,7 @@ int main(int argc, char** argv) {
                 int open = 0;
                 for (int d = 0; d < 4; ++d) {
                     ++tested;
-                    if (probe.goodStep(field, from, from + Walker::dirVec(d))) ++open;
+                    if (probe.goodStep(field, from, from + Walker::dirVec(d), terrain.heightAt(from))) ++open;
                     else ++blocked;
                 }
                 if (open == 0) ++isolated;   // a node no single step can leave

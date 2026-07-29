@@ -18,7 +18,7 @@ const glm::vec3 kEye     {0.55f, 0.95f, 1.00f};
 
 } // namespace
 
-void buildCreatureMesh(const Heightfield& hf,
+void buildCreatureMesh(const Ground& hf,
                        const Walker& walker,
                        std::vector<SceneVertex>& outVertices,
                        std::vector<uint32_t>& outIndices)

@@ -174,9 +174,41 @@ public:
         float runArmSwing  = 62.0f;
         float runArmExtend = 0.62f;
         float runFootLift  = 1.15f;
+
+        // How high a LEDGE he will step onto -- a kerb, the lip at the foot of
+        // the ramp. Deliberately a separate number from maxSlopeDeg, which is
+        // how steep a SLOPE he will walk up, because they are different
+        // questions and answering both with one number is what let him climb the
+        // side of the ramp.
+        //
+        // A slope rises gradually over the distance he covers, so the limit that
+        // governs it has to scale with distance. A ledge is the whole height at
+        // once however far away he started, so its limit must not. Hold them
+        // apart and the foot of the ramp becomes the only point along its length
+        // where the surface is within stepping height of the ground -- so he
+        // walks round to it, without anything telling him to.
+        float stepUp = 0.90f;
+
+        // ---- how much room he needs -------------------------------------
+        // The column he occupies, for the sake of anything solid. Wider than his
+        // hips and narrower than his arm span: shoulders 1.8 across would have
+        // him refusing doorways he plainly fits through, and hips 0.95 lets a
+        // wall pass between his shoulder and his ear.
+        float bodyRadius = 0.80f;
     };
 
     Params params;
+
+    // Sole to crown when he is stood up straight, worked out from the same
+    // numbers the skeleton is. Not measured off the live pose on purpose: a
+    // squatting creature would shrink his own collision, and the doorway he
+    // could not walk through standing would open the moment he bent to pick
+    // something up.
+    float standHeight() const;
+
+    // Where his soles are. Not derivable from the hips without getting it wrong
+    // by a third of a unit -- see the note on the definition.
+    float soleHeight() const;
 
     void reset(const Ground& hf, glm::vec2 position, float headingDeg, uint32_t seed);
 

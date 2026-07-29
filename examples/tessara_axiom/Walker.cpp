@@ -38,7 +38,28 @@ glm::ivec2 Walker::corner(int index) const {
     return m_block + kOffsets[((index % 4) + 4) % 4];
 }
 
-void Walker::recomputeFeet() {
+// How far up or down a single step may go, from the slope limit and the spacing.
+// The step rule and the reach rule are deliberately the SAME number: a surface
+// he could not climb to is a surface he cannot be standing on, so asking what is
+// under a foot and asking whether he may put it there is one question.
+float Walker::stepReach(const Ground& hf) const {
+    return hf.spacing() * std::tan(glm::radians(params.maxSlopeDeg));
+}
+
+// The height of whatever the foot on this node is standing on. All four corners
+// are occupied in phase 0, which is the only phase that asks about a corner.
+float Walker::surfaceUnder(const Ground& hf, const glm::ivec2& node) const {
+    for (int i = 0; i < 4; ++i) {
+        if (m_feet[i] == node) return m_footY[i];
+    }
+    return hf.terrain().heightAt(node);
+}
+
+void Walker::recomputeFeet(const Ground& hf) {
+    glm::ivec2 was[4];
+    float wasY[4];
+    for (int i = 0; i < 4; ++i) { was[i] = m_feet[i]; wasY[i] = m_footY[i]; }
+
     // frontLeft, frontRight, backRight, backLeft -- one step apart around the
     // ring, offset by the heading. For heading +x this puts the front pair on
     // the +x side; rotating the heading rotates the whole assignment.
@@ -52,9 +73,27 @@ void Walker::recomputeFeet() {
         m_feet[0] += d;
         m_feet[1] += d;
     }
+
+    // Then work out what each foot is now standing ON, measured from where a
+    // foot already was rather than from the terrain.
+    //
+    // Which foot to measure from is the whole trick, and it falls out of the two
+    // moves this creature has. A TURN lands every foot on a node one of the
+    // others was just standing on, so each inherits that foot's surface exactly
+    // and a pivot on the cargo deck stays on the cargo deck. A STEP moves only
+    // the front pair onto new ground, and they reach from their own last height
+    // -- which is what makes the ramp climbable one node at a time and the side
+    // of the hull, two units up in one go, not.
+    for (int i = 0; i < 4; ++i) {
+        float reference = wasY[i];
+        for (int j = 0; j < 4; ++j) {
+            if (was[j] == m_feet[i]) { reference = wasY[j]; break; }
+        }
+        m_footY[i] = hf.heightAt(m_feet[i], reference, stepReach(hf));
+    }
 }
 
-void Walker::reset(const Heightfield& hf, glm::ivec2 blockMin, int heading) {
+void Walker::reset(const Ground& hf, glm::ivec2 blockMin, int heading) {
     m_gridN = hf.n();
     m_visited.assign(static_cast<size_t>(m_gridN) * m_gridN, 0);
 
@@ -64,8 +103,19 @@ void Walker::reset(const Heightfield& hf, glm::ivec2 blockMin, int heading) {
     m_accum = 0.0f;
     m_steps = m_turns = m_stuck = 0;
 
-    recomputeFeet();
-    for (int i = 0; i < 4; ++i) m_prevFeet[i] = m_feet[i];
+    // Dropped onto the terrain, always. Being set down inside the ship is not a
+    // thing anyone asks for, and starting on the dirt means the first step out
+    // of here is measured from somewhere real.
+    for (int i = 0; i < 4; ++i) {
+        m_feet[i] = corner(i);
+        m_footY[i] = hf.terrain().heightAt(m_feet[i]);
+    }
+
+    recomputeFeet(hf);
+    for (int i = 0; i < 4; ++i) {
+        m_prevFeet[i]  = m_feet[i];
+        m_prevFootY[i] = m_footY[i];
+    }
     markVisited();
 }
 
@@ -92,32 +142,68 @@ float Walker::coverage() const {
     return static_cast<float>(hit) / static_cast<float>(m_visited.size());
 }
 
-// A step is good if the target exists and the ground does not rise or fall more
-// steeply than the limit. At 45 degrees on unit spacing that is a height change
-// of one spacing -- so he walks slopes and refuses walls.
-bool Walker::goodStep(const Heightfield& hf, const glm::ivec2& from, const glm::ivec2& to) const {
+// A step is good if the target exists, the surface does not rise or fall more
+// steeply than the limit, and there is nothing solid standing where the foot
+// would go. At 45 degrees on unit spacing the slope rule is a height change of
+// one spacing -- so he walks slopes and refuses walls.
+//
+// `fromY` is the height the stepping foot is at NOW, which is not the same as
+// the terrain under it once there is a ship in the world. Everything about
+// walking onto the deck and refusing to climb the hull comes out of passing the
+// right value here.
+bool Walker::goodStep(const Ground& hf, const glm::ivec2& from, const glm::ivec2& to,
+                      float fromY) const {
     if (!hf.inBounds(to)) return false;
 
     float run = hf.spacing() * static_cast<float>(std::abs(to.x - from.x) + std::abs(to.y - from.y));
     if (run < 1e-6f) return false;
 
-    float rise    = std::abs(hf.heightAt(to) - hf.heightAt(from));
     float maxRise = run * std::tan(glm::radians(params.maxSlopeDeg));
-    return rise <= maxRise;
+
+    // Reached for with exactly the step's own limit, so a surface too high to
+    // climb to is never offered as a candidate in the first place.
+    glm::vec3 landing = hf.worldAt(to, fromY, maxRise);
+
+    if (std::fabs(landing.y - fromY) > maxRise) return false;
+
+    // And nowhere to put a foot inside something solid. No radius: the other
+    // three corners are tested on their own, and between them they are his width.
+    if (hf.blocked(landing.x, landing.z, landing.y, params.bodyRise)) return false;
+
+    // Nor anything solid BETWEEN here and there.
+    //
+    // His feet are points and his stride is two units, so testing only where a
+    // foot lands means anything narrower than a step is something he walks over
+    // without ever touching. The ramp's kerb is exactly that -- and a kerb wide
+    // enough that a point could not miss it would be a kerb wider than the ramp.
+    //
+    // One sample at the midpoint is enough here because a step is a single node
+    // and there is only one gap to fall in. It is the same reasoning that says
+    // the bulkhead had to be seven units deep rather than half of one, arrived at
+    // from the other end: make the obstacle bigger, or look more often.
+    const glm::vec3 origin = hf.worldAt(from, fromY, 0.01f);
+    const glm::vec3 half   = (origin + landing) * 0.5f;
+
+    return !hf.blocked(half.x, half.z, std::max(fromY, landing.y), params.bodyRise);
 }
 
 // Both front feet must be able to step, or the whole move is refused. Half a
 // step forward would tear the body.
-bool Walker::canAdvance(const Heightfield& hf, int dir) const {
+//
+// Only ever asked in phase 0, when all four corners are underfoot -- so the
+// heights the two front feet reach from are ones he is actually standing at,
+// even for a heading he has not turned to yet.
+bool Walker::canAdvance(const Ground& hf, int dir) const {
     glm::ivec2 d = dirVec(dir);
     glm::ivec2 fl = corner(dir + 1);
     glm::ivec2 fr = corner(dir + 2);
-    return goodStep(hf, fl, fl + d) && goodStep(hf, fr, fr + d);
+    return goodStep(hf, fl, fl + d, surfaceUnder(hf, fl))
+        && goodStep(hf, fr, fr + d, surfaceUnder(hf, fr));
 }
 
 // Nearest lattice node to a world point, which is how anything out in continuous
 // space gets expressed to a creature that only understands nodes.
-static glm::ivec2 nodeNear(const Heightfield& hf, const glm::vec3& world) {
+static glm::ivec2 nodeNear(const Ground& hf, const glm::vec3& world) {
     float half = hf.n() * 0.5f * hf.spacing();
     int x = static_cast<int>(std::round((world.x + half) / hf.spacing()));
     int y = static_cast<int>(std::round((world.z + half) / hf.spacing()));
@@ -127,12 +213,25 @@ static glm::ivec2 nodeNear(const Heightfield& hf, const glm::vec3& world) {
 // Can a 2x2 block at `block` step one node along `dir`? Same rule canAdvance
 // applies to the live creature, asked about a hypothetical position -- which is
 // what makes the terrain searchable rather than only walkable.
-bool Walker::blockCanStep(const Heightfield& hf, const glm::ivec2& block, int dir) const {
+//
+// Planned on the TERRAIN, not on whatever is stacked over it. A search visits
+// sixteen thousand block positions and has no creature standing at any of them,
+// so there is no foot whose height would say which of two surfaces a node means
+// -- and carrying a candidate height along every branch of a breadth-first
+// search is a different and much larger program than this one.
+//
+// The cost of that is honest and small: a route is never planned UP the ramp, so
+// he does not deliberately haul a crate aboard. What he does get is a route that
+// never runs through the hull, because a node inside a solid is refused here the
+// same as anywhere else. Walking onto the ship is left to the live gait, which
+// does know what each foot is standing on.
+bool Walker::blockCanStep(const Ground& hf, const glm::ivec2& block, int dir) const {
     static const glm::ivec2 kOffsets[4] = { {0,0}, {1,0}, {1,1}, {0,1} };
     glm::ivec2 d  = dirVec(dir);
     glm::ivec2 fl = block + kOffsets[(dir + 1) % 4];
     glm::ivec2 fr = block + kOffsets[(dir + 2) % 4];
-    return goodStep(hf, fl, fl + d) && goodStep(hf, fr, fr + d);
+    return goodStep(hf, fl, fl + d, hf.terrain().heightAt(fl))
+        && goodStep(hf, fr, fr + d, hf.terrain().heightAt(fr));
 }
 
 // Breadth-first over block positions. The field is 128x128, so this is 16k
@@ -143,7 +242,7 @@ bool Walker::blockCanStep(const Heightfield& hf, const glm::ivec2& block, int di
 // AT ALL. Past a certain relief the ridge genuinely cuts the field in two, and
 // knowing that up front is the difference between giving up immediately and
 // grinding at a wall for half a minute.
-bool Walker::planPath(const Heightfield& hf, const glm::ivec2& goalBlock) {
+bool Walker::planPath(const Ground& hf, const glm::ivec2& goalBlock) {
     m_path.clear();
     m_pathNodes.clear();
     m_pathIndex = 0;
@@ -199,7 +298,7 @@ bool Walker::planPath(const Heightfield& hf, const glm::ivec2& goalBlock) {
     return true;
 }
 
-void Walker::assignFetch(const Heightfield& hf, const glm::vec3& crate,
+void Walker::assignFetch(const Ground& hf, const glm::vec3& crate,
                          const glm::vec3& storage) {
     m_target = nodeNear(hf, crate);
     m_storageWorld = storage;
@@ -227,14 +326,23 @@ const char* Walker::activityName() const {
     }
 }
 
-glm::vec3 Walker::cargoPosition(const Heightfield& hf) const {
+glm::vec3 Walker::cargoPosition(const Ground& hf) const {
     // Riding on his back, so it tilts with the shell -- which means on a slope
     // you can see the crate lean before you notice the machine has.
     return bodyCentre(hf) + bodyUp(hf) * (params.cargoRise * hf.spacing());
 }
 
-void Walker::tick(const Heightfield& hf) {
-    for (int i = 0; i < 4; ++i) m_prevFeet[i] = m_feet[i];
+void Walker::tick(const Ground& hf) {
+    for (int i = 0; i < 4; ++i) {
+        m_prevFeet[i]  = m_feet[i];
+        m_prevFootY[i] = m_footY[i];
+
+        // Asked again even though the foot has not moved, because the surface
+        // may have: the ramp swings, and a foot planted on it is standing on a
+        // floor that is going somewhere. Without this he keeps the height he had
+        // when he put the foot down and sinks through a ramp on its way up.
+        m_footY[i] = hf.heightAt(m_feet[i], m_footY[i], stepReach(hf));
+    }
 
     if (m_phase == 0) {
         // ---- choose a heading, then the front pair reaches ------------------
@@ -258,14 +366,14 @@ void Walker::tick(const Heightfield& hf) {
             if (want != m_dir) {
                 m_dir = want;
                 ++m_turns;
-                recomputeFeet();
+                recomputeFeet(hf);
                 markVisited();
                 return;
             }
             if (!canAdvance(hf, m_dir)) { ++m_stuck; return; }
 
             m_phase = 1;
-            recomputeFeet();
+            recomputeFeet(hf);
             markVisited();
             return;
         }
@@ -308,13 +416,13 @@ void Walker::tick(const Heightfield& hf) {
         if (bestDir != m_dir) {
             m_dir = bestDir;
             ++m_turns;
-            recomputeFeet();        // the pivot: same four nodes, roles rotated
+            recomputeFeet(hf);        // the pivot: same four nodes, roles rotated
             markVisited();
             return;                 // turning costs a tick, which reads as hesitation
         }
 
         m_phase = 1;
-        recomputeFeet();
+        recomputeFeet(hf);
         markVisited();
         return;
     }
@@ -329,11 +437,11 @@ void Walker::tick(const Heightfield& hf) {
     ++m_steps;
     if (m_pathIndex < m_path.size()) ++m_pathIndex;
 
-    recomputeFeet();
+    recomputeFeet(hf);
     markVisited();
 }
 
-void Walker::update(const Heightfield& hf, float dt) {
+void Walker::update(const Ground& hf, float dt) {
     if (m_visited.empty()) return;
 
     if (m_hasTask) {
@@ -378,12 +486,17 @@ void Walker::update(const Heightfield& hf, float dt) {
     if (guard >= 64) m_accum = 0.0f;   // fell far behind; do not spiral
 }
 
-glm::vec3 Walker::footWorld(const Heightfield& hf, int i) const {
+glm::vec3 Walker::footWorld(const Ground& hf, int i) const {
     const glm::ivec2& from = m_prevFeet[i];
     const glm::ivec2& to   = m_feet[i];
 
-    glm::vec3 a = hf.worldAt(from);
-    glm::vec3 b = hf.worldAt(to);
+    // The node gives x and z; the height comes from what the foot was decided to
+    // be standing on, not from asking the world again. Re-asking here would
+    // answer for a foot at rest instead of one halfway through a step, and would
+    // put a foot swinging from the deck to the ground on whichever surface the
+    // node happened to prefer for the whole swing.
+    glm::vec3 a = hf.terrain().worldAt(from); a.y = m_prevFootY[i];
+    glm::vec3 b = hf.terrain().worldAt(to);   b.y = m_footY[i];
 
     if (from == to) return a;
 
@@ -393,7 +506,7 @@ glm::vec3 Walker::footWorld(const Heightfield& hf, int i) const {
     return p;
 }
 
-glm::vec3 Walker::bodyCentre(const Heightfield& hf) const {
+glm::vec3 Walker::bodyCentre(const Ground& hf) const {
     glm::vec3 sum(0.0f);
     for (int i = 0; i < 4; ++i) sum += footWorld(hf, i);
     glm::vec3 c = sum * 0.25f;
@@ -404,7 +517,7 @@ glm::vec3 Walker::bodyCentre(const Heightfield& hf) const {
 // Taken from the feet rather than from the terrain, so the body tilts with what
 // he is actually standing on -- including mid-stretch, when the front pair is a
 // node further up the slope than the back pair.
-glm::vec3 Walker::bodyUp(const Heightfield& hf) const {
+glm::vec3 Walker::bodyUp(const Ground& hf) const {
     glm::vec3 fl = footWorld(hf, 0), fr = footWorld(hf, 1);
     glm::vec3 br = footWorld(hf, 2), bl = footWorld(hf, 3);
 
@@ -415,7 +528,7 @@ glm::vec3 Walker::bodyUp(const Heightfield& hf) const {
     return n.y < 0.0f ? -n : n;
 }
 
-glm::vec3 Walker::bodyForward(const Heightfield& hf) const {
+glm::vec3 Walker::bodyForward(const Ground& hf) const {
     glm::vec3 front = (footWorld(hf, 0) + footWorld(hf, 1)) * 0.5f;
     glm::vec3 back  = (footWorld(hf, 2) + footWorld(hf, 3)) * 0.5f;
 

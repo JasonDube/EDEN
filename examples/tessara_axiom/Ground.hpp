@@ -21,6 +21,38 @@ struct SurfacePatch {
     float halfWidth  = 1.0f;
     float halfLength = 1.0f;
     bool  enabled = true;
+
+    // Whether walking INTO this surface is prevented, as opposed to only walking
+    // on it being allowed.
+    //
+    // A deck does not need it -- it has hull walls round it and you cannot get
+    // beside it to try. A ramp does: it stands out in the open with its whole
+    // flank exposed, and the shortest line to the bay from almost anywhere runs
+    // straight across it. Without this a creature aims at the doorway, meets the
+    // ramp side-on, and walks through it as though it were a picture of a ramp.
+    bool  solidUnder = false;
+};
+
+// An upright box you cannot walk into.
+//
+// The same kind of thing as a SurfacePatch, and there for the same reason: a
+// patch says where a surface IS, a blocker says where a body may not be, and
+// neither is the mesh it was cut from. A hull wall is one box whatever it is
+// drawn out of, so the collision does not have to be rebuilt every time the ship
+// is restyled -- and a doorway is not a feature anyone implements, it is the gap
+// where nobody put a blocker.
+//
+// Upright on purpose. A tilted solid would want a real narrow-phase; everything
+// here that has to be walked around is a wall, and a wall stands up.
+struct Blocker {
+    glm::vec3 origin{0.0f};        // centre of the footprint, in the horizontal plane
+    glm::vec3 right{1, 0, 0};      // unit, horizontal
+    glm::vec3 along{0, 0, 1};      // unit, horizontal
+    float halfWidth  = 1.0f;
+    float halfLength = 1.0f;
+    float floorY     = 0.0f;       // underside; a body below this walks beneath it
+    float ceilingY   = 1.0f;       // top; a body standing above this walks over it
+    bool  enabled = true;
 };
 
 // What the world's inhabitants stand on.
@@ -36,6 +68,9 @@ public:
     void clearPatches() { m_patches.clear(); }
     void addPatch(const SurfacePatch& patch) { m_patches.push_back(patch); }
 
+    void clearBlockers() { m_blockers.clear(); }
+    void addBlocker(const Blocker& blocker) { m_blockers.push_back(blocker); }
+
     // Pass-through, so a Ground can stand in wherever a Heightfield was.
     int   n() const { return m_terrain->n(); }
     float spacing() const { return m_terrain->spacing(); }
@@ -44,6 +79,15 @@ public:
     // Terrain only -- for anything that genuinely means the ground, like siting
     // a crate or a landing pad.
     float terrainHeight(float x, float z) const { return m_terrain->heightAtWorld(x, z); }
+
+    // ---- the lattice -------------------------------------------------------
+    // For whatever stands on nodes rather than between them. Same rule as the
+    // continuous version and the same reasons, asked at a node's world position
+    // -- so a creature whose whole world is a graph of nodes gets to walk onto
+    // the ship without its graph having to know the ship exists.
+    bool inBounds(const glm::ivec2& node) const { return m_terrain->inBounds(node); }
+    float     heightAt(const glm::ivec2& node, float fromY, float stepUp) const;
+    glm::vec3 worldAt(const glm::ivec2& node, float fromY, float stepUp) const;
 
     // The surface under a foot that is currently at `fromY`.
     //
@@ -57,12 +101,35 @@ public:
     // True if the chosen surface was a patch rather than the terrain.
     bool onPatch(float x, float z, float fromY, float stepUp = 0.75f) const;
 
+    // ---- solids ------------------------------------------------------------
+    // A body is a column: `radius` across, standing with its soles at `footY` and
+    // its crown `height` above them. It is inside a solid if the two overlap in
+    // all three axes -- which is what lets the same test say "you cannot walk
+    // through that wall" and "you can stand on the deck above it" without either
+    // caller knowing there is a difference.
+    bool blocked(float x, float z, float footY, float height, float radius = 0.0f) const;
+
+    // The nearest place a blocked body could legally stand, pushed out through
+    // whichever face it is least far inside. Returns `xz` untouched if it was
+    // already free, so it is safe to run every frame on everything.
+    glm::vec2 resolve(glm::vec2 xz, float footY, float height, float radius) const;
+
 private:
-    // Returns false if (x,z) is off the patch.
-    static bool sample(const SurfacePatch& patch, float x, float z, float& outHeight);
+    // Returns false if (x,z) is off the patch. `outU` and `outV` are where the
+    // point sits in the patch's own frame, which only the push-out wants.
+    static bool sample(const SurfacePatch& patch, float x, float z, float& outHeight,
+                       float* outU = nullptr, float* outV = nullptr);
+
+    // How far inside the footprint, along each of the box's own axes. Negative on
+    // either axis means outside. Also reports where the point sits in box space,
+    // because the push-out needs it and recomputing it is the same work again.
+    static bool overlap(const Blocker& b, float x, float z, float footY, float height,
+                        float radius, float& outU, float& outV,
+                        float& outDepthU, float& outDepthV);
 
     const Heightfield* m_terrain;
     std::vector<SurfacePatch> m_patches;
+    std::vector<Blocker> m_blockers;
 };
 
 } // namespace tessara

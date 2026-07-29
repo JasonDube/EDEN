@@ -80,6 +80,13 @@ public:
     SurfacePatch deckPatch() const;
     SurfacePatch rampPatch() const;
 
+    // What cannot be walked through. Note what is NOT in here: there is no
+    // "doorway" blocker with a hole in it, and nothing names the bay. The way in
+    // is simply the strip of ground between the two hull walls that no box
+    // covers, which is the same trick as the patches -- the ramp is the way up
+    // because it is the only surface that reaches, not because it is labelled.
+    void appendBlockers(std::vector<Blocker>& out) const;
+
     // Where cargo goes, and the spot on the ground you walk to before you can
     // walk UP. Published for the same reason as the patches.
     glm::vec3 bayStoragePoint() const;

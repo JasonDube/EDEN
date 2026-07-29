@@ -620,10 +620,37 @@ void Biped::reset(const Ground& hf, glm::vec2 position, float headingDeg, uint32
     updateHandGoals(hf);
 }
 
+// Where his soles actually are.
+//
+// The obvious estimate -- hips minus a full leg -- is WRONG, and wrong in the
+// one direction that matters. He stands at 0.90 of full extension, so it puts
+// his feet a third of a unit UNDER the floor he is standing on. Against a
+// blocker that is harmless, because a blocker has margin above and below. Against
+// a surface it is fatal: the test there is whether the floor passes through him,
+// and a body whose soles are below the floor it is standing on always fails it.
+//
+// The symptom was a creature who stepped onto the ramp and was immediately shoved
+// back off it, every frame, forever -- because he was judged to be inside the very
+// thing he was standing on.
+//
+// The higher of the two feet, not the lower: mid-stride one foot is off the
+// ground and one is bearing weight, and it is the one bearing weight that says
+// what he is standing on.
+float Biped::soleHeight() const {
+    return std::max(m_foot[0].y, m_foot[1].y);
+}
+
+float Biped::standHeight() const {
+    // Hips at rest, then everything stacked above them, plus a little for the
+    // crown of the head sitting above its own centre.
+    return (params.thigh + params.shin) * params.standFrac
+         + params.torsoRise + params.shoulderRise + params.headRise + 0.45f;
+}
+
 // Can he get from `from` to a point `distance` along `headingDeg` without the
-// ground rising or falling faster than the limit? Sampled in a few places
-// because a cliff edge between two samples is exactly the thing that catches a
-// creature out.
+// ground rising or falling faster than the limit, and without walking into
+// something solid? Sampled in a few places because a cliff edge between two
+// samples is exactly the thing that catches a creature out.
 bool Biped::passable(const Ground& hf, glm::vec2 from, float headingDeg,
                      float distance) const
 {
@@ -640,11 +667,30 @@ bool Biped::passable(const Ground& hf, glm::vec2 from, float headingDeg,
     const int kSamples = 4;
     const float maxRise = std::tan(glm::radians(params.maxSlopeDeg)) * (distance / kSamples);
 
-    float previous = hf.heightAt(from.x, from.y, m_hipCentre.y - params.thigh - params.shin);
+    const float body = standHeight();
+
+    // Each sample's surface found by stepping up from the LAST sample's, rather
+    // than all of them measured from where he stands.
+    //
+    // Chained like this a ramp is a run of small rises, each one inside what he
+    // will step onto, and he follows it all the way up. Measured independently
+    // from his own feet it is one big rise at the far end, refused -- which is
+    // why he used to walk straight through the ramp on level ground with every
+    // check agreeing he was fine.
+    float previous = hf.heightAt(from.x, from.y, soleHeight(), params.stepUp);
     for (int s = 1; s <= kSamples; ++s) {
         glm::vec2 p = from + dir * (distance * s / kSamples);
-        float height = hf.heightAt(p.x, p.y, previous);
+
+        float height = hf.heightAt(p.x, p.y, previous, params.stepUp);
         if (std::fabs(height - previous) > maxRise) return false;
+
+        // Standing THERE, not here: the surface he would be on has already been
+        // worked out, so the solid test asks whether a body stood on it would be
+        // inside something. That is what makes the hull wall a refusal at the
+        // same moment as a cliff, through the same code, without the steering
+        // above knowing there is a difference between the two.
+        if (hf.blocked(p.x, p.y, height, body, params.bodyRadius)) return false;
+
         previous = height;
     }
     return true;
@@ -744,9 +790,20 @@ glm::vec3 Biped::footTarget(const Ground& hf, int i,
                      + forward() * reach
                      + right() * (side * params.hipWidth * 0.5f);
 
-    // Referenced to the foot that is lifting off, so a step can climb a ramp
-    // but cannot teleport onto a deck two units up.
-    target.y = hf.heightAt(target.x, target.z, m_foot[i].y);
+    // Referenced to the ground under HIM, not to the foot that is lifting off.
+    //
+    // The trailing foot is a whole stride behind, and a stride behind on a slope
+    // is a long way down. Measuring from there forces a choice between two wrong
+    // things: allow a reach big enough to cover the stride, and he can step up
+    // onto the flank of the ramp and onto the cargo deck out of the dirt beside
+    // the hull; allow a small one, and he cannot find the slope he is already
+    // standing on.
+    //
+    // Measuring from under his own hips separates them. The distance from him to
+    // where the foot lands is short, so a slope stays a small rise -- while a
+    // ledge is its full height however he came at it.
+    const float underHim = hf.heightAt(m_pos.x, m_pos.y, soleHeight(), params.stepUp);
+    target.y = hf.heightAt(target.x, target.z, underHim, params.stepUp);
     return target;
 }
 
@@ -767,6 +824,32 @@ void Biped::update(const Ground& hf, float dt, const glm::vec3* observer) {
 
     float half = hf.n() * 0.5f * hf.spacing() - 4.0f;
     m_pos = glm::clamp(m_pos, glm::vec2(-half), glm::vec2(half));
+
+    // Then put him back outside anything he has ended up inside.
+    //
+    // Belt as well as braces, and the braces are the real mechanism -- steering
+    // refuses to walk into a wall in the first place. But refusing only looks
+    // AHEAD, and there are ways to be somewhere without having walked there: the
+    // ship is set down on top of him when the terrain is regenerated, the ramp
+    // rises through him if he is standing under it, and a shove sideways out of
+    // a turn covers ground no probe was pointed at. Without this he sinks into
+    // the hull in exactly those cases and never comes out, because from inside a
+    // wall every direction is refused and he stands there turning.
+    // Against the floor UNDER HIM, reached for from his soles -- not the soles
+    // themselves.
+    //
+    // His hips cross onto a ramp a stride before his feet do, so for a moment his
+    // soles are on the flat behind it while his body is over it. Judged by his
+    // soles he is under the ramp in that moment and gets shoved back off, and the
+    // moment repeats every stride: he walks to the foot of the ramp and can never
+    // get on. Judged by the floor beneath him he is standing on the ramp, which is
+    // what a creature halfway onto a ramp is doing.
+    //
+    // And when he genuinely IS under it -- soles on the dirt, slab two units over
+    // his head -- the ramp is out of stepping range, so the floor under him comes
+    // back as the dirt and the test still catches him.
+    const float floor = hf.heightAt(m_pos.x, m_pos.y, soleHeight(), params.stepUp);
+    m_pos = hf.resolve(m_pos, floor, standHeight(), params.bodyRadius);
 
     // ---- gait ---------------------------------------------------------
     // Break into a run above a speed, drop back below it. The hysteresis band

@@ -1,6 +1,6 @@
 #pragma once
 
-#include "Heightfield.hpp"
+#include "Ground.hpp"
 
 #include <glm/glm.hpp>
 #include <vector>
@@ -89,16 +89,24 @@ public:
         float pickupNodes  = 1.6f;    // how near a crate counts as over it
         float cargoRise    = 0.55f;   // how high the crate rides above his shell
         int   giveUpTicks  = 4000;    // patience before abandoning a crate
+
+        // ---- how much room he needs ----
+        // Headroom above whatever a foot is standing on. He gets no radius to go
+        // with it, and does not need one: his footprint is four separate nodes
+        // and every one of them is tested on its own, so the 2x2 IS the
+        // collision volume. A wall he could not fit through is a wall one of the
+        // four corners cannot be put down in.
+        float bodyRise = 1.6f;
     };
 
     // ---- hauling ----------------------------------------------------------
-    void assignFetch(const Heightfield& hf, const glm::vec3& crate, const glm::vec3& storage);
+    void assignFetch(const Ground& hf, const glm::vec3& crate, const glm::vec3& storage);
     void abandonTask();
 
     Activity  activity() const { return m_activity; }
     bool      hasTask()  const { return m_hasTask; }
     bool      hasCargo() const { return m_carrying; }
-    glm::vec3 cargoPosition(const Heightfield& hf) const;
+    glm::vec3 cargoPosition(const Ground& hf) const;
     const char* activityName() const;
 
     // The route he is following, as block positions -- exposed so the diagram
@@ -111,8 +119,8 @@ public:
 
     Params params;
 
-    void reset(const Heightfield& hf, glm::ivec2 blockMin, int heading = 0);
-    void update(const Heightfield& hf, float dt);
+    void reset(const Ground& hf, glm::ivec2 blockMin, int heading = 0);
+    void update(const Ground& hf, float dt);
 
     // ---- discrete state ---------------------------------------------------
     // Foot order is frontLeft, frontRight, backRight, backLeft, so 0..3 winds
@@ -121,17 +129,24 @@ public:
     int  heading() const { return m_dir; }
     int  phase()   const { return m_phase; }
 
+    // The surface this foot is standing on. A node no longer answers that on its
+    // own once anything is stacked over the terrain, so anyone asking a question
+    // about a step -- the diagram view, most of all -- has to be told where the
+    // foot doing the stepping already is.
+    float footHeight(int i) const { return m_footY[i]; }
+
     // ---- animated state ---------------------------------------------------
     // Feet interpolate from where they were to where they are, with a lifting
     // arc, so a step is a step rather than a teleport.
-    glm::vec3 footWorld(const Heightfield& hf, int i) const;
-    glm::vec3 bodyCentre(const Heightfield& hf) const;
-    glm::vec3 bodyUp(const Heightfield& hf) const;
-    glm::vec3 bodyForward(const Heightfield& hf) const;
+    glm::vec3 footWorld(const Ground& hf, int i) const;
+    glm::vec3 bodyCentre(const Ground& hf) const;
+    glm::vec3 bodyUp(const Ground& hf) const;
+    glm::vec3 bodyForward(const Ground& hf) const;
 
     // ---- the rules, exposed so the diagnostic view can draw them ----------
-    bool goodStep(const Heightfield& hf, const glm::ivec2& from, const glm::ivec2& to) const;
-    bool canAdvance(const Heightfield& hf, int dir) const;
+    bool goodStep(const Ground& hf, const glm::ivec2& from, const glm::ivec2& to,
+                  float fromY) const;
+    bool canAdvance(const Ground& hf, int dir) const;
     static glm::ivec2 dirVec(int dir);
 
     // ---- where he has been ------------------------------------------------
@@ -144,13 +159,15 @@ public:
     int stuckTicks() const { return m_stuck; }
 
 private:
-    void tick(const Heightfield& hf);
-    void recomputeFeet();
+    void tick(const Ground& hf);
+    void recomputeFeet(const Ground& hf);
+    float stepReach(const Ground& hf) const;
+    float surfaceUnder(const Ground& hf, const glm::ivec2& node) const;
     void markVisited();
     glm::ivec2 corner(int index) const;   // 0..3 counter-clockwise from blockMin
     uint32_t nextRandom();
-    bool blockCanStep(const Heightfield& hf, const glm::ivec2& block, int dir) const;
-    bool planPath(const Heightfield& hf, const glm::ivec2& goalBlock);
+    bool blockCanStep(const Ground& hf, const glm::ivec2& block, int dir) const;
+    bool planPath(const Ground& hf, const glm::ivec2& goalBlock);
 
     glm::ivec2 m_block{0, 0};    // min corner of the 2x2 footprint
     int m_dir   = 0;
@@ -158,6 +175,19 @@ private:
 
     glm::ivec2 m_feet[4]{};
     glm::ivec2 m_prevFeet[4]{};
+
+    // The height of the surface each foot is actually standing on, and was
+    // standing on before the last step.
+    //
+    // A node used to be enough to say where a foot was, because a node had one
+    // height. With a ship in the world it has two -- the dirt and the cargo deck
+    // over it -- and which one a foot is on is not a property of the node, it is
+    // a property of the foot. Remembering it per foot is what lets him climb a
+    // ramp: each step is measured from where that foot already is, so reaching
+    // the deck is a short step up from the ramp and an impossible one from the
+    // ground beside the hull.
+    float m_footY[4]{};
+    float m_prevFootY[4]{};
 
     float m_accum = 0.0f;        // fraction of the way to the next tick
     uint32_t m_rngState = 0x9E3779B9u;

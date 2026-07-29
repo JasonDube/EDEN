@@ -84,4 +84,11 @@ void appendStoragePad(const glm::vec3& centre, float radius, bool occupied,
                       std::vector<SceneVertex>& outVertices,
                       std::vector<uint32_t>& outIndices);
 
+// The muster point at the foot of the ramp: where anything meaning to go aboard
+// has to get to first, because the rails make it the only way on. `claimed` is
+// whether somebody is currently heading for it.
+void appendApproachMark(const glm::vec3& centre, float radius, bool claimed,
+                        std::vector<SceneVertex>& outVertices,
+                        std::vector<uint32_t>& outIndices);
+
 } // namespace tessara
