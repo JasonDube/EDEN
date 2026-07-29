@@ -86,13 +86,17 @@ struct Enclosure {
 
     // Where you stand to WORK it, if it can be worked at all.
     //
-    // On the outside only, which is the whole of its politics: something shut
-    // out can let itself in, and something shut in cannot let itself out. That
-    // is a property of this door rather than of doors, and it is why the two
-    // creatures answer a closed ramp so differently -- one of them has hands and
-    // the other has to wait for it.
+    // One on each side, so being shut in and being shut out are the same
+    // predicament with the same answer. What still differs is who can act on it:
+    // one creature has hands and the other has four feet, and no amount of
+    // panels changes that.
     glm::vec3 control{0.0f};
     bool      hasControl = false;
+
+    // And one on the inside, for the same reason a room with a door has a handle
+    // on both faces of it.
+    glm::vec3 insideControl{0.0f};
+    bool      hasInsideControl = false;
 
     // How wide the way through is. The two marks give its length; this gives it
     // a body, and it needs one because a doorway is somewhere you can BE. Halfway

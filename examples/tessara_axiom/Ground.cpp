@@ -318,10 +318,11 @@ bool Ground::wayThrough(const glm::vec3& from, const glm::vec3& to,
 
     outShut = true;
 
-    // Shut, the way through is whatever will open it -- so for anything on the
-    // outside with hands, it is the button. Anything shut IN gets the door and no
-    // more, because there is nothing on that side to work.
-    outWaypoint = (here < 0 && e.hasControl) ? e.control : (here >= 0 ? e.inside : e.outside);
+    // Shut, the way through is whatever will open it -- the button on whichever
+    // side you are stood. Failing that, the door itself, which is at least
+    // somewhere to wait where you can see it.
+    if (here < 0) outWaypoint = e.hasControl       ? e.control       : e.outside;
+    else          outWaypoint = e.hasInsideControl ? e.insideControl : e.inside;
     return true;
 }
 

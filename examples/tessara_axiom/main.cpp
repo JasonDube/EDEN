@@ -17,7 +17,9 @@
 //   Tab            cycle view: solid -> ghost -> diagram lattice
 //   P              pause
 //   E              talk to the biped, or work the ship's ramp control --
-//                  whichever you are standing next to
+//                  whichever you are standing next to. There are two controls,
+//                  one outside on the hull and one on the bay wall, so the hold
+//                  can be shut from within it.
 //   H              biped holds still and faces you, for a proper look
 //   R / B          drop the walker / the biped somewhere new
 //   G              drop a fresh crate for him to fetch
@@ -231,9 +233,12 @@ protected:
             // Only ever opens. A creature that could also shut it would shut it on
             // the walker, who is standing outside holding a crate and waiting for
             // precisely this.
-            if (m_showBiped && m_biped.wayShut() && !m_ship.isOpening() &&
-                glm::length(m_biped.hipCentre() - m_ship.controlPosition()) < kPanelRange) {
-                m_ship.openRamp();
+            if (m_showBiped && m_biped.wayShut() && !m_ship.isOpening()) {
+                const glm::vec3 at = m_biped.hipCentre();
+                if (glm::length(at - m_ship.controlPosition()) < kPanelRange ||
+                    glm::length(at - m_ship.innerControlPosition()) < kPanelRange) {
+                    m_ship.openRamp();
+                }
             }
 
             // Nobody gets shut in the ramp. The scene knows who is about; the
@@ -1254,10 +1259,14 @@ private:
         return glm::length(glm::vec2(eye.x - chest.x, eye.z - chest.z));
     }
 
+    // Whichever ramp control is nearer. There are two, and from the player's
+    // side they are one thing: the panel you are standing at.
     float distanceToPanel() const {
-        glm::vec3 eye = cameraPosition();
-        glm::vec3 panel = m_ship.controlPosition();
-        return glm::length(glm::vec2(eye.x - panel.x, eye.z - panel.z));
+        const glm::vec3 eye = cameraPosition();
+        auto flat = [&](const glm::vec3& p) {
+            return glm::length(glm::vec2(eye.x - p.x, eye.z - p.z));
+        };
+        return std::min(flat(m_ship.controlPosition()), flat(m_ship.innerControlPosition()));
     }
 
     // E means one thing at a time. Whichever you are actually standing next to

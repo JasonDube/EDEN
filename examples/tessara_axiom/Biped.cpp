@@ -375,7 +375,13 @@ void Biped::assignFetch(const Ground& hf, const glm::vec3& crate, const glm::vec
     // Looked at before accepted. The walker has always done this -- no route, no
     // job -- and it is the difference between refusing work and pretending to do
     // it. A refused crate goes back on the pile for the other one to try.
-    steerAlongRoute(hf, crate);
+    //
+    // Through aimAt rather than straight at the crate, because a SHUT DOOR is not
+    // the same as an unreachable crate and the raw search cannot tell them apart:
+    // with the ramp closed there is no route to anywhere outside, so asking the
+    // search directly had him decline every job in the world while stood in the
+    // hold next to a button that would have opened it.
+    aimAt(hf, crate);
     if (m_routeFailed) {
         m_hasTask = false;
         m_activity = Activity::Wander;

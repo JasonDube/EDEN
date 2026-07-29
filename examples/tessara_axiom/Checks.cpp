@@ -891,6 +891,79 @@ void checkTheDoorMoving() {
                openedFromShut && shutFromOpen && openedAfterMeddling, detail);
     }
 
+    // The inner control: reachable from the deck, and enough to let a creature
+    // shut inside let itself out again.
+    {
+        Scene s(0.0f, {0.0f, 0.0f}, 0.0f);
+        Biped man;
+        const float H = man.standHeight(), R = man.params.bodyRadius;
+        const Enclosure e = s.ship.enclosure();
+
+        // Somewhere you can actually stand, inside the room, clear of the wall
+        // the panel is bolted to. A button in a solid is not a button.
+        const bool standable =
+            !s.ground.blocked(e.insideControl.x, e.insideControl.z, s.deckY(), H, R) &&
+            s.ground.enclosureAt(glm::vec3(e.insideControl.x, s.deckY() + 0.1f,
+                                           e.insideControl.z)) >= 0;
+
+        // And within arm's reach of the panel it works.
+        const float reach = glm::length(e.insideControl - s.ship.innerControlPosition());
+
+        char detail[128];
+        std::snprintf(detail, sizeof detail,
+                      "standing spot is %s, %.1f from the panel",
+                      standable ? "clear and inside the hold" : "NOT USABLE", reach);
+        report("the bay has a control you can stand at", standable && reach < 3.0f, detail);
+    }
+
+    // Shut in with a job outside, he lets himself out. Until there was a panel on
+    // the inside this was not something he could do at all -- he could only stand
+    // at the door and wait for somebody else, which is still the walker's lot.
+    {
+        Scene s(0.0f, {0.0f, 0.0f}, 0.0f);
+        const glm::vec3 pile = s.ship.bayStoragePoint();
+        const glm::vec3 muster = s.ship.rampApproachPoint();
+
+        // Get him aboard first, by delivering something.
+        Biped man;
+        glm::vec3 first = muster - s.f() * 6.0f;
+        first.y += 0.425f;
+        man.reset(s.ground, glm::vec2(muster.x - s.f().x * 16.0f,
+                                      muster.z - s.f().z * 16.0f), 0.0f, 1u);
+        man.assignFetch(s.ground, first, pile);
+        for (int i = 0; i < 60 * 90 && man.hasTask(); ++i) man.update(s.ground, 1.0f / 60.0f);
+
+        const bool aboard = s.ground.enclosureAt(man.hipCentre()) >= 0;
+        s.closeRamp();                       // shut him in
+
+        // Now send him for something outside.
+        glm::vec3 out = s.ship.origin() + s.r() * 30.0f;
+        out.y = s.terrain.heightAtWorld(out.x, out.z) + 0.425f;
+        man.assignFetch(s.ground, out, pile);
+
+        bool escaped = false;
+        for (int i = 0; i < 60 * 120 && !escaped; ++i) {
+            if (man.wayShut() && !s.ship.isOpening()) {
+                const glm::vec3 at = man.hipCentre();
+                if (glm::length(at - s.ship.controlPosition()) < 9.0f ||
+                    glm::length(at - s.ship.innerControlPosition()) < 9.0f) {
+                    s.ship.openRamp();
+                }
+            }
+            s.ship.update(1.0f / 60.0f, s.ship.isOnRamp(man.hipCentre()));
+            s.republish();
+            man.update(s.ground, 1.0f / 60.0f);
+            if (s.ground.enclosureAt(man.hipCentre()) < 0 && s.ship.rampProgress() > 0.9f) {
+                escaped = true;
+            }
+        }
+
+        char detail[128];
+        std::snprintf(detail, sizeof detail, "aboard %d, then out under his own power %d",
+                      (int)aboard, (int)escaped);
+        report("shut in, the biped lets himself out", aboard && escaped, detail);
+    }
+
     // And swinging OPEN through somebody stood at the foot of it. That one is
     // allowed to shove -- it is a slab coming down and there is nowhere else for
     // him to be -- but it has to shove all of him. Moving a body without its

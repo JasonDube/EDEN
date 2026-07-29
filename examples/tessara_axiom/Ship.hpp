@@ -97,8 +97,15 @@ public:
     glm::vec3 right() const;
     static glm::vec3 up() { return glm::vec3(0, 1, 0); }
 
-    // Where the ramp control sits, and where a unit stands to press it.
+    // Where the ramp control sits. There are two: one on the hull outside, and
+    // one on the bay wall.
+    //
+    // A hold you can be shut into wants a way to shut yourself into it, and a
+    // way back out. With only the outer panel the politics of the door were
+    // lopsided -- anything shut OUT could let itself in, and anything shut IN
+    // could do nothing but wait for someone else.
     glm::vec3 controlPosition() const;
+    glm::vec3 innerControlPosition() const;
 
     // The far end of the ramp, so the scene can tell how far it has swung.
     glm::vec3 rampFootPosition() const;

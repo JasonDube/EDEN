@@ -141,6 +141,17 @@ glm::vec3 Ship::controlPosition() const {
          + up() * params.controlRise;
 }
 
+glm::vec3 Ship::innerControlPosition() const {
+    // On the starboard bay wall by the doorway, at the same height above the
+    // floor as the one outside is above the ground. Somebody who has used one
+    // knows where to look for the other, which is most of what a control panel
+    // has to do.
+    return m_origin
+         + up() * (params.deckHeight + params.controlRise)
+         + right() * (params.bayWidth * 0.5f - 0.12f)
+         - forward() * (params.length * 0.30f);
+}
+
 glm::vec3 Ship::rampFootPosition() const {
     // Shut, it stands straight up sealing the doorway; down, it lies back at the
     // ramp angle. One sweep between the two.
@@ -386,6 +397,14 @@ Enclosure Ship::enclosure() const {
     e.control = m_origin
               + right() * (params.width * 0.5f + 2.0f)
               - forward() * (params.length * 0.22f);
+
+    // And standing room at the inner panel, far enough off the wall that a body
+    // is not inside it while reaching.
+    e.hasInsideControl = true;
+    e.insideControl = m_origin
+                    + up() * params.deckHeight
+                    + right() * (params.bayWidth * 0.5f - 1.8f)
+                    - forward() * (params.length * 0.30f);
     return e;
 }
 
@@ -587,11 +606,21 @@ void appendShipMesh(const Ship& ship,
     appendBox(verts, indices, hinge, r, u, f,
               glm::vec3(p.bayWidth * 0.48f, 0.26f, 0.26f), kTrim);
 
-    // ---- ramp control -----------------------------------------------------
+    // ---- ramp controls ----------------------------------------------------
+    // One outside on the hull, one inside on the bay wall, same panel drawn twice
+    // and facing opposite ways -- so it reads as the same control wherever you
+    // meet it.
     const glm::vec3 control = ship.controlPosition();
     appendBox(verts, indices, control, r, u, f,
               glm::vec3(0.10f, 0.42f, 0.34f), kHullDark);
     appendBox(verts, indices, control + r * 0.09f, r, u, f,
+              glm::vec3(0.05f, 0.22f, 0.18f),
+              ship.isOpening() ? kPanelOn : kPanelOff);
+
+    const glm::vec3 inner = ship.innerControlPosition();
+    appendBox(verts, indices, inner, r, u, f,
+              glm::vec3(0.10f, 0.42f, 0.34f), kHullDark);
+    appendBox(verts, indices, inner - r * 0.09f, r, u, f,
               glm::vec3(0.05f, 0.22f, 0.18f),
               ship.isOpening() ? kPanelOn : kPanelOff);
 }
