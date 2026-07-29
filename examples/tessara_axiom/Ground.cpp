@@ -210,14 +210,36 @@ bool Ground::findRoute(const glm::ivec2& from, float fromY, const glm::ivec2& to
     outNodes.clear();
 
     const int side = n();
-    auto index = [side](const glm::ivec2& p) { return p.y * side + p.x; };
-    auto valid = [side](const glm::ivec2& p) {
-        return p.x >= 0 && p.y >= 0 && p.x < side && p.y < side;
-    };
-    if (!valid(from) || !valid(to)) return false;
+    if (from.x < 0 || from.y < 0 || from.x >= side || from.y >= side) return false;
+    if (to.x   < 0 || to.y   < 0 || to.x   >= side || to.y   >= side) return false;
 
-    std::vector<int> cameFrom(static_cast<size_t>(side) * side, -2);
-    std::vector<float> arrivedAt(static_cast<size_t>(side) * side, 0.0f);
+    // Searched over a WINDOW around the two ends, not over the world.
+    //
+    // The arrays here are one entry per node, so on the field this example grew
+    // up on -- 128 a side -- the whole thing is sixteen thousand nodes and nobody
+    // notices. An authored level is four thousand units across at the same two
+    // unit spacing, which is two thousand nodes a side and four MILLION entries:
+    // thirty-odd megabytes allocated and breadth-firsted every time a creature is
+    // handed a crate. A route is a local thing and should cost what it is, not
+    // what the world is.
+    //
+    // The margin is how far out of the direct line a detour may wander. Generous
+    // enough to walk round a landed ship, and deliberately finite: a route that
+    // needs more than this is one worth failing rather than one worth grinding
+    // for, and failing is an answer the haulers already know what to do with.
+    constexpr int kMargin = 48;
+    const glm::ivec2 lo = glm::max(glm::min(from, to) - kMargin, glm::ivec2(0));
+    const glm::ivec2 hi = glm::min(glm::max(from, to) + kMargin, glm::ivec2(side - 1));
+    const int w = hi.x - lo.x + 1;
+
+    auto index = [lo, w](const glm::ivec2& p) { return (p.y - lo.y) * w + (p.x - lo.x); };
+    auto valid = [lo, hi](const glm::ivec2& p) {
+        return p.x >= lo.x && p.y >= lo.y && p.x <= hi.x && p.y <= hi.y;
+    };
+
+    const size_t cells = static_cast<size_t>(w) * (hi.y - lo.y + 1);
+    std::vector<int> cameFrom(cells, -2);
+    std::vector<float> arrivedAt(cells, 0.0f);
 
     std::vector<glm::ivec2> frontier{from}, next;
     cameFrom[index(from)] = -1;
@@ -254,7 +276,7 @@ bool Ground::findRoute(const glm::ivec2& from, float fromY, const glm::ivec2& to
     for (glm::ivec2 at = to; at != from; ) {
         outNodes.push_back(at);
         const int parent = cameFrom[index(at)];
-        at = glm::ivec2(parent % side, parent / side);
+        at = glm::ivec2(lo.x + parent % w, lo.y + parent / w);
     }
     std::reverse(outNodes.begin(), outNodes.end());
     return true;

@@ -260,21 +260,34 @@ bool Walker::planPath(const Ground& hf, const glm::ivec2& goalBlock) {
     m_pathFailed = false;
 
     const int span = hf.n() - 1;            // valid block positions per axis
-    auto index = [span](const glm::ivec2& b) { return b.y * span + b.x; };
-    auto valid = [span](const glm::ivec2& b) {
-        return b.x >= 0 && b.y >= 0 && b.x < span && b.y < span;
-    };
 
     const glm::ivec2 start = m_block;
     const glm::ivec2 goal  = glm::clamp(goalBlock, glm::ivec2(0), glm::ivec2(span - 1));
-    if (!valid(start)) { m_pathFailed = true; return false; }
+    if (start.x < 0 || start.y < 0 || start.x >= span || start.y >= span) {
+        m_pathFailed = true;
+        return false;
+    }
 
-    std::vector<int> cameFrom(static_cast<size_t>(span) * span, -2);
-    std::vector<int> cameDir(static_cast<size_t>(span) * span, -1);
+    // Windowed for the same reason Ground::findRoute is: these arrays are one
+    // entry per block position, and a level four thousand units across has four
+    // million of them. See the note there.
+    constexpr int kMargin = 48;
+    const glm::ivec2 lo = glm::max(glm::min(start, goal) - kMargin, glm::ivec2(0));
+    const glm::ivec2 hi = glm::min(glm::max(start, goal) + kMargin, glm::ivec2(span - 1));
+    const int w = hi.x - lo.x + 1;
+
+    auto index = [lo, w](const glm::ivec2& b) { return (b.y - lo.y) * w + (b.x - lo.x); };
+    auto valid = [lo, hi](const glm::ivec2& b) {
+        return b.x >= lo.x && b.y >= lo.y && b.x <= hi.x && b.y <= hi.y;
+    };
+
+    const size_t cells = static_cast<size_t>(w) * (hi.y - lo.y + 1);
+    std::vector<int> cameFrom(cells, -2);
+    std::vector<int> cameDir(cells, -1);
 
     // How high the block was when the search first arrived at it. The whole
     // reason a route can climb the ramp rather than stopping at the bottom of it.
-    std::vector<float> arrivedAt(static_cast<size_t>(span) * span, 0.0f);
+    std::vector<float> arrivedAt(cells, 0.0f);
 
     std::vector<glm::ivec2> frontier{start}, next;
     cameFrom[index(start)] = -1;
@@ -315,7 +328,7 @@ bool Walker::planPath(const Ground& hf, const glm::ivec2& goalBlock) {
         m_path.push_back(cameDir[i]);
         m_pathNodes.push_back(at);
         int parent = cameFrom[i];
-        at = glm::ivec2(parent % span, parent / span);
+        at = glm::ivec2(lo.x + parent % w, lo.y + parent / w);
     }
     std::reverse(m_path.begin(), m_path.end());
     std::reverse(m_pathNodes.begin(), m_pathNodes.end());

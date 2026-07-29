@@ -1,6 +1,6 @@
 #pragma once
 
-#include "Heightfield.hpp"
+#include "TerrainSource.hpp"
 
 #include <glm/glm.hpp>
 #include <vector>
@@ -115,7 +115,7 @@ struct Enclosure {
 // walking code knows the ship is there.
 class Ground {
 public:
-    explicit Ground(const Heightfield& terrain) : m_terrain(&terrain) {}
+    explicit Ground(const TerrainSource& terrain) : m_terrain(&terrain) {}
 
     void clearPatches() { m_patches.clear(); }
     void addPatch(const SurfacePatch& patch) { m_patches.push_back(patch); }
@@ -188,7 +188,7 @@ public:
     // Pass-through, so a Ground can stand in wherever a Heightfield was.
     int   n() const { return m_terrain->n(); }
     float spacing() const { return m_terrain->spacing(); }
-    const Heightfield& terrain() const { return *m_terrain; }
+    const TerrainSource& terrain() const { return *m_terrain; }
 
     // Terrain only -- for anything that genuinely means the ground, like siting
     // a crate or a landing pad.
@@ -241,7 +241,7 @@ private:
                         float radius, float& outU, float& outV,
                         float& outDepthU, float& outDepthV);
 
-    const Heightfield* m_terrain;
+    const TerrainSource* m_terrain;
     std::vector<SurfacePatch> m_patches;
     std::vector<Blocker> m_blockers;
     std::vector<Enclosure> m_enclosures;

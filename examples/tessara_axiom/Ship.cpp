@@ -35,7 +35,7 @@ glm::vec3 Ship::right() const {
     return glm::vec3(std::cos(y), 0.0f, -std::sin(y));
 }
 
-void Ship::place(Heightfield& hf, glm::vec2 near, float yawDegrees) {
+void Ship::place(TerrainSource& hf, glm::vec2 near, float yawDegrees) {
     m_yaw = yawDegrees;
 
     // Something this size sitting on a hillside looks wrong however carefully it

@@ -1,7 +1,7 @@
 #pragma once
 
 #include "Ground.hpp"
-#include "Heightfield.hpp"
+#include "TerrainSource.hpp"
 #include "SceneVertex.hpp"
 
 #include <cstdint>
@@ -52,7 +52,7 @@ public:
     Params params;
 
     // Finds the flattest ground near `near`, LEVELS it, and sets down.
-    void place(Heightfield& hf, glm::vec2 near, float yawDegrees);
+    void place(TerrainSource& hf, glm::vec2 near, float yawDegrees);
 
     float openAngleDegrees() const { return m_openAngle; }
 

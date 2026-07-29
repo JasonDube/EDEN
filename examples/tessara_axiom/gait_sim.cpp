@@ -19,6 +19,7 @@
 
 #include "Checks.hpp"
 #include "Ground.hpp"
+#include "Heightfield.hpp"
 #include "Walker.hpp"
 
 #include <cstring>
