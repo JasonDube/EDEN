@@ -157,6 +157,26 @@ void TessaraModule::onEnterPlayMode() {
 
 void TessaraModule::onExitPlayMode() { m_playing = false; }
 
+bool TessaraModule::playerStart(glm::vec3& outPosition, float& outYawDegrees) const {
+    if (!m_placed || !m_source) return false;
+
+    // A few paces behind the muster point, on the ground, facing up the ramp.
+    // Far enough back that the whole ship is in frame, near enough that the
+    // creatures are already doing something when you arrive.
+    const glm::vec3 muster = m_ship.rampApproachPoint();
+    const glm::vec3 back = -m_ship.forward();
+    const glm::vec3 at = muster + back * 14.0f;
+
+    // Eye height above whatever is actually under that spot -- it is a planet,
+    // not a plane, and the muster point's own height is not the ground's here.
+    outPosition = glm::vec3(at.x, m_source->heightAtWorld(at.x, at.z) + 4.0f, at.z);
+
+    // Camera yaw runs the same way the ship's does: atan2(x, z) of the heading.
+    const glm::vec3 look = glm::normalize(m_ship.origin() - outPosition);
+    outYawDegrees = glm::degrees(std::atan2(look.x, look.z));
+    return true;
+}
+
 void TessaraModule::update(float dt) {
     if (!m_playing || !m_ground || !m_placed || dt <= 0.0f) return;
 

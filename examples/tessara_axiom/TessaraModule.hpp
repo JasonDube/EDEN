@@ -58,6 +58,11 @@ public:
     // rather than broken -- there is simply nowhere to put a ship.
     void setTerrain(eden::Terrain* terrain);
 
+    // Standing at the foot of the ramp looking up it -- which is both the most
+    // useful place to be dropped and the one that shows you at a glance whether
+    // any of this is working.
+    bool playerStart(glm::vec3& outPosition, float& outYawDegrees) const override;
+
     bool isReady() const override { return m_terrain != nullptr; }
     std::string getStatusMessage() const override;
 

@@ -26607,6 +26607,19 @@ private:
         // Notify game module we're entering play mode
         if (m_gameModule) {
             m_gameModule->onEnterPlayMode();
+
+            // And put the player where the module says its game is. Asked after
+            // onEnterPlayMode because that is when a module decides where it has
+            // put things -- and on a level this size, "somewhere on the planet"
+            // is not a starting position.
+            glm::vec3 start(0.0f);
+            float yaw = 0.0f;
+            if (m_gameModule->playerStart(start, yaw)) {
+                m_camera.setPosition(start);
+                m_camera.setYaw(yaw);
+                std::cout << "[GameModule] start: (" << start.x << ", " << start.y
+                          << ", " << start.z << ")" << std::endl;
+            }
         }
     }
 

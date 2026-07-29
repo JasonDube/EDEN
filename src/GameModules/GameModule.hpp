@@ -77,6 +77,21 @@ public:
     virtual void detachRenderer() {}
     virtual void renderWorld(const ModuleRenderFrame&) {}
 
+    // Where the game starts, if the module has an opinion.
+    //
+    // Asked once, on entering play mode, AFTER onEnterPlayMode -- so a module
+    // that decides where to put things gets to decide before it is asked where
+    // the player should stand to see them.
+    //
+    // It exists because a level can be two and a half miles across and a module
+    // can put a ship anywhere in it. Dropping the player wherever the editor
+    // camera happened to be and letting them go looking is not a game, it is a
+    // search. False means no opinion, and the host does whatever it did before.
+    virtual bool playerStart(glm::vec3& outPosition, float& outYawDegrees) const {
+        (void)outPosition; (void)outYawDegrees;
+        return false;
+    }
+
     // Input handling - return true if module consumed the input
     virtual bool wantsCaptureKeyboard() const { return false; }
     virtual bool wantsCaptureMouse() const { return false; }
