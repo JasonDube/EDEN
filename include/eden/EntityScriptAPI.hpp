@@ -57,7 +57,15 @@ void setScriptPlayAnimHook(std::function<void(SceneObject&, const char*)> hook);
 // "surface height at (x, z)". Lets a walking script (e.g. a companion following
 // over hills) stay on the terrain instead of floating/sinking. No hook set =
 // ground verbs leave Y unchanged.
-void setScriptGroundHeightHook(std::function<float(float x, float z)> hook);
+// What a scripted thing is standing on at (x, z), given its feet are currently
+// at `fromY`.
+//
+// The height alone was not enough once a level could contain floors as well as
+// terrain. A cargo deck two units up is something you walk onto from the ramp
+// and NOT something you step onto from the dirt beside the hull, and the only
+// thing that tells those apart is where the body already is. Hosts that only
+// have terrain can ignore it.
+void setScriptGroundHeightHook(std::function<float(float x, float z, float fromY)> hook);
 
 } // namespace eden
 

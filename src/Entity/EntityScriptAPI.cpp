@@ -19,7 +19,7 @@ void setCurrentScriptEntity(Entity* e) {
 
 static thread_local SceneObject* t_currentScriptObject = nullptr;
 static std::function<void(SceneObject&, const char*)> s_playAnimHook;
-static std::function<float(float, float)> s_groundHeightFn;   // host: terrain height at (x,z)
+static std::function<float(float, float, float)> s_groundHeightFn;   // host: what is underfoot at (x,z), from feet at fromY
 static glm::vec3 s_playerPos{0.0f};   // set by the host each frame
 
 void setCurrentScriptObject(SceneObject* o) { t_currentScriptObject = o; }
@@ -27,7 +27,7 @@ SceneObject* currentScriptObject() { return t_currentScriptObject; }
 void setScriptPlayAnimHook(std::function<void(SceneObject&, const char*)> hook) {
     s_playAnimHook = std::move(hook);
 }
-void setScriptGroundHeightHook(std::function<float(float, float)> hook) {
+void setScriptGroundHeightHook(std::function<float(float, float, float)> hook) {
     s_groundHeightFn = std::move(hook);
 }
 void setScriptPlayerPosition(float x, float y, float z) { s_playerPos = {x, y, z}; }
@@ -170,7 +170,7 @@ float self_ground_y() {
     auto* t = currentScriptTransform();
     if (!t) return 0.0f;
     glm::vec3 s = t->getPosition();
-    if (eden::s_groundHeightFn) return eden::s_groundHeightFn(s.x, s.z);
+    if (eden::s_groundHeightFn) return eden::s_groundHeightFn(s.x, s.z, s.y);
     return s.y;   // no terrain hook -> leave height as-is
 }
 
@@ -185,13 +185,17 @@ void self_snap_to_ground() {
     auto* t = currentScriptTransform();
     if (!t || !eden::s_groundHeightFn) return;
     glm::vec3 s = t->getPosition();
-    float ground = eden::s_groundHeightFn(s.x, s.z);
-    // Place the model's BOTTOM on the ground, not its origin — a centered-origin
-    // model (feet at local -Y) would otherwise sink. Uses the object's local
-    // bounds + scale when we have the SceneObject; falls back to origin-on-ground.
+    // Measured from where its feet ARE, not from its origin: a model with a
+    // centred origin is half its own height above its soles, and asking the world
+    // what is underfoot from half a body up is how a creature steps onto things
+    // it should have to walk round.
     float feetOffset = 0.0f;
     if (auto* o = eden::currentScriptObject())
         feetOffset = -o->getLocalBounds().min.y * t->getScale().y;
+
+    float ground = eden::s_groundHeightFn(s.x, s.z, s.y - feetOffset);
+    // Place the model's BOTTOM on the ground, not its origin — a centered-origin
+    // model (feet at local -Y) would otherwise sink.
     t->setPosition(s.x, ground + feetOffset, s.z);
 }
 

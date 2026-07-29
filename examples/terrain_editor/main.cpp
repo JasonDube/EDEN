@@ -483,8 +483,20 @@ protected:
 
         // self_snap_to_ground / self_ground_y: keep scripted ground creatures on
         // the terrain surface (companion following over the planet's hills).
-        eden::setScriptGroundHeightHook([this](float x, float z) {
-            return m_terrain.getHeightAt(x, z);
+        eden::setScriptGroundHeightHook([this](float x, float z, float fromY) {
+            float height = m_terrain.getHeightAt(x, z);
+
+            // And anything a game module has put underfoot -- a ship's deck, its
+            // ramp. Without this the scripted player controller snapped to the
+            // planet and only the planet, so the creatures walked up a ramp the
+            // player could stand in the middle of and not be on.
+            if (m_gameModule) {
+                float fromModule = 0.0f;
+                if (m_gameModule->groundHeight(x, z, fromY, fromModule) && fromModule > height) {
+                    height = fromModule;
+                }
+            }
+            return height;
         });
 
         stampStartup("zone system + callbacks");
