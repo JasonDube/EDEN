@@ -29,8 +29,10 @@
 #include "Ship.hpp"
 #include "Walker.hpp"
 #include "BorrowedTerrain.hpp"
+#include "TessaraModule.hpp"
 
 #include "eden/LevelSerializer.hpp"
+#include "eden/Terrain.hpp"
 
 #include <unordered_map>
 
@@ -1227,6 +1229,7 @@ void checkFlight() {
     s.ship.setAirborne(true);
 
     float lowest = 1e9f;
+    float airborneAt = -1.0f;
     for (int i = 0; i < 60 * 45; ++i) {
         s.ship.fly(1.0f / 60.0f, 1.0f, 0.35f, i < 60 * 4 ? 1.0f : 0.0f, s.terrain);
 
@@ -1240,7 +1243,15 @@ void checkFlight() {
         rider.carry(move, spun, about);
         s.republish();
 
-        lowest = std::min(lowest, s.ship.heightAboveGround(s.terrain));
+        // Clearance is what it HOLDS, not what it has while leaving the ground.
+        // It lifts off at its climb rate rather than appearing at altitude, so
+        // the first half-second is legitimately low; when it gets there is the
+        // separate thing worth knowing.
+        const float above = s.ship.heightAboveGround(s.terrain);
+        if (airborneAt < 0.0f && above >= s.ship.flight.clearance - 0.05f) {
+            airborneAt = i / 60.0f;
+        }
+        if (airborneAt >= 0.0f) lowest = std::min(lowest, above);
     }
 
     const float riderDrift = glm::length(glm::vec2(
@@ -1277,13 +1288,110 @@ void checkFlight() {
 
     char detail[176];
     std::snprintf(detail, sizeof detail,
-                  "circuit put it %.0f from the pad, cleared %.1f at worst, "
-                  "rider drifted %.2f, crate %.2f",
-                  went, lowest, riderDrift, crateDrift);
+                  "off the ground in %.2fs, circuit put it %.0f from the pad, "
+                  "cleared %.1f at worst, rider drifted %.2f, crate %.2f",
+                  airborneAt, went, lowest, riderDrift, crateDrift);
     report("it flies, and the hold comes with it",
-           went > 40.0f && lowest >= s.ship.flight.clearance - 0.5f &&
+           went > 40.0f && airborneAt >= 0.0f && airborneAt < 2.0f &&
+           lowest >= s.ship.flight.clearance - 0.5f &&
            riderDrift < 1.0f && crateDrift < 1.0f &&
            s.ground.enclosureAt(rider.hipCentre()) >= 0, detail);
+}
+
+// ---------------------------------------------------------------------------
+// 5d. The player rides too -- driven through the MODULE, in the host's order.
+//
+// Everything above tests the content. This tests the thing the content is bolted
+// into, and it is a different kind of check: it stands a pretend player on the
+// deck and runs TessaraModule::update / setPlayerPosition / carriedPlayer in the
+// exact order terrain_editor calls them, including the snap-to-ground the
+// scripted controller does every frame.
+//
+// It exists because the bug it catches was invisible from every other angle. The
+// content was right -- ship, deck, enclosure, the aboard test, the carry maths,
+// all correct and all covered. What was wrong was WHEN two of them ran: the
+// passenger list was read after the ship had moved, and Ground still described
+// the pad for one frame after take-off. The player was snapped back down onto a
+// deck that had left, and from the next frame he was too far below it to count as
+// aboard. Reasoning about it produced three wrong answers; running it produced
+// the number in one go.
+// ---------------------------------------------------------------------------
+void checkThePlayerRides() {
+    // Flat, and with the fixed bounds a saved level has -- a terrain that reports
+    // no extent gives the module a two-node lattice and a crew that cannot walk.
+    eden::TerrainConfig cfg;
+    cfg.heightScale = 0.0f;
+    cfg.useFixedBounds = true;
+    eden::Terrain terrain(cfg);
+
+    TessaraModule mod;
+    mod.initialize();
+    mod.setTerrain(&terrain);
+    mod.onEnterPlayMode();
+
+    const Ship& ship = mod.ship();
+    constexpr float kEye = 1.7f;   // the host reports the CAMERA, not the feet
+
+    // Standing on a muster station, which is the middle of the hold.
+    glm::vec3 eye = ship.stationPosition(0) + glm::vec3(0.0f, kEye, 0.0f);
+    mod.setPlayerPosition(eye);
+    const bool aboardOnDeck = mod.playerAboard();
+
+    // One frame of terrain_editor's play-mode loop.
+    auto frame = [&] {
+        constexpr float dt = 1.0f / 60.0f;
+        mod.update(dt);
+        mod.setPlayerPosition(eye);
+
+        glm::vec3 move(0.0f), about(0.0f);
+        float spun = 0.0f;
+        const bool carried = mod.carriedPlayer(move, spun, about);
+        if (carried) {
+            const float a = glm::radians(spun);
+            const glm::vec3 d = eye - about;
+            eye = about + glm::vec3(d.x * std::cos(a) + d.z * std::sin(a), d.y,
+                                    -d.x * std::sin(a) + d.z * std::cos(a)) + move;
+        }
+
+        // ...and the scripted controller's snap-to-ground, which is what sets his
+        // height every frame and which pinned him to the old deck.
+        float h = 0.0f;
+        if (mod.groundHeight(eye.x, eye.z, eye.y - kEye, h)) eye.y = h + kEye;
+        return carried;
+    };
+
+    mod.callRally();
+    int sealedAt = -1;
+    for (int i = 0; i < 60 * 120; ++i) {
+        frame();
+        if (mod.launchState() == TessaraModule::Launch::Ready) { sealedAt = i; break; }
+    }
+
+    const float deckWas = ship.origin().y + ship.params.deckHeight;
+    const float stoodAt = (eye.y - kEye) - deckWas;
+
+    int carriedFrames = 0, total = 60 * 10;
+    float rose = 0.0f;
+    if (sealedAt >= 0) {
+        mod.launch();
+        for (int i = 0; i < total; ++i) if (frame()) ++carriedFrames;
+        rose = ship.origin().y - (deckWas - ship.params.deckHeight);
+    }
+
+    const float deckNow = ship.origin().y + ship.params.deckHeight;
+    const float standsAt = (eye.y - kEye) - deckNow;
+
+    char detail[192];
+    std::snprintf(detail, sizeof detail,
+                  "sealed after %.0fs, rose %.1f, carried %d/%d frames, "
+                  "stood %+.2f above the deck and still does at %+.2f",
+                  sealedAt >= 0 ? sealedAt / 60.0f : -1.0f, rose,
+                  carriedFrames, total, stoodAt, standsAt);
+
+    report("it takes the player with it",
+           aboardOnDeck && sealedAt >= 0 && rose > 1.0f &&
+           carriedFrames >= total - 2 && std::fabs(standsAt - stoodAt) < 0.25f,
+           detail);
 }
 
 // ---------------------------------------------------------------------------
@@ -1418,6 +1526,7 @@ int runShipChecks(bool verbose) {
     checkRoutesAndDeliveries();
     checkTheRally();
     checkFlight();
+    checkThePlayerRides();
     checkTheRealPlanet();
 
     std::printf("  %s\n\n", g_failed ? "SOMETHING IS BROKEN" : "all ok");

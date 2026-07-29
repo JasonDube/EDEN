@@ -442,8 +442,28 @@ void TessaraModule::setDown() {
     m_launch = Launch::Ready;
 }
 
+// Who is aboard, asked while the ship is still where they are standing.
+//
+// This has to be a separate step from carrying them. A passenger is somebody the
+// floor was under at the moment it left, and every way of asking -- the room, the
+// deck patch, the hull -- is derived from where the ship IS. Ask after the move
+// and the deck has already gone out from under them, so the honest answer is no,
+// and the ship flies off leaving behind exactly the people who were standing in
+// it. That was the bug.
+TessaraModule::Manifest TessaraModule::manifest() const {
+    Manifest m;
+    m.player = playerAboard();
+    m.biped = m_ground->enclosureAt(m_biped.hipCentre()) >= 0;
+    m.crates.reserve(m_crates.size());
+    for (const Crate& crate : m_crates) {
+        m.crates.push_back(m_ground->enclosureAt(crate.position) >= 0);
+    }
+    return m;
+}
+
 // Everything standing in the hold moves by exactly what the ship moved by.
-void TessaraModule::carryPassengers(const glm::vec3& move, float turn) {
+void TessaraModule::carryPassengers(const Manifest& aboard,
+                                    const glm::vec3& move, float turn) {
     const glm::vec3 about = m_ship.origin() - move;   // where the pivot WAS
     const float a = glm::radians(turn);
     const float s = std::sin(a), co = std::cos(a);
@@ -452,14 +472,12 @@ void TessaraModule::carryPassengers(const glm::vec3& move, float turn) {
         return about + glm::vec3(d.x * co + d.z * s, d.y, -d.x * s + d.z * co) + move;
     };
 
-    if (m_ground->enclosureAt(m_biped.hipCentre()) >= 0) {
-        m_biped.carry(move, turn, about);
-    }
+    if (aboard.biped) m_biped.carry(move, turn, about);
 
-    for (Crate& crate : m_crates) {
-        if (m_ground->enclosureAt(crate.position) >= 0) {
-            crate.position = shift(crate.position);
-            crate.yaw += a;
+    for (size_t i = 0; i < m_crates.size(); ++i) {
+        if (i < aboard.crates.size() && aboard.crates[i]) {
+            m_crates[i].position = shift(m_crates[i].position);
+            m_crates[i].yaw += a;
         }
     }
 
@@ -520,9 +538,22 @@ void TessaraModule::updateLaunch(float dt) {
                 if (Input::isKeyDown(Input::KEY_LEFT_CONTROL)) lift -= 1.0f;
             }
 
+            // The manifest is taken FIRST, and then the ship moves. See
+            // TessaraModule::manifest.
+            const Manifest aboard = manifest();
+
             m_ship.fly(dt, forward, turn, lift, *m_source);
             const glm::vec3 move = m_ship.lastMove();
             const float spun = m_ship.lastTurn();
+
+            // ...and the ground follows it in the same breath. Everything the
+            // host asks for the rest of this frame -- what is under the player's
+            // feet, what he is standing inside, what he has walked into -- comes
+            // out of Ground, and Ground is a snapshot of where the ship was when
+            // it was last built. Republished at the top of update(), it describes
+            // the pad for one frame after take-off, which is one frame of the
+            // player being snapped back down onto a deck that is no longer there.
+            republishGround();
 
             // The player rides too, and had been the one thing that did not.
             // The host owns where he is, so this is reported rather than applied
@@ -535,7 +566,7 @@ void TessaraModule::updateLaunch(float dt) {
             // being in the hold. The deck, the bridge and the ramp are all its
             // floor, and somebody in the doorway is on it whichever side of the
             // enclosure's edge their feet happen to fall.
-            m_carriedPlayer = playerAboard();
+            m_carriedPlayer = aboard.player;
 
             // Once a second while airborne, so a launch that leaves somebody
             // behind says why without them having to go looking.
@@ -556,7 +587,7 @@ void TessaraModule::updateLaunch(float dt) {
             m_carryAbout = m_ship.origin() - move;
 
             if (glm::dot(move, move) > 1e-10f || std::fabs(spun) > 1e-5f) {
-                carryPassengers(move, spun);
+                carryPassengers(aboard, move, spun);
             }
 
             // And the walker rides, drawn in the ship's frame.

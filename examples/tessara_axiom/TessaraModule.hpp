@@ -81,6 +81,11 @@ public:
                        glm::vec3& outAbout) const override;
     Launch launchState() const { return m_launch; }
 
+    // Is the player standing on this ship? Public because it is the precondition
+    // for the whole launch, and a precondition nothing outside can ask about is
+    // one nothing outside can test.
+    bool playerAboard() const;
+
     // Standing at the foot of the ramp looking up it -- which is both the most
     // useful place to be dropped and the one that shows you at a glance whether
     // any of this is working.
@@ -96,18 +101,30 @@ public:
     bool isReady() const override { return m_terrain != nullptr; }
     std::string getStatusMessage() const override;
 
+    // The ship and the ground it stands on, for anything that needs to ask them
+    // where things are -- chiefly the headless harness, which stands a pretend
+    // player on the deck and flies the thing without a screen. Read-only: the
+    // launch sequence is the way to make it do anything.
+    const Ship& ship() const { return m_ship; }
+    const Ground* ground() const { return m_ground.get(); }
+    const Biped& biped() const { return m_biped; }
+    const Walker& walker() const { return m_walker; }
+
 private:
     void placeShip();
     void scatterCrates();
     void republishGround();
     void updateHauling();
     void updateLaunch(float dt);
-
-    // Is the player standing on this ship? Asked in three ways, because the
-    // answer decides whether he flies or watches, and being nearly aboard is not
-    // a thing that should quietly resolve to no.
-    bool playerAboard() const;
-    void carryPassengers(const glm::vec3& move, float turn);
+    // Who was standing in the hold when it moved. Read before the ship goes
+    // anywhere and acted on afterwards -- see TessaraModule::manifest.
+    struct Manifest {
+        bool player = false;
+        bool biped = false;
+        std::vector<bool> crates;
+    };
+    Manifest manifest() const;
+    void carryPassengers(const Manifest& aboard, const glm::vec3& move, float turn);
     const char* launchLabel() const;
     void rebuildGeometry();
     void upload(const std::vector<SceneVertex>& verts,

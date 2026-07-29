@@ -129,7 +129,16 @@ void Ship::fly(float dt, float forward, float turn, float lift,
         below = std::max(below, ground.heightAtWorld(at.x, at.z));
     }
 
-    m_origin.y = std::clamp(m_origin.y, below + flight.clearance, below + flight.ceiling);
+    // Held off the ground, but at a RATE rather than by decree. Clamping it
+    // outright means take-off is a single frame in which the ship, and the deck,
+    // and everybody standing on the deck, are seven units higher than they were --
+    // and anything that reads a position once a frame sees them teleport. A ship
+    // that rises is also simply what leaving the ground looks like.
+    const float floor = below + flight.clearance;
+    if (m_origin.y < floor) {
+        m_origin.y = std::min(floor, m_origin.y + flight.climbRate * dt);
+    }
+    m_origin.y = std::min(m_origin.y, below + flight.ceiling);
 
     m_lastMove = m_origin - was;
     m_lastTurn = m_yaw - wasYaw;
