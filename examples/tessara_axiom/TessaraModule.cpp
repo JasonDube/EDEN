@@ -463,15 +463,27 @@ void TessaraModule::updateLadder(float dt) {
 
         if (std::fabs(m_climbY - m_climbTo) < 0.01f || toLadder > 3.0f) {
             m_climbing = false;
+            m_climbCooldown = 0.5f;
         }
         return;
     }
 
-    if (m_atLadder && eden::Input::isKeyDown(eden::Input::KEY_E)) climbLadder();
+    if (m_climbCooldown > 0.0f) m_climbCooldown = std::max(0.0f, m_climbCooldown - dt);
+
+    // On the PRESS, not while held.
+    //
+    // Now that the ladder goes both ways, a held key is a loop: E carries you up,
+    // the climb ends, E is still down, and "the end you are not at" is the bottom --
+    // so it takes you straight back. One press became up-and-down, and holding it
+    // became a shuttle. Tracked here rather than trusting an engine-wide edge,
+    // because this reads the key from inside the module's own update.
+    const bool eDown = eden::Input::isKeyDown(eden::Input::KEY_E);
+    if (m_atLadder && eDown && !m_wasClimbKeyDown) climbLadder();
+    m_wasClimbKeyDown = eDown;
 }
 
 void TessaraModule::climbLadder() {
-    if (!m_atLadder || m_climbing) return;
+    if (!m_atLadder || m_climbing || m_climbCooldown > 0.0f) return;
     const glm::vec3 feet = m_playerPosition - glm::vec3(0.0f, 1.7f, 0.0f);
     const glm::vec3 foot = m_ship.ladderFoot();
     const float ground = m_source->heightAtWorld(foot.x, foot.z);

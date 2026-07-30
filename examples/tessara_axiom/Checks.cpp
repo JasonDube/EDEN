@@ -1961,6 +1961,8 @@ void checkTheLadderHolds() {
         if (mod.groundHeight(eye.x, eye.z, eye.y - kEye, h)) eye.y = h + kEye;
     };
 
+    const float deck = ship.origin().y + ship.params.deckHeight;
+
     frame();
     const bool sawLadder = mod.atLadder();
     mod.climbLadder();
@@ -1970,10 +1972,20 @@ void checkTheLadderHolds() {
     for (int i = 0; i < 60 * 10 && mod.climbing(); ++i) { frame(); ++climbFrames; }
     peak = eye.y;
 
+    // Arriving at the top must not send you back down.
+    //
+    // Reported as "press E once and I go to the top and back to the bottom; hold E
+    // and it shuttles". The ladder goes both ways now, so anything still asking to
+    // climb when the climb ENDS reads as a request for the other end -- and a key
+    // read while held asks every frame. The press edge fixes that; this makes the
+    // shape of it impossible regardless of who asks next.
+    mod.climbLadder();                    // as a held key would, the instant it lands
+    for (int i = 0; i < 30; ++i) frame();
+    const bool stillUp = std::fabs((eye.y - kEye) - deck) < 0.3f && !mod.climbing();
+
     // Then stand there. This is the part that was failing.
     for (int i = 0; i < 60 * 3; ++i) frame();
 
-    const float deck = ship.origin().y + ship.params.deckHeight;
     const float settled = eye.y - kEye;
 
     // The hatch has to be OPEN by the time he gets there, and the way through it
@@ -2032,11 +2044,12 @@ void checkTheLadderHolds() {
 
     char trip[192];
     std::snprintf(trip, sizeof trip,
-                  "walked in to %.2f (deck %.2f, never dropped below %.2f), "
-                  "back at the rungs %d, climbed down to %.2f (ground %.2f)",
-                  walkedIn, deck, lowest - kEye, (int)backOutside, downTo, groundThere);
+                  "stayed up on arrival %d | walked in to %.2f (deck %.2f, never "
+                  "below %.2f), back at the rungs %d, down to %.2f (ground %.2f)",
+                  (int)stillUp, walkedIn, deck, lowest - kEye, (int)backOutside,
+                  downTo, groundThere);
     report("you can walk in through the hatch, and back down",
-           stayedUp && std::fabs(walkedIn - deck) < 0.4f && backOutside &&
+           stillUp && stayedUp && std::fabs(walkedIn - deck) < 0.4f && backOutside &&
            std::fabs(downTo - groundThere) < 0.6f, trip);
 
     report("the ladder takes you up and leaves you there",

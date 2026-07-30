@@ -223,6 +223,12 @@ private:
     // Where the climb is heading. A ladder is not one-way: the same rungs go down,
     // and a way aboard you cannot leave by is half a door.
     float m_climbTo = 0.0f;
+    bool  m_wasClimbKeyDown = false;
+
+    // A moment's rest after arriving, so nothing can bounce you straight back down
+    // the way you came. The key edge already stops the common case; this stops the
+    // whole shape of it, including whatever asks next time.
+    float m_climbCooldown = 0.0f;
     float m_climbY = 0.0f;
 
     Launch m_launch = Launch::Idle;
