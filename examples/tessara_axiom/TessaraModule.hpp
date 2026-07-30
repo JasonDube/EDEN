@@ -97,10 +97,12 @@ public:
     // Climb keys for checks: -1 real keyboard, else bit0 = up (W), bit1 = down (S).
     void holdPoleKeys(int mask) { m_poleKeyTest = mask; }
     void holdClimbKeys(int mask) { m_poleKeyTest = mask; }
+    void holdPanelKey(int state) { m_panelKeyTest = state; }
     bool onPole() const { return m_pole.on(); }
     bool onLadder() const { return m_onLadder; }
     bool climbing() const { return m_shipLadder.on(); }
     bool atLadder() const { return m_atLadder; }
+    bool atPanel() const { return m_atPanel; }
 
     // The module takes the movement keys while somebody is flying from the helm,
     // so the same W that walks you about the hold does not also walk you about
@@ -108,13 +110,14 @@ public:
     // ...and only while it is actually flying. m_atHelm is worked out in the
     // flying branch and nowhere else, so on its own it stays true after landing
     // and quietly keeps the movement keys forever.
-    // ...and while a ladder has him. W and S climb it, and the same W and S walk
-    // you, so a ladder that did not take the movement keys would have you step
-    // backwards off the rungs every time you tried to go down. This is the only
-    // thing a ladder takes, and it gives it straight back at the top -- see the
-    // hand-off in updateLadder.
+    // ...and while a ladder has him, which is not quite the same as while he is
+    // ON one. W and S climb, and the same W and S walk, so a ladder that took
+    // neither would step you backwards off the rungs every time you went down.
+    // But at the TOP it stops taking W, so walking forward carries you in -- that
+    // is the difference between a ladder you can reach and a way aboard. It still
+    // holds S there, because down still means down. See updateLadder.
     bool wantsCaptureKeyboard() const override {
-        return (m_atHelm && m_launch == Launch::Flying) || m_onLadder;
+        return (m_atHelm && m_launch == Launch::Flying) || m_ladderHoldsKeys;
     }
 
     // The deck moved and the player was standing on it.
@@ -232,6 +235,10 @@ private:
     // by the same mechanism that keeps him on the ground the rest of the time, at a
     // speed you can see, and able to step off at the top like anything else.
     bool  m_atLadder = false;
+    bool  m_atPanel = false;
+    bool  m_ladderHoldsKeys = false;
+    bool  m_wasPanelKeyDown = false;
+    int   m_panelKeyTest = -1;
 
     // The climb's pull kept SEPARATE from the ship's carry, and recomputed every
     // frame it is used.

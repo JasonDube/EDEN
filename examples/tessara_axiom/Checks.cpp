@@ -2147,6 +2147,141 @@ void checkTheBarePole() {
 }
 
 // ---------------------------------------------------------------------------
+// 5e-iv-b2. At the top, W walks again -- and you can get in.
+//
+// "Make it so when we get to the top of the ladder W is reactivated to walk
+// forward again so we can actually enter the ship." A ladder holds the movement
+// keys because W and S climb it; if it does not give them back at the top, the
+// ladder is a place you can reach and not a way in.
+//
+// The condition is what needs testing, not the release. Handing the keys back
+// whenever he reaches the ceiling is easy and wrong -- it drops him whenever the
+// platform is not there. So: at the top he must be OFF the ladder AND still up,
+// and walking forward must carry him onto the deck rather than through it.
+// ---------------------------------------------------------------------------
+void checkWWalksAgainAtTheTop() {
+    eden::TerrainConfig cfg;
+    cfg.heightScale = 0.0f;
+    cfg.useFixedBounds = true;
+    eden::Terrain terrain(cfg);
+
+    TessaraModule mod;
+    mod.initialize();
+    mod.setTerrain(&terrain);
+    mod.onEnterPlayMode();
+
+    const Ship& ship = mod.ship();
+    constexpr float kEye = 1.7f;
+    const glm::vec3 foot = ship.ladderFoot();
+    const float deck = ship.origin().y + ship.params.deckHeight;
+    glm::vec3 eye = foot + glm::vec3(0.0f, kEye, 0.0f);
+
+    auto frame = [&] {
+        mod.setPlayerPosition(eye);
+        mod.update(1.0f / 60.0f);
+        glm::vec3 move(0.0f), about(0.0f);
+        float spun = 0.0f;
+        if (mod.carriedPlayer(move, spun, about)) eye += move;
+        float h = terrain.getHeightAt(eye.x, eye.z);
+        float fromModule = 0.0f;
+        if (mod.groundHeight(eye.x, eye.z, eye.y - kEye, fromModule) && fromModule > h)
+            h = fromModule;
+        eye.y = h + kEye;
+    };
+
+    // Up, W held the whole way and kept held at the top -- which is exactly what
+    // somebody walking into a ship does. He must not still be captured.
+    mod.holdClimbKeys(1);
+    for (int i = 0; i < 60 * 12; ++i) frame();
+    // Not "is he off the ladder" -- at the top he is deliberately still on it,
+    // still being told what height his feet are at, because letting go is what
+    // dropped people. What matters is that it has stopped holding W.
+    const bool capturedAtTop = mod.wantsCaptureKeyboard();
+    const float atTop = eye.y - kEye;
+
+    // Now walk in, the way the host would once it has its keys back.
+    float lowest = eye.y;
+    for (int i = 0; i < 40; ++i) {
+        eye -= ship.right() * 0.12f;
+        frame();
+        lowest = std::min(lowest, eye.y);
+    }
+    mod.holdClimbKeys(-1);
+    const float walkedIn = eye.y - kEye;
+
+    // Walked far enough in, it should have let go of him entirely -- he is
+    // standing on the ship now, not on a ladder.
+    const bool letGoInside = !mod.onLadder();
+
+    char detail[208];
+    std::snprintf(detail, sizeof detail,
+                  "top %.2f (deck %.2f), keys held at top %d, walked in to %.2f "
+                  "(never below %.2f), let go once inside %d",
+                  atTop, deck, (int)capturedAtTop, walkedIn, lowest - kEye,
+                  (int)letGoInside);
+    report("at the top W walks again, and walking forward gets you in",
+           std::fabs(atTop - deck) < 0.2f && !capturedAtTop && letGoInside &&
+           std::fabs(walkedIn - deck) < 0.4f && (lowest - kEye) > deck - 0.6f, detail);
+}
+
+// ---------------------------------------------------------------------------
+// 5e-iv-b3. E works the cargo ramp from either panel.
+//
+// "I think it's best if you restore E functionality to the manual cargo hatch
+// controls." E was taken by the ladder and freed when the ladder stopped needing
+// it. A door you can only open by waiting for a creature to want in is not a
+// control. Pressed at either panel -- outside by the ramp, or inboard on the bay
+// wall -- it toggles, and it toggles on the PRESS, because a door driven by a
+// held key flutters.
+// ---------------------------------------------------------------------------
+void checkEWorksTheRamp() {
+    eden::TerrainConfig cfg;
+    cfg.heightScale = 0.0f;
+    cfg.useFixedBounds = true;
+    eden::Terrain terrain(cfg);
+
+    TessaraModule mod;
+    mod.initialize();
+    mod.setTerrain(&terrain);
+    mod.onEnterPlayMode();
+
+    const Ship& ship = mod.ship();
+    int toggles = 0, flutters = 0;
+    bool seenPanel = false;
+
+    for (int which = 0; which < 2; ++which) {
+        const glm::vec3 panel = which ? ship.innerControlPosition()
+                                      : ship.controlPosition();
+        mod.setPlayerPosition(panel);
+        mod.update(1.0f / 60.0f);
+        if (mod.atPanel()) seenPanel = true;
+
+        // Held for two seconds. One toggle, not a hundred and twenty.
+        const bool before = ship.isOpening();
+        mod.holdPanelKey(1);
+        for (int i = 0; i < 120; ++i) {
+            const bool was = ship.isOpening();
+            mod.setPlayerPosition(panel);
+            mod.update(1.0f / 60.0f);
+            if (ship.isOpening() != was) ++flutters;
+        }
+        mod.holdPanelKey(0);
+        mod.setPlayerPosition(panel);
+        mod.update(1.0f / 60.0f);
+        if (ship.isOpening() != before) ++toggles;
+    }
+    mod.holdPanelKey(-1);
+
+    char detail[176];
+    std::snprintf(detail, sizeof detail,
+                  "both panels seen %d: %d of 2 toggled, %d state changes across "
+                  "240 held frames (2 is right, one per press)",
+                  (int)seenPanel, toggles, flutters);
+    report("E at a panel works the cargo ramp, once per press",
+           seenPanel && toggles == 2 && flutters == 2, detail);
+}
+
+// ---------------------------------------------------------------------------
 // 5e-iv-c. Hold W at the foot of the ladder, from anywhere, and climb.
 //
 // Reported as "sometimes it works, sometimes it doesn't -- hold E at the base
@@ -3194,6 +3329,8 @@ int runShipChecks(bool verbose) {
     checkNoTeleportedCrates();
     checkTheShipIsAllThere();
     checkTheBarePole();
+    checkWWalksAgainAtTheTop();
+    checkEWorksTheRamp();
     checkNobodyWalksInEmpty();
     checkHoldingEClimbsOnce();
     checkTheLadderHolds();

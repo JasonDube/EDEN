@@ -255,6 +255,33 @@ void TessaraModule::update(float dt) {
     // The biped works the panel when a job needs the way open. Noticed rather
     // than commanded, exactly as the standalone example does it -- he stands in
     // front of the control and the scene sees him there.
+    // E at a control panel works the cargo ramp by hand.
+    //
+    // E was taken over by the ladder and has been free since the ladder stopped
+    // needing it. It goes back to what it was for: standing at either panel --
+    // the one outside by the ramp, or the one inboard on the bay wall -- and
+    // opening or shutting the hold yourself, rather than waiting for a creature
+    // to decide it wants in. On the press, because a toggle read while held is a
+    // door that flutters.
+    {
+        const glm::vec3 me = m_playerPosition;
+        const bool atPanel =
+            glm::length(me - m_ship.controlPosition()) < kPanelRange ||
+            glm::length(me - m_ship.innerControlPosition()) < kPanelRange;
+        const bool eDown = (m_panelKeyTest >= 0)
+                         ? m_panelKeyTest != 0
+                         : eden::Input::isKeyDown(eden::Input::KEY_E);
+        if (atPanel && eDown && !m_wasPanelKeyDown && !m_ship.airborne()) {
+            if (m_ship.isOpening()) m_ship.closeRamp();
+            else                    m_ship.openRamp();
+            std::printf("[ramp] %s by hand at the panel\n",
+                        m_ship.isOpening() ? "opening" : "closing");
+            std::fflush(stdout);
+        }
+        m_wasPanelKeyDown = eDown;
+        m_atPanel = atPanel;
+    }
+
     if (m_biped.wayShut() && !m_ship.isOpening()) {
         const glm::vec3 at = m_biped.hipCentre();
         if (glm::length(at - m_ship.controlPosition()) < kPanelRange ||
@@ -486,23 +513,21 @@ void TessaraModule::updateLadder(float dt) {
     }
     m_onLadder = (on != nullptr);
 
-    // Handing off at the top.
+    // Handing the KEYS back at the top, without letting go of him.
     //
-    // At the ceiling with a floor already under him -- the platform outside the
-    // hatch -- the ladder lets go and he simply walks off it. The condition is
-    // the whole safety of it: a ladder that released at the top REGARDLESS is a
-    // ladder that drops you when the platform is not there, which is the failure
-    // this has been chased around for two days. If there is nothing to stand on,
-    // he stays on the rungs and can climb back down.
-    if (on == &m_shipLadder && on->atTop()) {
-        const float top = m_ship.ladderTopY();
-        if (m_ground->onPatch(feet.x, feet.z, top + 0.05f, 0.30f)) {
-            on->release();
-            m_onLadder = false;
-            std::printf("[ladder] stepped off at the top, y %.2f\n", top);
-            std::fflush(stdout);
-        }
-    }
+    // The first attempt released the ladder outright when he reached the ceiling,
+    // and that is the old bug wearing a new hat: let go and whatever is under him
+    // is the terrain, so anybody a pace off-centre fell -- measured, 0.64 below
+    // the deck, and then W put him straight back on the rungs and he climbed
+    // again. Releasing is a decision about where he is standing, and this should
+    // not be making decisions about where he is standing.
+    //
+    // So it keeps answering his height, and only stops holding the movement keys.
+    // At the top W walks him inboard onto the platform and out of reach, which is
+    // how you get in; S still means down, so it keeps the keys for that. He steps
+    // off by walking off, and nothing ever decides on his behalf that he has.
+    const bool atCeiling = on && on->atTop();
+    m_ladderHoldsKeys = m_onLadder && !(atCeiling && !down);
 
     if (m_onLadder != wasOn) {
         std::printf("[ladder] %s %s at y %.2f (ground %.2f)\n",
@@ -1067,6 +1092,11 @@ void TessaraModule::renderUI(float, float) {
         ImGui::TextColored(ImVec4(0.35f, 0.9f, 0.45f, 1.0f),
                            m_onLadder ? "  W up / S down"
                                       : "  W to climb, S to come down");
+    }
+    if (m_atPanel) {
+        ImGui::TextColored(ImVec4(0.9f, 0.8f, 0.35f, 1.0f),
+                           m_ship.isOpening() ? "  E -- close the hold"
+                                              : "  E -- open the hold");
     }
     if (m_launch == Launch::Idle) {
         if (ImGui::Button("RALLY")) callRally();
