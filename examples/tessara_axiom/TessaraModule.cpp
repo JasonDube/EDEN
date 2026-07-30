@@ -100,29 +100,12 @@ void TessaraModule::setTerrain(eden::Terrain* terrain) {
 bool TessaraModule::groundHeight(float x, float z, float fromY, float& outHeight) const {
     if (!m_ground || !m_placed) return false;
 
-    // The test pole, answered before anything else so no part of the ship can
-    // reach into it. This is the same channel the ship's ladder uses -- the module
-    // says what is underfoot and the controller's snap does the carrying -- which
-    // is exactly the mechanism under suspicion. If the pole works and the ship
-    // does not, the channel is fine and the ship's extra parts are at fault.
-    if (m_onPole) {
-        const glm::vec3 pb = m_pole.base();
-        if (glm::length(glm::vec2(x - pb.x, z - pb.z)) < TestPole::kReach) {
-            outHeight = m_poleY;
-            return true;
-        }
-    }
-
-    // Climbing: the floor under him IS the rung he is on. Answering here rather
-    // than moving him means the scripted controller's own snap-to-ground does the
-    // carrying, so nothing fights over his position and he can step off at the top
-    // like anything else.
-    if (m_climbing) {
-        const glm::vec3 foot = m_ship.ladderFoot();
-        if (glm::length(glm::vec2(x - foot.x, z - foot.z)) < 3.0f) {
-            outHeight = m_climbY;
-            return true;
-        }
+    // A ladder he is on. Answered first and answered plainly: the rung under his
+    // feet IS the floor, and the controller's own snap does the carrying, exactly
+    // as it does for a deck or a ramp. Nothing here moves him.
+    if (m_onLadder) {
+        outHeight = m_ladderY;
+        return true;
     }
 
     // Only worth answering if we actually have something here. Everywhere else
@@ -305,7 +288,7 @@ void TessaraModule::update(float dt) {
             (glm::length(glm::vec2(soles.x - hatch.x, soles.z - hatch.z)) < 3.4f ||
              glm::length(glm::vec2(soles.x - inward.x, soles.z - inward.z)) < 3.0f) &&
             soles.y > hatch.y - 1.2f;
-        m_ship.updateHatch(dt, atTheDoor || m_climbing);
+        m_ship.updateHatch(dt, atTheDoor || m_shipLadder.on());
     }
 
     m_ship.updateBridgeDoor(dt, nearDoor(m_playerPosition) ||
@@ -331,7 +314,7 @@ void TessaraModule::update(float dt) {
     // A rally suspends the haul loop outright: it hands out crates, and handing
     // a crate to something that has been called in is how a rally never finishes.
     updateLadder(dt);
-    updateTestPole(dt);
+    updateLadder(dt);
 
     if (m_launch == Launch::Idle) updateHauling();
     updateLaunch(dt);
@@ -447,158 +430,87 @@ void TessaraModule::updateHauling() {
 // So: a ladder, at the BRIDGE end, the far end from the ramp. Hold E at the foot
 // of it and climb. It is not a second door -- you walk the length of the hull to
 // use it, and you arrive on the bridge rather than in the hold.
+// Both ladders, through one implementation, driven by the player.
+//
+// The ship's ladder used to grab you and animate you to an end it chose. That is
+// gone, and with it every question it forced: which end, what if the key is still
+// held, how long before he may ask again, what if he arrives over nothing. The
+// player moves himself now; the ladder only says what height his feet are at.
 void TessaraModule::updateLadder(float dt) {
     if (!m_source || !m_placed) return;
 
+    // The ship's ladder is placed EVERY frame, because the ship moves. Its floor
+    // is the ground under the rungs and its ceiling is the deck.
     const glm::vec3 foot = m_ship.ladderFoot();
-    const glm::vec3 feet = m_playerPosition - glm::vec3(0.0f, 1.7f, 0.0f);
-    const float toLadder = glm::length(glm::vec2(feet.x - foot.x, feet.z - foot.z));
+    const float footGround = m_source->heightAtWorld(foot.x, foot.z);
+    m_shipLadder.placeAt(glm::vec3(foot.x, footGround, foot.z),
+                         std::max(0.5f, m_ship.ladderTopY() - footGround));
 
-    // At the ladder means at either END of it -- the foot on the ground, or the
-    // platform at the top. Both are the same place seen from different heights.
-    const float groundHere = m_source->heightAtWorld(feet.x, feet.z);
-    const float top = m_ship.ladderTopY();
-    const bool nearRungs = toLadder < 1.6f && !m_ship.airborne();
-    m_atLadder = nearRungs && (feet.y < groundHere + 1.2f ||
-                               std::fabs(feet.y - top) < 1.2f);
-
-    // The key is read HERE, above everything, and the edge state is updated on
-    // every single frame.
-    //
-    // It used to be read at the bottom, past an early return taken for the whole
-    // of a climb -- so for those two seconds `m_wasClimbKeyDown` remembered a key
-    // state from before the climb started, and whether the next press registered
-    // depended on what the key happened to be doing when the climb began. That is
-    // the "sometimes it works, sometimes it loops": not a different bug on
-    // different tries, the same bug sampled at a different moment. An edge
-    // detector that stops watching is not an edge detector.
-    const bool eDown = (m_climbKeyTest >= 0)
-                     ? (m_climbKeyTest != 0)
-                     : eden::Input::isKeyDown(eden::Input::KEY_E);
-    const bool pressed = eDown && !m_wasClimbKeyDown;
-    m_wasClimbKeyDown = eDown;
-
-    // LET GO before it will take you the other way.
-    //
-    // The edge above is the intent; this is the guarantee. An edge detector is
-    // only as good as the frames it is sampled on, and this one sits behind an
-    // early return, a cooldown and a host that can skip an update -- which is
-    // what "sometimes it works, sometimes it throws you in a loop" sounds like:
-    // one bug, sampled differently. So a finished climb latches, and only the key
-    // coming UP unlatches it. Holding E cannot produce a second climb by any
-    // route, whatever the edge did.
-    if (!eDown) m_climbLatched = false;
-
-    if (m_climbing) {
-        // Pulled onto the rungs as he goes, which is what climbing a ladder is.
-        //
-        // Without this the climb starts wherever he happened to be standing and
-        // ends there too -- and the platform at the top is a metre and a half of
-        // grating, so starting a pace off it means arriving over thin air and
-        // dropping the moment the climb lets go. That is the "it puts me back on
-        // the ground" -- not the climb failing, but nothing being under him where
-        // it left him. Reported as a displacement, the way the deck moving is,
-        // because the host owns where he is.
-        const glm::vec2 off(foot.x - feet.x, foot.z - feet.z);
-        const float d = glm::length(off);
-        m_climbPull = glm::vec3(0.0f);
-        if (d > 0.02f) {
-            const float pull = std::min(d, 2.0f * dt);
-            m_climbPull = glm::vec3(off.x / d * pull, 0.0f, off.y / d * pull);
-        }
-
-        // Toward whichever end he asked for, at a climbing pace. Wandering off the
-        // ladder ends it -- he is holding rungs, not riding a lift.
-        const float step = 3.2f * dt;
-        if (m_climbY < m_climbTo) m_climbY = std::min(m_climbTo, m_climbY + step);
-        else                      m_climbY = std::max(m_climbTo, m_climbY - step);
-
-        if (std::fabs(m_climbY - m_climbTo) < 0.01f || toLadder > 3.0f) {
-            m_climbing = false;
-            m_climbCooldown = 0.5f;
-            m_climbLatched = eDown;   // still holding? then you must let go first
-
-            std::printf("[ladder] arrived y=%.2f (wanted %.2f) %.2f from the rungs, "
-                        "key %s\n", m_climbY, m_climbTo, toLadder,
-                        eDown ? "still held" : "released");
-            std::fflush(stdout);
-        }
-        return;
-    }
-
-    if (m_climbCooldown > 0.0f) m_climbCooldown = std::max(0.0f, m_climbCooldown - dt);
-
-    // On the PRESS, not while held. Holding E is one climb, not a shuttle.
-    if (m_atLadder && pressed && !m_climbLatched) climbLadder();
-}
-
-// The isolated ladder. Two keys, held, and a height. Nothing else.
-//
-// Deliberately not sharing a line of code with updateLadder: the point of a
-// control experiment is that it cannot inherit the fault being investigated.
-void TessaraModule::updateTestPole(float dt) {
-    if (!m_source || !m_placed) return;
-
-    // Placed once, right where the player starts, four paces to his left.
-    //
-    // It was off the ship's PORT side, which is the far side from the ramp and
-    // the hatch -- so it stood behind thirty-eight metres of hull from where
-    // anybody spawns, and the first thing said about it was "I don't see the
-    // pole". A rig nobody can find tests nothing.
+    // The bare rig, placed once where the player starts. Same class, no ship.
     if (!m_pole.placed()) {
         glm::vec3 start(0.0f);
         float yaw = 0.0f;
         const glm::vec3 from = playerStart(start, yaw) ? start : m_ship.origin();
-
-        // To the left of the way he is facing, so it is in frame on spawn without
-        // standing between him and the ship.
         const glm::vec3 look = glm::normalize(m_ship.origin() - from);
         const glm::vec3 left(-look.z, 0.0f, look.x);
         const glm::vec3 spot = from + left * 4.0f + look * 2.0f;
-
         const float g = m_source->heightAtWorld(spot.x, spot.z);
         m_pole.placeAt(glm::vec3(spot.x, g, spot.z), 4.0f);
-        std::printf("[pole] standing at %.1f, %.1f -- base y %.2f, top y %.2f. "
-                    "Z climbs, X descends.\n", spot.x, spot.z, g, g + 4.0f);
+        std::printf("[ladder] test pole at %.1f, %.1f -- base %.2f, top %.2f\n",
+                    spot.x, spot.z, g, g + 4.0f);
         std::fflush(stdout);
     }
 
     const glm::vec3 feet = m_playerPosition - glm::vec3(0.0f, 1.7f, 0.0f);
+
+    // W up, S down -- the keys every game uses. They also walk, which is why a
+    // ladder holds the keyboard while you are on it.
     const bool up   = (m_poleKeyTest >= 0) ? (m_poleKeyTest & 1) != 0
-                                           : eden::Input::isKeyDown(eden::Input::KEY_Z);
+                                           : eden::Input::isKeyDown(eden::Input::KEY_W);
     const bool down = (m_poleKeyTest >= 0) ? (m_poleKeyTest & 2) != 0
-                                           : eden::Input::isKeyDown(eden::Input::KEY_X);
+                                           : eden::Input::isKeyDown(eden::Input::KEY_S);
 
-    const float groundY = m_source->heightAtWorld(feet.x, feet.z);
-    const bool wasOn = m_onPole;
-    m_onPole = m_pole.update(dt, feet, groundY, up, down, m_poleY);
+    const float groundHere = m_source->heightAtWorld(feet.x, feet.z);
+    m_atLadder = m_shipLadder.withinReach(feet) || m_pole.withinReach(feet);
 
-    if (m_onPole != wasOn) {
-        std::printf("[pole] %s at y %.2f (ground %.2f, top %.2f)\n",
-                    m_onPole ? "ON" : "off", m_poleY, groundY, m_pole.topY());
+    const bool wasOn = m_onLadder;
+    m_onLadder = false;
+
+    // Whichever one he is at. They cannot both hold him.
+    Ladder* on = nullptr;
+    if (m_shipLadder.update(dt, feet, groundHere, up, down, m_ladderY)) {
+        on = &m_shipLadder;
+        m_pole.release();
+    } else if (m_pole.update(dt, feet, groundHere, up, down, m_ladderY)) {
+        on = &m_pole;
+    }
+    m_onLadder = (on != nullptr);
+
+    // Handing off at the top.
+    //
+    // At the ceiling with a floor already under him -- the platform outside the
+    // hatch -- the ladder lets go and he simply walks off it. The condition is
+    // the whole safety of it: a ladder that released at the top REGARDLESS is a
+    // ladder that drops you when the platform is not there, which is the failure
+    // this has been chased around for two days. If there is nothing to stand on,
+    // he stays on the rungs and can climb back down.
+    if (on == &m_shipLadder && on->atTop()) {
+        const float top = m_ship.ladderTopY();
+        if (m_ground->onPatch(feet.x, feet.z, top + 0.05f, 0.30f)) {
+            on->release();
+            m_onLadder = false;
+            std::printf("[ladder] stepped off at the top, y %.2f\n", top);
+            std::fflush(stdout);
+        }
+    }
+
+    if (m_onLadder != wasOn) {
+        std::printf("[ladder] %s %s at y %.2f (ground %.2f)\n",
+                    m_onLadder ? "ON" : "off",
+                    on == &m_pole ? "the test pole" : "the ship's ladder",
+                    m_ladderY, groundHere);
         std::fflush(stdout);
     }
-}
-
-void TessaraModule::climbLadder() {
-    if (!m_atLadder || m_climbing || m_climbCooldown > 0.0f) return;
-    const glm::vec3 feet = m_playerPosition - glm::vec3(0.0f, 1.7f, 0.0f);
-    const glm::vec3 foot = m_ship.ladderFoot();
-    const float ground = m_source->heightAtWorld(foot.x, foot.z);
-    const float top = m_ship.ladderTopY();
-
-    // Whichever end he is NOT at. Down from the platform, up from the ground.
-    m_climbing = true;
-    m_climbY = feet.y;
-    m_climbTo = (std::fabs(feet.y - top) < 1.2f) ? ground : top;
-
-    // Said out loud, because this is the one thing in here nobody has been able
-    // to catch in the act. If it goes the wrong way, the reason is on this line.
-    std::printf("[ladder] climb from y=%.2f -> %.2f (ground %.2f, top %.2f, "
-                "%.2f from the rungs)\n",
-                m_climbY, m_climbTo, ground, top,
-                glm::length(glm::vec2(feet.x - foot.x, feet.z - foot.z)));
-    std::fflush(stdout);
 }
 
 void TessaraModule::callRally() {
@@ -665,13 +577,8 @@ bool TessaraModule::playerAboard() const {
 
 bool TessaraModule::carriedPlayer(glm::vec3& outMove, float& outTurnDegrees,
                                   glm::vec3& outAbout) const {
-    // Climbing wins, and only while climbing -- see m_climbPull.
-    if (m_climbing) {
-        outMove = m_climbPull;
-        outTurnDegrees = 0.0f;
-        outAbout = m_playerPosition;
-        return glm::dot(m_climbPull, m_climbPull) > 1e-10f;
-    }
+    // Nothing to say about a climb any more. The ladder does not move the
+    // player, so it has nothing to report through the channel that does.
     if (!m_carriedPlayer) return false;
     outMove = m_carryMove;
     outTurnDegrees = m_carryTurn;
@@ -1156,10 +1063,10 @@ void TessaraModule::renderUI(float, float) {
     ImGui::Separator();
     // Said in both panels, because when this matters you are standing outside a
     // badly parked ship with no idea it exists.
-    if (m_atLadder || m_climbing) {
+    if (m_atLadder || m_onLadder) {
         ImGui::TextColored(ImVec4(0.35f, 0.9f, 0.45f, 1.0f),
-                           m_climbing ? "  climbing the ladder..."
-                                      : "  hold E to climb aboard");
+                           m_onLadder ? "  W up / S down"
+                                      : "  W to climb, S to come down");
     }
     if (m_launch == Launch::Idle) {
         if (ImGui::Button("RALLY")) callRally();

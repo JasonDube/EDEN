@@ -1,9 +1,9 @@
-#include "TestPole.hpp"
+#include "Ladder.hpp"
 #include "MeshBuild.hpp"
 
 namespace tessara {
 
-void TestPole::buildMesh(std::vector<SceneVertex>& verts,
+void Ladder::buildMesh(std::vector<SceneVertex>& verts,
                          std::vector<uint32_t>& indices) const {
     if (!m_placed) return;
 

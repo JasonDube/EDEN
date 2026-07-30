@@ -2138,7 +2138,7 @@ void checkTheBarePole() {
                   "(dipped to %.2f), X down -> %.2f (ground %.2f)",
                   heldAtTop, topY, stillUp, afterIdle, lowestIdle, ended, groundY);
 
-    report("a bare 4 m ladder: Z up, X down, and it stays where you leave it",
+    report("a bare 4 m ladder: W up, S down, and it stays where you leave it",
            std::fabs(heldAtTop - topY) < 0.15f &&
            std::fabs(stillUp - topY) < 0.15f &&
            std::fabs(afterIdle - topY) < 0.15f &&
@@ -2147,18 +2147,18 @@ void checkTheBarePole() {
 }
 
 // ---------------------------------------------------------------------------
-// 5e-iv-c. Hold E at the foot of the ladder, from anywhere, and go up ONCE.
+// 5e-iv-c. Hold W at the foot of the ladder, from anywhere, and climb.
 //
 // Reported as "sometimes it works, sometimes it doesn't -- hold E at the base
-// and sometimes it throws you in a loop". No description beyond that, and none
-// was needed: "sometimes" with a held key means the outcome depends on something
-// the player is not choosing. The only free variables at the foot of a ladder
-// are where you are standing and how long you hold, so sweep both and let the
-// failures name themselves.
+// and sometimes it throws you in a loop". "Sometimes" with a held key means the
+// outcome depends on something the player is not choosing, and the sweep found
+// it: with the old level-read key, 72 of these 144 combinations climbed more than
+// once, and every one of them was a LONGER hold. Nobody could have described that.
 //
-// One press must produce exactly ONE climb. Counting the climbs is the whole
-// check -- ending up at the top is not enough, because up-down-up ends at the
-// top too and that is precisely what was reported.
+// The ladder no longer decides anything, so "more than one climb" is close to
+// unreachable now -- but this stays, because it is the check that caught the
+// class of bug, and the mount/dismount rules are still rules that can be got
+// wrong. Where you stand and how long you hold, swept.
 // ---------------------------------------------------------------------------
 void checkHoldingEClimbsOnce() {
     eden::TerrainConfig cfg;
@@ -2175,6 +2175,7 @@ void checkHoldingEClimbsOnce() {
     constexpr float kEye = 1.7f;
     const glm::vec3 foot = ship.ladderFoot();
     const float deck = ship.origin().y + ship.params.deckHeight;
+    const float groundAt = terrain.getHeightAt(foot.x, foot.z);
 
     int tried = 0, looped = 0, neverWent = 0, wrongEnd = 0;
     float worstRadius = 0.0f;
@@ -2191,12 +2192,12 @@ void checkHoldingEClimbsOnce() {
                                                  std::sin(ang) * rad);
                 ++tried;
 
-                mod.holdClimbKey(-1);
+                mod.holdClimbKeys(-1);
                 int climbs = 0;
                 bool wasClimbing = false;
 
                 for (int i = 0; i < 600; ++i) {
-                    mod.holdClimbKey(i < holdFrames ? 1 : 0);
+                    mod.holdClimbKeys(i < holdFrames ? 1 : 0);
                     mod.setPlayerPosition(eye);
                     mod.update(1.0f / 60.0f);
 
@@ -2219,12 +2220,19 @@ void checkHoldingEClimbsOnce() {
                     if (mod.climbing() && !wasClimbing) ++climbs;
                     wasClimbing = mod.climbing();
                 }
-                mod.holdClimbKey(-1);
+                mod.holdClimbKeys(-1);
 
+                // A ladder the player drives climbs for exactly as long as he
+                // holds the key. Only a hold long enough to cover the rise can be
+                // expected at the top; a short one must simply leave him partway
+                // up and never below the ground he started on.
                 const float ended = eye.y - kEye;
+                const bool longEnough = holdFrames >= 150;
                 if (climbs == 0)      ++neverWent;
                 else if (climbs > 1) { ++looped; worstRadius = std::max(worstRadius, rad); }
-                else if (std::fabs(ended - deck) > 0.4f) ++wrongEnd;
+                else if (longEnough  ? std::fabs(ended - deck) > 0.4f
+                                     : (ended > deck + 0.2f || ended < groundAt - 0.2f))
+                    ++wrongEnd;
 
                 // Put him back for the next spot.
                 for (int i = 0; i < 40; ++i) {
@@ -2242,7 +2250,7 @@ void checkHoldingEClimbsOnce() {
                   "radius %.2f), %d never left the ground, %d ended somewhere "
                   "other than the deck",
                   tried, looped, worstRadius, neverWent, wrongEnd);
-    report("holding E at the foot climbs once, from anywhere",
+    report("holding W at the foot climbs, and holding it longer does no more",
            looped == 0 && neverWent == 0 && wrongEnd == 0, detail);
 }
 
@@ -2302,11 +2310,12 @@ void checkTheLadderHolds() {
 
     frame();
     const bool sawLadder = mod.atLadder();
-    mod.climbLadder();
 
+    // Hold W. Nothing carries him; he climbs.
     float peak = eye.y;
     int climbFrames = 0;
-    for (int i = 0; i < 60 * 10 && mod.climbing(); ++i) { frame(); ++climbFrames; }
+    mod.holdClimbKeys(1);
+    for (int i = 0; i < 60 * 12; ++i) { frame(); ++climbFrames; }
     peak = eye.y;
 
     // Arriving at the top must not send you back down.
@@ -2316,9 +2325,11 @@ void checkTheLadderHolds() {
     // climb when the climb ENDS reads as a request for the other end -- and a key
     // read while held asks every frame. The press edge fixes that; this makes the
     // shape of it impossible regardless of who asks next.
-    mod.climbLadder();                    // as a held key would, the instant it lands
-    for (int i = 0; i < 30; ++i) frame();
-    const bool stillUp = std::fabs((eye.y - kEye) - deck) < 0.3f && !mod.climbing();
+    // Still holding W, three more seconds. A ladder that decides things would
+    // send him somewhere; this one has nothing left to decide.
+    for (int i = 0; i < 180; ++i) frame();
+    const bool stillUp = std::fabs((eye.y - kEye) - deck) < 0.3f;
+    mod.holdClimbKeys(0);
 
     // Then stand there. This is the part that was failing.
     for (int i = 0; i < 60 * 3; ++i) frame();
@@ -2374,7 +2385,9 @@ void checkTheLadderHolds() {
     // than past them.
     for (int i = 0; i < 40; ++i) { eye += ship.right() * 0.12f; frame(); }
     const bool backOutside = mod.atLadder();
-    mod.climbLadder();
+    mod.holdClimbKeys(2);   // S: come down
+    for (int i = 0; i < 60 * 12; ++i) frame();
+    mod.holdClimbKeys(-1);
     for (int i = 0; i < 60 * 10 && mod.climbing(); ++i) frame();
     const float downTo = eye.y - kEye;
     const float groundThere = ship.origin().y;
@@ -2389,9 +2402,12 @@ void checkTheLadderHolds() {
            stillUp && stayedUp && std::fabs(walkedIn - deck) < 0.4f && backOutside &&
            std::fabs(downTo - groundThere) < 0.6f, trip);
 
+    // He ends where HE steered, not where a pull put him -- the ladder moves
+    // nobody now. So the test is that he is still within reach of the rungs, not
+    // that something centred him on them.
     report("the ladder takes you up and leaves you there",
            sawLadder && climbFrames > 5 && std::fabs(settled - deck) < 0.3f &&
-           fromRungs < 1.0f && open > 0.9f && wayThrough, detail);
+           fromRungs < Ladder::kReach && open > 0.9f && wayThrough, detail);
 }
 
 // ---------------------------------------------------------------------------

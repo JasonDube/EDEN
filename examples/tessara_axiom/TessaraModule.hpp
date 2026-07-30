@@ -5,7 +5,7 @@
 #include "Ground.hpp"
 #include "SceneVertex.hpp"
 #include "Ship.hpp"
-#include "TestPole.hpp"
+#include "Ladder.hpp"
 #include "Walker.hpp"
 
 #include "GameModules/GameModule.hpp"
@@ -85,21 +85,21 @@ public:
 
     // Start the climb without a keypress, so the whole thing can be driven in a
     // check. Ignored unless the player is actually at the foot of the ladder.
-    void climbLadder();
 
-    // The isolated ladder rig -- see TestPole.hpp. Z up, X down, nothing else.
-    const TestPole& pole() const { return m_pole; }
+    // The isolated ladder rig -- see Ladder.hpp. Z up, X down, nothing else.
+    const Ladder& pole() const { return m_pole; }
 
     // Drive the climb key without an input device, for checks. -1 hands the
     // question back to the real keyboard. A held key is the case that broke, so
     // it has to be expressible.
-    void holdClimbKey(int state) { m_climbKeyTest = state; }
 
     // Test pole keys, for checks: -1 real keyboard, else bit0 = up, bit1 = down.
+    // Climb keys for checks: -1 real keyboard, else bit0 = up (W), bit1 = down (S).
     void holdPoleKeys(int mask) { m_poleKeyTest = mask; }
-    bool onPole() const { return m_onPole; }
-    bool climbCoolingDown() const { return m_climbCooldown > 0.0f; }
-    bool climbing() const { return m_climbing; }
+    void holdClimbKeys(int mask) { m_poleKeyTest = mask; }
+    bool onPole() const { return m_pole.on(); }
+    bool onLadder() const { return m_onLadder; }
+    bool climbing() const { return m_shipLadder.on(); }
     bool atLadder() const { return m_atLadder; }
 
     // The module takes the movement keys while somebody is flying from the helm,
@@ -108,8 +108,13 @@ public:
     // ...and only while it is actually flying. m_atHelm is worked out in the
     // flying branch and nowhere else, so on its own it stays true after landing
     // and quietly keeps the movement keys forever.
+    // ...and while a ladder has him. W and S climb it, and the same W and S walk
+    // you, so a ladder that did not take the movement keys would have you step
+    // backwards off the rungs every time you tried to go down. This is the only
+    // thing a ladder takes, and it gives it straight back at the top -- see the
+    // hand-off in updateLadder.
     bool wantsCaptureKeyboard() const override {
-        return m_atHelm && m_launch == Launch::Flying;
+        return (m_atHelm && m_launch == Launch::Flying) || m_onLadder;
     }
 
     // The deck moved and the player was standing on it.
@@ -153,7 +158,6 @@ private:
     void updateHauling();
     void updateLaunch(float dt);
     void updateLadder(float dt);
-    void updateTestPole(float dt);
     // Who was standing in the hold when it moved. Read before the ship goes
     // anywhere and acted on afterwards -- see TessaraModule::manifest.
     struct Manifest {
@@ -228,7 +232,6 @@ private:
     // by the same mechanism that keeps him on the ground the rest of the time, at a
     // speed you can see, and able to step off at the top like anything else.
     bool  m_atLadder = false;
-    bool  m_climbing = false;
 
     // The climb's pull kept SEPARATE from the ship's carry, and recomputed every
     // frame it is used.
@@ -236,29 +239,23 @@ private:
     // Sharing m_carriedPlayer for it leaked: nothing clears that flag while the
     // launch sequence is Idle, so the host went on re-applying the last pull for
     // ever and walked the player six units off the ladder in three seconds. A
-    // channel that is only ever true while m_climbing is cannot do that.
-    glm::vec3 m_climbPull{0.0f};
+    // channel that is only ever true while a ladder holds him cannot do that.
 
     // Where the climb is heading. A ladder is not one-way: the same rungs go down,
     // and a way aboard you cannot leave by is half a door.
-    float m_climbTo = 0.0f;
-    bool  m_wasClimbKeyDown = false;
-    int   m_climbKeyTest = -1;   // -1 real key, 0/1 forced (checks only)
-    bool  m_climbLatched = false;  // a finished climb; needs the key released
 
     glm::vec3 m_levelSpawn{0.0f};
     bool  m_hasLevelSpawn = false;
 
-    TestPole m_pole;
-    float m_poleY = 0.0f;      // the height it wants the player's feet at
-    bool  m_onPole = false;
+    Ladder m_pole;        // the bare control rig, beside the spawn
+    Ladder m_shipLadder;  // the ship's own, at the hatch -- the SAME code
+    float m_ladderY = 0.0f;    // the height whichever ladder wants his feet at
+    bool  m_onLadder = false;  // on either of them
     int   m_poleKeyTest = -1;
 
     // A moment's rest after arriving, so nothing can bounce you straight back down
     // the way you came. The key edge already stops the common case; this stops the
     // whole shape of it, including whatever asks next time.
-    float m_climbCooldown = 0.0f;
-    float m_climbY = 0.0f;
 
     Launch m_launch = Launch::Idle;
     bool   m_atHelm = false;
