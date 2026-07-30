@@ -29,6 +29,7 @@
 #include "Ship.hpp"
 #include "Walker.hpp"
 #include "BorrowedTerrain.hpp"
+#include "Prefab.hpp"
 #include "TessaraModule.hpp"
 
 #include "eden/LevelSerializer.hpp"
@@ -2063,6 +2064,75 @@ void checkTheShipIsAllThere() {
 }
 
 // ---------------------------------------------------------------------------
+// 5e-0. A prefab the game was never compiled against.
+//
+// The whole thesis of the catalogue plan in one check: a FILE decides what a
+// thing is, what it costs, and where a body stands to use it. Nothing here reads
+// a constant. Every value asserted below came out of helm.lime, and if somebody
+// edits that file in LIME these numbers move with it -- which is the point, and
+// also why this check reads the file for its own expectations rather than
+// hardcoding them. A check that hardcoded 2500 would pass while the catalogue
+// showed the wrong price.
+//
+// What it must NOT do is pass when the file is missing. A prefab that silently
+// fails to appear is the failure this idea is most exposed to, so absence is a
+// failure here and not a skip.
+// ---------------------------------------------------------------------------
+void checkThePrefabIsRead() {
+    eden::TerrainConfig cfg;
+    cfg.heightScale = 0.0f;
+    cfg.useFixedBounds = true;
+    eden::Terrain terrain(cfg);
+
+    TessaraModule mod;
+    mod.initialize();
+    mod.setTerrain(&terrain);
+    mod.onEnterPlayMode();
+    for (int i = 0; i < 5; ++i) mod.update(1.0f / 60.0f);
+
+    const Prefab& helm = mod.helmPrefab();
+
+    // Read the file independently of the module, so this compares two readings
+    // rather than one reading against itself.
+    Prefab direct;
+    const bool onDisk = direct.load("assets/models/prefabs/helm.lime");
+
+    const bool sameRole  = onDisk && helm.meta("role") == direct.meta("role");
+    const bool sameTitle = onDisk && helm.meta("title") == direct.meta("title");
+    const bool isHelm    = helm.meta("role") == "helm";
+    const bool hasPorts  = helm.hasPort("pilot_station") && helm.hasPort("deck_mount");
+    const bool priced    = !helm.meta("price").empty();
+
+    // The station is a place in the world, not a string. Walk to it.
+    glm::vec3 station(0.0f), facing(0.0f);
+    const bool located = helm.worldPort("pilot_station", station, facing);
+    bool noticed = false, noticedAway = false;
+    if (located) {
+        mod.setPlayerPosition(station + glm::vec3(0.0f, 1.7f, 0.0f));
+        mod.update(1.0f / 60.0f);
+        noticed = mod.atHelmPrefab();
+
+        // ...and it must stop noticing when you leave, or "you are at the helm"
+        // means nothing.
+        mod.setPlayerPosition(station + glm::vec3(9.0f, 1.7f, 9.0f));
+        mod.update(1.0f / 60.0f);
+        noticedAway = mod.atHelmPrefab();
+    }
+
+    char detail[224];
+    std::snprintf(detail, sizeof detail,
+                  "loaded %d, role '%s', title '%s', %s cr, ports %d, station at "
+                  "(%.1f %.1f) noticed %d, left %d",
+                  (int)helm.loaded(), helm.meta("role", "-").c_str(),
+                  helm.meta("title", "-").c_str(), helm.meta("price", "-").c_str(),
+                  (int)hasPorts, station.x, station.z, (int)noticed,
+                  (int)!noticedAway);
+    report("the game reads a helm out of a .lime it never compiled against",
+           helm.loaded() && onDisk && sameRole && sameTitle && isHelm && hasPorts &&
+           priced && located && noticed && !noticedAway, detail);
+}
+
+// ---------------------------------------------------------------------------
 // 5e-iv-a. THE CONTROL EXPERIMENT: a ladder with nothing attached to it.
 //
 // Four metres of pole beside the ship, Z up, X down, no platform, no toggle, no
@@ -3327,6 +3397,7 @@ int runShipChecks(bool verbose) {
     checkTheHelmView();
     checkTheLanding();
     checkNoTeleportedCrates();
+    checkThePrefabIsRead();
     checkTheShipIsAllThere();
     checkTheBarePole();
     checkWWalksAgainAtTheTop();

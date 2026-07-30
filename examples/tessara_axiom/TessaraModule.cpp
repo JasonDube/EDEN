@@ -473,6 +473,16 @@ void TessaraModule::updateLadder(float dt) {
     m_shipLadder.placeAt(glm::vec3(foot.x, footGround, foot.z),
                          std::max(0.5f, m_ship.ladderTopY() - footGround));
 
+    // The helm prefab, stood beside the pole at the spawn.
+    //
+    // On the ground rather than on the deck, and connected to nothing. The
+    // question this answers is only "can the game read a role and a port out of a
+    // file it was never compiled against" -- putting it somewhere meaningful
+    // would tangle that question with a second one.
+    if (!m_helmPrefab.loaded()) {
+        m_helmPrefab.load("assets/models/prefabs/helm.lime");
+    }
+
     // The bare rig, placed once where the player starts. Same class, no ship.
     if (!m_pole.placed()) {
         glm::vec3 start(0.0f);
@@ -486,9 +496,27 @@ void TessaraModule::updateLadder(float dt) {
         std::printf("[ladder] test pole at %.1f, %.1f -- base %.2f, top %.2f\n",
                     spot.x, spot.z, g, g + 4.0f);
         std::fflush(stdout);
+
+        // Three paces the other side of the player, facing him, so its
+        // pilot_station faces back the way he arrives from.
+        if (m_helmPrefab.loaded()) {
+            const glm::vec3 at = from - left * 3.0f + look * 2.0f;
+            const float yaw = glm::degrees(std::atan2(look.x, look.z));
+            m_helmPrefab.placeAt(
+                glm::vec3(at.x, m_source->heightAtWorld(at.x, at.z), at.z), yaw + 180.0f);
+        }
     }
 
     const glm::vec3 feet = m_playerPosition - glm::vec3(0.0f, 1.7f, 0.0f);
+
+    // Standing at the pilot's spot -- which the FILE decides, not this code.
+    m_atHelmPrefab = false;
+    glm::vec3 station(0.0f), facing(0.0f);
+    if (m_helmPrefab.worldPort("pilot_station", station, facing)) {
+        m_atHelmPrefab = glm::length(glm::vec2(feet.x - station.x,
+                                               feet.z - station.z)) < 1.4f;
+    }
+
 
     // W up, S down -- the keys every game uses. They also walk, which is why a
     // ladder holds the keyboard while you are on it.
@@ -935,6 +963,7 @@ void TessaraModule::rebuildGeometry() {
     }
     appendStoragePad(m_storage, 1.6f, m_stored > 0, m_verts, m_indices);
     m_pole.buildMesh(m_verts, m_indices);
+    m_helmPrefab.appendMesh(m_verts, m_indices);
 
     // The stations, marked. A spot a unit is sent to should be a spot you can see
     // it standing on -- otherwise a crew lined up correctly and a crew lined up by
@@ -1092,6 +1121,15 @@ void TessaraModule::renderUI(float, float) {
         ImGui::TextColored(ImVec4(0.35f, 0.9f, 0.45f, 1.0f),
                            m_onLadder ? "  W up / S down"
                                       : "  W to climb, S to come down");
+    }
+    if (m_atHelmPrefab) {
+        // Everything on this line came out of the .lime.
+        ImGui::TextColored(ImVec4(0.55f, 0.85f, 1.0f, 1.0f), "  %s",
+                           m_helmPrefab.meta("title", "(untitled prefab)").c_str());
+        ImGui::TextDisabled("  role %s  -  %s cr  -  %s",
+                            m_helmPrefab.meta("role", "?").c_str(),
+                            m_helmPrefab.meta("price", "?").c_str(),
+                            m_helmPrefab.meta("summary", "").c_str());
     }
     if (m_atPanel) {
         ImGui::TextColored(ImVec4(0.9f, 0.8f, 0.35f, 1.0f),

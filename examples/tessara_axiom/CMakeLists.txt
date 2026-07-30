@@ -4,6 +4,7 @@
 # Nothing in here creates a window or owns a frame loop.
 add_library(tessara_core STATIC
     Register.cpp
+    Prefab.cpp
     Ladder.cpp
     Heightfield.cpp
     Ground.cpp

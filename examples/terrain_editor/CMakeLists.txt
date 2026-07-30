@@ -97,6 +97,20 @@ add_custom_command(TARGET terrain_editor POST_BUILD
 
 # Sync textures (terrain + building) to build directory
 # Building textures live at project root: textures/building/
+# Developer-authored PREFABS live at the repo root, not under this example.
+#
+# They are game content -- a helm, an engine, a robot -- and a catalogue of them
+# is not a property of the terrain editor, which merely happens to be what hosts
+# the game today. Copied rather than referenced because the binary runs from its
+# own directory and LimeLoader resolves by searching assets/models from there; a
+# prefab that is not under it does not fail loudly, it simply never appears.
+add_custom_command(TARGET terrain_editor POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+        ${CMAKE_SOURCE_DIR}/assets/models/prefabs
+        $<TARGET_FILE_DIR:terrain_editor>/assets/models/prefabs
+    COMMENT "Copying prefabs"
+)
+
 # Terrain textures live at: examples/terrain_editor/assets/textures/
 add_custom_command(TARGET terrain_editor POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_directory

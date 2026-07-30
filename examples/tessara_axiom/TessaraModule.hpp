@@ -4,6 +4,7 @@
 #include "Biped.hpp"
 #include "Ground.hpp"
 #include "SceneVertex.hpp"
+#include "Prefab.hpp"
 #include "Ship.hpp"
 #include "Ladder.hpp"
 #include "Walker.hpp"
@@ -103,6 +104,11 @@ public:
     bool climbing() const { return m_shipLadder.on(); }
     bool atLadder() const { return m_atLadder; }
     bool atPanel() const { return m_atPanel; }
+
+    // The prefab, so a check can ask what the FILE said rather than what the
+    // code assumed.
+    const Prefab& helmPrefab() const { return m_helmPrefab; }
+    bool atHelmPrefab() const { return m_atHelmPrefab; }
 
     // The module takes the movement keys while somebody is flying from the helm,
     // so the same W that walks you about the hold does not also walk you about
@@ -253,6 +259,12 @@ private:
 
     glm::vec3 m_levelSpawn{0.0f};
     bool  m_hasLevelSpawn = false;
+
+    // The first developer-authored prefab in the world. Loose on purpose: it is
+    // a thing standing on the ground that the game reads out of a file, and it is
+    // wired to nothing.
+    Prefab m_helmPrefab;
+    bool   m_atHelmPrefab = false;
 
     Ladder m_pole;        // the bare control rig, beside the spawn
     Ladder m_shipLadder;  // the ship's own, at the hatch -- the SAME code
