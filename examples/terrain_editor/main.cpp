@@ -58,6 +58,8 @@
 // Does a new level come up empty? The assertions live in LevelChecks.cpp; this
 // file only says how each poke is performed.
 #include "LevelChecks.hpp"
+// What a module may DO to the world, as opposed to be asked about.
+#include "EditorModuleHost.hpp"
 
 // OS / Filesystem
 #include "OS/FilesystemBrowser.hpp"
@@ -409,6 +411,32 @@ protected:
                 return (w - hotbarW) * 0.5f + hotbarW;
             };
             m_tribeSim.setHost(host);
+        }
+
+        // The same shape again, for whatever module a level names.
+        {
+            EditorModuleHostDeps deps;
+            deps.sceneObjects = &m_sceneObjects;
+            deps.terrain      = &m_terrain;
+            deps.models       = m_modelRenderer.get();
+            deps.skinned      = m_skinnedModelRenderer.get();
+            deps.importModelFile = [this](const std::string& path) {
+                // Which importer is host policy, not the module's business.
+                const std::string ext = std::filesystem::path(path).extension().string();
+                if (ext == ".lime")                       importLimeModel(path);
+                else if (ext == ".glb" || ext == ".gltf") importSkinnedModel(path);
+                else                                      importModel(path);
+            };
+            deps.destroyNamed = [this](const std::string& name) {
+                for (int i = 0; i < static_cast<int>(m_sceneObjects.size()); ++i) {
+                    if (m_sceneObjects[i] && m_sceneObjects[i]->getName() == name) {
+                        deleteObject(i);
+                        return;
+                    }
+                }
+            };
+            deps.objectsChanged = [this] { updateSceneObjectsList(); };
+            m_moduleHost.setDeps(deps);
         }
 
         m_videoEditor = std::make_unique<eden::VideoEditor>(getContext());
@@ -7627,6 +7655,7 @@ private:
         r.testLevel       = m_isTestLevel;
         r.spaceLevel      = m_isSpaceLevel;
         r.edenOSLevel     = m_isEdenOSLevel;
+        r.moduleOwned     = m_moduleHost.ownedCount();
         r.occupiedSlots   = 0;
         for (int i = 0; i < TOOLBAR_SLOT_COUNT; ++i)
             if (m_toolbarSlots[i].occupied) ++r.occupiedSlots;
@@ -7660,6 +7689,24 @@ private:
             m_toolbarSlots[0].filePath    = "/check/not-a-real-file";
             m_toolbarSlots[0].displayName = "check";
         };
+        // Through the seam, exactly as a module would: spawn, move it onto the
+        // ground, read the position back. If any of that stopped working the
+        // dirty step reports it before the wipe is ever tested.
+        h.spawnViaModuleHost = [this] {
+            const std::string name =
+                m_moduleHost.spawnBox(glm::vec3(0.0f), glm::vec3(1.0f),
+                                      glm::vec4(1.0f, 0.0f, 1.0f, 1.0f), "CheckModuleBox");
+            if (name.empty()) return;
+            glm::vec3 p(12.0f, 0.0f, 12.0f);
+            p.y = m_moduleHost.terrainHeight(p.x, p.z) + 0.5f;
+            m_moduleHost.setObjectPosition(name, p);
+            m_moduleHost.setObjectYaw(name, 45.0f);
+            glm::vec3 readBack(0.0f);
+            if (!m_moduleHost.objectPosition(name, readBack) || readBack != p) {
+                std::cerr << "[check] ModuleHost lost the object it just placed" << std::endl;
+            }
+        };
+        h.destroyModuleOwned = [this] { m_moduleHost.destroyAllOwned(); };
         h.addASceneObject = [this] {
             auto mesh = PrimitiveMeshBuilder::createCube(1.0f, glm::vec4(1.0f));
             auto obj = std::make_unique<SceneObject>("CheckCube");
@@ -13338,6 +13385,7 @@ private:
         if (!m_gameModule) return;
 
         m_gameModule->setTerrain(&m_terrain);
+        m_gameModule->setModuleHost(&m_moduleHost);
 
         eden::ModuleRenderSetup setup{
             getContext(),
@@ -23241,6 +23289,9 @@ private:
                 ImGui::Text("%s", m_gameModule->getStatusMessage().c_str());
 
                 if (ImGui::Button("Unload Module")) {
+                    // Destroy here, not forget: the level stays, so anything the
+                    // module put in it would outlive the module that owns it.
+                    m_moduleHost.destroyAllOwned();
                     m_gameModule->shutdown();
                     m_gameModule.reset();
                 }
@@ -23260,8 +23311,10 @@ private:
                     ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), "  %s (loaded)", moduleName.c_str());
                 } else {
                     if (ImGui::Button(moduleName.c_str())) {
-                        // Unload current module if any
+                        // Unload current module if any, and take its objects with
+                        // it -- the level is staying put.
                         if (m_gameModule) {
+                            m_moduleHost.destroyAllOwned();
                             m_gameModule->shutdown();
                             m_gameModule.reset();
                         }
@@ -24231,6 +24284,10 @@ private:
         m_grassBlades.clear();
         m_grassDirty = m_grassEnabled;
 
+        // Same reasoning as the blades: the scene the module's objects lived in
+        // has just been cleared out from under them.
+        m_moduleHost.forgetOwned();
+
         // Spawn objects via the shared instantiator: binary sidecar (.edenbin)
         // fast path first, JSON/GLB fallback if it's absent/mismatched (see
         // LevelInstantiator / docs/EDEN_FORMAT.md §3.4).
@@ -24647,6 +24704,10 @@ private:
             m_gameModule->shutdown();
             m_gameModule.reset();
         }
+        // Forget rather than destroy: the wipe below deletes every object in the
+        // level anyway, so the names the module owned refer to nothing by the
+        // time anyone could walk them.
+        m_moduleHost.forgetOwned();
 
         // And no tribe. Its state was never cleared anywhere in this binary, so a
         // new level inherited inhabitants, tribes, camps and a wound-on clock from
@@ -31661,6 +31722,11 @@ private:
     // The tribe sim. Everything it remembers lives inside it, so New Level can
     // forget the lot by asking -- which is what nothing in this file used to do.
     TribeSim m_tribeSim;
+
+    // What a loaded module is allowed to do to the world. Handed over in
+    // wireGameModule alongside the terrain; it remembers what it spawned so the
+    // host can take it all back.
+    EditorModuleHost m_moduleHost;
 
     enum class PlayerZone { Silo, Basement, Outside, Void };
     PlayerZone m_playerZone = PlayerZone::Outside;

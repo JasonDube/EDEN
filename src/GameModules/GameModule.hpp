@@ -11,6 +11,7 @@ namespace eden {
 
 class VulkanContext;
 class BufferManager;
+class ModuleHost;
 class Terrain;
 
 // What a module needs from the host to put geometry on the screen, and what it
@@ -168,12 +169,21 @@ public:
     // Optional: Module can receive player position for proximity-based features
     virtual void setPlayerPosition(const glm::vec3& pos) { m_playerPosition = pos; }
 
+    // The other direction: what this module may DO to the world.
+    //
+    // Given once, alongside setTerrain, and null until it is -- a module written
+    // before this existed keeps working, and a module that needs it must cope
+    // with not having it, because the host is entitled to offer nothing. See
+    // ModuleHost.hpp for why the seam only ever pointed one way before.
+    virtual void setModuleHost(ModuleHost* host) { m_moduleHost = host; }
+
     // Check if module is ready/connected
     virtual bool isReady() const { return true; }
     virtual std::string getStatusMessage() const { return "Ready"; }
 
 protected:
     glm::vec3 m_playerPosition{0.0f};
+    ModuleHost* m_moduleHost = nullptr;   // null = this host offers no world access
 };
 
 /**

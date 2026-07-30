@@ -57,6 +57,10 @@ std::vector<Channel> channelsFor(const LevelCheckHooks& h) {
          [](const LevelStateReport& r) {
              return count("occupied slots", static_cast<std::size_t>(r.occupiedSlots));
          }},
+        {"module-owned objects",
+         h.spawnViaModuleHost,
+         [](const LevelStateReport& r) { return r.moduleOwned > 0; },
+         [](const LevelStateReport& r) { return count("owned", r.moduleOwned); }},
         {"scene objects",
          h.addASceneObject,
          [](const LevelStateReport& r) { return r.sceneObjects > 0; },
@@ -125,6 +129,33 @@ int runEmptyLevelChecks(const LevelCheckHooks& hooks, bool verbose) {
     }
 
     const std::vector<Channel> channels = channelsFor(hooks);
+
+    // Unloading a module takes its objects with it, WITHOUT wiping the level.
+    //
+    // Checked on its own because it is the only cleanup path that has to delete
+    // real objects rather than drop a list of names -- New Level clears the
+    // scene by other means, so it would pass this even if destroyAllOwned did
+    // nothing at all. Measured against a baseline rather than against zero,
+    // because the level legitimately has other things in it.
+    if (hooks.spawnViaModuleHost && hooks.destroyModuleOwned) {
+        const std::size_t baseObjects = hooks.snapshot().sceneObjects;
+        hooks.spawnViaModuleHost();
+        const LevelStateReport spawned = hooks.snapshot();
+        report("module unload: spawned", spawned.sceneObjects > baseObjects &&
+                                         spawned.moduleOwned > 0,
+               count("objects", spawned.sceneObjects) + ", " +
+               count("owned", spawned.moduleOwned));
+
+        hooks.destroyModuleOwned();
+        const LevelStateReport after = hooks.snapshot();
+        report("module unload: owns nothing", after.moduleOwned == 0,
+               count("owned", after.moduleOwned));
+        report("module unload: object really gone", after.sceneObjects == baseObjects,
+               count("objects", after.sceneObjects) + " (baseline " +
+               std::to_string(baseObjects) + ")");
+    } else {
+        report("module unload", false, "no hook -- destroyAllOwned is NOT checked");
+    }
 
     // A plain New Level must forget everything.
     dirtyEverything(channels, hooks);

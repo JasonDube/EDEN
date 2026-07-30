@@ -43,6 +43,7 @@ struct LevelStateReport {
     bool        grassEnabled    = false;
     std::size_t grassBlades     = 0;
     int         occupiedSlots   = 0;   // hotbar
+    std::size_t moduleOwned     = 0;   // objects a module put in the world
     std::size_t sceneObjects    = 0;
     std::size_t aiNodes         = 0;
     bool        hasSpawnPoint   = false;
@@ -62,6 +63,14 @@ struct LevelCheckHooks {
     std::function<void()> enableTribeSim;
     std::function<void()> enableGrass;
     std::function<void()> occupyAHotbarSlot;
+    // Spawns through eden::ModuleHost, the way a module would. This is the only
+    // exercise that seam gets until a real module uses it, so it is doing double
+    // duty: it checks the leak AND it checks that spawning works at all.
+    std::function<void()> spawnViaModuleHost;
+    // ModuleHost::destroyAllOwned() -- the Unload Module path, where the level
+    // stays and only the module's objects go. Distinct from a wipe, and the one
+    // that can leave real objects behind rather than just a stale name list.
+    std::function<void()> destroyModuleOwned;
     std::function<void()> addASceneObject;
     std::function<void()> setASpawnPoint;
 
