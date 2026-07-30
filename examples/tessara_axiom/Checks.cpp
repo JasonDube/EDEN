@@ -1976,12 +1976,27 @@ void checkTheLadderHolds() {
     const float deck = ship.origin().y + ship.params.deckHeight;
     const float settled = eye.y - kEye;
 
+    // The hatch has to be OPEN by the time he gets there, and the way through it
+    // has to be clear. A ladder that delivers you to a shut door is a ladder that
+    // delivers you nowhere.
+    const float open = ship.hatchProgress();
+    const glm::vec3 hatch = ship.hatchCentre();
+    // Straight inboard, using the ship's own axis -- normalising origin-to-hatch
+    // gives a diagonal that walks aft as much as in. And a hand above the deck
+    // rather than exactly on it: the deck is a patch with a solid underside, so a
+    // body tested at precisely its surface reads as inside the floor it is standing
+    // on. That is the same trick that cost an afternoon on the ramp.
+    const glm::vec3 inboard = hatch - ship.right() * 1.2f;
+    const bool wayThrough = mod.ground() &&
+        !mod.ground()->blocked(inboard.x, inboard.z, deck + 0.10f, 1.8f, 0.40f);
+
     char detail[192];
     std::snprintf(detail, sizeof detail,
-                  "started 1.2 aside: at the foot %d, climbed %d frames to %.2f, "
-                  "three seconds later %.2f (deck %.2f), %.2f from the rungs",
-                  (int)sawLadder, climbFrames, peak - kEye, settled, deck,
-                  glm::length(glm::vec2(eye.x - foot.x, eye.z - foot.z)));
+                  "started 1.2 aside: climbed %d frames, ended %.2f (deck %.2f), "
+                  "%.2f from the rungs, hatch %.0f%% open, way in clear %d",
+                  climbFrames, settled, deck,
+                  glm::length(glm::vec2(eye.x - foot.x, eye.z - foot.z)),
+                  open * 100.0f, (int)wayThrough);
     // Where he ends up horizontally matters as much as vertically: a pull that
     // keeps being applied after the climb is over walks him off the ship, and it
     // did -- six units in three seconds, because nothing cleared the flag while the
@@ -1990,7 +2005,7 @@ void checkTheLadderHolds() {
 
     report("the ladder takes you up and leaves you there",
            sawLadder && climbFrames > 5 && std::fabs(settled - deck) < 0.3f &&
-           fromRungs < 1.0f, detail);
+           fromRungs < 1.0f && open > 0.9f && wayThrough, detail);
 }
 
 // ---------------------------------------------------------------------------

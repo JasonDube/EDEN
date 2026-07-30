@@ -268,6 +268,17 @@ void TessaraModule::update(float dt) {
     auto nearDoor = [&](const glm::vec3& who) {
         return glm::length(glm::vec2(who.x - doorAt.x, who.z - doorAt.z)) < 5.0f;
     };
+    // The hatch opens for whoever is on the platform outside it -- and while he is
+    // still climbing, so it is already open by the time he gets to the top.
+    {
+        const glm::vec3 hatch = m_ship.hatchCentre();
+        const glm::vec3 soles = m_playerPosition - glm::vec3(0.0f, 1.7f, 0.0f);
+        const bool onThePlatform =
+            glm::length(glm::vec2(soles.x - hatch.x, soles.z - hatch.z)) < 3.4f &&
+            soles.y > hatch.y - 1.2f;
+        m_ship.updateHatch(dt, onThePlatform || m_climbing);
+    }
+
     m_ship.updateBridgeDoor(dt, nearDoor(m_playerPosition) ||
                                 nearDoor(m_biped.hipCentre()) ||
                                 nearDoor(m_walker.bodyCentre(*m_ground)));

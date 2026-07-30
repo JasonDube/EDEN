@@ -189,6 +189,21 @@ public:
     SurfacePatch ladderPlatformPatch() const;
     glm::vec3 hatchCentre() const;   // in the starboard wall, level with the deck
 
+    // The hatch door itself. Opens for whoever is standing on the platform, the way
+    // the bridge door opens for whoever is at it -- nobody wants a button on a door
+    // they came up a ladder to reach.
+    void  updateHatch(float dt, bool somebodyOnThePlatform);
+    float hatchProgress() const { return m_hatch; }   // 0 shut, 1 open
+    static constexpr float kHatchHalf = 1.35f;        // the opening, fore and aft
+
+    // Where along the hull the ladder and hatch sit, as a fraction of the length.
+    //
+    // FORWARD of the bulkhead, which stands at 0.31. At 0.30 the hatch opened
+    // straight into it -- a door onto a wall, a metre and a half from being a door
+    // onto the bridge. One number, used by the ladder, the hatch, the platform, the
+    // hole in the wall blocker and the hole in the mesh, so they cannot drift apart.
+    static constexpr float kHatchStation = 0.42f;
+
     // ---- landing gear ------------------------------------------------------
     // Four legs, each as long as the ground under IT requires.
     //
@@ -394,6 +409,7 @@ private:
     glm::vec3 m_lastMove{0.0f};
     float m_lastTurn = 0.0f;
     float m_rampLength = 4.4f; // the doorway height
+    float m_hatch       = 0.0f;   // 0 shut, 1 open
     float m_rampExt     = 0.0f;   // 0 stowed, 1 fully out
     float m_rampExtWant = 0.0f;
     float m_rampExtAuto = 0.0f;   // what the ground under the tip asks for

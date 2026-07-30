@@ -420,13 +420,18 @@ glm::vec3 Ship::ladderFoot() const {
     // all ten test placements failed on exactly that.
     return m_origin
          + right() * (params.width * 0.5f + 1.00f)
-         + forward() * (params.length * 0.30f);
+         + forward() * (params.length * kHatchStation);
+}
+
+void Ship::updateHatch(float dt, bool somebodyOnThePlatform) {
+    const float rate = dt / 0.7f;
+    m_hatch = std::clamp(m_hatch + (somebodyOnThePlatform ? rate : -rate), 0.0f, 1.0f);
 }
 
 glm::vec3 Ship::hatchCentre() const {
     return m_origin
          + right() * (params.width * 0.5f)
-         + forward() * (params.length * 0.30f)
+         + forward() * (params.length * kHatchStation)
          + up() * params.deckHeight;
 }
 
@@ -442,7 +447,7 @@ SurfacePatch Ship::ladderPlatformPatch() const {
     patch.along  = right();
     patch.origin = m_origin
                  + right() * ((out + 1.35f) * 0.5f + out * 0.5f)
-                 + forward() * (params.length * 0.30f)
+                 + forward() * (params.length * kHatchStation)
                  + up() * params.deckHeight;
     patch.halfWidth  = 1.60f;                       // fore and aft of the hatch
     patch.halfLength = 1.10f;                       // hull face out past the rungs
@@ -590,8 +595,18 @@ void Ship::appendBlockers(std::vector<Blocker>& out) const {
         // same trick the bulkhead uses for its doorway -- there is no such thing
         // here as a solid with a hole in it, so a gap has to be a gap.
         if (sx > 0.0f) {
-            const float at = params.length * 0.30f;   // the ladder's station
-            const float half = 1.35f;
+            const float at = params.length * kHatchStation;   // the ladder's station
+            const float half = kHatchHalf;
+
+            // Shut, the hatch is part of the wall. Same rule as the ramp: a door is
+            // solid exactly while it is not a way through, and the two conditions
+            // are written from one number so they cannot contradict each other.
+            if (m_hatch < 0.75f) {
+                Blocker shut = b;
+                shut.halfLength = half;
+                shut.origin = b.origin + forward() * at;
+                out.push_back(shut);
+            }
             const float aftEnd  = at - half;
             const float foreEnd = at + half;
 
@@ -981,10 +996,45 @@ void appendShipMesh(const Ship& ship,
     const float wallBot = p.deckHeight - 0.10f;                          // 1.90
     for (int side = 0; side < 2; ++side) {
         float sx = side ? 1.0f : -1.0f;
-        appendBox(verts, indices,
-                  at(sx * (p.bayWidth * 0.5f + wallT), (wallTop + wallBot) * 0.5f, 0.0f),
-                  r, u, f,
-                  glm::vec3(wallT, (wallTop - wallBot) * 0.5f, halfL), kHull);
+        const float wx = sx * (p.bayWidth * 0.5f + wallT);
+        const float wy = (wallTop + wallBot) * 0.5f;
+        const float wh = (wallTop - wallBot) * 0.5f;
+
+        // Starboard is drawn as two lengths with a HOLE between them, because the
+        // collision has a hole there and a wall you can walk through while looking
+        // solid is worse than either. The gap is the hatch.
+        if (sx > 0.0f) {
+            const float hz = p.length * Ship::kHatchStation;
+            const float hh = Ship::kHatchHalf;
+
+            const float aftMid  = (-halfL + (hz - hh)) * 0.5f;
+            const float aftHalf = ((hz - hh) + halfL) * 0.5f;
+            appendBox(verts, indices, at(wx, wy, aftMid), r, u, f,
+                      glm::vec3(wallT, wh, aftHalf), kHull);
+
+            const float foreMid  = ((hz + hh) + halfL) * 0.5f;
+            const float foreHalf = (halfL - (hz + hh)) * 0.5f;
+            appendBox(verts, indices, at(wx, wy, foreMid), r, u, f,
+                      glm::vec3(wallT, wh, foreHalf), kHull);
+
+            // A header over the opening, so the hull does not read as sliced.
+            const float headBot = p.deckHeight + p.bayHeight * 0.62f;
+            appendBox(verts, indices, at(wx, (headBot + wallTop) * 0.5f, hz), r, u, f,
+                      glm::vec3(wallT, (wallTop - headBot) * 0.5f, hh), kHull);
+
+            // And the door: a panel filling the opening, sliding aft into the wall
+            // as it opens. Drawn from hatchProgress, so what you see is the number
+            // the collision is using.
+            const float open = ship.hatchProgress();
+            const float doorH = (headBot - wallBot) * 0.5f;
+            appendBox(verts, indices,
+                      at(wx, wallBot + doorH, hz - open * (hh * 2.0f + 0.05f)),
+                      r, u, f, glm::vec3(wallT * 0.55f, doorH, hh), kTrim);
+            continue;
+        }
+
+        appendBox(verts, indices, at(wx, wy, 0.0f), r, u, f,
+                  glm::vec3(wallT, wh, halfL), kHull);
     }
 
     // Roof over the bay: slightly wider than the walls and dropped a little
@@ -1133,14 +1183,14 @@ void appendShipMesh(const Ship& ship,
 
         // The landing itself: a grating from the hull face out past the rungs.
         appendBox(verts, indices,
-                  o + r * (outw + 0.68f) + f * (p.length * 0.30f)
+                  o + r * (outw + 0.68f) + f * (p.length * Ship::kHatchStation)
                     + u * (p.deckHeight - 0.09f),
                   r, u, f, glm::vec3(0.78f, 0.09f, 1.35f), kTrim);
 
         // A rail along its outer edge, so it reads as somewhere to stand rather
         // than a shelf, and a frame round the opening so the hatch reads as a way in.
         appendBox(verts, indices,
-                  o + r * (outw + 1.42f) + f * (p.length * 0.30f)
+                  o + r * (outw + 1.42f) + f * (p.length * Ship::kHatchStation)
                     + u * (p.deckHeight + 0.45f),
                   r, u, f, glm::vec3(0.06f, 0.45f, 1.35f), kHazard);
         for (int e = 0; e < 2; ++e) {
