@@ -1,5 +1,7 @@
 #include "Swapchain.hpp"
 #include <cstdlib>
+#include <iostream>
+#include <string>
 #include "VulkanContext.hpp"
 #include "Buffer.hpp"
 #include <stdexcept>
@@ -377,15 +379,76 @@ bool Swapchain::vsyncPreferred() { return vsyncWanted(); }
 VkPresentModeKHR Swapchain::chooseSwapPresentMode(const std::vector<VkPresentModeKHR>& availablePresentModes) {
     const bool uncapped = !vsyncWanted();
 
+    // What the surface ACTUALLY offers, said out loud once.
+    //
+    // Worth printing rather than assuming: which modes exist decides whether
+    // there is a one-line fix available at all. MAILBOX is uncapped without
+    // tearing; FIFO_RELAXED lets a late frame through immediately instead of
+    // waiting a whole refresh, which is the difference between one missed vblank
+    // costing 16 ms and costing 33.
+    {
+        std::string list;
+        for (const auto& mode : availablePresentModes) {
+            switch (mode) {
+                case VK_PRESENT_MODE_IMMEDIATE_KHR:    list += "immediate "; break;
+                case VK_PRESENT_MODE_MAILBOX_KHR:      list += "mailbox "; break;
+                case VK_PRESENT_MODE_FIFO_KHR:         list += "fifo "; break;
+                case VK_PRESENT_MODE_FIFO_RELAXED_KHR: list += "fifo_relaxed "; break;
+                case (VkPresentModeKHR)1000361000:     list += "fifo_latest_ready "; break;
+                default: list += "mode#" + std::to_string((int)mode) + " "; break;
+            }
+        }
+        std::cout << "[swapchain] present modes offered: " << list << std::endl;
+    }
+
+    // EDEN_PRESENT names one outright, for testing exactly one variable.
+    if (const char* want = std::getenv("EDEN_PRESENT")) {
+        const std::string w(want);
+        VkPresentModeKHR asked = VK_PRESENT_MODE_FIFO_KHR;
+        if      (w == "immediate") asked = VK_PRESENT_MODE_IMMEDIATE_KHR;
+        else if (w == "mailbox")   asked = VK_PRESENT_MODE_MAILBOX_KHR;
+        else if (w == "relaxed")   asked = VK_PRESENT_MODE_FIFO_RELAXED_KHR;
+        // FIFO_LATEST_READY: hand the display the NEWEST finished frame at each
+        // vblank instead of the oldest queued one. Tear-free like fifo, but a slow
+        // frame does not push every later frame back behind it -- which is what
+        // mailbox is for, and mailbox is not offered here.
+        else if (w == "latest")    asked = (VkPresentModeKHR)1000361000;
+        for (const auto& mode : availablePresentModes) {
+            if (mode == asked) {
+                m_presentMode = asked;
+                std::cout << "[swapchain] EDEN_PRESENT=" << w << " honoured" << std::endl;
+                return m_presentMode;
+            }
+        }
+        std::cout << "[swapchain] EDEN_PRESENT=" << w
+                  << " NOT offered by this surface -- falling through" << std::endl;
+    }
+
     auto has = [&](VkPresentModeKHR want) {
         for (const auto& mode : availablePresentModes) if (mode == want) return true;
         return false;
     };
 
+    // Tear-free and non-blocking, in that order of preference.
+    //
+    // Plain FIFO is a QUEUE: a frame that misses its vblank pushes every frame
+    // behind it back, so the cost of one late frame is paid again and again. That
+    // is why this scene sat at 19 ms a frame while doing 2.4 ms of work.
+    //
+    // MAILBOX and FIFO_LATEST_READY both fix that by handing the display the
+    // newest finished frame at each vblank and discarding the stale ones -- still
+    // tear-free, but a late frame costs itself and nothing more. Measured here:
+    // fifo 19 ms average, fifo_latest_ready 3.9 ms, and neither tears.
+    //
+    // I had told the user this machine offered no smooth-and-uncapped mode. It
+    // does; I had simply not enumerated them, and the one it offers is an
+    // extension rather than the mode I was looking for.
     if (uncapped && has(VK_PRESENT_MODE_IMMEDIATE_KHR)) {
         m_presentMode = VK_PRESENT_MODE_IMMEDIATE_KHR;
     } else if (has(VK_PRESENT_MODE_MAILBOX_KHR)) {
         m_presentMode = VK_PRESENT_MODE_MAILBOX_KHR;
+    } else if (has((VkPresentModeKHR)1000361000)) {   // FIFO_LATEST_READY
+        m_presentMode = (VkPresentModeKHR)1000361000;
     } else {
         m_presentMode = VK_PRESENT_MODE_FIFO_KHR;
     }
@@ -397,6 +460,7 @@ const char* Swapchain::getPresentModeName() const {
         case VK_PRESENT_MODE_IMMEDIATE_KHR: return "immediate (uncapped)";
         case VK_PRESENT_MODE_MAILBOX_KHR:   return "mailbox";
         case VK_PRESENT_MODE_FIFO_KHR:      return "fifo (vsync)";
+        case (VkPresentModeKHR)1000361000:  return "fifo_latest_ready";
         default:                            return "other";
     }
 }

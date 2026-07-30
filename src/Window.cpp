@@ -3,6 +3,7 @@
 #include <GLFW/glfw3.h>
 #include <stdexcept>
 #include <cstdlib>
+#include <cstdio>
 
 namespace eden {
 
@@ -16,6 +17,28 @@ Window::Window(int width, int height, const std::string& title)
     glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
     glfwWindowHint(GLFW_RESIZABLE, GLFW_TRUE);
     glfwWindowHint(GLFW_MAXIMIZED, GLFW_TRUE);
+
+    // What the displays actually are, said once.
+    //
+    // FIFO waits for a vertical blank, so the refresh rate IS the frame budget --
+    // and "why am I not getting sixty" is unanswerable until you know whether the
+    // panel does sixty. Printed for every monitor, because with two outputs the
+    // one your window lands on decides your ceiling.
+    {
+        int count = 0;
+        GLFWmonitor** monitors = glfwGetMonitors(&count);
+        for (int i = 0; i < count; ++i) {
+            const GLFWvidmode* mode = glfwGetVideoMode(monitors[i]);
+            if (!mode) continue;
+            std::printf("[display] %s%s: %dx%d @ %d Hz%s\n",
+                        glfwGetMonitorName(monitors[i]) ? glfwGetMonitorName(monitors[i]) : "?",
+                        monitors[i] == glfwGetPrimaryMonitor() ? " (primary)" : "",
+                        mode->width, mode->height, mode->refreshRate,
+                        mode->refreshRate > 0 && mode->refreshRate < 58
+                            ? "   <- under 60; FIFO can never beat this" : "");
+        }
+        std::fflush(stdout);
+    }
 
     // EDEN_FULLSCREEN=1 asks for a real fullscreen window on the primary monitor.
     //
