@@ -67,6 +67,13 @@ struct LevelCheckHooks {
     // exercise that seam gets until a real module uses it, so it is doing double
     // duty: it checks the leak AND it checks that spawning works at all.
     std::function<void()> spawnViaModuleHost;
+
+    // Does the seam itself work? Returns an empty string if so, else what went
+    // wrong. A RETURN VALUE rather than the printf-to-stderr this started as:
+    // those messages appeared in the log while the run still reported "0 failed"
+    // and exited 0, so a script watching the exit code would have been told the
+    // seam was fine while it was demonstrably broken.
+    std::function<std::string()> moduleHostSelfTest;
     // ModuleHost::destroyAllOwned() -- the Unload Module path, where the level
     // stays and only the module's objects go. Distinct from a wipe, and the one
     // that can leave real objects behind rather than just a stale name list.

@@ -420,6 +420,15 @@ protected:
             deps.terrain      = &m_terrain;
             deps.models       = m_modelRenderer.get();
             deps.skinned      = m_skinnedModelRenderer.get();
+            deps.camera       = &m_camera;
+            deps.window       = &getWindow();
+            deps.gameTimeMinutes = &m_gameTimeMinutes;
+            deps.gameTimeScale   = &m_gameTimeScale;
+            // "Is there ground" rather than "which of my games is this" -- see
+            // ModuleHost::hasTerrain.
+            deps.hasTerrain = [this] {
+                return !m_isEdenOSLevel && !m_isSpaceLevel && !m_isTestLevel;
+            };
             deps.importModelFile = [this](const std::string& path) {
                 // Which importer is host policy, not the module's business.
                 const std::string ext = std::filesystem::path(path).extension().string();
@@ -7689,23 +7698,80 @@ private:
             m_toolbarSlots[0].filePath    = "/check/not-a-real-file";
             m_toolbarSlots[0].displayName = "check";
         };
-        // Through the seam, exactly as a module would: spawn, move it onto the
-        // ground, read the position back. If any of that stopped working the
-        // dirty step reports it before the wipe is ever tested.
+        // The dirty hook: put one thing in the world through the seam, and no
+        // more. Whether the seam WORKS is a separate question, asked below --
+        // mixing the two meant a broken seam printed complaints while the run
+        // still reported success.
         h.spawnViaModuleHost = [this] {
+            m_moduleHost.spawnBox(glm::vec3(0.0f), glm::vec3(1.0f),
+                                  glm::vec4(1.0f, 0.0f, 1.0f, 1.0f), "CheckModuleBox");
+        };
+
+        // Drive eden::ModuleHost the way a module would, and say what broke.
+        // Empty return = the seam works.
+        h.moduleHostSelfTest = [this]() -> std::string {
             const std::string name =
                 m_moduleHost.spawnBox(glm::vec3(0.0f), glm::vec3(1.0f),
-                                      glm::vec4(1.0f, 0.0f, 1.0f, 1.0f), "CheckModuleBox");
-            if (name.empty()) return;
+                                      glm::vec4(0.0f, 1.0f, 1.0f, 1.0f), "SelfTestBox");
+            if (name.empty()) return "spawnBox returned nothing";
+
+            std::string problems;
+            auto fail = [&problems](const std::string& s) {
+                if (!problems.empty()) problems += "; ";
+                problems += s;
+            };
+
             glm::vec3 p(12.0f, 0.0f, 12.0f);
             p.y = m_moduleHost.terrainHeight(p.x, p.z) + 0.5f;
             m_moduleHost.setObjectPosition(name, p);
             m_moduleHost.setObjectYaw(name, 45.0f);
+            m_moduleHost.setObjectTag(name, "check_tag");
+            m_moduleHost.setObjectScale(name, glm::vec3(2.0f, 3.0f, 4.0f));
+
             glm::vec3 readBack(0.0f);
-            if (!m_moduleHost.objectPosition(name, readBack) || readBack != p) {
-                std::cerr << "[check] ModuleHost lost the object it just placed" << std::endl;
+            if (!m_moduleHost.objectPosition(name, readBack) || readBack != p)
+                fail("objectPosition lost the placement");
+
+            // Read tag and scale back through the ENUMERATION, not the setters --
+            // a getter echoing what you just handed it proves nothing about what
+            // the world actually holds.
+            std::vector<eden::ModuleObjectInfo> owned;
+            m_moduleHost.ownedObjects(owned);
+            bool found = false;
+            for (const auto& o : owned) {
+                if (o.name != name) continue;
+                found = true;
+                if (o.tag != "check_tag")   fail("ownedObjects lost the tag");
+                if (o.scale != glm::vec3(2.0f, 3.0f, 4.0f)) fail("ownedObjects lost the scale");
+                if (o.position != p)        fail("ownedObjects disagrees with objectPosition");
             }
+            if (!found) fail("ownedObjects does not list what it owns");
+
+            // Projection, against a point derived from the CAMERA rather than a
+            // fixed one: the first version used the spawned box and failed three
+            // times in four, because the templates re-frame the camera and the box
+            // was behind it. That was the check being wrong, and a check that
+            // cries wolf gets ignored -- worse than not having it.
+            //
+            // hasTerrain() is deliberately not asserted: Foundation sets
+            // m_isTestLevel ("the slab is the ground"), so false is correct there.
+            const glm::vec3 inFront = m_camera.getPosition() + m_camera.getFront() * 10.0f;
+            glm::vec2 px(0.0f);
+            if (!m_moduleHost.worldToScreen(inFront, px)) {
+                fail("worldToScreen failed on a point in front of the camera");
+            } else {
+                glm::vec3 ro(0.0f), rd(0.0f);
+                if (!m_moduleHost.screenRay(px, ro, rd))
+                    fail("screenRay failed on a pixel that just projected");
+                else if (glm::dot(rd, glm::normalize(inFront - ro)) < 0.99f)
+                    fail("screenRay does not undo worldToScreen");
+            }
+
+            m_moduleHost.destroyObject(name);
+            return problems;
         };
+
+
         h.destroyModuleOwned = [this] { m_moduleHost.destroyAllOwned(); };
         h.addASceneObject = [this] {
             auto mesh = PrimitiveMeshBuilder::createCube(1.0f, glm::vec4(1.0f));

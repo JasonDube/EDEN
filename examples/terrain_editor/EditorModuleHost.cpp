@@ -5,7 +5,13 @@
 #include "Renderer/ModelRenderer.hpp"
 #include "Renderer/SkinnedModelRenderer.hpp"
 
+#include <eden/Camera.hpp>
 #include <eden/Terrain.hpp>
+#include <eden/Window.hpp>
+
+#include <glm/gtc/matrix_transform.hpp>
+
+#include <cmath>
 
 using namespace eden;
 
@@ -139,6 +145,86 @@ bool EditorModuleHost::playAnimation(const std::string& name, const std::string&
     m_deps.skinned->playAnimation(o->getSkinnedModelHandle(), clip, loop);
     o->setCurrentAnimation(clip);
     return true;
+}
+
+bool EditorModuleHost::setObjectScale(const std::string& name, const glm::vec3& scale) {
+    if (auto* o = find(name)) { o->getTransform().setScale(scale); return true; }
+    return false;
+}
+
+// Stored in the object's buildingType, which is already the editor's free-form
+// "what sort of thing is this" string. Reusing it rather than adding a field
+// keeps a module's tag saved with the level for free.
+bool EditorModuleHost::setObjectTag(const std::string& name, const std::string& tag) {
+    if (auto* o = find(name)) { o->setBuildingType(tag); return true; }
+    return false;
+}
+
+void EditorModuleHost::ownedObjects(std::vector<ModuleObjectInfo>& out) const {
+    out.clear();
+    if (!m_deps.sceneObjects) return;
+    out.reserve(m_owned.size());
+    for (const std::string& name : m_owned) {
+        auto* o = find(name);
+        if (!o) continue;                 // destroyed by something else; skip quietly
+        ModuleObjectInfo info;
+        info.name     = name;
+        info.tag      = o->getBuildingType();
+        info.position = o->getTransform().getPosition();
+        info.scale    = o->getTransform().getScale();
+        info.skinned  = o->isSkinned();
+        out.push_back(std::move(info));
+    }
+}
+
+bool EditorModuleHost::hasTerrain() const {
+    return m_deps.hasTerrain ? m_deps.hasTerrain() : (m_deps.terrain != nullptr);
+}
+
+// The same projection the host renders with, so a label lands on the thing it
+// names rather than near it.
+bool EditorModuleHost::worldToScreen(const glm::vec3& world, glm::vec2& outPixel) const {
+    if (!m_deps.camera || !m_deps.window) return false;
+    const float w = static_cast<float>(m_deps.window->getWidth());
+    const float h = static_cast<float>(m_deps.window->getHeight());
+    if (w <= 0.0f || h <= 0.0f) return false;
+
+    const glm::mat4 vp = m_deps.camera->getProjectionMatrix(w / h, 0.1f, 5000.0f) *
+                         m_deps.camera->getViewMatrix();
+    const glm::vec4 clip = vp * glm::vec4(world, 1.0f);
+    if (clip.w <= 0.0001f) return false;          // behind the eye, not merely off-screen
+    const glm::vec3 ndc = glm::vec3(clip) / clip.w;
+    outPixel.x = (ndc.x * 0.5f + 0.5f) * w;
+    outPixel.y = (ndc.y * 0.5f + 0.5f) * h;
+    return true;
+}
+
+bool EditorModuleHost::screenRay(const glm::vec2& pixel, glm::vec3& outOrigin,
+                                 glm::vec3& outDirection) const {
+    if (!m_deps.camera || !m_deps.window) return false;
+    const float w = static_cast<float>(m_deps.window->getWidth());
+    const float h = static_cast<float>(m_deps.window->getHeight());
+    if (w <= 0.0f || h <= 0.0f) return false;
+
+    const glm::mat4 invVP = glm::inverse(
+        m_deps.camera->getProjectionMatrix(w / h, 0.1f, 5000.0f) *
+        m_deps.camera->getViewMatrix());
+    const float ndcX = (pixel.x / w) * 2.0f - 1.0f;
+    const float ndcY = (pixel.y / h) * 2.0f - 1.0f;
+    glm::vec4 near4 = invVP * glm::vec4(ndcX, ndcY, 0.0f, 1.0f);
+    glm::vec4 far4  = invVP * glm::vec4(ndcX, ndcY, 1.0f, 1.0f);
+    if (std::fabs(near4.w) < 1e-6f || std::fabs(far4.w) < 1e-6f) return false;
+    outOrigin    = glm::vec3(near4) / near4.w;
+    outDirection = glm::normalize(glm::vec3(far4) / far4.w - outOrigin);
+    return true;
+}
+
+float EditorModuleHost::gameTimeMinutes() const {
+    return m_deps.gameTimeMinutes ? *m_deps.gameTimeMinutes : 0.0f;
+}
+
+void EditorModuleHost::requestTimeScale(float minutesPerRealSecond) {
+    if (m_deps.gameTimeScale) *m_deps.gameTimeScale = minutesPerRealSecond;
 }
 
 float EditorModuleHost::terrainHeight(float x, float z) const {

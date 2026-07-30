@@ -15,10 +15,12 @@
 #include <vector>
 
 namespace eden {
+class Camera;
 class ModelRenderer;
 class SceneObject;
 class SkinnedModelRenderer;
 class Terrain;
+class Window;
 }
 
 // Where the editor keeps the things this needs.
@@ -27,6 +29,15 @@ struct EditorModuleHostDeps {
     eden::Terrain*              terrain = nullptr;
     eden::ModelRenderer*        models  = nullptr;
     eden::SkinnedModelRenderer* skinned = nullptr;
+    eden::Camera*               camera  = nullptr;   // projection only
+    eden::Window*               window  = nullptr;   // screen size for that projection
+
+    // The world clock. The host owns it; a module may ask for it to turn.
+    const float* gameTimeMinutes = nullptr;
+    float*       gameTimeScale   = nullptr;
+
+    // False in levels with no ground -- EDEN OS, space, test levels.
+    std::function<bool()> hasTerrain;
 
     // Importing a model file is real host policy -- .lime and .glb take
     // different paths, skinned and static take different paths again, and all of
@@ -57,9 +68,18 @@ public:
     bool objectPosition(const std::string& name, glm::vec3& outPosition) const override;
     bool setObjectPosition(const std::string& name, const glm::vec3& position) override;
     bool setObjectYaw(const std::string& name, float yawDegrees) override;
+    bool setObjectScale(const std::string& name, const glm::vec3& scale) override;
+    bool setObjectTag(const std::string& name, const std::string& tag) override;
+    void ownedObjects(std::vector<eden::ModuleObjectInfo>& out) const override;
     bool playAnimation(const std::string& name, const std::string& clip, bool loop) override;
 
     float terrainHeight(float x, float z) const override;
+    bool  hasTerrain() const override;
+    bool  worldToScreen(const glm::vec3& world, glm::vec2& outPixel) const override;
+    bool  screenRay(const glm::vec2& pixel, glm::vec3& outOrigin,
+                    glm::vec3& outDirection) const override;
+    float gameTimeMinutes() const override;
+    void  requestTimeScale(float minutesPerRealSecond) override;
     std::size_t ownedCount() const override { return m_owned.size(); }
 
     // Forget the ownership list without destroying anything. For when the host

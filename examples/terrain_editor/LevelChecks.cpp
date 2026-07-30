@@ -130,6 +130,19 @@ int runEmptyLevelChecks(const LevelCheckHooks& hooks, bool verbose) {
 
     const std::vector<Channel> channels = channelsFor(hooks);
 
+    // Can a module do anything to the world at all?
+    //
+    // Before asking whether a wipe clears what a module put here, establish that
+    // it can put anything here -- spawn, tag, scale, move, read back, project.
+    // Nothing else exercises eden::ModuleHost until a real module uses it.
+    if (hooks.moduleHostSelfTest) {
+        const std::string problem = hooks.moduleHostSelfTest();
+        report("module host: works", problem.empty(), problem.empty() ? "spawn/tag/scale/project"
+                                                                     : problem);
+    } else {
+        report("module host: works", false, "no hook -- the seam is NOT checked");
+    }
+
     // Unloading a module takes its objects with it, WITHOUT wiping the level.
     //
     // Checked on its own because it is the only cleanup path that has to delete
