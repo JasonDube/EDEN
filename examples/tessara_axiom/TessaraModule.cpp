@@ -260,6 +260,14 @@ void TessaraModule::update(float dt) {
                                 nearDoor(m_walker.bodyCentre(*m_ground)));
 
     m_ship.update(dt, rampBusy);
+
+    // The pile's spot is a place in the HOLD, so it is taken from the ship rather
+    // than remembered. It was read once when the ship was first set down and never
+    // again, so the moment the ship flew anywhere the pallet stayed behind on the
+    // old pad -- the crates rode along, because carryPassengers moves anything
+    // inside the enclosure, and the tray they were stacked on did not.
+    m_storage = m_ship.bayStoragePoint();
+
     republishGround();
 
     m_walker.update(*m_ground, dt);
@@ -471,7 +479,7 @@ void TessaraModule::setDown() {
     m_carryAbout = m_ship.origin() - move;
     if (glm::dot(move, move) > 1e-10f) carryPassengers(aboard, move, 0.0f);
 
-    m_walker.unpark();
+    m_walker.unpark(*m_ground, m_ship.origin(), m_ship.right(), m_ship.forward());
     m_launch = Launch::Ready;
     std::printf("[tessara] set down at (%.0f, %.1f, %.0f), dropped %.1f\n",
                 m_ship.origin().x, m_ship.origin().y, m_ship.origin().z, -move.y);
@@ -636,7 +644,8 @@ void TessaraModule::updateLaunch(float dt) {
             // is a frame the ship moved -- the last few inches of the drop -- and
             // everybody aboard has to come the whole way.
             if (!m_ship.airborne()) {
-                m_walker.unpark();
+                m_walker.unpark(*m_ground, m_ship.origin(), m_ship.right(),
+                                m_ship.forward());
                 m_launch = Launch::Ready;
                 m_reportAt = 0.0f;
                 std::printf("[tessara] down at (%.0f, %.1f, %.0f), %.1f/s on the gear -- %s\n",

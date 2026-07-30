@@ -1807,6 +1807,114 @@ void checkTheLanding() {
 }
 
 // ---------------------------------------------------------------------------
+// 5f-ii. Fly somewhere and land, and everything that rode along is still there.
+//
+// Reported: "the walker goes along for the whole ride but when we land where does
+// he disappear to? also the cargo tray doesn't come with us -- the boxes do but
+// the pallet is left behind."
+//
+// One cause twice. Both were positions RECORDED once instead of derived from the
+// ship:
+//
+//   The walker is parked for the flight -- his feet are lattice indices and a
+//   moving deck is not on the lattice, so the drawing follows the ship while the
+//   feet stop being updated. unpark() dropped the flag and nothing else, which
+//   put him back on the nodes he boarded from. Fly a mile, land a mile from him.
+//
+//   The pile's spot was read from the ship once at placement. The crates ride
+//   because carryPassengers moves anything inside the enclosure; the tray they sit
+//   on was not in the enclosure's list of anything, so it stayed on the old pad.
+// ---------------------------------------------------------------------------
+void checkEverythingLands() {
+    Scene s(0.0f, {0.0f, 0.0f}, 34.0f);
+
+    // A walker standing in the hold, and a crate stacked on the pile.
+    // Out on the field, and he walks in. reset() drops him on the TERRAIN by
+    // design -- "being set down inside the ship is not a thing anyone asks for" --
+    // so resetting him at the station puts him under the hull, boxed in, and he
+    // never boards. The first version of this check did that and then measured a
+    // walker who had never been aboard to carry.
+    Walker w;
+    const glm::vec3 station = s.ship.stationPosition(1);
+    w.reset(s.ground, s.ground.nodeNear(s.ship.origin() - s.f() * 40.0f), 0);
+    w.setHome(s.ship.origin(), 250.0f);
+    w.orderTo(s.ground, station);
+    for (int i = 0; i < 60 * 120; ++i) {
+        s.ship.update(1.0f / 60.0f, s.ship.isOnRamp(w.bodyCentre(s.ground)));
+        s.republish();
+        w.update(s.ground, 1.0f / 60.0f);
+        if (w.onStation() && s.ground.enclosureAt(w.bodyCentre(s.ground)) >= 0) break;
+    }
+    const bool startedAboard = s.ground.enclosureAt(w.bodyCentre(s.ground)) >= 0;
+
+    glm::vec3 pallet = s.ship.bayStoragePoint();
+    glm::vec3 crate = pallet + glm::vec3(0.0f, 0.42f, 0.0f);
+    const glm::vec3 from = s.ship.origin();
+
+    // Up, a long way off, and down again -- carrying everything the module carries.
+    s.closeRamp();
+    s.ship.setAirborne(true);
+    w.parkIn(s.ground, s.ship.origin(), s.ship.right(), s.ship.forward());
+
+    auto flyOne = [&](float forward, float turn, float lift) {
+        s.ship.fly(1.0f / 60.0f, forward, turn, lift, s.terrain);
+        const glm::vec3 move = s.ship.lastMove();
+        const float spun = s.ship.lastTurn();
+        const glm::vec3 about = s.ship.origin() - move;
+        const float a = glm::radians(spun);
+        const float sn = std::sin(a), cs = std::cos(a);
+        auto shift = [&](glm::vec3 p) {
+            const glm::vec3 d = p - about;
+            return about + glm::vec3(d.x * cs + d.z * sn, d.y, -d.x * sn + d.z * cs) + move;
+        };
+        crate = shift(crate);
+        w.parkFollow(s.ship.origin(), s.ship.right(), s.ship.forward());
+        s.republish();
+    };
+
+    // Far enough to prove the point, and no further: this field is 256 units
+    // across, so a flight of 245 puts the ship at the edge and the walker's block
+    // gets clamped to the boundary rather than landing under the hull. The first
+    // version of this check did exactly that and blamed the code.
+    for (int i = 0; i < 60 * 2; ++i)  flyOne(1.0f, 0.0f, 1.0f);
+    for (int i = 0; i < 60 * 3; ++i)  flyOne(1.0f, 0.5f, 0.0f);
+
+    const float flew = glm::length(glm::vec2(s.ship.origin().x - from.x,
+                                             s.ship.origin().z - from.z));
+
+    s.ship.beginLanding();
+    for (int i = 0; i < 60 * 60 && s.ship.airborne(); ++i) {
+        const float rate = -s.ship.verticalSpeed();
+        flyOne(0.0f, 0.0f, rate > 4.0f ? 1.0f : 0.0f);
+    }
+
+    // Down. Hand the walker back to the lattice where he actually is.
+    w.unpark(s.ground, s.ship.origin(), s.ship.right(), s.ship.forward());
+    s.republish();
+
+    const glm::vec3 landedPallet = s.ship.bayStoragePoint();
+    const glm::vec3 him = w.bodyCentre(s.ground);
+    const float walkerFromShip = glm::length(glm::vec2(him.x - s.ship.origin().x,
+                                                       him.z - s.ship.origin().z));
+    const float palletFromShip = glm::length(glm::vec2(landedPallet.x - s.ship.origin().x,
+                                                       landedPallet.z - s.ship.origin().z));
+    const float crateOffPallet = glm::length(glm::vec2(crate.x - landedPallet.x,
+                                                       crate.z - landedPallet.z));
+
+    char detail[224];
+    std::snprintf(detail, sizeof detail,
+                  "flew %.0f: walker %.1f from the ship, feet at %.2f/%.2f, deck %.2f, "
+                  "body %.2f, room %d | pallet %.1f, crate %.1f off it",
+                  flew, walkerFromShip, w.footHeight(0), w.footHeight(2), s.deckY(),
+                  him.y, s.ground.enclosureAt(him), palletFromShip, crateOffPallet);
+
+    report("nothing is left behind when it lands",
+           startedAboard && flew > 40.0f &&
+           s.ground.enclosureAt(him) >= 0 && walkerFromShip < 14.0f &&
+           palletFromShip < 14.0f && crateOffPallet < 1.0f, detail);
+}
+
+// ---------------------------------------------------------------------------
 // 5g. Set down on a slope, all four feet find the ground.
 //
 // Reported from a screenshot: the ship resting on a hillside with daylight under
@@ -2037,6 +2145,7 @@ int runShipChecks(bool verbose) {
     checkThePlayerRides();
     checkTheHelmView();
     checkTheLanding();
+    checkEverythingLands();
     checkTheLandingGear();
     checkTheRealPlanet();
 

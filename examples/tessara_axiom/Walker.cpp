@@ -1026,6 +1026,51 @@ void Walker::parkFollow(const glm::vec3& origin, const glm::vec3& right,
     m_parkFwd = fwd;
 }
 
+void Walker::unpark(const Ground& hf, const glm::vec3& origin,
+                    const glm::vec3& right, const glm::vec3& fwd) {
+    if (!m_parked) return;
+
+    // Where the carried feet actually are now, in the frame he arrived in.
+    parkFollow(origin, right, fwd);
+
+    glm::vec3 centre(0.0f);
+    float held[4];
+    for (int i = 0; i < 4; ++i) {
+        const glm::vec3 at = footWorld(hf, i);   // still the parked branch
+        centre += at;
+        held[i] = at.y;
+    }
+    centre *= 0.25f;
+
+    // The block whose middle is nearest that, which is the nearest thing to where
+    // he was standing that he is able to stand on.
+    m_parked = false;
+    m_block = glm::clamp(blockNearest(hf, centre), glm::ivec2(0),
+                         glm::ivec2(m_gridN - 2));
+    m_phase = 0;
+    m_accum = 0.0f;
+
+    // Seeded from the heights he was carried at, so recomputeFeet measures the
+    // step down onto the deck from the deck rather than from the dirt below it --
+    // he is standing in a hold, and the hold's floor is what he should find.
+    for (int i = 0; i < 4; ++i) {
+        m_feet[i] = corner(i);
+        m_footY[i] = held[i];
+    }
+    recomputeFeet(hf);
+    for (int i = 0; i < 4; ++i) {
+        m_prevFeet[i]  = m_feet[i];      // no interpolation across the handover
+        m_prevFootY[i] = m_footY[i];
+    }
+    markVisited();
+
+    // And whatever route he had is counted from a block on another continent.
+    m_path.clear();
+    m_pathNodes.clear();
+    m_pathIndex = 0;
+    m_routeStall = 0;
+}
+
 glm::vec3 Walker::footWorld(const Ground& hf, int i) const {
     // Parked: drawn in the carrying frame rather than on the ground. His feet are
     // lattice indices and a moving deck is not on the lattice, so the drawing is

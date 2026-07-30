@@ -115,7 +115,18 @@ public:
     void parkIn(const Ground& hf, const glm::vec3& origin,
                 const glm::vec3& right, const glm::vec3& fwd);
     void parkFollow(const glm::vec3& origin, const glm::vec3& right, const glm::vec3& fwd);
-    void unpark() { m_parked = false; }
+    // Set down: come off the carrying frame and back onto the lattice, HERE.
+    //
+    // unpark() used to be `m_parked = false`, and that is a bug the moment the ship
+    // goes anywhere. While parked his feet are lattice indices that stopped being
+    // updated -- the drawing moved, the feet did not -- so dropping the flag puts
+    // him back on the nodes he was standing on before take-off. Fly a mile and land
+    // and he is a mile behind you, which reads as him vanishing.
+    //
+    // So landing needs the frame he was carried in, to work out where those feet
+    // have ended up and claim the lattice under them.
+    void unpark(const Ground& hf, const glm::vec3& origin,
+                const glm::vec3& right, const glm::vec3& fwd);
     bool parked() const { return m_parked; }
 
     // ---- being called in ---------------------------------------------------
