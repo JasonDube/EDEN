@@ -8681,6 +8681,8 @@ private:
             // In EDEN OS mode there's no terrain — use a very low floor so player
             // can descend freely through the silo (gravity still works via AABB objects)
             float height = m_isEdenOSLevel ? -10000.0f : m_terrain.getHeightAt(x, z);
+            m_groundSource = "terrain";
+            m_groundRejected.clear();
             const float playerRadius = 0.15f;
             glm::vec3 camPos = m_camera.getPosition();
 
@@ -8728,6 +8730,16 @@ private:
 
                     if (surfaceY > height && surfaceY < camPos.y + 0.5f) {
                         height = surfaceY;
+                        m_groundSource = obj->getName();
+                    } else if (obj->getBuildingType() == "platform_slab") {
+                        // A slab the player is standing OVER that did not win the
+                        // floor. Recorded with the reason, because "no collision"
+                        // and "the rule rejected it" look identical from inside the
+                        // game and completely different from here.
+                        m_groundRejected = obj->getName() + (surfaceY <= height
+                            ? " (below current ground)"
+                            : " (top is above eye+0.5)");
+                        m_groundRejectedY = surfaceY;
                     }
                 }
             }
@@ -8948,6 +8960,23 @@ private:
             glm::vec3 charPos = m_characterController->extendedUpdate(
                 deltaTime, desiredVelocity, jump, jumpVelocity
             );
+
+            // Once a second: what is holding the player up, and what was passed
+            // over. "No collision whatsoever" and "the floor rule rejected your
+            // slab" are indistinguishable in the game and completely different
+            // here, and every guess so far has been about the wrong one.
+            m_groundLogAt += deltaTime;
+            if (m_groundLogAt >= 1.0f) {
+                m_groundLogAt = 0.0f;
+                std::printf("[Ground] eye=(%.1f,%.1f,%.1f) floor=%.2f from '%s'  cc=%d walk=%d%s%s\n",
+                            m_camera.getPosition().x, m_camera.getPosition().y,
+                            m_camera.getPosition().z, terrainHeight,
+                            m_groundSource.c_str(), useCharacterController ? 1 : 0,
+                            m_camera.getMovementMode() == MovementMode::Walk ? 1 : 0,
+                            m_groundRejected.empty() ? "" : "  REJECTED ",
+                            m_groundRejected.c_str());
+                std::fflush(stdout);
+            }
 
             // Ensure we don't go below terrain
             // Character controller returns CENTER position (half height above feet)
@@ -32123,6 +32152,12 @@ private:
     bool m_edenGravity = false;   // false = zero-g free-flight (default); true = walk w/ gravity+collision
     static constexpr float kEdenGravity = 20.0f; // world gravity when EDEN OS gravity mode is on
     static constexpr float kEdenEyeOffset = 1.15f; // camera above the character body centre (eye 1.65 − half 0.5)
+
+    // What decided the player's floor this frame, for the ground diagnostic.
+    std::string m_groundSource;
+    std::string m_groundRejected;
+    float m_groundRejectedY = 0.0f;
+    float m_groundLogAt = 0.0f;
 
     // The tribe sim. Everything it remembers lives inside it, so New Level can
     // forget the lot by asking -- which is what nothing in this file used to do.
