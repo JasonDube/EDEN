@@ -31943,7 +31943,10 @@ private:
     float m_gameTimeScale = 0.0f;      // 0 = no advance; restore to 4.8 for the day/night cycle
 
     // Player economy
-    float m_playerCredits = 1000.0f;   // Starting credits
+    // 100k while the catalogue is being built and tested -- a helm is 2500, and
+    // running out of money mid-experiment tells you nothing about whether the
+    // shop works. Balance is a decision for when there is something to balance.
+    float m_playerCredits = 100000.0f;   // Starting credits
     float m_cityCredits = 5000.0f;     // City treasury (separate from player)
 
     // Camera speed (tracked separately since Camera doesn't expose getter)
