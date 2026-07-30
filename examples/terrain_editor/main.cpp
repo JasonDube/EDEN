@@ -9012,12 +9012,35 @@ private:
                 // wherever the module said to start, so you lost your place too.
                 m_playModeCursorVisible = true;
                 Input::setMouseCaptured(false);
-            } else if (m_isPlayMode) {
-                // Second Escape, with the cursor already free, leaves play mode.
-                exitPlayMode();
             }
+            // NO second-Escape exit.
+            //
+            // It used to be: first Escape frees the mouse, second Escape leaves play
+            // mode. Two taps of one key and you are out of the game -- and freeing
+            // the mouse is something you do constantly, so the exit sat one keypress
+            // away from a thing you do all the time. It was hit accidentally half a
+            // dozen times, which is the key path being wrong rather than the user
+            // being careless.
+            //
+            // F5 leaves play mode, deliberately and on its own key. Escape now only
+            // ever hands you the mouse.
         }
         wasEscapeDown = escapeDown;
+
+        // RIGHT-CLICK toggles the mouse, both ways.
+        //
+        // This is the control that should have been on it from the start: one button,
+        // press it to get the cursor, press it again to get the game back, and it is
+        // not adjacent to anything that quits. Escape still frees the mouse for
+        // anyone with the habit.
+        if (m_isPlayMode && !m_inConversation && !m_quickChatMode &&
+            !m_inPanelFocusMode && !m_agentConsole.isOpen() &&
+            !m_filesystemBrowser.isActive() &&   // EDEN OS uses right-click itself
+            Input::isMouseButtonPressed(Input::MOUSE_RIGHT) &&
+            !ImGui::GetIO().WantCaptureMouse) {
+            m_playModeCursorVisible = !m_playModeCursorVisible;
+            Input::setMouseCaptured(!m_playModeCursorVisible);
+        }
 
         // ...and back in again. Enter, or a click on the world rather than on a
         // panel. Escape without this is a one-way door: it frees the mouse so the

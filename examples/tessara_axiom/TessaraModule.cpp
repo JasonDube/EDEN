@@ -648,10 +648,22 @@ void TessaraModule::updateLaunch(float dt) {
                                 m_ship.forward());
                 m_launch = Launch::Ready;
                 m_reportAt = 0.0f;
-                std::printf("[tessara] down at (%.0f, %.1f, %.0f), %.1f/s on the gear -- %s\n",
+                // The crew's arrival reported with the ship's, because "the walker
+                // did not land with us" is a claim a harness cannot settle -- it
+                // passes there -- and one line of truth from the actual game can.
+                const glm::vec3 wp = m_walker.bodyCentre(*m_ground);
+                const glm::vec3 st = m_ship.stationPosition(1);
+                std::printf("[tessara] down at (%.0f, %.1f, %.0f), %.1f/s on the gear "
+                            "-- %s | walker %.1f from the ship, %.1f from his station, "
+                            "room %d, parked %d, on station %d\n",
                             m_ship.origin().x, m_ship.origin().y, m_ship.origin().z,
                             m_ship.touchdownSpeed(),
-                            m_ship.landedHard() ? "HARD" : "clean");
+                            m_ship.landedHard() ? "HARD" : "clean",
+                            glm::length(glm::vec2(wp.x - m_ship.origin().x,
+                                                  wp.z - m_ship.origin().z)),
+                            glm::length(glm::vec2(wp.x - st.x, wp.z - st.z)),
+                            m_ground->enclosureAt(wp), (int)m_walker.parked(),
+                            (int)m_walker.onStation());
             }
             break;
         }

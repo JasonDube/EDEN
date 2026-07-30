@@ -557,6 +557,28 @@ void Ship::appendBlockers(std::vector<Blocker>& out) const {
                     rail.halfLength = run / (2.0f * kSlices);
                     rail.floorY     = m_origin.y - 6.0f;
                     rail.ceilingY   = std::max(a.y, b.y) + railRise;
+
+                    // Kept solid, and the attempt to retire them is worth recording.
+                    //
+                    // Asked for: let the crew hop on and off the ramp's sides. A body
+                    // here is a COLUMN, so anything standing on the ramp beside a kerb
+                    // overlaps it at any height -- nothing can step over one however
+                    // well it jumps. So the only way to allow it is to stop pushing
+                    // these, and that was tried.
+                    //
+                    // It broke the ramp as a ROUTE, which is a thing the kerbs turned
+                    // out to be doing as well as forcing entry at the foot. Measured
+                    // over the check suite with them gone: the rally never sealed and
+                    // the crew ended twenty units apart, twenty-six of eighty-four
+                    // approaches stalled, four of eleven deliveries finished with
+                    // seven stranded, none of the four diagonals boarded. Without a
+                    // wall the planners find shortcuts up the flank and the gait
+                    // cannot finish them.
+                    //
+                    // Hopping on and off is still worth having. It needs the routes to
+                    // work without a wall to lean on, which is a piece of work rather
+                    // than a line -- not a kerb that is quietly deleted underneath a
+                    // suite that then reports the game as broken in eight places.
                     out.push_back(rail);
                 }
             }

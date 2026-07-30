@@ -1616,6 +1616,32 @@ void checkThePlayerRides() {
                   "stands %+.2f above the deck, aboard %d",
                   downFrames, ship.touchdownSpeed(), onDeck, (int)mod.playerAboard());
 
+    // AND the walker is still on his station, in the hold, after all that.
+    //
+    // Reported twice: "the walker still does not land with the ship". The check that
+    // drives the raw Walker passes, so if this one fails the fault is in the module's
+    // wiring rather than in the handover -- which is exactly the seam a check built
+    // out of the parts cannot see.
+    {
+        const Walker& w = mod.walker();
+        const glm::vec3 him = w.bodyCentre(*mod.ground());
+        const float out = glm::length(glm::vec2(him.x - ship.origin().x,
+                                                him.z - ship.origin().z));
+        const glm::vec3 station = ship.stationPosition(1);
+        const float offStation = glm::length(glm::vec2(him.x - station.x,
+                                                       him.z - station.z));
+
+        char wdet[192];
+        std::snprintf(wdet, sizeof wdet,
+                      "after landing: %.1f from the ship, %.1f from his station, "
+                      "room %d, parked %d, on station %d",
+                      out, offStation, mod.ground()->enclosureAt(him),
+                      (int)w.parked(), (int)w.onStation());
+        report("the walker lands with the ship, on his station",
+               out < 14.0f && offStation < 4.0f && !w.parked() &&
+               mod.ground()->enclosureAt(him) >= 0 && w.onStation(), wdet);
+    }
+
     report("and brings the player back down",
            !ship.airborne() && downFrames > 30 && std::fabs(onDeck) < 0.25f &&
            mod.playerAboard(),
