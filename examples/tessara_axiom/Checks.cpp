@@ -1914,6 +1914,86 @@ void checkNoTeleportedCrates() {
 }
 
 // ---------------------------------------------------------------------------
+// 5e-v. The ladder takes you up AND leaves you there.
+//
+// Reported twice: "it puts me back on the ground after I reach the top". The
+// platform is demonstrably there -- onPatch says so at the ladder head -- so the
+// question is not whether a floor exists but whether the player is still standing
+// on it a second later. That is a loop, not a query, and only driving the module
+// the way the host does can answer it: update, then snap to whatever ground the
+// module reports, every frame, exactly as the scripted controller does.
+// ---------------------------------------------------------------------------
+void checkTheLadderHolds() {
+    eden::TerrainConfig cfg;
+    cfg.heightScale = 0.0f;
+    cfg.useFixedBounds = true;
+    eden::Terrain terrain(cfg);
+
+    TessaraModule mod;
+    mod.initialize();
+    mod.setTerrain(&terrain);
+    mod.onEnterPlayMode();
+
+    const Ship& ship = mod.ship();
+    constexpr float kEye = 1.7f;
+
+    // Standing NEAR the foot of it, not on the exact spot -- which is what anyone
+    // walking up to a ladder does, and is the case that was failing. The platform
+    // at the top is a metre and a half of grating; start a pace off it and the old
+    // code carried you up over thin air and dropped you the moment it let go.
+    const glm::vec3 foot = ship.ladderFoot();
+    const glm::vec3 aside = glm::normalize(glm::cross(glm::vec3(0, 1, 0),
+                                                      ship.forward()));
+    glm::vec3 eye = foot + aside * 1.2f + glm::vec3(0.0f, kEye, 0.0f);
+
+    auto frame = [&] {
+        constexpr float dt = 1.0f / 60.0f;
+        mod.setPlayerPosition(eye);
+        mod.update(dt);
+
+        // The host applies whatever the module asks -- the pull onto the rungs
+        // comes through the same channel a moving deck does.
+        glm::vec3 move(0.0f), about(0.0f);
+        float spun = 0.0f;
+        if (mod.carriedPlayer(move, spun, about)) eye += move;
+
+        float h = 0.0f;
+        if (mod.groundHeight(eye.x, eye.z, eye.y - kEye, h)) eye.y = h + kEye;
+    };
+
+    frame();
+    const bool sawLadder = mod.atLadder();
+    mod.climbLadder();
+
+    float peak = eye.y;
+    int climbFrames = 0;
+    for (int i = 0; i < 60 * 10 && mod.climbing(); ++i) { frame(); ++climbFrames; }
+    peak = eye.y;
+
+    // Then stand there. This is the part that was failing.
+    for (int i = 0; i < 60 * 3; ++i) frame();
+
+    const float deck = ship.origin().y + ship.params.deckHeight;
+    const float settled = eye.y - kEye;
+
+    char detail[192];
+    std::snprintf(detail, sizeof detail,
+                  "started 1.2 aside: at the foot %d, climbed %d frames to %.2f, "
+                  "three seconds later %.2f (deck %.2f), %.2f from the rungs",
+                  (int)sawLadder, climbFrames, peak - kEye, settled, deck,
+                  glm::length(glm::vec2(eye.x - foot.x, eye.z - foot.z)));
+    // Where he ends up horizontally matters as much as vertically: a pull that
+    // keeps being applied after the climb is over walks him off the ship, and it
+    // did -- six units in three seconds, because nothing cleared the flag while the
+    // launch sequence was Idle.
+    const float fromRungs = glm::length(glm::vec2(eye.x - foot.x, eye.z - foot.z));
+
+    report("the ladder takes you up and leaves you there",
+           sawLadder && climbFrames > 5 && std::fabs(settled - deck) < 0.3f &&
+           fromRungs < 1.0f, detail);
+}
+
+// ---------------------------------------------------------------------------
 // 5e-iv. The pre-landing warning tells the truth.
 //
 // The ship already says whether the GEAR can take a site. It could not say whether
@@ -2695,6 +2775,7 @@ int runShipChecks(bool verbose) {
     checkTheHelmView();
     checkTheLanding();
     checkNoTeleportedCrates();
+    checkTheLadderHolds();
     checkTheLandingForecast();
     checkTheBoardingLadder();
     checkTheHullStopsYou();

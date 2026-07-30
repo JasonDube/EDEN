@@ -444,8 +444,8 @@ SurfacePatch Ship::ladderPlatformPatch() const {
                  + right() * ((out + 1.35f) * 0.5f + out * 0.5f)
                  + forward() * (params.length * 0.30f)
                  + up() * params.deckHeight;
-    patch.halfWidth  = 1.35f;                       // fore and aft of the hatch
-    patch.halfLength = (1.35f + 0.35f) * 0.5f;      // hull face out past the rungs
+    patch.halfWidth  = 1.60f;                       // fore and aft of the hatch
+    patch.halfLength = 1.10f;                       // hull face out past the rungs
     patch.solidUnder = true;
     patch.enabled = true;
     (void)foot;

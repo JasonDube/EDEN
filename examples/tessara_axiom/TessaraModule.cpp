@@ -413,9 +413,28 @@ void TessaraModule::updateLadder(float dt) {
     const glm::vec3 feet = m_playerPosition - glm::vec3(0.0f, 1.7f, 0.0f);
     const float toLadder = glm::length(glm::vec2(feet.x - foot.x, feet.z - foot.z));
 
-    m_atLadder = toLadder < 2.2f && !m_ship.airborne();
+    // Tighter than the platform is wide, so a climb can only start from somewhere
+    // the top of it will actually catch you.
+    m_atLadder = toLadder < 1.6f && !m_ship.airborne();
 
     if (m_climbing) {
+        // Pulled onto the rungs as he goes, which is what climbing a ladder is.
+        //
+        // Without this the climb starts wherever he happened to be standing and
+        // ends there too -- and the platform at the top is a metre and a half of
+        // grating, so starting a pace off it means arriving over thin air and
+        // dropping the moment the climb lets go. That is the "it puts me back on
+        // the ground" -- not the climb failing, but nothing being under him where
+        // it left him. Reported as a displacement, the way the deck moving is,
+        // because the host owns where he is.
+        const glm::vec2 off(foot.x - feet.x, foot.z - feet.z);
+        const float d = glm::length(off);
+        m_climbPull = glm::vec3(0.0f);
+        if (d > 0.02f) {
+            const float pull = std::min(d, 2.0f * dt);
+            m_climbPull = glm::vec3(off.x / d * pull, 0.0f, off.y / d * pull);
+        }
+
         // Up at a climbing pace, and stop at the platform. Wandering off the ladder
         // ends it -- he is holding rungs, not riding a lift.
         m_climbY += 3.2f * dt;
@@ -427,10 +446,14 @@ void TessaraModule::updateLadder(float dt) {
         return;
     }
 
-    if (m_atLadder && eden::Input::isKeyDown(eden::Input::KEY_E)) {
-        m_climbing = true;
-        m_climbY = std::max(feet.y, m_source->heightAtWorld(feet.x, feet.z));
-    }
+    if (m_atLadder && eden::Input::isKeyDown(eden::Input::KEY_E)) climbLadder();
+}
+
+void TessaraModule::climbLadder() {
+    if (!m_atLadder || m_climbing) return;
+    const glm::vec3 feet = m_playerPosition - glm::vec3(0.0f, 1.7f, 0.0f);
+    m_climbing = true;
+    m_climbY = std::max(feet.y, m_source->heightAtWorld(feet.x, feet.z));
 }
 
 void TessaraModule::callRally() {
@@ -497,6 +520,13 @@ bool TessaraModule::playerAboard() const {
 
 bool TessaraModule::carriedPlayer(glm::vec3& outMove, float& outTurnDegrees,
                                   glm::vec3& outAbout) const {
+    // Climbing wins, and only while climbing -- see m_climbPull.
+    if (m_climbing) {
+        outMove = m_climbPull;
+        outTurnDegrees = 0.0f;
+        outAbout = m_playerPosition;
+        return glm::dot(m_climbPull, m_climbPull) > 1e-10f;
+    }
     if (!m_carriedPlayer) return false;
     outMove = m_carryMove;
     outTurnDegrees = m_carryTurn;
@@ -635,7 +665,7 @@ void TessaraModule::updateLaunch(float dt) {
         case Launch::Ready:
             // Whatever the last airborne frame asked the host to do with the
             // player, it has been done by now. Left standing, it would be redone
-            // every frame and walk him off across the planet.
+            // every frame and walk him off across the planet. Not while he is on
             m_carriedPlayer = false;
             break;
 

@@ -78,6 +78,12 @@ public:
 
     void setDown();       // put it on the ground where it stands, at once
 
+    // Start the climb without a keypress, so the whole thing can be driven in a
+    // check. Ignored unless the player is actually at the foot of the ladder.
+    void climbLadder();
+    bool climbing() const { return m_climbing; }
+    bool atLadder() const { return m_atLadder; }
+
     // The module takes the movement keys while somebody is flying from the helm,
     // so the same W that walks you about the hold does not also walk you about
     // the hold WHILE steering the ship you are standing in.
@@ -204,6 +210,15 @@ private:
     // speed you can see, and able to step off at the top like anything else.
     bool  m_atLadder = false;
     bool  m_climbing = false;
+
+    // The climb's pull kept SEPARATE from the ship's carry, and recomputed every
+    // frame it is used.
+    //
+    // Sharing m_carriedPlayer for it leaked: nothing clears that flag while the
+    // launch sequence is Idle, so the host went on re-applying the last pull for
+    // ever and walked the player six units off the ladder in three seconds. A
+    // channel that is only ever true while m_climbing is cannot do that.
+    glm::vec3 m_climbPull{0.0f};
     float m_climbY = 0.0f;
 
     Launch m_launch = Launch::Idle;
