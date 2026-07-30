@@ -436,24 +436,28 @@ glm::vec3 Ship::hatchCentre() const {
 }
 
 SurfacePatch Ship::ladderPlatformPatch() const {
-    // From the hull face out past the ladder, at deck height, so stepping off the
-    // top rung puts you on something and one pace inboard puts you through the
-    // hatch.
-    const glm::vec3 foot = ladderFoot();
+    // From INSIDE the bay, across the doorway, and out past the ladder.
+    //
+    // It has to reach inboard far enough to overlap the deck, because the deck stops
+    // at the bay wall and the wall is three units thick: a platform that starts at
+    // the hull FACE leaves the threshold itself floorless, and walking in off the
+    // top of the ladder drops you straight back to the bottom. Jumping cleared it,
+    // which is the tell -- a hole, not a wall.
     const float out = params.width * 0.5f;
+    const float inner = params.bayWidth * 0.5f - 0.40f;   // overlapping the deck
+    const float outer = out + 1.75f;                      // past the rungs
 
     SurfacePatch patch;
     patch.right  = forward();                       // its own long axis runs fore-aft
     patch.along  = right();
     patch.origin = m_origin
-                 + right() * ((out + 1.35f) * 0.5f + out * 0.5f)
+                 + right() * ((inner + outer) * 0.5f)
                  + forward() * (params.length * kHatchStation)
                  + up() * params.deckHeight;
     patch.halfWidth  = 1.60f;                       // fore and aft of the hatch
-    patch.halfLength = 1.10f;                       // hull face out past the rungs
+    patch.halfLength = (outer - inner) * 0.5f;      // deck, threshold, and landing
     patch.solidUnder = true;
     patch.enabled = true;
-    (void)foot;
     return patch;
 }
 

@@ -273,10 +273,15 @@ void TessaraModule::update(float dt) {
     {
         const glm::vec3 hatch = m_ship.hatchCentre();
         const glm::vec3 soles = m_playerPosition - glm::vec3(0.0f, 1.7f, 0.0f);
-        const bool onThePlatform =
-            glm::length(glm::vec2(soles.x - hatch.x, soles.z - hatch.z)) < 3.4f &&
+        // Either side of it: on the platform outside, or on the bridge within reach
+        // of it inside. A door that only opens from the outside is a door you can
+        // walk through once.
+        const glm::vec3 inward = hatch - m_ship.right() * 2.2f;
+        const bool atTheDoor =
+            (glm::length(glm::vec2(soles.x - hatch.x, soles.z - hatch.z)) < 3.4f ||
+             glm::length(glm::vec2(soles.x - inward.x, soles.z - inward.z)) < 3.0f) &&
             soles.y > hatch.y - 1.2f;
-        m_ship.updateHatch(dt, onThePlatform || m_climbing);
+        m_ship.updateHatch(dt, atTheDoor || m_climbing);
     }
 
     m_ship.updateBridgeDoor(dt, nearDoor(m_playerPosition) ||
@@ -424,9 +429,13 @@ void TessaraModule::updateLadder(float dt) {
     const glm::vec3 feet = m_playerPosition - glm::vec3(0.0f, 1.7f, 0.0f);
     const float toLadder = glm::length(glm::vec2(feet.x - foot.x, feet.z - foot.z));
 
-    // Tighter than the platform is wide, so a climb can only start from somewhere
-    // the top of it will actually catch you.
-    m_atLadder = toLadder < 1.6f && !m_ship.airborne();
+    // At the ladder means at either END of it -- the foot on the ground, or the
+    // platform at the top. Both are the same place seen from different heights.
+    const float groundHere = m_source->heightAtWorld(feet.x, feet.z);
+    const float top = m_ship.ladderTopY();
+    const bool nearRungs = toLadder < 1.6f && !m_ship.airborne();
+    m_atLadder = nearRungs && (feet.y < groundHere + 1.2f ||
+                               std::fabs(feet.y - top) < 1.2f);
 
     if (m_climbing) {
         // Pulled onto the rungs as he goes, which is what climbing a ladder is.
@@ -446,13 +455,14 @@ void TessaraModule::updateLadder(float dt) {
             m_climbPull = glm::vec3(off.x / d * pull, 0.0f, off.y / d * pull);
         }
 
-        // Up at a climbing pace, and stop at the platform. Wandering off the ladder
-        // ends it -- he is holding rungs, not riding a lift.
-        m_climbY += 3.2f * dt;
-        if (toLadder > 3.0f || m_climbY >= m_ship.ladderTopY()) {
-            m_climbY = std::min(m_climbY, m_ship.ladderTopY());
-            if (m_climbY >= m_ship.ladderTopY() - 0.01f) m_climbing = false;
-            else if (toLadder > 3.0f) m_climbing = false;
+        // Toward whichever end he asked for, at a climbing pace. Wandering off the
+        // ladder ends it -- he is holding rungs, not riding a lift.
+        const float step = 3.2f * dt;
+        if (m_climbY < m_climbTo) m_climbY = std::min(m_climbTo, m_climbY + step);
+        else                      m_climbY = std::max(m_climbTo, m_climbY - step);
+
+        if (std::fabs(m_climbY - m_climbTo) < 0.01f || toLadder > 3.0f) {
+            m_climbing = false;
         }
         return;
     }
@@ -463,8 +473,14 @@ void TessaraModule::updateLadder(float dt) {
 void TessaraModule::climbLadder() {
     if (!m_atLadder || m_climbing) return;
     const glm::vec3 feet = m_playerPosition - glm::vec3(0.0f, 1.7f, 0.0f);
+    const glm::vec3 foot = m_ship.ladderFoot();
+    const float ground = m_source->heightAtWorld(foot.x, foot.z);
+    const float top = m_ship.ladderTopY();
+
+    // Whichever end he is NOT at. Down from the platform, up from the ground.
     m_climbing = true;
-    m_climbY = std::max(feet.y, m_source->heightAtWorld(feet.x, feet.z));
+    m_climbY = feet.y;
+    m_climbTo = (std::fabs(feet.y - top) < 1.2f) ? ground : top;
 }
 
 void TessaraModule::callRally() {

@@ -219,6 +219,10 @@ private:
     // ever and walked the player six units off the ladder in three seconds. A
     // channel that is only ever true while m_climbing is cannot do that.
     glm::vec3 m_climbPull{0.0f};
+
+    // Where the climb is heading. A ladder is not one-way: the same rungs go down,
+    // and a way aboard you cannot leave by is half a door.
+    float m_climbTo = 0.0f;
     float m_climbY = 0.0f;
 
     Launch m_launch = Launch::Idle;

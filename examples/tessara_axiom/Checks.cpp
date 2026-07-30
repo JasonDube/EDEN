@@ -2003,6 +2003,42 @@ void checkTheLadderHolds() {
     // launch sequence was Idle.
     const float fromRungs = glm::length(glm::vec2(eye.x - foot.x, eye.z - foot.z));
 
+    // WALK the threshold, do not just test a point in it.
+    //
+    // "The way in is clear" passed while walking in dropped the player straight back
+    // to the bottom of the ladder: the deck stops at the bay wall, the wall is three
+    // units thick, and the doorway itself had no floor. One point sampled in the gap
+    // said fine; a body crossing it fell through. So this walks him in a step at a
+    // time, snapping to whatever the module reports underfoot, exactly as the host
+    // does -- and then back out and down the ladder, because a way aboard you cannot
+    // leave by is half a door.
+    float lowest = eye.y;
+    for (int i = 0; i < 40; ++i) {
+        eye -= ship.right() * 0.12f;      // inboard, through the hatch
+        frame();
+        lowest = std::min(lowest, eye.y);
+    }
+    const float walkedIn = eye.y - kEye;
+    const bool stayedUp = (lowest - kEye) > deck - 0.6f;
+
+    // ...and back out the same distance, which puts him on the rungs again rather
+    // than past them.
+    for (int i = 0; i < 40; ++i) { eye += ship.right() * 0.12f; frame(); }
+    const bool backOutside = mod.atLadder();
+    mod.climbLadder();
+    for (int i = 0; i < 60 * 10 && mod.climbing(); ++i) frame();
+    const float downTo = eye.y - kEye;
+    const float groundThere = ship.origin().y;
+
+    char trip[192];
+    std::snprintf(trip, sizeof trip,
+                  "walked in to %.2f (deck %.2f, never dropped below %.2f), "
+                  "back at the rungs %d, climbed down to %.2f (ground %.2f)",
+                  walkedIn, deck, lowest - kEye, (int)backOutside, downTo, groundThere);
+    report("you can walk in through the hatch, and back down",
+           stayedUp && std::fabs(walkedIn - deck) < 0.4f && backOutside &&
+           std::fabs(downTo - groundThere) < 0.6f, trip);
+
     report("the ladder takes you up and leaves you there",
            sawLadder && climbFrames > 5 && std::fabs(settled - deck) < 0.3f &&
            fromRungs < 1.0f && open > 0.9f && wayThrough, detail);
