@@ -9389,20 +9389,21 @@ private:
         }
         wasEscapeDown = escapeDown;
 
-        // RIGHT-CLICK toggles the mouse, both ways.
+        // RIGHT-CLICK IS FOR PLACING, and nothing else.
         //
-        // This is the control that should have been on it from the start: one button,
-        // press it to get the cursor, press it again to get the game back, and it is
-        // not adjacent to anything that quits. Escape still frees the mouse for
-        // anyone with the habit.
-        if (m_isPlayMode && !m_inConversation && !m_quickChatMode &&
-            !m_inPanelFocusMode && !m_agentConsole.isOpen() &&
-            !m_filesystemBrowser.isActive() &&   // EDEN OS uses right-click itself
-            Input::isMouseButtonPressed(Input::MOUSE_RIGHT) &&
-            !ImGui::GetIO().WantCaptureMouse) {
-            m_playModeCursorVisible = !m_playModeCursorVisible;
-            Input::setMouseCaptured(!m_playModeCursorVisible);
-        }
+        // It used to toggle the mouse cursor here, and that quietly broke the thing
+        // right-click had always been for. Hotbar placement lives further down and
+        // is gated on !m_playModeCursorVisible; the toggle ran FIRST, in the same
+        // frame, so the press that was meant to put something down instead made the
+        // cursor appear and skipped the placement. Press again and the cursor went
+        // away and the placement ran. Every SECOND right-click placed, and the one
+        // in between just flashed the pointer -- which reads as "it refuses
+        // sometimes" rather than as two features fighting over one button.
+        //
+        // Nothing is lost by removing it. Escape hands you the mouse (just above),
+        // and Tab into build mode hands you the mouse as part of entering it, which
+        // is when you actually want it. Enter, or a left-click on the world, gives
+        // it back to the game.
 
         // ...and back in again. Enter, or a click on the world rather than on a
         // panel. Escape without this is a one-way door: it frees the mouse so the
@@ -9418,8 +9419,16 @@ private:
                 (Input::isKeyPressed(Input::KEY_ENTER) || Input::isKeyPressed(335));
             const bool clickedWorld = !overPanel && Input::isMouseButtonPressed(0);
 
-            if ((enter || clickedWorld) && !m_inConversation && !m_quickChatMode &&
-                !m_inPanelFocusMode && !m_agentConsole.isOpen()) {
+            // ...but NOT while building. Tab hands you the cursor precisely so you
+            // can drag out a slab, and the drag starts with a left-click on the
+            // world -- which is exactly the gesture this block was treating as
+            // "done with the mouse, back to playing". So the first click of every
+            // slab took the pointer away mid-drag. Build mode keeps its cursor
+            // until Tab gives it back.
+            const bool building = m_showSiloConfig;
+
+            if ((enter || clickedWorld) && !building && !m_inConversation &&
+                !m_quickChatMode && !m_inPanelFocusMode && !m_agentConsole.isOpen()) {
                 m_playModeCursorVisible = false;
                 Input::setMouseCaptured(true);
             }
@@ -11182,8 +11191,19 @@ private:
         // the number-key throw fallback stay OUT of the silo (in EDEN OS number keys
         // mean "paste held mount onto the frame you're aiming at", handled above).
         bool siloActive = m_filesystemBrowser.isActive();
+        // Placing works while BUILDING too, not only while walking around with the
+        // mouse captured. Build mode is exactly when you want to put a bought
+        // component down -- you have just dragged out the deck to stand it on --
+        // and gating this on a hidden cursor meant Tab made placement impossible.
+        //
+        // A visible cursor does bring one guard with it: a click that ImGui wants
+        // belongs to the panel under it, not to the world. Without that, clicking
+        // Buy in the Catalog would also fling the hotbar item across the room.
+        const bool buildingWithCursor = m_showSiloConfig && m_playModeCursorVisible;
         if (m_isPlayMode && !ImGui::GetIO().WantTextInput
-            && !m_quickChatMode && !m_inConversation && !m_playModeCursorVisible) {
+            && !m_quickChatMode && !m_inConversation
+            && (!m_playModeCursorVisible || buildingWithCursor)
+            && !(buildingWithCursor && ImGui::GetIO().WantCaptureMouse)) {
 
             // Check for RMB/Q shortcuts before number keys
             int rmbqSlot = -1;
