@@ -8,9 +8,18 @@
 # master and re-modeset the display, which is what repaints your screen.
 
 # 1. Make sure nothing is still holding the display.
-pkill -x tearsheet3d 2>/dev/null || true
+#
+# Every binary that can take the display, not just tearsheet3d -- kms-ted.sh runs
+# the editor on the same backend, and a recovery script that does not know about
+# the thing currently holding your screen bounces the VT into a display somebody
+# else still owns, and you stay black.
+for app in tearsheet3d terrain_editor tessara_axiom; do
+    pkill -x "$app" 2>/dev/null || true
+done
 sleep 1
-pkill -9 -x tearsheet3d 2>/dev/null || true
+for app in tearsheet3d terrain_editor tessara_axiom; do
+    pkill -9 -x "$app" 2>/dev/null || true
+done
 
 # 2. Find COSMIC's VT (falls back to tty1).
 COSMIC_TTY=$(ps -o tty= -C cosmic-comp 2>/dev/null | grep -o 'tty[0-9]*' | head -1)
