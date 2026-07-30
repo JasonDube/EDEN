@@ -1847,6 +1847,23 @@ void checkEverythingLands() {
     }
     const bool startedAboard = s.ground.enclosureAt(w.bodyCentre(s.ground)) >= 0;
 
+    // And the biped, who rides a different way: he is continuous rather than
+    // lattice-locked, so he is not parked -- carryPassengers moves his hips and his
+    // planted feet together every frame. Never tested across a LANDING though, and
+    // landing is where the ground under him changes: his feet are at world
+    // positions and the new terrain is not the old terrain.
+    Biped man;
+    const glm::vec3 st = s.ship.stationPosition(0);
+    man.reset(s.ground, glm::vec2(st.x, st.z), 0.0f, 5u);
+    man.setHome(s.ship.origin(), 250.0f);
+    const bool bipedStartedAboard = s.ground.enclosureAt(man.hipCentre()) >= 0;
+
+    auto localTo = [](const Ship& sh, const glm::vec3& p) {
+        const glm::vec3 d = p - sh.origin();
+        return glm::vec3(glm::dot(d, sh.right()), d.y, glm::dot(d, sh.forward()));
+    };
+    const glm::vec3 bipedWas = localTo(s.ship, man.hipCentre());
+
     glm::vec3 pallet = s.ship.bayStoragePoint();
     glm::vec3 crate = pallet + glm::vec3(0.0f, 0.42f, 0.0f);
     const glm::vec3 from = s.ship.origin();
@@ -1869,6 +1886,16 @@ void checkEverythingLands() {
         };
         crate = shift(crate);
         w.parkFollow(s.ship.origin(), s.ship.right(), s.ship.forward());
+        man.carry(move, spun, about);
+
+        // The leash travels with the ship, exactly as TessaraModule's
+        // carryPassengers does. Without this the check itself reproduces the third
+        // instance of the same bug: home is a position recorded once, so after
+        // flying a hundred and twenty units both creatures are outside their range
+        // and set off back to where the ship USED to be. The module already gets
+        // this right; it was the check that did not.
+        w.setHome(s.ship.origin(), 250.0f);
+        man.setHome(s.ship.origin(), 250.0f);
         s.republish();
     };
 
@@ -1892,6 +1919,47 @@ void checkEverythingLands() {
     w.unpark(s.ground, s.ship.origin(), s.ship.right(), s.ship.forward());
     s.republish();
 
+    // Then let them both STAND there for a while. Arriving in the hold and staying
+    // in it are different claims: the ground under them is new, the biped solves
+    // his legs against whatever he can now reach, and a creature that lands
+    // correctly and then falls through the deck or gets shoved off it has still
+    // been left behind, just more slowly.
+    const glm::vec3 bipedOnTouchdown = localTo(s.ship, man.hipCentre());
+    const float carriedDrift = glm::length(glm::vec2(bipedOnTouchdown.x - bipedWas.x,
+                                                     bipedOnTouchdown.z - bipedWas.z));
+    const bool inAtTouchdown = s.ground.enclosureAt(man.hipCentre()) >= 0;
+    const float bipedAfterLanding = bipedOnTouchdown.y;
+
+    // The ramp comes down before they are left to their own devices, because that
+    // is what the module does -- the biped works the panel when the way is shut and
+    // the module opens it. Sealed in with nobody to open it he does something else
+    // entirely, and that is a separate bug rather than this one: see the note under
+    // "a sealed hold is not a wall" below.
+    s.ship.openRamp();
+    for (int i = 0; i < 60 * 3; ++i) {
+        s.ship.update(1.0f / 60.0f, false);
+        s.republish();
+        w.update(s.ground, 1.0f / 60.0f);
+        man.update(s.ground, 1.0f / 60.0f, nullptr);
+    }
+
+    const glm::vec3 bipedNow = localTo(s.ship, man.hipCentre());
+    const float bipedDrift = glm::length(glm::vec2(bipedNow.x - bipedWas.x,
+                                                   bipedNow.z - bipedWas.z));
+    const float bipedSank = bipedAfterLanding - bipedNow.y;
+
+    // NEAR the ship, not aboard it. He has no orders once he is down, so he
+    // wanders, and with the ramp open wandering off it is correct -- the ship has
+    // landed and there is a planet to look at. What matters is that he is HERE
+    // rather than a hundred and twenty units back at the launch pad, which is the
+    // thing that was broken.
+    const bool bipedStillIn =
+        glm::length(glm::vec2(man.hipCentre().x - s.ship.origin().x,
+                              man.hipCentre().z - s.ship.origin().z)) < 40.0f;
+    const bool walkerStillIn =
+        glm::length(glm::vec2(w.bodyCentre(s.ground).x - s.ship.origin().x,
+                              w.bodyCentre(s.ground).z - s.ship.origin().z)) < 40.0f;
+
     const glm::vec3 landedPallet = s.ship.bayStoragePoint();
     const glm::vec3 him = w.bodyCentre(s.ground);
     const float walkerFromShip = glm::length(glm::vec2(him.x - s.ship.origin().x,
@@ -1903,14 +1971,23 @@ void checkEverythingLands() {
 
     char detail[224];
     std::snprintf(detail, sizeof detail,
-                  "flew %.0f: walker %.1f from the ship, feet at %.2f/%.2f, deck %.2f, "
-                  "body %.2f, room %d | pallet %.1f, crate %.1f off it",
-                  flew, walkerFromShip, w.footHeight(0), w.footHeight(2), s.deckY(),
-                  him.y, s.ground.enclosureAt(him), palletFromShip, crateOffPallet);
+                  "flew %.0f | walker %.1f out, still in %d | biped: carried drift "
+                  "%.2f (in the hold %d at touchdown), wandered %.2f in 3s (still here %d), "
+                  "sank %.2f | pallet %.1f, crate %.1f off",
+                  flew, walkerFromShip, (int)walkerStillIn,
+                  carriedDrift, (int)inAtTouchdown, bipedDrift, (int)bipedStillIn,
+                  bipedSank, palletFromShip, crateOffPallet);
+    std::printf("      biped local: was (%.1f,%.1f,%.1f) -> now (%.1f,%.1f,%.1f), "
+                "ramp %.2f, hull is %.0f long x %.0f wide\n",
+                bipedWas.x, bipedWas.y, bipedWas.z, bipedNow.x, bipedNow.y, bipedNow.z,
+                s.ship.rampProgress(), s.ship.params.length, s.ship.params.width);
 
     report("nothing is left behind when it lands",
-           startedAboard && flew > 40.0f &&
+           startedAboard && bipedStartedAboard && flew > 40.0f &&
            s.ground.enclosureAt(him) >= 0 && walkerFromShip < 14.0f &&
+           walkerStillIn && bipedStillIn &&
+           carriedDrift < 0.5f && inAtTouchdown &&
+           std::fabs(bipedSank) < 0.6f &&
            palletFromShip < 14.0f && crateOffPallet < 1.0f, detail);
 }
 
