@@ -337,6 +337,11 @@ public:
     glm::vec3 cargoPosition() const;
     const char* activityName() const;
 
+    // Where he is headed when his hands are empty -- the crate he was sent for.
+    // Only meaningful while he has a task; it is the answer to "why is he over
+    // there", which is otherwise unaskable from outside.
+    glm::vec3 crateTarget() const { return m_crate; }
+
     bool  isRunning() const { return m_running; }
     bool  isAirborne() const { return m_airborne; }
     float dutyFactor() const { return m_running ? params.runDuty : params.walkDuty; }

@@ -1914,6 +1914,104 @@ void checkNoTeleportedCrates() {
 }
 
 // ---------------------------------------------------------------------------
+// 5e-iv-b. Nobody walks into the hold empty-handed.
+//
+// Reported from a screenshot: "the biped is walking into the aisle of the ship
+// and he has no package". The state machine says that cannot happen -- Carry is
+// only reachable through Reach, which sets m_carrying -- so either the report is
+// about a state that is not Carry, or the machine is not the whole story. Both
+// are worth knowing, and neither is answerable by reading it again.
+//
+// So: run the module's own dispatch, and every frame that either creature is
+// inside the bay, record what he was doing and whether his hands were full. A
+// trip inboard is legitimate only if he is carrying, or if the thing he is going
+// to get is itself in there. Anything else is a wasted walk, and the point of
+// this check is to say WHICH, not merely that one happened.
+// ---------------------------------------------------------------------------
+void checkNobodyWalksInEmpty() {
+    eden::TerrainConfig cfg;
+    cfg.heightScale = 0.0f;
+    cfg.useFixedBounds = true;
+    eden::Terrain terrain(cfg);
+
+    TessaraModule mod;
+    mod.initialize();
+    mod.setTerrain(&terrain);
+    mod.onEnterPlayMode();
+
+    const Ship& ship = mod.ship();
+
+    // Inside the bay: within the hull footprint, at deck height. The half-extents
+    // are the ship's own, pulled in a little so standing ON the ramp lip does not
+    // read as being aboard.
+    auto inTheBay = [&](const glm::vec3& p) {
+        const glm::vec3 d = p - ship.origin();
+        const float alongF = glm::dot(d, ship.forward());
+        const float alongR = glm::dot(d, ship.right());
+        return std::fabs(alongF) < ship.params.length * 0.5f - 1.0f &&
+               std::fabs(alongR) < ship.params.bayWidth * 0.5f - 0.5f;
+    };
+
+    // The CROSSING, not the occupancy. Standing in the bay with empty hands is
+    // most often the walk back out, which is not a complaint anybody would make.
+    // What was reported is walking IN with nothing -- an outside-to-inside
+    // transition while carrying nothing and with nothing in there to fetch. That
+    // is a distinct event and it is the one to count.
+    int bipedWalkedIn = 0, walkerWalkedIn = 0;
+    const char* bipedWhy = "-", * walkerWhy = "-";
+    bool bipedWasIn = false, walkerWasIn = false;
+    bool first = true;
+
+    // And do it where it was actually seen. The report came from a site the ship
+    // had flown to, not the pad it starts on -- different ground under the ramp,
+    // a different pile position, a different way in. Running only the tidy case is
+    // the mistake this suite keeps having to unlearn, so: rally, launch, fly, set
+    // down, stand down, and only then start counting.
+    mod.callRally();
+    for (int i = 0; i < 60 * 30; ++i) mod.update(1.0f / 60.0f);
+    mod.launch();
+    for (int i = 0; i < 60 * 20; ++i) mod.update(1.0f / 60.0f);
+    mod.setDown();
+    for (int i = 0; i < 60 * 20; ++i) mod.update(1.0f / 60.0f);
+    mod.standDown();
+    for (int i = 0; i < 60 * 5; ++i) mod.update(1.0f / 60.0f);
+
+    for (int i = 0; i < 60 * 240; ++i) {
+        mod.update(1.0f / 60.0f);
+
+        const glm::vec3 b = mod.biped().hipCentre();
+        const bool bIn = inTheBay(b);
+        if (bIn && !bipedWasIn && !first) {
+            const bool errand = mod.biped().hasCargo() ||
+                                inTheBay(mod.biped().crateTarget());
+            if (!errand) { ++bipedWalkedIn; bipedWhy = mod.biped().activityName(); }
+        }
+        bipedWasIn = bIn;
+
+        if (mod.ground()) {
+            const glm::vec3 w = mod.walker().bodyCentre(*mod.ground());
+            const bool wIn = inTheBay(w);
+            if (wIn && !walkerWasIn && !first) {
+                if (!mod.walker().hasCargo()) {
+                    ++walkerWalkedIn; walkerWhy = mod.walker().activityName();
+                }
+            }
+            walkerWasIn = wIn;
+        }
+        first = false;
+    }
+
+    char detail[208];
+    std::snprintf(detail, sizeof detail,
+                  "after a landing, four minutes: biped walked in empty %d times (%s), "
+                  "walker %d times (%s)",
+                  bipedWalkedIn, bipedWhy, walkerWalkedIn, walkerWhy);
+
+    report("nobody walks into the hold with nothing to do there",
+           bipedWalkedIn == 0 && walkerWalkedIn == 0, detail);
+}
+
+// ---------------------------------------------------------------------------
 // 5e-v. The ladder takes you up AND leaves you there.
 //
 // Reported twice: "it puts me back on the ground after I reach the top". The
@@ -2839,6 +2937,7 @@ int runShipChecks(bool verbose) {
     checkTheHelmView();
     checkTheLanding();
     checkNoTeleportedCrates();
+    checkNobodyWalksInEmpty();
     checkTheLadderHolds();
     checkTheLandingForecast();
     checkTheBoardingLadder();
