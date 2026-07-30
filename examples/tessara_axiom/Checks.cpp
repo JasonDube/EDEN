@@ -2012,6 +2012,90 @@ void checkNobodyWalksInEmpty() {
 }
 
 // ---------------------------------------------------------------------------
+// 5e-iv-a. THE CONTROL EXPERIMENT: a ladder with nothing attached to it.
+//
+// Four metres of pole beside the ship, Z up, X down, no platform, no toggle, no
+// edge, no cooldown, no latch, no hatch. The ship's ladder has been fixed three
+// times and still flips people back down, and every fix so far has been a guess
+// about which of its parts was lying. This has no parts.
+//
+// What it proves either way is the point. Climb it and hold Z at the top: if he
+// STAYS, then the channel a module uses to hand the player a height is sound and
+// the ship's extra machinery is at fault. If he drops here too, every fix so far
+// has been aimed at the wrong half of the problem.
+// ---------------------------------------------------------------------------
+void checkTheBarePole() {
+    eden::TerrainConfig cfg;
+    cfg.heightScale = 0.0f;
+    cfg.useFixedBounds = true;
+    eden::Terrain terrain(cfg);
+
+    TessaraModule mod;
+    mod.initialize();
+    mod.setTerrain(&terrain);
+    mod.onEnterPlayMode();
+
+    constexpr float kEye = 1.7f;
+    mod.update(1.0f / 60.0f);            // places the pole
+    const glm::vec3 base = mod.pole().base();
+    const float topY = mod.pole().topY();
+
+    glm::vec3 eye = base + glm::vec3(0.8f, kEye, 0.0f);
+
+    // The host's rule, verbatim -- max of terrain and module, module only if it
+    // answers. This is what the harness got wrong for every ladder check before.
+    auto frame = [&](int keys) {
+        mod.holdPoleKeys(keys);
+        mod.setPlayerPosition(eye);
+        mod.update(1.0f / 60.0f);
+
+        glm::vec3 move(0.0f), about(0.0f);
+        float spun = 0.0f;
+        if (mod.carriedPlayer(move, spun, about)) eye += move;
+
+        float h = terrain.getHeightAt(eye.x, eye.z);
+        float fromModule = 0.0f;
+        if (mod.groundHeight(eye.x, eye.z, eye.y - kEye, fromModule) && fromModule > h)
+            h = fromModule;
+        eye.y = h + kEye;
+    };
+
+    // Up, holding Z the whole way and then well past the top.
+    float highest = eye.y - kEye;
+    for (int i = 0; i < 60 * 8; ++i) { frame(1); highest = std::max(highest, eye.y - kEye); }
+    const float heldAtTop = eye.y - kEye;
+
+    // Keep holding Z for another three seconds. THIS is the reported failure:
+    // arriving and then being flipped back down while still asking to go up.
+    for (int i = 0; i < 60 * 3; ++i) frame(1);
+    const float stillUp = eye.y - kEye;
+
+    // Let go entirely. Nothing is asking for anything; he should stay put.
+    float lowestIdle = 1e9f;
+    for (int i = 0; i < 60 * 3; ++i) { frame(0); lowestIdle = std::min(lowestIdle, eye.y - kEye); }
+    const float afterIdle = eye.y - kEye;
+
+    // Down, and he should end on the ground rather than through it.
+    for (int i = 0; i < 60 * 8; ++i) frame(2);
+    const float ended = eye.y - kEye;
+    mod.holdPoleKeys(-1);
+
+    const float groundY = terrain.getHeightAt(base.x, base.z);
+    char detail[224];
+    std::snprintf(detail, sizeof detail,
+                  "up to %.2f (top %.2f), held 3s more -> %.2f, let go 3s -> %.2f "
+                  "(dipped to %.2f), X down -> %.2f (ground %.2f)",
+                  heldAtTop, topY, stillUp, afterIdle, lowestIdle, ended, groundY);
+
+    report("a bare 4 m ladder: Z up, X down, and it stays where you leave it",
+           std::fabs(heldAtTop - topY) < 0.15f &&
+           std::fabs(stillUp - topY) < 0.15f &&
+           std::fabs(afterIdle - topY) < 0.15f &&
+           lowestIdle > topY - 0.2f &&
+           std::fabs(ended - groundY) < 0.2f, detail);
+}
+
+// ---------------------------------------------------------------------------
 // 5e-iv-c. Hold E at the foot of the ladder, from anywhere, and go up ONCE.
 //
 // Reported as "sometimes it works, sometimes it doesn't -- hold E at the base
@@ -3041,6 +3125,7 @@ int runShipChecks(bool verbose) {
     checkTheHelmView();
     checkTheLanding();
     checkNoTeleportedCrates();
+    checkTheBarePole();
     checkNobodyWalksInEmpty();
     checkHoldingEClimbsOnce();
     checkTheLadderHolds();

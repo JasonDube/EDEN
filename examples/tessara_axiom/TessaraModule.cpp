@@ -100,6 +100,19 @@ void TessaraModule::setTerrain(eden::Terrain* terrain) {
 bool TessaraModule::groundHeight(float x, float z, float fromY, float& outHeight) const {
     if (!m_ground || !m_placed) return false;
 
+    // The test pole, answered before anything else so no part of the ship can
+    // reach into it. This is the same channel the ship's ladder uses -- the module
+    // says what is underfoot and the controller's snap does the carrying -- which
+    // is exactly the mechanism under suspicion. If the pole works and the ship
+    // does not, the channel is fine and the ship's extra parts are at fault.
+    if (m_onPole) {
+        const glm::vec3 pb = m_pole.base();
+        if (glm::length(glm::vec2(x - pb.x, z - pb.z)) < TestPole::kReach) {
+            outHeight = m_poleY;
+            return true;
+        }
+    }
+
     // Climbing: the floor under him IS the rung he is on. Answering here rather
     // than moving him means the scripted controller's own snap-to-ground does the
     // carrying, so nothing fights over his position and he can step off at the top
@@ -307,6 +320,7 @@ void TessaraModule::update(float dt) {
     // A rally suspends the haul loop outright: it hands out crates, and handing
     // a crate to something that has been called in is how a rally never finishes.
     updateLadder(dt);
+    updateTestPole(dt);
 
     if (m_launch == Launch::Idle) updateHauling();
     updateLaunch(dt);
@@ -505,6 +519,42 @@ void TessaraModule::updateLadder(float dt) {
 
     // On the PRESS, not while held. Holding E is one climb, not a shuttle.
     if (m_atLadder && pressed && !m_climbLatched) climbLadder();
+}
+
+// The isolated ladder. Two keys, held, and a height. Nothing else.
+//
+// Deliberately not sharing a line of code with updateLadder: the point of a
+// control experiment is that it cannot inherit the fault being investigated.
+void TessaraModule::updateTestPole(float dt) {
+    if (!m_source || !m_placed) return;
+
+    // Placed once, beside the ship and clear of the ramp and the ladder both.
+    if (!m_pole.placed()) {
+        const glm::vec3 spot = m_ship.origin()
+                             - m_ship.right() * (m_ship.params.width * 0.5f + 6.0f)
+                             + m_ship.forward() * 4.0f;
+        const float g = m_source->heightAtWorld(spot.x, spot.z);
+        m_pole.placeAt(glm::vec3(spot.x, g, spot.z), 4.0f);
+        std::printf("[pole] standing at %.1f, %.1f, base y %.2f, top y %.2f\n",
+                    spot.x, spot.z, g, g + 4.0f);
+        std::fflush(stdout);
+    }
+
+    const glm::vec3 feet = m_playerPosition - glm::vec3(0.0f, 1.7f, 0.0f);
+    const bool up   = (m_poleKeyTest >= 0) ? (m_poleKeyTest & 1) != 0
+                                           : eden::Input::isKeyDown(eden::Input::KEY_Z);
+    const bool down = (m_poleKeyTest >= 0) ? (m_poleKeyTest & 2) != 0
+                                           : eden::Input::isKeyDown(eden::Input::KEY_X);
+
+    const float groundY = m_source->heightAtWorld(feet.x, feet.z);
+    const bool wasOn = m_onPole;
+    m_onPole = m_pole.update(dt, feet, groundY, up, down, m_poleY);
+
+    if (m_onPole != wasOn) {
+        std::printf("[pole] %s at y %.2f (ground %.2f, top %.2f)\n",
+                    m_onPole ? "ON" : "off", m_poleY, groundY, m_pole.topY());
+        std::fflush(stdout);
+    }
 }
 
 void TessaraModule::climbLadder() {
@@ -929,6 +979,7 @@ void TessaraModule::rebuildGeometry() {
                     m_verts, m_indices);
     }
     appendStoragePad(m_storage, 1.6f, m_stored > 0, m_verts, m_indices);
+    m_pole.buildMesh(m_verts, m_indices);
 
     // The stations, marked. A spot a unit is sent to should be a spot you can see
     // it standing on -- otherwise a crew lined up correctly and a crew lined up by

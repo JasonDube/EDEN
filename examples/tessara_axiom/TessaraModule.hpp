@@ -5,6 +5,7 @@
 #include "Ground.hpp"
 #include "SceneVertex.hpp"
 #include "Ship.hpp"
+#include "TestPole.hpp"
 #include "Walker.hpp"
 
 #include "GameModules/GameModule.hpp"
@@ -82,10 +83,17 @@ public:
     // check. Ignored unless the player is actually at the foot of the ladder.
     void climbLadder();
 
+    // The isolated ladder rig -- see TestPole.hpp. Z up, X down, nothing else.
+    const TestPole& pole() const { return m_pole; }
+
     // Drive the climb key without an input device, for checks. -1 hands the
     // question back to the real keyboard. A held key is the case that broke, so
     // it has to be expressible.
     void holdClimbKey(int state) { m_climbKeyTest = state; }
+
+    // Test pole keys, for checks: -1 real keyboard, else bit0 = up, bit1 = down.
+    void holdPoleKeys(int mask) { m_poleKeyTest = mask; }
+    bool onPole() const { return m_onPole; }
     bool climbCoolingDown() const { return m_climbCooldown > 0.0f; }
     bool climbing() const { return m_climbing; }
     bool atLadder() const { return m_atLadder; }
@@ -141,6 +149,7 @@ private:
     void updateHauling();
     void updateLaunch(float dt);
     void updateLadder(float dt);
+    void updateTestPole(float dt);
     // Who was standing in the hold when it moved. Read before the ship goes
     // anywhere and acted on afterwards -- see TessaraModule::manifest.
     struct Manifest {
@@ -232,6 +241,11 @@ private:
     bool  m_wasClimbKeyDown = false;
     int   m_climbKeyTest = -1;   // -1 real key, 0/1 forced (checks only)
     bool  m_climbLatched = false;  // a finished climb; needs the key released
+
+    TestPole m_pole;
+    float m_poleY = 0.0f;      // the height it wants the player's feet at
+    bool  m_onPole = false;
+    int   m_poleKeyTest = -1;
 
     // A moment's rest after arriving, so nothing can bounce you straight back down
     // the way you came. The key edge already stops the common case; this stops the
