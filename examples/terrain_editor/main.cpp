@@ -1487,7 +1487,40 @@ protected:
         m_pipeline.reset();
     }
 
+    // Checkpoints through update(), so a stall inside it can be NAMED.
+    //
+    // update() is thousands of lines and the frame breakdown can only say "the
+    // time went in update". That is true and useless. These mark the boundaries
+    // between its coarse phases and the largest gap gets printed whenever the
+    // whole thing runs long, which turns "something once a second" into a place.
+    void mark(const char* name) {
+        m_marks.push_back({name, std::chrono::high_resolution_clock::now()});
+    }
+
+    void reportSlowSection() {
+        if (m_marks.size() < 2) { m_lastUpdateSpan = -1.0f; m_marks.clear(); return; }
+        const float whole = std::chrono::duration<float, std::milli>(
+            m_marks.back().second - m_marks.front().second).count();
+        m_lastUpdateSpan = whole;
+        m_marksSeen = static_cast<int>(m_marks.size());
+        if (whole > 4.0f) {
+            const char* worst = "-";
+            float worstMs = 0.0f;
+            for (size_t i = 1; i < m_marks.size(); ++i) {
+                const float ms = std::chrono::duration<float, std::milli>(
+                    m_marks[i].second - m_marks[i - 1].second).count();
+                if (ms > worstMs) { worstMs = ms; worst = m_marks[i].first; }
+            }
+            std::printf("[slow] update %.1f ms -- worst section '%s' %.1f ms\n",
+                        whole, worst, worstMs);
+            std::fflush(stdout);
+        }
+        m_marks.clear();
+    }
+
     void update(float deltaTime) override {
+        m_marks.clear();
+        mark("start");
         // Deferred level load (from the Load dialog) — safe point at frame
         // start, before any UI holds pointers into the current scene.
         if (!m_pendingLevelLoad.empty()) {
@@ -1498,6 +1531,7 @@ protected:
         }
 
         // Tick the standalone clip editor (no-op when no video loaded).
+        mark("pending load");
         if (m_videoEditor) m_videoEditor->update(deltaTime);
 
         // Phase 1 grass: build assets once and (re)scatter blades when marked dirty.
@@ -1531,6 +1565,7 @@ protected:
         }
 
         // Update machines (fan spinning, sound attenuation, etc.)
+        mark("video+grass+terminal");
         m_machineManager.update(deltaTime);
 
         // Battle render mode: when entering play, drop terrain view distance to 1 chunk
@@ -1548,6 +1583,7 @@ protected:
         }
 
         // Battle test (only updates in play mode / F5)
+        mark("machines");
         if (m_isPlayMode) updateBattle(deltaTime);
 
         // Water flow sound attenuation (same curve as generator)
@@ -1709,6 +1745,7 @@ protected:
         }
 
         // Process pending filesystem navigation
+        mark("battle+water+wires+particles");
         bool hadPending = m_filesystemBrowser.hasPendingNavigation();
         if (hadPending) syncExcludedPaths(); // ensure hotbar/frame files are excluded before rebuild
         m_filesystemBrowser.processNavigation();
@@ -1789,6 +1826,7 @@ protected:
         }
 
         // Check if Hunyuan3D generation completed — place model on forge pad
+        mark("filesystem browser");
         if (m_aiGenerateComplete.load()) {
             m_aiGenerateComplete = false;
             m_aiGenerating = false;
@@ -1920,22 +1958,43 @@ protected:
             }
         }
 
-        // Poll system clipboard for changes (add to history automatically)
-        {
-            const char* clip = glfwGetClipboardString(getWindow().getHandle());
-            if (clip && clip[0] != '\0') {
-                std::string clipStr(clip);
-                if (clipStr != m_lastClipboardContent) {
-                    m_lastClipboardContent = clipStr;
-                    addClipboardEntry(clipStr);
+        mark("fs browser ui");
+        // Poll the system clipboard for changes made by OTHER applications.
+        //
+        // Only while the history panel is open, and twice a second at most.
+        //
+        // This ran every frame, and glfwGetClipboardString is not cheap: on Wayland
+        // it is a synchronous round-trip to the compositor, and it measured FIFTY
+        // MILLISECONDS a call on this machine -- seventy-five of them in twenty
+        // seconds. That was the whole mystery. The frame breakdown said the time was
+        // in "update", and inside update it was one line polling a clipboard nobody
+        // was looking at, three times a second, for fifty milliseconds a go.
+        //
+        // Nothing is lost by gating it. This app's own copies call addClipboardEntry
+        // directly, so the poll exists purely to notice a copy made in another
+        // application -- which is only interesting while the history is on screen.
+        if (m_showClipboardHistory) {
+            m_clipboardPollTimer += deltaTime;
+            if (m_clipboardPollTimer >= 0.5f) {
+                m_clipboardPollTimer = 0.0f;
+                const char* clip = glfwGetClipboardString(getWindow().getHandle());
+                if (clip && clip[0] != '\0') {
+                    std::string clipStr(clip);
+                    if (clipStr != m_lastClipboardContent) {
+                        m_lastClipboardContent = clipStr;
+                        addClipboardEntry(clipStr);
+                    }
                 }
             }
         }
 
+        mark("clipboard");
         // Update level transition fade (runs even during transitions)
         updateFade(deltaTime);
 
+        mark("fade");
         handleCameraInput(deltaTime);
+        mark("camera input");
         handleKeyboardShortcuts(deltaTime);
 
         m_totalTime += deltaTime;
@@ -1998,6 +2057,7 @@ protected:
             }
         }
         m_dialogueRenderer.update(deltaTime);
+        mark("scripts+play");
         updateChatLog(deltaTime);
 
         // Auto-start SmolVLM server when ImageBot is present in room
@@ -2183,6 +2243,7 @@ protected:
             m_mcpServer->processCommands();
         }
 
+        mark("chat log");
         trackFPS(deltaTime);
 
         if (!m_isEdenOSLevel) {
@@ -2258,11 +2319,17 @@ protected:
         }
 
         if (m_isPlayMode) {
+            mark("opacity/import");
             updatePlayMode(deltaTime);
+            mark("play mode");
+            reportSlowSection();   // play mode returns HERE, so it has to report here
             return;
         }
 
+        mark("opacity/import/playmode");
         updateEditorMode(deltaTime);
+        mark("editor mode");
+        reportSlowSection();
     }
 
     // ── Agent chat (EDEN OS) ────────────────────────────────────────────────
@@ -3033,18 +3100,23 @@ protected:
                 for (const auto& [coord, chunk] : m_terrain.getAllChunks())
                     draws.emplace_back(chunk.get(), glm::vec3(0.0f));
             } else {
-                // Frustum culled, which the visible set is NOT.
-                //
-                // getVisibleChunks is a square of (2*viewDistance+1)^2 chunks
-                // around the camera, chosen when the camera crosses a chunk
-                // boundary and never reconsidered when it turns. So everything
-                // behind you was being drawn, every frame -- and a chunk is eight
-                // thousand triangles through a sixteen-weight splatmap shader, so
-                // it is paid for in fragments whether or not it is on screen.
-                //
-                // Six planes out of the view-projection and an AABB test each. The
-                // Y span is the chunk's own measured height range, which is why
-                // TerrainChunk keeps one.
+                for (const auto& vc : m_terrain.getVisibleChunks())
+                    draws.emplace_back(vc.chunk.get(), vc.renderOffset);
+            }
+
+            // Then frustum culled, whichever list it came from.
+            //
+            // This used to cull only the view-distance list, which is the EDIT mode
+            // one -- and play mode takes the other branch, so the cull never ran
+            // anywhere it mattered. All 1024 of red_planet's chunks were drawn every
+            // frame while playing, and the overlay reported 300 of 1089 because
+            // those were stale numbers left by the last edit-mode frame.
+            //
+            // Play mode draws every chunk on purpose: the view-distance square is an
+            // authoring convenience and a player should see the horizon. Culling is
+            // not in tension with that -- it removes what is behind you, which you
+            // cannot see however far you can see.
+            {
                 const glm::mat4& m = vp;
                 auto row = [&m](int i) {
                     return glm::vec4(m[0][i], m[1][i], m[2][i], m[3][i]);
@@ -3056,20 +3128,22 @@ protected:
                     w + row(2), w - row(2),    // near, far
                 };
 
-                for (const auto& vc : m_terrain.getVisibleChunks()) {
-                    eden::TerrainChunk* chunk = vc.chunk.get();
+                m_chunksConsidered = static_cast<int>(draws.size());
+                std::vector<std::pair<eden::TerrainChunk*, glm::vec3>> kept;
+                kept.reserve(draws.size());
+
+                for (const auto& [chunk, offset] : draws) {
                     const float side = chunk->getChunkWorldSize();
-                    const glm::vec3 base = chunk->getWorldPosition() + vc.renderOffset;
+                    const glm::vec3 base = chunk->getWorldPosition() + offset;
 
                     // A slab, not a cube: flat ground gives a flat box and the test
-                    // stays tight. A margin of a tile so a chunk whose edge vertex
+                    // stays tight. A tile of margin so a chunk whose edge vertex
                     // sits exactly on a plane is never clipped away.
-                    const glm::vec3 lo(base.x - chunk->getTileSize(),
-                                       chunk->getMinHeight() - chunk->getTileSize(),
-                                       base.z - chunk->getTileSize());
-                    const glm::vec3 hi(base.x + side + chunk->getTileSize(),
-                                       chunk->getMaxHeight() + chunk->getTileSize(),
-                                       base.z + side + chunk->getTileSize());
+                    const float pad = chunk->getTileSize();
+                    const glm::vec3 lo(base.x - pad, chunk->getMinHeight() - pad,
+                                       base.z - pad);
+                    const glm::vec3 hi(base.x + side + pad, chunk->getMaxHeight() + pad,
+                                       base.z + side + pad);
 
                     bool outside = false;
                     for (const glm::vec4& p : planes) {
@@ -3081,11 +3155,12 @@ protected:
                                             p.z >= 0.0f ? hi.z : lo.z);
                         if (glm::dot(glm::vec3(p), far) + p.w < 0.0f) { outside = true; break; }
                     }
-                    if (!outside) draws.emplace_back(chunk, vc.renderOffset);
+                    if (!outside) kept.emplace_back(chunk, offset);
                 }
+                draws.swap(kept);
                 m_chunksDrawn = static_cast<int>(draws.size());
-                m_chunksConsidered = static_cast<int>(m_terrain.getVisibleChunks().size());
             }
+
             for (const auto& [chunk, offset] : draws) {
                 auto* buffers = getBufferManager().getMeshBuffers(chunk->getBufferHandle());
                 if (!buffers || !buffers->vertexBuffer) continue;
@@ -8829,6 +8904,33 @@ private:
             m_loadedStartupLevel = true;
             std::cout << "[Startup] Loading level: " << m_startupLevel << std::endl;
             loadLevel(m_startupLevel);
+
+            // --play: straight into play mode, so a scene can be measured without
+            // somebody standing at the keyboard to press F5.
+            if (m_startupPlay && !m_isPlayMode) {
+                std::cout << "[Startup] Entering play mode" << std::endl;
+                enterPlayMode();
+            }
+        }
+
+        // --perf-log: the frame breakdown to stdout once a second, which is the
+        // only way to read it when the thing being measured is why nobody can look
+        // at the screen. Same numbers as the overlay.
+        if (m_perfLog) {
+            m_perfLogAt += deltaTime;
+            if (m_perfLogAt >= 1.0f) {
+                m_perfLogAt = 0.0f;
+                const FrameCost& c = frameCost();
+                std::printf("[perf] %.1f ms avg | upd %.2f acq %.2f rec %.2f pre %.2f "
+                            "| worst %.1f (%s %.1f) | chunks %d/%d | %s\n",
+                            c.total, c.update, c.acquire, c.record, c.present,
+                            c.worst, c.worstName, c.worstPhase,
+                            m_chunksDrawn, m_chunksConsidered,
+                            getSwapchain().getPresentModeName());
+                std::printf("[perf] update() from inside: %.2f ms over %d checkpoints\n",
+                            m_lastUpdateSpan, m_marksSeen);
+                std::fflush(stdout);
+            }
         }
 
         // J — one-key: deploy a Claude-backed Agent avatar in the current folder
@@ -32174,8 +32276,17 @@ private:
     bool m_bootEdenOS = false;   // --eden-os: auto-load the saved EDEN OS world
 public:
     void setStartupLevel(const std::string& p) { m_startupLevel = p; }
+    void setStartupPlay(bool on) { m_startupPlay = on; }
+    void setPerfLog(bool on) { m_perfLog = on; }
 private:
     std::string m_startupLevel;          // --level <path>: load on first frame
+    bool m_startupPlay = false;          // --play: enter play mode once it is loaded
+    bool m_perfLog = false;              // --perf-log: frame cost to stdout each second
+    float m_perfLogAt = 0.0f;
+    float m_clipboardPollTimer = 0.0f;
+    float m_lastUpdateSpan = -1.0f;
+    int m_marksSeen = 0;
+    std::vector<std::pair<const char*, std::chrono::high_resolution_clock::time_point>> m_marks;
     bool m_loadedStartupLevel = false;
     std::string m_pendingLevelLoad;      // Load-dialog result, applied at frame start (see update())
     bool m_playRTSCamera = false;        // F6 in play mode: false = first-person WASD (default), true = RTS/battle cam
@@ -33236,6 +33347,8 @@ int main(int argc, char* argv[]) {
 
     bool sessionMode = false;
     bool bootEdenOS = false;
+    bool startupPlay = false;
+    bool perfLog = false;
     std::string startupLevel;
     for (int i = 1; i < argc; ++i) {
         if (std::string(argv[i]) == "--session-mode") {
@@ -33244,6 +33357,10 @@ int main(int argc, char* argv[]) {
             bootEdenOS = true;
         } else if (std::string(argv[i]) == "--level" && i + 1 < argc) {
             startupLevel = argv[++i];
+        } else if (std::string(argv[i]) == "--play") {
+            startupPlay = true;
+        } else if (std::string(argv[i]) == "--perf-log") {
+            perfLog = true;
         }
     }
 
@@ -33258,6 +33375,8 @@ int main(int argc, char* argv[]) {
         if (!startupLevel.empty()) {
             editor.setStartupLevel(startupLevel);
         }
+        editor.setStartupPlay(startupPlay);
+        editor.setPerfLog(perfLog);
         editor.run();
     } catch (const std::exception& e) {
         std::cerr << "\n=== EXCEPTION: " << e.what() << " ===" << std::endl;

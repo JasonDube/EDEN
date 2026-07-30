@@ -2,6 +2,7 @@
 #include <GLFW/glfw3.h>
 #include <stdexcept>
 #include <iostream>
+#include <cstdio>
 #include <cstdlib>
 
 namespace eden {
@@ -92,12 +93,20 @@ void VulkanApplicationBase::mainLoop() {
     auto shouldClose = [this] { return m_kms ? m_kms->shouldClose() : m_window->shouldClose(); };
     auto pollEvents  = [this] { if (m_kms) m_kms->pollEvents(); else m_window->pollEvents(); };
 
-    // Smoothed rather than instantaneous: a number that changes sixty times a
-    // second is a number nobody can read off the screen.
-    auto mark = [](std::chrono::high_resolution_clock::time_point& since, float& into) {
+    // Smoothed for reading, RAW for blame.
+    //
+    // The first version of this recorded the SMOOTHED phase values at the moment of
+    // a spike, which is useless: those are what the last twenty frames were doing,
+    // not what this one did. It confidently blamed acquire for 60 ms frames while
+    // acquire's own average was 13. A spike has to be attributed from the spike's
+    // own measurements.
+    float raw[5] = {0, 0, 0, 0, 0};
+    int rawAt = 0;
+    auto mark = [&](std::chrono::high_resolution_clock::time_point& since, float& into) {
         const auto now = std::chrono::high_resolution_clock::now();
         const float took = std::chrono::duration<float, std::milli>(now - since).count();
         into += (took - into) * 0.1f;
+        if (rawAt < 5) raw[rawAt++] = took;
         since = now;
     };
 
@@ -107,6 +116,8 @@ void VulkanApplicationBase::mainLoop() {
     while (!shouldClose()) {
         auto phase = std::chrono::high_resolution_clock::now();
         const auto frameBegan = phase;
+        rawAt = 0;
+        raw[0] = raw[1] = raw[2] = raw[3] = raw[4] = 0.0f;
 
         pollEvents();
         mark(phase, m_frameCost.poll);
@@ -139,17 +150,35 @@ void VulkanApplicationBase::mainLoop() {
         // The worst frame in the last second, kept rather than averaged away, with
         // the phase that made it worst. Reset each second so it tracks the scene
         // instead of remembering one bad frame at startup forever.
+        // Every bad frame, printed with its OWN five numbers the moment it
+        // happens. No smoothing, no naming, no interpretation -- the previous
+        // version named a phase and the name disagreed with checkpoints placed
+        // inside that phase, so one of the two was lying and this settles it.
+        if (whole > 30.0f) {
+            std::fprintf(stderr,
+                "[spike] frame %.1f ms | poll %.1f update %.1f acquire %.1f "
+                "record %.1f present %.1f | sum %.1f\n",
+                whole, raw[0], raw[1], raw[2], raw[3], raw[4],
+                raw[0] + raw[1] + raw[2] + raw[3] + raw[4]);
+            std::fflush(stderr);
+        }
+
         if (whole > peakWhole) {
             peakWhole = whole;
-            const std::pair<const char*, float> phases[] = {
-                {"poll", m_frameCost.poll}, {"update", m_frameCost.update},
-                {"acquire", m_frameCost.acquire}, {"record", m_frameCost.record},
-                {"present", m_frameCost.present},
-            };
+            static const char* kNames[5] = {"poll", "update", "acquire", "record", "present"};
             peakName = "-";
             peakPhase = 0.0f;
-            for (const auto& [name, ms] : phases) {
-                if (ms > peakPhase) { peakPhase = ms; peakName = name; }
+            float accounted = 0.0f;
+            for (int i = 0; i < 5; ++i) {
+                accounted += raw[i];
+                if (raw[i] > peakPhase) { peakPhase = raw[i]; peakName = kNames[i]; }
+            }
+            // If the phases do not add up to the frame, the time went somewhere this
+            // loop does not measure -- which is itself the answer, and worth saying
+            // rather than mis-attributing it to the largest thing that IS measured.
+            if (whole - accounted > peakPhase) {
+                peakPhase = whole - accounted;
+                peakName = "outside the loop";
             }
         }
         peakWindow += whole;
