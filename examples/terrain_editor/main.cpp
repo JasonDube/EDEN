@@ -26326,6 +26326,16 @@ private:
         // is when a module decides where it has put things, and it cannot say
         // where to stand to see them before it knows.
         if (m_gameModule) {
+            // Where the level says it starts, before the module decides anything.
+            // The spawn object's transform is the truth if there is one; it is
+            // refreshed on save, so read it here rather than trusting the cache.
+            if (m_hasSpawnPoint && m_spawnObjectIndex >= 0 &&
+                m_spawnObjectIndex < static_cast<int>(m_sceneObjects.size()) &&
+                m_sceneObjects[m_spawnObjectIndex]) {
+                m_spawnPosition = m_sceneObjects[m_spawnObjectIndex]->getTransform().getPosition();
+            }
+            m_gameModule->setLevelSpawn(m_spawnPosition, m_hasSpawnPoint);
+
             m_gameModule->onEnterPlayMode();
 
             glm::vec3 start(0.0f);

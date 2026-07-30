@@ -149,10 +149,21 @@ bool TessaraModule::resolvePosition(float& x, float& z, float footY, float heigh
 void TessaraModule::placeShip() {
     if (!m_source || !m_ground) return;
 
-    // Set down near the middle of whatever this level is, on the flattest ground
-    // it can find. It does not flatten a pad here: editing the level's terrain
-    // out from under the player is a much larger promise than landing a ship.
-    m_ship.place(*m_source, glm::vec2(0.0f, 0.0f), 34.0f);
+    // Set down at the level's OWN spawn point, on the flattest ground near it.
+    //
+    // This used to be world (0,0) regardless of the level, and the player's start
+    // was then derived from the ship -- so the level's spawn point, the one thing
+    // an author sets to say "the game begins here", decided nothing at all. With
+    // an anchor, everything downstream is knowable: the ship is at the spawn, the
+    // player starts looking at it, and anything else placed relative to either is
+    // where you can predict it will be.
+    const glm::vec2 anchor = m_hasLevelSpawn ? glm::vec2(m_levelSpawn.x, m_levelSpawn.z)
+                                             : glm::vec2(0.0f, 0.0f);
+    std::printf("[tessara] anchor: %s (%.1f, %.1f)\n",
+                m_hasLevelSpawn ? "the level's spawn point" : "world origin (level has no spawn point)",
+                anchor.x, anchor.y);
+    std::fflush(stdout);
+    m_ship.place(*m_source, anchor, 34.0f);
     m_ship.openRamp();
     for (int i = 0; i < 300; ++i) m_ship.update(1.0f / 60.0f);
 
@@ -528,15 +539,27 @@ void TessaraModule::updateLadder(float dt) {
 void TessaraModule::updateTestPole(float dt) {
     if (!m_source || !m_placed) return;
 
-    // Placed once, beside the ship and clear of the ramp and the ladder both.
+    // Placed once, right where the player starts, four paces to his left.
+    //
+    // It was off the ship's PORT side, which is the far side from the ramp and
+    // the hatch -- so it stood behind thirty-eight metres of hull from where
+    // anybody spawns, and the first thing said about it was "I don't see the
+    // pole". A rig nobody can find tests nothing.
     if (!m_pole.placed()) {
-        const glm::vec3 spot = m_ship.origin()
-                             - m_ship.right() * (m_ship.params.width * 0.5f + 6.0f)
-                             + m_ship.forward() * 4.0f;
+        glm::vec3 start(0.0f);
+        float yaw = 0.0f;
+        const glm::vec3 from = playerStart(start, yaw) ? start : m_ship.origin();
+
+        // To the left of the way he is facing, so it is in frame on spawn without
+        // standing between him and the ship.
+        const glm::vec3 look = glm::normalize(m_ship.origin() - from);
+        const glm::vec3 left(-look.z, 0.0f, look.x);
+        const glm::vec3 spot = from + left * 4.0f + look * 2.0f;
+
         const float g = m_source->heightAtWorld(spot.x, spot.z);
         m_pole.placeAt(glm::vec3(spot.x, g, spot.z), 4.0f);
-        std::printf("[pole] standing at %.1f, %.1f, base y %.2f, top y %.2f\n",
-                    spot.x, spot.z, g, g + 4.0f);
+        std::printf("[pole] standing at %.1f, %.1f -- base y %.2f, top y %.2f. "
+                    "Z climbs, X descends.\n", spot.x, spot.z, g, g + 4.0f);
         std::fflush(stdout);
     }
 

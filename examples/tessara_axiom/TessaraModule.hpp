@@ -58,6 +58,10 @@ public:
     // The host hands us the level's terrain. Without one the module is inert
     // rather than broken -- there is simply nowhere to put a ship.
     void setTerrain(eden::Terrain* terrain) override;
+    void setLevelSpawn(const glm::vec3& worldPosition, bool hasOne) override {
+        m_levelSpawn = worldPosition;
+        m_hasLevelSpawn = hasOne;
+    }
 
     // ---- the launch sequence -----------------------------------------------
     // Rally, seal, ready. Deliberately a sequence with named states rather than
@@ -241,6 +245,9 @@ private:
     bool  m_wasClimbKeyDown = false;
     int   m_climbKeyTest = -1;   // -1 real key, 0/1 forced (checks only)
     bool  m_climbLatched = false;  // a finished climb; needs the key released
+
+    glm::vec3 m_levelSpawn{0.0f};
+    bool  m_hasLevelSpawn = false;
 
     TestPole m_pole;
     float m_poleY = 0.0f;      // the height it wants the player's feet at

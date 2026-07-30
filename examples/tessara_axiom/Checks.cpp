@@ -2012,6 +2012,57 @@ void checkNobodyWalksInEmpty() {
 }
 
 // ---------------------------------------------------------------------------
+// 5e-iv-0. The ship's mesh is all there.
+//
+// From a screenshot: "why is the right part of the ship getting completely
+// clipped out?" -- a hard vertical edge with terrain visible past it. Two things
+// it could be. Either the renderer is cutting geometry that exists, or the
+// geometry does not exist. The pipeline culls nothing and depth-tests normally,
+// so the second is worth ruling out before anything else, and it is measurable
+// without a screen: build the hull and see whether it spans the hull.
+//
+// Measured along the ship's OWN axes, not the world's, because a ship on a
+// heading has a world bounding box larger than itself and that box would pass
+// while half the plating was missing.
+// ---------------------------------------------------------------------------
+void checkTheShipIsAllThere() {
+    for (float heading : {0.0f, 37.0f, 90.0f, 143.0f, 216.0f, 305.0f}) {
+        Scene s(0.0f, {0.0f, 0.0f}, heading);
+
+        std::vector<SceneVertex> verts;
+        std::vector<uint32_t> indices;
+        appendShipMesh(s.ship, verts, indices);
+
+        const glm::vec3 o = s.ship.origin();
+        const glm::vec3 f = s.ship.forward(), r = s.ship.right();
+        float minF = 1e9f, maxF = -1e9f, minR = 1e9f, maxR = -1e9f, maxU = -1e9f;
+        for (const SceneVertex& v : verts) {
+            const glm::vec3 d = v.pos - o;
+            minF = std::min(minF, glm::dot(d, f)); maxF = std::max(maxF, glm::dot(d, f));
+            minR = std::min(minR, glm::dot(d, r)); maxR = std::max(maxR, glm::dot(d, r));
+            maxU = std::max(maxU, d.y);
+        }
+
+        // Both halves, fore and aft, port and starboard. A truncated buffer loses
+        // the END of the mesh, so a check that only asks for total extent would
+        // pass on a hull missing everything after the midpoint.
+        const float halfLen = s.ship.params.length * 0.5f;
+        const float halfWid = s.ship.params.width * 0.5f;
+        const bool whole = maxF > halfLen * 0.85f && minF < -halfLen * 0.85f &&
+                           maxR > halfWid * 0.85f && minR < -halfWid * 0.85f &&
+                           maxU > s.ship.params.deckHeight;
+
+        char detail[208];
+        std::snprintf(detail, sizeof detail,
+                      "heading %.0f: %zu verts spanning fore %.1f..%.1f (hull +-%.1f), "
+                      "port/stbd %.1f..%.1f (+-%.1f), up to %.1f",
+                      heading, verts.size(), minF, maxF, halfLen, minR, maxR, halfWid, maxU);
+        report("the ship's hull mesh spans the whole ship", whole, detail);
+        if (!whole) return;
+    }
+}
+
+// ---------------------------------------------------------------------------
 // 5e-iv-a. THE CONTROL EXPERIMENT: a ladder with nothing attached to it.
 //
 // Four metres of pole beside the ship, Z up, X down, no platform, no toggle, no
@@ -3125,6 +3176,7 @@ int runShipChecks(bool verbose) {
     checkTheHelmView();
     checkTheLanding();
     checkNoTeleportedCrates();
+    checkTheShipIsAllThere();
     checkTheBarePole();
     checkNobodyWalksInEmpty();
     checkHoldingEClimbsOnce();

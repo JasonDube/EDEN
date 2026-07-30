@@ -139,6 +139,16 @@ public:
     virtual bool wantsCaptureKeyboard() const { return false; }
     virtual bool wantsCaptureMouse() const { return false; }
 
+    // The level's spawn point, if it has one, in world space.
+    //
+    // Told to the module BEFORE onEnterPlayMode, because where a level says its
+    // start is decides where a module puts everything else. Without this a module
+    // has no anchor at all and has to invent one -- Tessara set its ship down at
+    // world (0,0) whatever the level was, and then derived the player's start
+    // from the ship, so the level's own spawn point was never consulted and
+    // nothing was where the author put it.
+    virtual void setLevelSpawn(const glm::vec3& /*worldPosition*/, bool /*hasOne*/) {}
+
     // Optional: the host's terrain, for a module that walks on it.
     //
     // On the base class rather than reached for with a dynamic_cast, because the
