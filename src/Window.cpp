@@ -2,6 +2,7 @@
 #define GLFW_INCLUDE_VULKAN
 #include <GLFW/glfw3.h>
 #include <stdexcept>
+#include <cstdlib>
 
 namespace eden {
 
@@ -16,7 +17,34 @@ Window::Window(int width, int height, const std::string& title)
     glfwWindowHint(GLFW_RESIZABLE, GLFW_TRUE);
     glfwWindowHint(GLFW_MAXIMIZED, GLFW_TRUE);
 
-    m_window = glfwCreateWindow(width, height, title.c_str(), nullptr, nullptr);
+    // EDEN_FULLSCREEN=1 asks for a real fullscreen window on the primary monitor.
+    //
+    // Not a cosmetic option. A windowed surface is composited: the compositor takes
+    // your buffer, draws it into a larger scene, and hands THAT to the display. A
+    // fullscreen surface exactly matching the mode can instead be handed straight to
+    // the display -- direct scanout -- which skips the composite and the latency that
+    // comes with it. Whether it happens is the compositor's decision, not ours, so
+    // this is a thing to MEASURE rather than to assume.
+    GLFWmonitor* monitor = nullptr;
+    const char* wantFull = std::getenv("EDEN_FULLSCREEN");
+    if (wantFull && wantFull[0] == '1') {
+        monitor = glfwGetPrimaryMonitor();
+        if (monitor) {
+            // The monitor's own mode, so the surface matches the display exactly.
+            // A fullscreen window at the wrong size has to be scaled, and a scaled
+            // surface is one no compositor will scan out directly.
+            if (const GLFWvidmode* mode = glfwGetVideoMode(monitor)) {
+                width = mode->width;
+                height = mode->height;
+                glfwWindowHint(GLFW_RED_BITS, mode->redBits);
+                glfwWindowHint(GLFW_GREEN_BITS, mode->greenBits);
+                glfwWindowHint(GLFW_BLUE_BITS, mode->blueBits);
+                glfwWindowHint(GLFW_REFRESH_RATE, mode->refreshRate);
+            }
+        }
+    }
+
+    m_window = glfwCreateWindow(width, height, title.c_str(), monitor, nullptr);
     if (!m_window) {
         glfwTerminate();
         throw std::runtime_error("Failed to create GLFW window");
