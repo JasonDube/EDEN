@@ -70,6 +70,10 @@ void EditorUI::render() {
         renderWaterSettings();
     }
 
+    if (m_showFoliageSettings) {
+        renderFoliageSettings();
+    }
+
     if (m_showLevelSettings) {
         renderLevelSettings();
     }
@@ -200,6 +204,7 @@ void EditorUI::renderMenuBar() {
             ImGui::MenuItem("Terrain Info", nullptr, &m_showTerrainInfo);
             ImGui::MenuItem("Sky Settings", nullptr, &m_showSkySettings);
             ImGui::MenuItem("Water Settings", nullptr, &m_showWaterSettings);
+            ImGui::MenuItem("Foliage Settings", nullptr, &m_showFoliageSettings);
             ImGui::MenuItem("Level Settings", nullptr, &m_showLevelSettings);
             ImGui::MenuItem("Build (floors/walls)", nullptr, &m_showBuild);
             ImGui::MenuItem("Character Controller", nullptr, &m_showCharacterController);
@@ -245,6 +250,7 @@ void EditorUI::renderMenuBar() {
                 m_showTerrainInfo = true;
                 m_showSkySettings = true;
                 m_showWaterSettings = true;
+                m_showFoliageSettings = true;
                 m_showLevelSettings = true;
                 m_showCharacterController = true;
                 m_showModels = true;
@@ -259,6 +265,7 @@ void EditorUI::renderMenuBar() {
                 m_showTerrainInfo = false;
                 m_showSkySettings = false;
                 m_showWaterSettings = false;
+                m_showFoliageSettings = false;
                 m_showLevelSettings = false;
                 m_showCharacterController = false;
                 m_showModels = false;
@@ -2193,6 +2200,58 @@ void EditorUI::renderWaterSettings() {
     }
 }
 
+// Foliage -- everything that grows on the ground.
+//
+// Grass is the only thing here so far, and it is the reason the window exists:
+// it had no UI at all. It scattered itself over any Terrain Cell level, and the
+// only ways to influence it were J (toggle), K (erase brush) and L (paint
+// brush) -- three unlabelled keys, one of which used to also spawn a cave
+// person. A thing that covers the whole map should be visible in a window.
+//
+// Trees, rocks, scatter layers and per-biome mixes belong here as they arrive.
+void EditorUI::renderFoliageSettings() {
+    ImGui::SetNextWindowPos(ImVec2(630, 220), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSize(ImVec2(250, 190), ImGuiCond_FirstUseEver);
+    ImGui::Begin("Foliage Settings");
+
+    bool changed = false;
+
+    ImGui::Text("Grass");
+    ImGui::Separator();
+
+    if (ImGui::Checkbox("Show Grass (J)", &m_grassEnabled)) changed = true;
+
+    // Greyed rather than hidden: the knobs should be readable when it is off, so
+    // you can see what you are about to turn on.
+    ImGui::BeginDisabled(!m_grassEnabled);
+
+    if (ImGui::SliderFloat("Spacing", &m_grassSpacing, 2.0f, 20.0f, "%.1f ft")) changed = true;
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Feet between tufts before jitter.\nBigger = sparser.");
+
+    if (ImGui::SliderFloat("Height", &m_grassHeight, 0.2f, 3.0f, "%.2fx")) changed = true;
+
+    ImGui::Separator();
+    ImGui::TextDisabled("Density brush:");
+    if (ImGui::Button("Paint (L)")) {
+        m_terrainToolsEnabled = true;
+        m_brushMode = BrushMode::GrassPaint;
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Erase (K)")) {
+        m_terrainToolsEnabled = true;
+        m_brushMode = BrushMode::GrassErase;
+    }
+
+    ImGui::EndDisabled();
+
+    ImGui::End();
+
+    if (changed && m_onFoliageChanged) {
+        m_onFoliageChanged(m_grassEnabled, m_grassSpacing, m_grassHeight);
+    }
+}
+
 void EditorUI::renderLevelSettings() {
     ImGui::SetNextWindowPos(ImVec2(630, 220), ImGuiCond_FirstUseEver);
     ImGui::SetNextWindowSize(ImVec2(250, 120), ImGuiCond_FirstUseEver);
@@ -2947,6 +3006,7 @@ void EditorUI::saveConfig(const std::string& filepath) {
     config["windows"]["terrainEditor"] = m_showTerrainEditor;
     config["windows"]["skySettings"] = m_showSkySettings;
     config["windows"]["waterSettings"] = m_showWaterSettings;
+    config["windows"]["foliageSettings"] = m_showFoliageSettings;
     config["windows"]["models"] = m_showModels;
     config["windows"]["terrainInfo"] = m_showTerrainInfo;
     config["windows"]["aiNodes"] = m_showAINodes;
@@ -3229,6 +3289,7 @@ void EditorUI::loadConfig(const std::string& filepath) {
             m_showTerrainEditor = w.value("terrainEditor", true);
             m_showSkySettings = w.value("skySettings", true);
             m_showWaterSettings = w.value("waterSettings", true);
+            m_showFoliageSettings = w.value("foliageSettings", true);
             m_showModels = w.value("models", true);
             m_showTerrainInfo = w.value("terrainInfo", true);
             m_showAINodes = w.value("aiNodes", true);
@@ -3879,6 +3940,7 @@ std::vector<std::pair<const char*, bool*>> EditorUI::uiPrefBoolEntries() {
         {"show_terrain_info",        &m_showTerrainInfo},
         {"show_sky_settings",        &m_showSkySettings},
         {"show_water_settings",      &m_showWaterSettings},
+        {"show_foliage_settings",    &m_showFoliageSettings},
         {"show_level_settings",      &m_showLevelSettings},
         {"show_build",               &m_showBuild},
         {"show_character_controller",&m_showCharacterController},

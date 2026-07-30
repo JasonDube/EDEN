@@ -427,6 +427,15 @@ protected:
             m_waterRenderer->setVisible(visible);
         });
 
+        // Foliage. The window owns what the grass should look like; the blades
+        // themselves stay here, so a change just means scatter it again.
+        m_editorUI.setFoliageChangedCallback([this](bool on, float spacing, float height) {
+            m_grassEnabled = on;
+            m_grassSpacing = spacing;
+            m_grassHeight  = height;
+            m_grassDirty   = true;
+        });
+
         TerrainInfo terrainInfo;
         terrainInfo.chunkCountX = 32;
         terrainInfo.chunkCountZ = 32;
@@ -9442,10 +9451,16 @@ private:
             if (u && !wasU) m_showTerrainGrid = !m_showTerrainGrid;
             wasU = u;
 
-            // J — toggle Phase 1 grass. First enable also triggers a scatter.
+            // J — toggle grass. The shortcut for the Foliage Settings checkbox, so
+            // it tells the window too; a key and a checkbox that disagree about the
+            // same thing is worse than either alone.
             static bool wasJ = false;
             bool j = Input::isKeyDown(74); // GLFW_KEY_J
-            if (j && !wasJ) { m_grassEnabled = !m_grassEnabled; if (m_grassEnabled) m_grassDirty = true; }
+            if (j && !wasJ) {
+                m_grassEnabled = !m_grassEnabled;
+                m_editorUI.setGrassEnabled(m_grassEnabled);
+                if (m_grassEnabled) m_grassDirty = true;
+            }
             wasJ = j;
 
             // K — grass ERASE brush (carve paths/clearings); L — grass PAINT brush
@@ -9454,8 +9469,8 @@ private:
             static bool wasK = false, wasL = false;
             bool k = Input::isKeyDown(75); // GLFW_KEY_K
             bool l = Input::isKeyDown(76); // GLFW_KEY_L
-            if (k && !wasK) { m_editorUI.setTerrainToolsEnabled(true); m_editorUI.setBrushMode(BrushMode::GrassErase); m_grassEnabled = true; m_grassDirty = true; }
-            if (l && !wasL) { m_editorUI.setTerrainToolsEnabled(true); m_editorUI.setBrushMode(BrushMode::GrassPaint); m_grassEnabled = true; m_grassDirty = true; }
+            if (k && !wasK) { m_editorUI.setTerrainToolsEnabled(true); m_editorUI.setBrushMode(BrushMode::GrassErase); m_grassEnabled = true; m_editorUI.setGrassEnabled(true); m_grassDirty = true; }
+            if (l && !wasL) { m_editorUI.setTerrainToolsEnabled(true); m_editorUI.setBrushMode(BrushMode::GrassPaint); m_grassEnabled = true; m_editorUI.setGrassEnabled(true); m_grassDirty = true; }
             wasK = k; wasL = l;
         }
 
@@ -24099,6 +24114,13 @@ private:
         m_terminalScreenObject = nullptr;  // Will re-bind after load
         m_terminalScreenBound = false;
 
+        // The blades belong to the terrain that was here a moment ago. Foliage is
+        // not saved in the level yet, so the setting carries over -- but the
+        // scatter cannot, or grass from the old heightmap hangs in the new level's
+        // air. Re-scatter against the terrain that just arrived.
+        m_grassBlades.clear();
+        m_grassDirty = m_grassEnabled;
+
         // Spawn objects via the shared instantiator: binary sidecar (.edenbin)
         // fast path first, JSON/GLB fallback if it's absent/mismatched (see
         // LevelInstantiator / docs/EDEN_FORMAT.md §3.4).
@@ -24521,6 +24543,12 @@ private:
         // whatever was played last -- pointing at bodies the wipe below deletes.
         m_tribeSim.setEnabled(false);
         m_tribeSim.reset();
+
+        // And no grass, for the same reason: a new level shows what you put in it.
+        m_grassEnabled = false;
+        m_grassBlades.clear();
+        m_grassDirty = false;
+        m_editorUI.setGrassEnabled(false);
 
         // Clear physics worlds
         if (m_physicsWorld) {
@@ -25144,10 +25172,9 @@ private:
         // The 5-ft gameplay grid is the whole point of this template — show it now.
         m_showTerrainGrid = true;
 
-        // Phase 1 grass on by default for outdoor cells (J toggles). Blades scatter in
-        // update() once the terrain heights exist.
-        m_grassEnabled = true;
-        m_grassDirty = true;
+        // No grass. It used to switch itself on here, so every outdoor cell arrived
+        // wearing a field of green spikes whether the level was about grass or not,
+        // and the only way off was knowing about J. Foliage Settings turns it on.
 
         // Play-mode spawn: center of the cell, a bit above the ground.
         float scx = 125.0f, scz = 125.0f;
@@ -25230,7 +25257,7 @@ private:
         float ex = std::max(span, (cfg.maxChunk.x - cfg.minChunk.x + 1) * span);
         float ez = std::max(span, (cfg.maxChunk.y - cfg.minChunk.y + 1) * span);
 
-        const float STEP = 6.0f;   // ~one tuft per 6 ft, jittered
+        const float STEP = std::max(0.5f, m_grassSpacing);   // one tuft per STEP ft, jittered
         // Cheap deterministic hash -> [0,1), stable per grid cell so blades don't dance.
         auto h01 = [](int a, int b) {
             uint32_t h = static_cast<uint32_t>(a * 73856093) ^ static_cast<uint32_t>(b * 19349663);
@@ -25267,7 +25294,8 @@ private:
                 GrassBlade blade;
                 blade.pos    = glm::vec3(wx, wy, wz);
                 blade.yaw    = h01(ix - 11, iz + 5) * 6.2831853f;
-                blade.scale  = (0.75f + h01(ix + 3, iz + 9) * 0.85f) * (0.6f + 0.4f * density);
+                blade.scale  = (0.75f + h01(ix + 3, iz + 9) * 0.85f) * (0.6f + 0.4f * density)
+                             * m_grassHeight;
                 blade.bright = 0.80f + h01(ix - 4, iz - 8) * 0.50f;
                 m_grassBlades.push_back(blade);
             }
@@ -31985,6 +32013,10 @@ private:
     uint32_t m_grassModelHandle = UINT32_MAX;   // cross-quad mesh + placeholder sprite
     bool m_grassEnabled = false;
     bool m_grassDirty = true;                   // re-scatter blades next update()
+    // Authored in the Foliage Settings window rather than baked in here, which is
+    // where the 6-ft spacing used to be a literal in the scatter loop.
+    float m_grassSpacing = 6.0f;                // feet between tufts before jitter
+    float m_grassHeight  = 1.0f;                // multiplier on blade scale
     struct GrassBlade { glm::vec3 pos; float yaw; float scale; float bright; };
     std::vector<GrassBlade> m_grassBlades;
 

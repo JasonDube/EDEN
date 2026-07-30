@@ -48,6 +48,10 @@ using UndoPathPointCallback = std::function<void()>;
 using CreateTubeCallback = std::function<void(float radius, int segments, const glm::vec3& color)>;
 using CreateRoadCallback = std::function<void(float width, const glm::vec3& color, bool useFixedY, float fixedY)>;
 using WaterChangedCallback = std::function<void(float level, float amplitude, float frequency, bool visible)>;
+// Foliage. Grass was the first thing to grow on the terrain and it had no window
+// at all -- only J to toggle it and K/L for the brushes, undiscoverable unless
+// you knew. Everything that grows on the ground gets settings here from now on.
+using FoliageChangedCallback = std::function<void(bool grassEnabled, float spacingFeet, float height)>;
 using ApplyBuildingTextureCallback = std::function<void(SceneObject* target, int textureIndex, float uScale, float vScale, int rotationDeg)>;
 using ApplyFaceTextureCallback = std::function<void(int textureIndex, float uScale, float vScale, int rotationDeg)>;
 using FileNewCallback = std::function<void()>;
@@ -244,6 +248,7 @@ public:
     void setCreateTubeCallback(CreateTubeCallback callback) { m_onCreateTube = callback; }
     void setCreateRoadCallback(CreateRoadCallback callback) { m_onCreateRoad = callback; }
     void setWaterChangedCallback(WaterChangedCallback callback) { m_onWaterChanged = callback; }
+    void setFoliageChangedCallback(FoliageChangedCallback callback) { m_onFoliageChanged = callback; }
     void setFileNewCallback(FileNewCallback callback) { m_onFileNew = callback; }
     void setNewTestLevelCallback(NewTestLevelCallback callback) { m_onNewTestLevel = callback; }
     void setNewSpaceLevelCallback(NewSpaceLevelCallback callback) { m_onNewSpaceLevel = callback; }
@@ -304,6 +309,7 @@ public:
     bool& showTerrainEditor() { return m_showTerrainEditor; }
     bool& showSkySettings() { return m_showSkySettings; }
     bool& showWaterSettings() { return m_showWaterSettings; }
+    bool& showFoliageSettings() { return m_showFoliageSettings; }
     bool& showModels() { return m_showModels; }
     bool& showTerrainInfo() { return m_showTerrainInfo; }
     bool& showAINodes() { return m_showAINodes; }
@@ -371,6 +377,14 @@ public:
     float getWaveFrequency() const { return m_waveFrequency; }
     void setWaterVisible(bool visible) { m_waterVisible = visible; }
     bool getWaterVisible() const { return m_waterVisible; }
+
+    // Foliage. The host keeps the blades; this keeps what they are meant to look
+    // like. setGrassEnabled is for when something else turns it on or off (the J
+    // key, a level load) so the window does not disagree with the world.
+    void setGrassEnabled(bool on) { m_grassEnabled = on; }
+    bool getGrassEnabled() const { return m_grassEnabled; }
+    float getGrassSpacing() const { return m_grassSpacing; }
+    float getGrassHeight() const { return m_grassHeight; }
 
     // Path tool state
     void setPathPointCount(size_t count) { m_pathPointCount = count; }
@@ -546,6 +560,7 @@ private:
     void renderModelsWindow();
     void renderPathToolWindow();
     void renderWaterSettings();
+    void renderFoliageSettings();
     void renderLevelSettings();
     void renderCharacterController();
     void renderTerrainInfo();
@@ -634,6 +649,7 @@ private:
     CreateTubeCallback m_onCreateTube;
     CreateRoadCallback m_onCreateRoad;
     WaterChangedCallback m_onWaterChanged;
+    FoliageChangedCallback m_onFoliageChanged;
     FileNewCallback m_onFileNew;
     NewTestLevelCallback m_onNewTestLevel;
     NewSpaceLevelCallback m_onNewSpaceLevel;
@@ -716,6 +732,7 @@ private:
     bool m_showTerrainEditor = true;
     bool m_showSkySettings = true;
     bool m_showWaterSettings = true;
+    bool m_showFoliageSettings = true;
     bool m_showModels = true;
     bool m_showTerrainInfo = true;
     bool m_showAINodes = true;
@@ -804,6 +821,14 @@ private:
     float m_waveAmplitude = 0.5f;
     float m_waveFrequency = 0.1f;
     bool m_waterVisible = false;
+
+    // ---- foliage ----------------------------------------------------------
+    // OFF. Grass used to switch itself on with the Terrain Cell template, so a
+    // level you made to look at something else arrived wearing a field of green
+    // spikes you had not asked for and could only remove by knowing about J.
+    bool  m_grassEnabled = false;
+    float m_grassSpacing = 6.0f;   // feet between tufts before jitter and density
+    float m_grassHeight  = 1.0f;   // multiplier on blade scale
 
     // Sky parameters (external, not owned)
     SkyParameters* m_skyParams = nullptr;
