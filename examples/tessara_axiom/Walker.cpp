@@ -1083,13 +1083,54 @@ void Walker::unpark(const Ground& hf, const glm::vec3& origin,
     }
     centre *= 0.25f;
 
-    // The block whose middle is nearest that, which is the nearest thing to where
-    // he was standing that he is able to stand on.
+    // The nearest block that can hold ALL FOUR feet at the height he was carried
+    // at -- not simply the nearest block.
+    //
+    // Nearest alone straddles the edge of the deck, and a straddling block is not a
+    // near miss: the feet that miss fall through to the terrain two units below,
+    // which skews the body frame enough to draw him upside down and leaves him
+    // under his own hull with no route out. From there he cannot take a job, so he
+    // reports "wandering" and stands there for good. Two feet poking through the
+    // deck and a walker on his back is exactly what a half-supported footprint
+    // looks like.
+    //
+    // So the landing spot is searched for rather than assumed: outward from the
+    // nearest, first block whose four corners all find a surface within a hand's
+    // width of the deck he was riding.
     m_parked = false;
-    m_block = glm::clamp(blockNearest(hf, centre), glm::ivec2(0),
-                         glm::ivec2(m_gridN - 2));
     m_phase = 0;
     m_accum = 0.0f;
+
+    const float rideY = 0.25f * (held[0] + held[1] + held[2] + held[3]);
+    const glm::ivec2 want = glm::clamp(blockNearest(hf, centre), glm::ivec2(0),
+                                       glm::ivec2(m_gridN - 2));
+    const float reach = stepReach(hf);
+
+    auto holdsAllFour = [&](const glm::ivec2& b) {
+        static const glm::ivec2 kOff[4] = {{0,0},{1,0},{1,1},{0,1}};
+        for (int i = 0; i < 4; ++i) {
+            const glm::ivec2 n = b + kOff[i];
+            if (!hf.inBounds(n)) return false;
+            const glm::vec3 w = hf.terrain().worldAt(n);
+            if (!hf.onPatch(w.x, w.z, rideY, reach)) return false;
+            if (std::fabs(hf.heightAt(n, rideY, reach) - rideY) > 0.5f) return false;
+        }
+        return true;
+    };
+
+    m_block = want;
+    for (int ring = 0; ring <= 4; ++ring) {
+        bool found = false;
+        for (int dz = -ring; dz <= ring && !found; ++dz) {
+            for (int dx = -ring; dx <= ring && !found; ++dx) {
+                if (ring > 0 && std::abs(dx) != ring && std::abs(dz) != ring) continue;
+                const glm::ivec2 b = glm::clamp(want + glm::ivec2(dx, dz),
+                                                glm::ivec2(0), glm::ivec2(m_gridN - 2));
+                if (holdsAllFour(b)) { m_block = b; found = true; }
+            }
+        }
+        if (found) break;
+    }
 
     // Seeded from the heights he was carried at, so recomputeFeet measures the
     // step down onto the deck from the deck rather than from the dirt below it --

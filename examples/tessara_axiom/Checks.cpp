@@ -1631,15 +1631,33 @@ void checkThePlayerRides() {
         const float offStation = glm::length(glm::vec2(him.x - station.x,
                                                        him.z - station.z));
 
-        char wdet[192];
+        // ALL FOUR FEET on the deck, and level with each other.
+        //
+        // "Near the ship and in the hold" was not enough to ask. A block straddling
+        // the deck edge puts two feet on the deck and two through it onto the terrain
+        // two units below, which skews the body frame enough to draw him upside down
+        // and strands him under his own hull -- and it passes every test that only
+        // looks at where his middle is. The spread between his feet is the number
+        // that would have caught it.
+        float lo = 1e9f, hi = -1e9f;
+        for (int i = 0; i < 4; ++i) {
+            lo = std::min(lo, w.footHeight(i));
+            hi = std::max(hi, w.footHeight(i));
+        }
+        const float spread = hi - lo;
+        const float deck = ship.origin().y + ship.params.deckHeight;
+
+        char wdet[224];
         std::snprintf(wdet, sizeof wdet,
                       "after landing: %.1f from the ship, %.1f from his station, "
-                      "room %d, parked %d, on station %d",
+                      "room %d, parked %d, on station %d | feet spread %.2f, "
+                      "%.2f off the deck",
                       out, offStation, mod.ground()->enclosureAt(him),
-                      (int)w.parked(), (int)w.onStation());
+                      (int)w.parked(), (int)w.onStation(), spread, lo - deck);
         report("the walker lands with the ship, on his station",
                out < 14.0f && offStation < 4.0f && !w.parked() &&
-               mod.ground()->enclosureAt(him) >= 0 && w.onStation(), wdet);
+               mod.ground()->enclosureAt(him) >= 0 && w.onStation() &&
+               spread < 0.3f && std::fabs(lo - deck) < 0.5f, wdet);
     }
 
     report("and brings the player back down",
@@ -2115,6 +2133,15 @@ void checkEverythingLands() {
         glm::length(glm::vec2(w.bodyCentre(s.ground).x - s.ship.origin().x,
                               w.bodyCentre(s.ground).z - s.ship.origin().z)) < 40.0f;
 
+    // The same question after a real flight: are all four feet on the deck and
+    // level with each other, or is he straddling its edge with two through it?
+    float wlo = 1e9f, whi = -1e9f;
+    for (int i = 0; i < 4; ++i) {
+        wlo = std::min(wlo, w.footHeight(i));
+        whi = std::max(whi, w.footHeight(i));
+    }
+    const float walkerSpread = whi - wlo;
+
     const glm::vec3 landedPallet = s.ship.bayStoragePoint();
     const glm::vec3 him = w.bodyCentre(s.ground);
     const float walkerFromShip = glm::length(glm::vec2(him.x - s.ship.origin().x,
@@ -2126,10 +2153,11 @@ void checkEverythingLands() {
 
     char detail[224];
     std::snprintf(detail, sizeof detail,
-                  "flew %.0f | walker %.1f out, still in %d | biped: carried drift "
+                  "flew %.0f | walker %.1f out, feet spread %.2f, still in %d | "
+                  "biped: carried drift "
                   "%.2f (in the hold %d at touchdown), wandered %.2f in 3s (still here %d), "
                   "sank %.2f | pallet %.1f, crate %.1f off",
-                  flew, walkerFromShip, (int)walkerStillIn,
+                  flew, walkerFromShip, walkerSpread, (int)walkerStillIn,
                   carriedDrift, (int)inAtTouchdown, bipedDrift, (int)bipedStillIn,
                   bipedSank, palletFromShip, crateOffPallet);
     std::printf("      biped local: was (%.1f,%.1f,%.1f) -> now (%.1f,%.1f,%.1f), "
@@ -2140,7 +2168,7 @@ void checkEverythingLands() {
     report("nothing is left behind when it lands",
            startedAboard && bipedStartedAboard && flew > 40.0f &&
            s.ground.enclosureAt(him) >= 0 && walkerFromShip < 14.0f &&
-           walkerStillIn && bipedStillIn &&
+           walkerSpread < 0.3f && walkerStillIn && bipedStillIn &&
            carriedDrift < 0.5f && inAtTouchdown &&
            std::fabs(bipedSank) < 0.6f &&
            palletFromShip < 14.0f && crateOffPallet < 1.0f, detail);
