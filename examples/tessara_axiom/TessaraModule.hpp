@@ -128,6 +128,7 @@ private:
     void republishGround();
     void updateHauling();
     void updateLaunch(float dt);
+    void updateLadder(float dt);
     // Who was standing in the hold when it moved. Read before the ship goes
     // anywhere and acted on afterwards -- see TessaraModule::manifest.
     struct Manifest {
@@ -192,6 +193,18 @@ private:
     float m_msThink = 0.0f;    // gait, routing, the launch sequence
     float m_msMesh  = 0.0f;    // re-meshing and uploading
     float m_msDraw  = 0.0f;    // recording the draw
+
+    // ---- climbing the boarding ladder --------------------------------------
+    // A rising FLOOR under the player rather than a place he is put.
+    //
+    // Teleporting him aboard would be one line, and it would feel like one. The
+    // scripted controller calls self_snap_to_ground every frame, so if the module
+    // simply answers that question with a height that rises, he climbs -- carried
+    // by the same mechanism that keeps him on the ground the rest of the time, at a
+    // speed you can see, and able to step off at the top like anything else.
+    bool  m_atLadder = false;
+    bool  m_climbing = false;
+    float m_climbY = 0.0f;
 
     Launch m_launch = Launch::Idle;
     bool   m_atHelm = false;

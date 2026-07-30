@@ -167,6 +167,19 @@ public:
     // The far end of the ramp, so the scene can tell how far it has swung.
     glm::vec3 rampFootPosition() const;
 
+    // ---- the boarding ladder -----------------------------------------------
+    // On the hull by the BRIDGE, deliberately nowhere near the ramp.
+    //
+    // It exists because of a landing site that passes every test and then strands
+    // you: flat enough on top for the ship, but a cliff at the back, so the ramp
+    // opens onto air. You get down somehow, and then you cannot get back to the
+    // ship you need in order to fly it somewhere better.
+    //
+    // Put at the far end from the ramp on purpose. It is a way back aboard, not a
+    // second door -- walk the length of the hull to use it.
+    glm::vec3 ladderFoot() const;    // at the ground, outside the hull
+    float ladderTopY() const { return m_origin.y + params.deckHeight; }
+
     // ---- landing gear ------------------------------------------------------
     // Four legs, each as long as the ground under IT requires.
     //

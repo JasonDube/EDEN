@@ -100,6 +100,18 @@ void TessaraModule::setTerrain(eden::Terrain* terrain) {
 bool TessaraModule::groundHeight(float x, float z, float fromY, float& outHeight) const {
     if (!m_ground || !m_placed) return false;
 
+    // Climbing: the floor under him IS the rung he is on. Answering here rather
+    // than moving him means the scripted controller's own snap-to-ground does the
+    // carrying, so nothing fights over his position and he can step off at the top
+    // like anything else.
+    if (m_climbing) {
+        const glm::vec3 foot = m_ship.ladderFoot();
+        if (glm::length(glm::vec2(x - foot.x, z - foot.z)) < 3.0f) {
+            outHeight = m_climbY;
+            return true;
+        }
+    }
+
     // Only worth answering if we actually have something here. Everywhere else
     // Ground falls back to the terrain, which the host has already asked.
     const float mine = m_ground->heightAt(x, z, fromY, kPlayerStepUp);
@@ -277,6 +289,8 @@ void TessaraModule::update(float dt) {
 
     // A rally suspends the haul loop outright: it hands out crates, and handing
     // a crate to something that has been called in is how a rally never finishes.
+    updateLadder(dt);
+
     if (m_launch == Launch::Idle) updateHauling();
     updateLaunch(dt);
 
@@ -378,6 +392,43 @@ void TessaraModule::updateHauling() {
                 else      { h.refused.push_back(next); m_freeSlots.push_back(slot); }
             }
         }
+    }
+}
+
+// The way back aboard when the ramp opens onto air.
+//
+// A site can pass every test the ship makes -- flat enough on top to stand on --
+// and still be a cliff at the back, so the ramp comes down into nothing. Get out
+// of a ship parked like that and there is no way back into the ship you need in
+// order to move it, which is a dead end rather than a difficulty.
+//
+// So: a ladder, at the BRIDGE end, the far end from the ramp. Hold E at the foot
+// of it and climb. It is not a second door -- you walk the length of the hull to
+// use it, and you arrive on the bridge rather than in the hold.
+void TessaraModule::updateLadder(float dt) {
+    if (!m_source || !m_placed) return;
+
+    const glm::vec3 foot = m_ship.ladderFoot();
+    const glm::vec3 feet = m_playerPosition - glm::vec3(0.0f, 1.7f, 0.0f);
+    const float toLadder = glm::length(glm::vec2(feet.x - foot.x, feet.z - foot.z));
+
+    m_atLadder = toLadder < 2.2f && !m_ship.airborne();
+
+    if (m_climbing) {
+        // Up at a climbing pace, and stop at the deck. Wandering off the ladder
+        // ends it -- he is holding rungs, not riding a lift.
+        m_climbY += 3.2f * dt;
+        if (toLadder > 3.0f || m_climbY >= m_ship.ladderTopY()) {
+            m_climbY = std::min(m_climbY, m_ship.ladderTopY());
+            if (m_climbY >= m_ship.ladderTopY() - 0.01f) m_climbing = false;
+            else if (toLadder > 3.0f) m_climbing = false;
+        }
+        return;
+    }
+
+    if (m_atLadder && eden::Input::isKeyDown(eden::Input::KEY_E)) {
+        m_climbing = true;
+        m_climbY = std::max(feet.y, m_source->heightAtWorld(feet.x, feet.z));
     }
 }
 
@@ -914,6 +965,13 @@ void TessaraModule::renderUI(float, float) {
     }
 
     ImGui::Separator();
+    // Said in both panels, because when this matters you are standing outside a
+    // badly parked ship with no idea it exists.
+    if (m_atLadder || m_climbing) {
+        ImGui::TextColored(ImVec4(0.35f, 0.9f, 0.45f, 1.0f),
+                           m_climbing ? "  climbing the ladder..."
+                                      : "  hold E to climb aboard");
+    }
     if (m_launch == Launch::Idle) {
         if (ImGui::Button("RALLY")) callRally();
         ImGui::SameLine();

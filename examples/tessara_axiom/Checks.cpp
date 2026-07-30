@@ -1914,6 +1914,55 @@ void checkNoTeleportedCrates() {
 }
 
 // ---------------------------------------------------------------------------
+// 5e-iii. There is a way back aboard, and it is not next to the ramp.
+//
+// A landing site can pass every test the ship makes -- flat enough on top to stand
+// on -- and still be a cliff at the back, so the ramp opens onto air. Get out of a
+// ship parked like that and there is no way back into the ship you need in order to
+// move it. That is a dead end, not a difficulty, and it is the one failure the
+// player cannot work around.
+//
+// So there is a ladder, and where it is matters as much as that it exists: at the
+// BRIDGE end, the far end from the ramp, so it is a way back aboard rather than a
+// second door. What is checked here is that you can stand at its foot -- a ladder
+// inside the hull, or up a cliff, is no ladder -- and that it reaches the deck.
+// ---------------------------------------------------------------------------
+void checkTheBoardingLadder() {
+    int placements = 0, unreachable = 0, tooCloseToRamp = 0, wrongHeight = 0;
+    float nearestToRamp = 1e9f;
+
+    for (float yaw : {0.0f, 34.0f, 115.0f, 200.0f, 300.0f}) {
+        for (float relief : {0.0f, 14.0f}) {
+            Scene s(relief, {0.0f, 0.0f}, yaw);
+            ++placements;
+
+            const glm::vec3 foot = s.ship.ladderFoot();
+
+            // Standable: on the ground outside the hull, not inside anything.
+            const float ground = s.terrain.heightAtWorld(foot.x, foot.z);
+            if (s.ground.blocked(foot.x, foot.z, ground, 1.9f, 0.40f)) ++unreachable;
+
+            // Far from the ramp, or it is just another door.
+            const glm::vec3 tip = s.ship.rampFootPosition();
+            const float toRamp = glm::length(glm::vec2(foot.x - tip.x, foot.z - tip.z));
+            nearestToRamp = std::min(nearestToRamp, toRamp);
+            if (toRamp < 14.0f) ++tooCloseToRamp;
+
+            // And it goes to the deck, which is where the bridge is.
+            if (std::fabs(s.ship.ladderTopY() - s.deckY()) > 0.01f) ++wrongHeight;
+        }
+    }
+
+    char detail[192];
+    std::snprintf(detail, sizeof detail,
+                  "%d placements: %d with no room to stand at the foot, %d too near "
+                  "the ramp (nearest %.1f), %d not reaching the deck",
+                  placements, unreachable, tooCloseToRamp, wrongHeight, nearestToRamp);
+    report("there is a way back aboard, away from the ramp",
+           unreachable == 0 && tooCloseToRamp == 0 && wrongHeight == 0, detail);
+}
+
+// ---------------------------------------------------------------------------
 // 5f-i. The hull stops a body, from every side and at every height.
 //
 // Reported as "I often fall through the wall of the ship", and it was not a
@@ -2566,6 +2615,7 @@ int runShipChecks(bool verbose) {
     checkTheHelmView();
     checkTheLanding();
     checkNoTeleportedCrates();
+    checkTheBoardingLadder();
     checkTheHullStopsYou();
     checkEverythingLands();
     checkTheRampExtension();

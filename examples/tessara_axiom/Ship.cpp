@@ -388,6 +388,18 @@ glm::vec3 Ship::controlPosition() const {
          + up() * params.controlRise;
 }
 
+glm::vec3 Ship::ladderFoot() const {
+    // Starboard side, well forward, level with the bridge -- the opposite end of
+    // the ship from the ramp.
+    // A body's width clear of the hull, because this is where somebody STANDS to
+    // use it. At 0.30 the rails were against the plating and the player's own
+    // radius put him inside it -- a ladder you cannot reach is not a ladder, and
+    // all ten test placements failed on exactly that.
+    return m_origin
+         + right() * (params.width * 0.5f + 1.00f)
+         + forward() * (params.length * 0.30f);
+}
+
 glm::vec3 Ship::innerControlPosition() const {
     // On the starboard bay wall by the doorway, at the same height above the
     // floor as the one outside is above the ground. Somebody who has used one
@@ -608,6 +620,10 @@ void Ship::appendBlockers(std::vector<Blocker>& out) const {
             }
         }
     }
+
+    // ---- the boarding ladder ------------------------------------------------
+    // Not a solid: it is climbed, not walked into, and a blocker here would be a
+    // pillar standing in the doorway of nothing.
 
     // ---- the shut ramp IS a door, so make it solid -------------------------
     //
@@ -1034,6 +1050,30 @@ void appendShipMesh(const Ship& ship,
     appendBox(verts, indices, (hinge + foot) * 0.5f, r, rampUp, dir,
               glm::vec3(p.bayWidth * 0.46f, 0.16f, glm::length(foot - hinge) * 0.5f),
               kRamp);
+
+    // ---- the boarding ladder ----------------------------------------------
+    // Two rails and a set of rungs up the hull by the bridge. Drawn from the same
+    // numbers ladderFoot() is computed from, so what you climb is what you see.
+    {
+        // Drawn against the plating, inboard of the spot you stand on to use it.
+        const glm::vec3 base = ship.ladderFoot() - r * 0.72f;
+        const float top = ship.ladderTopY();
+        const float rise = top - o.y + 0.5f;      // a little proud of the deck lip
+        const float railGap = 0.55f;
+
+        for (int side = 0; side < 2; ++side) {
+            const float sx = side ? 1.0f : -1.0f;
+            appendBox(verts, indices,
+                      base + f * (sx * railGap) + u * (rise * 0.5f),
+                      r, u, f, glm::vec3(0.07f, rise * 0.5f, 0.07f), kTrim);
+        }
+        const int rungs = std::max(3, static_cast<int>(rise / 0.42f));
+        for (int i = 1; i <= rungs; ++i) {
+            const float t = static_cast<float>(i) / (rungs + 1);
+            appendBox(verts, indices, base + u * (rise * t),
+                      r, u, f, glm::vec3(0.06f, 0.05f, railGap), kHazard);
+        }
+    }
 
     // The extended section, drawn as a plate lying over the outer end of the slab.
     //
