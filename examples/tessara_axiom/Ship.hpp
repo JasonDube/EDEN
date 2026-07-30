@@ -37,6 +37,17 @@ public:
         // angle is whatever reaches the ground, not a number chosen separately.
         float rampSeconds  = 2.4f;  // full open or close
 
+        // A second section that slides out of the first.
+        //
+        // This is the answer to a ramp that stops short, and it is the only answer
+        // that does not make it unwalkable. Reach comes from length x sin(angle),
+        // and the ANGLE cannot grow -- past 24 degrees the biped's router will not
+        // cross it and he simply stops delivering. So the length grows instead: at
+        // the nominal 21 degrees, eight more units of ramp is nearly three more
+        // units of drop, at exactly the same grade underfoot.
+        float rampExtend   = 8.0f;
+        float rampExtendSeconds = 1.8f;
+
         float controlRise  = 2.3f;  // the button, at about chest height on a unit
 
         // How far anything meant to touch the ground actually sinks into it.
@@ -66,6 +77,26 @@ public:
     void place(TerrainSource& hf, glm::vec2 near, float yawDegrees);
 
     float openAngleDegrees() const { return m_openAngle; }
+
+    // ---- the ramp extension ------------------------------------------------
+    // How far the second section is out, 0..1, and how long the ramp therefore is.
+    //
+    // rampSpan() is the one number everything else already asked for: the patch you
+    // walk on, the kerbs down its sides, the mesh and the spot creatures wait at are
+    // all derived from rampFootPosition(), which is derived from this. So extending
+    // the ramp extends all of them without any of them being told.
+    float rampSpan() const { return m_rampLength + params.rampExtend * m_rampExt; }
+    float rampExtension() const { return m_rampExt; }
+
+    // Roll it out, or put it away. -1 means "as far as the ground needs", which is
+    // what solveRampExtension worked out on touchdown.
+    void setRampExtension(float want) { m_rampExtWant = want; }
+    void autoRampExtension() { m_rampExtWant = m_rampExtAuto; }
+    float neededRampExtension() const { return m_rampExtAuto; }
+
+    // How much of it the ground actually calls for, swept rather than solved --
+    // see the note in solveRampAngle about what iterating against real terrain did.
+    void solveRampExtension(const TerrainSource& ground);
 
     // `obstructed` is whether anything is standing on the ramp. A ramp that shuts
     // regardless scoops whoever is on it: measured at two and a half units of lift
@@ -312,6 +343,9 @@ private:
     glm::vec3 m_lastMove{0.0f};
     float m_lastTurn = 0.0f;
     float m_rampLength = 4.4f; // the doorway height
+    float m_rampExt     = 0.0f;   // 0 stowed, 1 fully out
+    float m_rampExtWant = 0.0f;
+    float m_rampExtAuto = 0.0f;   // what the ground under the tip asks for
     float m_openAngle  = 27.0f; // worked out at placement, from the two of them
 };
 

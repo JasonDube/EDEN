@@ -72,7 +72,8 @@ void Ship::place(TerrainSource& hf, glm::vec2 near, float yawDegrees) {
     // hull, and a ramp swung down onto sloping ground finished up to 3.7 units
     // underneath it.
     float height = hf.heightAtWorld(best.x, best.y);
-    float radius = std::max(params.length, params.width) * 0.62f + m_rampLength;
+    float radius = std::max(params.length, params.width) * 0.62f
+                 + m_rampLength + params.rampExtend;
     hf.levelPatch(best, radius, 14.0f, height);
 
     m_origin = glm::vec3(best.x, height, best.y);
@@ -86,6 +87,8 @@ void Ship::place(TerrainSource& hf, glm::vec2 near, float yawDegrees) {
     // exactly level with a flat pad is a coplanar face, and it flickers.
     solveRampAngle(hf);
     solveLegs(hf);
+    solveRampExtension(hf);
+    autoRampExtension();
 }
 
 void Ship::update(float dt, bool obstructed) {
@@ -106,6 +109,14 @@ void Ship::update(float dt, bool obstructed) {
 
     float rate = dt / std::max(0.05f, params.rampSeconds);
     m_ramp = std::clamp(m_ramp + (m_opening ? rate : -rate), 0.0f, 1.0f);
+
+    // The extension only travels once the ramp is down, and comes in before it
+    // shuts. A section sliding out of a slab that is still swinging would sweep it
+    // through the hull, and a ramp trying to stow with its extension out cannot.
+    const float want = (m_ramp > 0.92f) ? std::clamp(m_rampExtWant, 0.0f, 1.0f) : 0.0f;
+    const float extRate = dt / std::max(0.05f, params.rampExtendSeconds);
+    if (m_rampExt < want)      m_rampExt = std::min(want, m_rampExt + extRate);
+    else if (m_rampExt > want) m_rampExt = std::max(want, m_rampExt - extRate);
 }
 
 // Terrain following, which is most of what makes a surface aircraft pleasant and
@@ -196,6 +207,32 @@ void Ship::solveRampAngle(const TerrainSource&) {
         std::clamp((params.deckHeight + params.groundBite) / m_rampLength, 0.0f, 0.95f)));
 }
 
+// How much extension the ground under the tip calls for.
+//
+// Swept, for the reason written at length over solveRampAngle: feeding a height
+// function its own output back through a guess oscillates on real terrain. Twenty
+// samples of a lever that only goes from nought to one is nothing, and a table
+// cannot diverge.
+void Ship::solveRampExtension(const TerrainSource& ground) {
+    const float a = glm::radians(m_openAngle);
+    const glm::vec3 hinge = m_origin + up() * params.deckHeight
+                          - forward() * (params.length * 0.5f);
+    const glm::vec3 dir = -forward() * std::cos(a) - up() * std::sin(a);
+
+    float best = 0.0f, bestGap = 1e9f;
+    for (int i = 0; i <= 20; ++i) {
+        const float t = i / 20.0f;
+        const glm::vec3 tip = hinge + dir * (m_rampLength + params.rampExtend * t);
+        const float gap = tip.y - ground.heightAtWorld(tip.x, tip.z) + params.groundBite;
+
+        // Stopping short is a step to climb; driving the tip into the dirt is a
+        // spike through the ground. Weighted so it prefers the former.
+        const float score = gap < 0.0f ? -gap * 3.0f : gap;
+        if (score < bestGap) { bestGap = score; best = t; }
+    }
+    m_rampExtAuto = best;
+}
+
 float Ship::siteDrop(const TerrainSource& ground) const {
     float lo = 1e30f, hi = -1e30f;
     for (int i = 0; i < kLegs; ++i) {
@@ -225,6 +262,8 @@ glm::vec3 Ship::settle(const TerrainSource& ground) {
     m_touchdownSpeed = 0.0f;   // it was set down, not landed
     solveRampAngle(ground);
     solveLegs(ground);
+    solveRampExtension(ground);
+    autoRampExtension();
 
     m_lastMove = m_origin - was;
     m_lastTurn = 0.0f;
@@ -270,6 +309,8 @@ void Ship::fly(float dt, float forward, float turn, float lift,
             // actually standing on.
             solveRampAngle(ground);
             solveLegs(ground);
+            solveRampExtension(ground);
+            autoRampExtension();
         }
     } else {
         // Held off the ground, but at a RATE rather than by decree. Clamping it
@@ -343,7 +384,7 @@ glm::vec3 Ship::rampFootPosition() const {
 
     glm::vec3 hinge = m_origin + up() * params.deckHeight - forward() * (params.length * 0.5f);
     glm::vec3 dir = -forward() * std::cos(angle) + up() * std::sin(angle);
-    return hinge + dir * m_rampLength;
+    return hinge + dir * rampSpan();
 }
 
 SurfacePatch Ship::deckPatch() const {
@@ -704,7 +745,7 @@ glm::vec3 Ship::rampApproachPoint() const {
     const float a = glm::radians(m_openAngle);
     const glm::vec3 hinge = m_origin + up() * params.deckHeight
                           - forward() * (params.length * 0.5f);
-    const glm::vec3 rest = hinge - forward() * (m_rampLength * std::cos(a));
+    const glm::vec3 rest = hinge - forward() * (rampSpan() * std::cos(a));
 
     return glm::vec3(rest.x, m_origin.y, rest.z) - forward() * 3.0f;
 }
@@ -922,6 +963,18 @@ void appendShipMesh(const Ship& ship,
     appendBox(verts, indices, (hinge + foot) * 0.5f, r, rampUp, dir,
               glm::vec3(p.bayWidth * 0.46f, 0.16f, glm::length(foot - hinge) * 0.5f),
               kRamp);
+
+    // The extended section, drawn as a plate lying over the outer end of the slab.
+    //
+    // A telescoping ramp that is simply LONGER reads as a design change rather than
+    // a mechanism; a visible second plate reads as a thing that came out of the
+    // first, which is what it is. Narrower and a shade proud, so the seam shows.
+    if (ship.rampExtension() > 0.01f) {
+        const float out = p.rampExtend * ship.rampExtension();
+        const glm::vec3 mid = foot - dir * (out * 0.5f);
+        appendBox(verts, indices, mid + rampUp * 0.04f, r, rampUp, dir,
+                  glm::vec3(p.bayWidth * 0.42f, 0.15f, out * 0.5f), kTrim);
+    }
 
     // Hazard stripes across it, so which way is up is never in doubt.
     for (int i = 0; i < 4; ++i) {

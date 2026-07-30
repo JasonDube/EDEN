@@ -1,5 +1,7 @@
 #pragma once
 
+#include <algorithm>
+
 #include "SceneVertex.hpp"
 #include "TerrainSource.hpp"
 
@@ -34,9 +36,22 @@ public:
         return node.x >= 0 && node.y >= 0 && node.x < m_n && node.y < m_n;
     }
 
+    // Off the edge, the EDGE height rather than zero.
+    //
+    // Zero is a lie that reads as flat ground at sea level, and it is not a quiet
+    // one: heightAtWorld interpolates four nodes, so anything within a node of the
+    // boundary blends real terrain with a phantom plane, and heightAboveGround and
+    // groundUnderHull take the MAX over several samples. A ship crossing the edge
+    // therefore rests on whichever fiction is highest -- which is how three separate
+    // checks came to report a ship landed twenty units in the air, and a fourth a
+    // hundred-unit ramp gap, all of them believing the geometry was at fault.
+    //
+    // Clamping continues the terrain instead, which is wrong in a way that cannot
+    // surprise anybody: past the edge the world simply stops changing.
     float heightAt(const glm::ivec2& node) const override {
-        if (!inBounds(node)) return 0.0f;
-        return m_heights[static_cast<size_t>(node.y) * m_n + node.x];
+        const int x = std::clamp(node.x, 0, m_n - 1);
+        const int z = std::clamp(node.y, 0, m_n - 1);
+        return m_heights[static_cast<size_t>(z) * m_n + x];
     }
 
     // World position of a node. X and Z come from the lattice, Y from the height,

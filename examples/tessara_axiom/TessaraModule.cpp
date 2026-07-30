@@ -973,6 +973,21 @@ void TessaraModule::renderUI(float, float) {
     if (ImGui::Button("scatter crates again")) scatterCrates();
     ImGui::SameLine();
     if (ImGui::Button("work the ramp")) m_ship.toggleRamp();
+    ImGui::SameLine();
+
+    // Rolled out automatically to whatever the ground under the tip needs, and
+    // overridable either way -- because "as far as it has to go" is right almost
+    // always and somebody will want it all the way out on purpose.
+    {
+        const float out = m_ship.rampExtension();
+        const float needed = m_ship.neededRampExtension();
+        if (ImGui::Button(out > 0.5f ? "stow the extension" : "roll out the extension")) {
+            m_ship.setRampExtension(out > 0.5f ? 0.0f : 1.0f);
+        }
+        ImGui::SameLine();
+        ImGui::TextDisabled("%.0f%% out, ground here wants %.0f%%",
+                            out * 100.0f, needed * 100.0f);
+    }
 
     ImGui::End();
 }

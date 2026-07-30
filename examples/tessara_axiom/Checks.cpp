@@ -1992,6 +1992,126 @@ void checkEverythingLands() {
 }
 
 // ---------------------------------------------------------------------------
+// 5f-iii. The ramp extension reaches the ground the fixed ramp could not.
+//
+// The fixed ramp stops short on a downhill site and cannot be steepened out of it:
+// reach is length x sin(angle), and past about 24 degrees the biped's router will
+// not cross the slope, so a steeper ramp is one nothing walks up -- he simply stops
+// delivering. Two attempts to solve the angle proved that the hard way.
+//
+// So the LENGTH grows instead. At the nominal 21 degrees another eight units of ramp
+// is nearly three more units of drop at exactly the same grade underfoot, which is
+// the one axis that was still free.
+//
+// Two things have to be true together, and the second is the one worth guarding:
+// the gap closes, AND the angle does not change. An extension that reached by
+// tilting would have solved nothing.
+// ---------------------------------------------------------------------------
+void checkTheRampExtension() {
+    int sites = 0, helped = 0, stillShort = 0, neverLanded = 0, offField = 0;
+    float worstBefore = 0.0f, worstAfter = 0.0f, angleDrift = 0.0f;
+
+    for (float relief : {10.0f, 24.0f}) {
+        for (glm::vec2 at : {glm::vec2(0.0f, 0.0f), glm::vec2(46.0f, -34.0f)}) {
+            for (float yaw : {0.0f, 95.0f, 190.0f, 285.0f}) {
+                Scene s(relief, at, yaw);
+
+                // Landed away from the pad it levelled for itself, which is the only
+                // place the ground behind the ship is not flat.
+                s.closeRamp();
+                s.ship.setAirborne(true);
+                // Far enough off the levelled pad to be on real ground, and no
+                // further: seven seconds at twenty-six units a second is a hundred
+                // and eighty, and this field is two hundred and fifty-six across.
+                // Fly off the edge and the ship never lands, which reads as a
+                // thirty-unit ramp gap and is nothing of the kind.
+                for (int i = 0; i < 60 * 2; ++i)
+                    s.ship.fly(1.0f / 60.0f, 0.0f, 0.0f, 1.0f, s.terrain);
+                for (int i = 0; i < 60 * 1; ++i)
+                    s.ship.fly(1.0f / 60.0f, 1.0f, 0.0f, 0.0f, s.terrain);
+                s.ship.beginLanding();
+                for (int i = 0; i < 60 * 60 && s.ship.airborne(); ++i) {
+                    const float rate = -s.ship.verticalSpeed();
+                    s.ship.fly(1.0f / 60.0f, 0.0f, 0.0f, rate > 4.0f ? 1.0f : 0.0f, s.terrain);
+                }
+                ++sites;
+
+                // It has to have LANDED for any of the rest to mean anything. One
+                // site did not, and the check went green anyway with a worst-case
+                // "ramp gap" of 105 units in its own summary -- which is a ship
+                // hovering, not a ramp falling short. A number that absurd sitting
+                // inside a passing test is the test failing to notice.
+                if (s.ship.airborne()) { ++neverLanded; continue; }
+
+                // ...and the ramp tip has to be ON the field. Off the edge,
+                // heightAtWorld answers for ground that does not exist and rampGap
+                // comes back as a hundred units -- which is what left a 105 in a
+                // passing summary twice. Measuring off the end of the world is not
+                // a failure of the ramp.
+                //
+                // The whole SHIP, not just the tip: the hull reaches nineteen units
+                // past its centre and groundUnderHull samples along all of it. Sample
+                // outside the heightfield and it answers with something that is not
+                // a height -- one site "landed" at y 97.59 on terrain spanning about
+                // twelve units, on phantom ground, and reported a 105-unit ramp gap
+                // that survived two attempts to guard against it.
+                {
+                    const glm::vec3 o = s.ship.origin();
+                    const float edge = 128.0f - 46.0f;   // half the field, less the hull
+                    if (std::fabs(o.x) > edge || std::fabs(o.z) > edge) {
+                        ++offField;
+                        continue;
+                    }
+                }
+
+                // Ramp down, extension stowed: the old behaviour.
+                s.ship.setRampExtension(0.0f);
+                s.ship.openRamp();
+                for (int i = 0; i < 400; ++i) s.ship.update(1.0f / 60.0f);
+                s.republish();
+                const float before = s.ship.rampGap(s.terrain);
+                const float angleBefore = s.ship.openAngleDegrees();
+
+                // Now roll it out as far as the ground asks.
+                s.ship.autoRampExtension();
+                for (int i = 0; i < 400; ++i) s.ship.update(1.0f / 60.0f);
+                s.republish();
+                const float after = s.ship.rampGap(s.terrain);
+
+                angleDrift = std::max(angleDrift,
+                                      std::fabs(s.ship.openAngleDegrees() - angleBefore));
+                if (before > 12.0f && g_verbose) {
+                    const glm::vec3 tip = s.ship.rampFootPosition();
+                    std::printf("      ODD site relief %.0f yaw %.0f: ship y %.2f, tip "
+                                "(%.1f,%.2f,%.1f), terrain there %.2f, gap %.2f\n",
+                                relief, yaw, s.ship.origin().y, tip.x, tip.y, tip.z,
+                                s.terrain.heightAtWorld(tip.x, tip.z), before);
+                }
+                worstBefore = std::max(worstBefore, before);
+                worstAfter = std::max(worstAfter, after);
+
+                // Only sites the fixed ramp actually failed on count as helped;
+                // somewhere it already reached, the extension has nothing to do.
+                if (before > 0.5f) {
+                    if (after < before - 0.3f) ++helped; else ++stillShort;
+                }
+            }
+        }
+    }
+
+    char detail[224];
+    std::snprintf(detail, sizeof detail,
+                  "%d sites (%d unlanded, %d off-field): worst gap %.2f stowed -> "
+                  "%.2f extended, %d of %d short ones closed, angle moved %.2f deg",
+                  sites, neverLanded, offField, worstBefore, worstAfter, helped,
+                  helped + stillShort, angleDrift);
+
+    report("the ramp extension reaches what the ramp cannot",
+           neverLanded == 0 && helped > 2 && stillShort == 0 &&
+           worstAfter < worstBefore - 0.3f && angleDrift < 0.01f, detail);
+}
+
+// ---------------------------------------------------------------------------
 // 5g. Set down on a slope, all four feet find the ground.
 //
 // Reported from a screenshot: the ship resting on a hillside with daylight under
@@ -2009,7 +2129,7 @@ void checkEverythingLands() {
 // landing check runs on one.
 // ---------------------------------------------------------------------------
 void checkTheLandingGear() {
-    int sites = 0, allDown = 0, reached = 0, tooSteep = 0;
+    int sites = 0, allDown = 0, reached = 0, tooSteep = 0, phantom = 0;
     float worstFoot = 0.0f, worstGap = -1e9f, mostSpread = 0.0f;
 
     // Several places on a rolling field, and several headings at each, so the ramp
@@ -2027,9 +2147,14 @@ void checkTheLandingGear() {
                 // anything -- which it did, reporting a leg spread of 0.00 across
                 // twenty-four slopes.
                 s.ship.setAirborne(true);
-                for (int i = 0; i < 60 * 4; ++i)
-                    s.ship.fly(1.0f / 60.0f, 1.0f, 0.0f, 1.0f, s.terrain);
-                for (int i = 0; i < 60 * 3; ++i)
+                // Far enough off the levelled pad to be on real ground, and no
+                // further: seven seconds at twenty-six units a second is a hundred
+                // and eighty, and this field is two hundred and fifty-six across.
+                // Fly off the edge and the ship never lands, which reads as a
+                // thirty-unit ramp gap and is nothing of the kind.
+                for (int i = 0; i < 60 * 2; ++i)
+                    s.ship.fly(1.0f / 60.0f, 0.0f, 0.0f, 1.0f, s.terrain);
+                for (int i = 0; i < 60 * 1; ++i)
                     s.ship.fly(1.0f / 60.0f, 1.0f, 0.0f, 0.0f, s.terrain);
 
                 s.ship.beginLanding();
@@ -2040,6 +2165,29 @@ void checkTheLandingGear() {
                 s.ship.openRamp();
                 for (int i = 0; i < 300; ++i) s.ship.update(1.0f / 60.0f);
                 s.republish();
+
+                // On the field, whole hull. groundUnderHull samples along all
+                // thirty-eight units of it, and outside the heightfield those
+                // samples are not heights -- a ship "landed" at y 97 on terrain
+                // spanning twelve. This is the third check to be bitten by it, so:
+                // if the flight left the field, the site tells you nothing.
+                //
+                // The site has to be one the ship is genuinely STANDING on. Its
+                // resting height is the max over the centreline AND the legs, so a
+                // single bad sample -- and outside the heightfield the samples are
+                // not heights -- lifts the hull twenty units while the four legs
+                // still agree with each other perfectly. That reads as "no site was
+                // too steep, and seventeen of them had feet twenty units in the
+                // air", which is a contradiction and was the clue.
+                {
+                    float highestUnderLeg = -1e30f;
+                    for (int i = 0; i < Ship::kLegs; ++i) {
+                        const glm::vec3 b = s.ship.legBase(i);
+                        highestUnderLeg = std::max(highestUnderLeg,
+                                                   s.terrain.heightAtWorld(b.x, b.z));
+                    }
+                    if (s.ship.origin().y - highestUnderLeg > 1.0f) { ++phantom; continue; }
+                }
 
                 // Every foot within a hand's width of the dirt under it -- but
                 // only asked of sites the gear can actually absorb. A hull
@@ -2070,15 +2218,15 @@ void checkTheLandingGear() {
         }
     }
 
-    const int standable = sites - tooSteep;
+    const int standable = sites - tooSteep - phantom;
 
     char detail[224];
     std::snprintf(detail, sizeof detail,
-                  "%d slopes, %d too steep for the gear: %d of %d standable had all "
+                  "%d slopes (%d too steep, %d not really landed): %d of %d had all "
                   "four feet down (worst %.2f off, legs differed by up to %.2f), "
                   "ramp reached on %d (worst gap %.2f)",
-                  sites, tooSteep, allDown, standable, worstFoot, mostSpread,
-                  reached, worstGap);
+                  sites, tooSteep, phantom, allDown, standable, worstFoot,
+                  mostSpread, reached, worstGap);
 
     report("it stands on all four legs on a slope",
            standable > 0 && allDown == standable && mostSpread > 0.3f, detail);
@@ -2223,6 +2371,7 @@ int runShipChecks(bool verbose) {
     checkTheHelmView();
     checkTheLanding();
     checkEverythingLands();
+    checkTheRampExtension();
     checkTheLandingGear();
     checkTheRealPlanet();
 
