@@ -188,7 +188,21 @@ public:
         // apart and the foot of the ramp becomes the only point along its length
         // where the surface is within stepping height of the ground -- so he
         // walks round to it, without anything telling him to.
-        float stepUp = 0.90f;
+        // Raised from 0.90, which was the single number holding the ramp at 21
+        // degrees.
+        //
+        // This is his ROUTER'S limit as well as his legs': findRoute is given it as
+        // the rise it may climb per two-unit node, so it caps any ramp he will cross
+        // at atan(stepUp / 2.0). At 0.90 that is 24 degrees, and the ramp's nominal
+        // angle is already 21 -- which is why every attempt to let the ramp lay
+        // itself flatter against falling ground ended with him refusing to deliver.
+        //
+        // At 1.5 he will cross 37 degrees, which is enough for the ramp to reach
+        // ground that drops away behind the ship. It is also the ledge he was asked
+        // for in the same breath as the jump, and it is still well under the deck's
+        // own 2.2 -- so the hull stays something he has to walk round rather than
+        // step onto, which is the property the whole approach behaviour rests on.
+        float stepUp = 1.50f;
 
         // ---- how much room he needs -------------------------------------
         // The column he occupies, for the sake of anything solid. Wider than his

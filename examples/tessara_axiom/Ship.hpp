@@ -48,6 +48,16 @@ public:
         float rampExtend   = 8.0f;
         float rampExtendSeconds = 1.8f;
 
+        // The steepest the ramp will lay itself, whatever the drop behind the ship.
+        //
+        // Bounded by the BIPED'S ROUTER, not by taste: he plans over the lattice
+        // allowing params.stepUp of rise per two-unit node, so a ramp steeper than
+        // atan(stepUp / 2.0) is one no route will ever cross and he simply stops
+        // delivering. That limit was 24 degrees while his step-up was 0.90, and the
+        // ramp's nominal angle is 21 -- which is why this could not exist before.
+        // At 1.5 it is 37, so 33 leaves the margin and buys twelve degrees of reach.
+        float rampMaxDegrees = 33.0f;
+
         float controlRise  = 2.3f;  // the button, at about chest height on a unit
 
         // How far anything meant to touch the ground actually sinks into it.

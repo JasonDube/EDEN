@@ -2186,13 +2186,19 @@ void checkEverythingLands() {
 // is nearly three more units of drop at exactly the same grade underfoot, which is
 // the one axis that was still free.
 //
+// It ROTATES now as well, and that needed the biped's step-up raised from 0.90 to
+// 1.5 first: his router is given it as the rise it may climb per two-unit node, so
+// it capped any ramp he would cross at 24 degrees while the nominal is already 21.
+// That one number is why every earlier attempt at this ended with him refusing to
+// deliver. At 1.5 he crosses 37, so the ramp may lay itself to 33.
+//
 // Two things have to be true together, and the second is the one worth guarding:
-// the gap closes, AND the angle does not change. An extension that reached by
-// tilting would have solved nothing.
+// the gap closes, AND the ramp never lays itself steeper than a route will cross.
+// A ramp that reaches by becoming a wall has solved nothing.
 // ---------------------------------------------------------------------------
 void checkTheRampExtension() {
     int sites = 0, helped = 0, stillShort = 0, neverLanded = 0, offField = 0;
-    float worstBefore = 0.0f, worstAfter = 0.0f, angleDrift = 0.0f;
+    float worstBefore = 0.0f, worstAfter = 0.0f, steepest = 0.0f;
 
     for (float relief : {10.0f, 24.0f}) {
         for (glm::vec2 at : {glm::vec2(0.0f, 0.0f), glm::vec2(46.0f, -34.0f)}) {
@@ -2261,8 +2267,10 @@ void checkTheRampExtension() {
                 s.republish();
                 const float after = s.ship.rampGap(s.terrain);
 
-                angleDrift = std::max(angleDrift,
-                                      std::fabs(s.ship.openAngleDegrees() - angleBefore));
+                // Angle and extension are chosen together, so it is already final
+                // here; what matters is that it stayed inside what a route crosses.
+                (void)angleBefore;
+                steepest = std::max(steepest, s.ship.openAngleDegrees());
                 if (before > 12.0f && g_verbose) {
                     const glm::vec3 tip = s.ship.rampFootPosition();
                     std::printf("      ODD site relief %.0f yaw %.0f: ship y %.2f, tip "
@@ -2285,13 +2293,17 @@ void checkTheRampExtension() {
     char detail[224];
     std::snprintf(detail, sizeof detail,
                   "%d sites (%d unlanded, %d off-field): worst gap %.2f stowed -> "
-                  "%.2f extended, %d of %d short ones closed, angle moved %.2f deg",
+                  "%.2f out, %d of %d short ones closed, steepest %.1f deg and a "
+                  "route crosses %.1f",
                   sites, neverLanded, offField, worstBefore, worstAfter, helped,
-                  helped + stillShort, angleDrift);
+                  helped + stillShort, steepest,
+                  glm::degrees(std::atan(Biped().params.stepUp / 2.0f)));
 
-    report("the ramp extension reaches what the ramp cannot",
+    report("the ramp reaches what it could not, and stays walkable",
            neverLanded == 0 && helped > 2 && stillShort == 0 &&
-           worstAfter < worstBefore - 0.3f && angleDrift < 0.01f, detail);
+           worstAfter < worstBefore - 0.3f &&
+           steepest <= glm::degrees(std::atan(Biped().params.stepUp / 2.0f)) + 0.01f,
+           detail);
 }
 
 // ---------------------------------------------------------------------------

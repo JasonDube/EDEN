@@ -202,35 +202,59 @@ float Ship::legSpread() const {
 // lower than the ground under it the tip stops short. Ship::rampGap reports by how
 // much, which is the honest version: a ramp that stops short is a step the crew can
 // still take, and a ramp steep enough to always touch is one nothing can climb.
-void Ship::solveRampAngle(const TerrainSource&) {
-    m_openAngle = glm::degrees(std::asin(
+// Angle AND extension, solved together, because both move the tip.
+//
+// Solving them apart cannot work: pick the angle with the extension stowed and it
+// comes out steep, then the extension slides out and drives the tip through the
+// dirt. They are one geometry problem with two levers.
+//
+// The preference is deliberate. Among settings that reach, the SHALLOWEST angle
+// wins -- length is free to walk on and steepness is not -- so it uses the
+// extension first and only tips further when reach runs out. And stopping short is
+// weighted better than overshooting: short is a step down, long is a spike through
+// the ground.
+//
+// Swept, never iterated. Feeding a height function its own output back through a
+// guess oscillates on real terrain; four passes of that put the ramp somewhere
+// arbitrary and the biped stopped delivering, which is how it was caught. Five
+// hundred height lookups once per landing is nothing, and a table cannot diverge.
+void Ship::solveRampAngle(const TerrainSource& ground) {
+    const float halfL = params.length * 0.5f;
+
+    // Never shallower than the nominal, or the ramp lifts off a level pad.
+    const float nominal = glm::degrees(std::asin(
         std::clamp((params.deckHeight + params.groundBite) / m_rampLength, 0.0f, 0.95f)));
+
+    auto gapAt = [&](float degrees, float ext) {
+        const float rad = glm::radians(degrees);
+        const float span = m_rampLength + params.rampExtend * ext;
+        const glm::vec3 tip = m_origin + up() * params.deckHeight
+                            - forward() * (halfL + span * std::cos(rad))
+                            - up() * (span * std::sin(rad));
+        return tip.y - ground.heightAtWorld(tip.x, tip.z) + params.groundBite;
+    };
+
+    float bestAngle = nominal, bestExt = 0.0f, bestScore = 1e9f;
+    for (float d = nominal; d <= params.rampMaxDegrees + 0.01f; d += 0.5f) {
+        for (float e = 0.0f; e <= 1.0f + 0.001f; e += 0.05f) {
+            const float gap = gapAt(d, e);
+            const float score = gap < 0.0f ? -gap * 3.0f : gap;
+            // Strictly better, so the shallowest angle reached first keeps a tie.
+            if (score < bestScore - 0.01f) {
+                bestScore = score;
+                bestAngle = d;
+                bestExt = e;
+            }
+        }
+    }
+    m_openAngle = bestAngle;
+    m_rampExtAuto = bestExt;
 }
 
-// How much extension the ground under the tip calls for.
-//
-// Swept, for the reason written at length over solveRampAngle: feeding a height
-// function its own output back through a guess oscillates on real terrain. Twenty
-// samples of a lever that only goes from nought to one is nothing, and a table
-// cannot diverge.
+// Kept as its own name because the call sites read better for it, and because the
+// extension is a thing the player can also work by hand.
 void Ship::solveRampExtension(const TerrainSource& ground) {
-    const float a = glm::radians(m_openAngle);
-    const glm::vec3 hinge = m_origin + up() * params.deckHeight
-                          - forward() * (params.length * 0.5f);
-    const glm::vec3 dir = -forward() * std::cos(a) - up() * std::sin(a);
-
-    float best = 0.0f, bestGap = 1e9f;
-    for (int i = 0; i <= 20; ++i) {
-        const float t = i / 20.0f;
-        const glm::vec3 tip = hinge + dir * (m_rampLength + params.rampExtend * t);
-        const float gap = tip.y - ground.heightAtWorld(tip.x, tip.z) + params.groundBite;
-
-        // Stopping short is a step to climb; driving the tip into the dirt is a
-        // spike through the ground. Weighted so it prefers the former.
-        const float score = gap < 0.0f ? -gap * 3.0f : gap;
-        if (score < bestGap) { bestGap = score; best = t; }
-    }
-    m_rampExtAuto = best;
+    solveRampAngle(ground);
 }
 
 float Ship::siteDrop(const TerrainSource& ground) const {
