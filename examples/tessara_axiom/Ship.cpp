@@ -585,6 +585,31 @@ void Ship::appendBlockers(std::vector<Blocker>& out) const {
         }
     }
 
+    // ---- the shut ramp IS a door, so make it solid -------------------------
+    //
+    // The ramp is a SurfacePatch: down, it is a floor you walk up; shut, the patch
+    // simply switches off. Nothing ever stood in the doorway. So a sealed hold was
+    // sealed to the routing -- the enclosure reports its door shut, the walker waits
+    // outside for it -- and wide open to anything that just walked at it, which is
+    // what a player does. Three of forty-eight approaches from around the hull got
+    // inside, all of them from astern.
+    //
+    // The threshold is the PATCH'S OWN, not a number chosen here.
+    //
+    // rampPatch() enables itself above 0.15, so anything else makes the ramp a floor
+    // and a door at once: at 0.85 the biped walking up a half-open ramp was standing
+    // inside the door blocker, and he stopped delivering. Complementary by
+    // construction is the only version that cannot contradict itself.
+    if (m_ramp <= 0.15f) {
+        Blocker door = base;
+        door.origin     = m_origin + up() * params.deckHeight - forward() * (halfL - 0.3f);
+        door.halfWidth  = halfB;
+        door.halfLength = 0.55f;
+        door.floorY     = m_origin.y + split;
+        door.ceilingY   = m_origin.y + params.deckHeight + params.bayHeight;
+        out.push_back(door);
+    }
+
     // ---- the bulkhead, with a way through it -------------------------------
     // It used to be solid from here to the nose, on the grounds that the bridge
     // was somewhere nobody could walk -- no door, no floor. Both of those are now

@@ -2039,6 +2039,32 @@ protected:
                 m_playerControllerFn(deltaTime);
                 eden::setCurrentScriptTransform(nullptr);
                 glm::vec3 pp = m_playerTransform.getPosition();
+
+                // Pushed back out of anything the module says is solid.
+                //
+                // GameModule::resolvePosition has existed since the module seam was
+                // built, TessaraModule has always implemented it, and NOTHING EVER
+                // CALLED IT. So the ship's hull has never been solid to the player --
+                // walls, bulkhead, belly, all of it walk-through. Reported as "I often
+                // fall through the wall of the ship", which is exactly right and is
+                // not a collision bug: it is a wire that was never connected.
+                //
+                // A cylinder, because that is what resolve() expects: soles at pp.y,
+                // crown a little above the eye, and a shoulder's width across.
+                if (m_gameModule) {
+                    float px = pp.x, pz = pp.z;
+                    if (m_gameModule->resolvePosition(px, pz, pp.y,
+                                                      m_playerEyeHeight + 0.2f, 0.40f)) {
+                        pp.x = px;
+                        pp.z = pz;
+                        m_playerTransform.setPosition(pp);
+                        if (m_characterController) {
+                            const glm::vec3 cc = m_characterController->getPosition();
+                            m_characterController->setPosition(glm::vec3(pp.x, cc.y, pp.z));
+                        }
+                    }
+                }
+
                 m_camera.setPosition(glm::vec3(pp.x, pp.y + m_playerEyeHeight, pp.z));
             }
 

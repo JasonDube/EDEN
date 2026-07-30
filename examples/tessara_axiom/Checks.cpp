@@ -1833,6 +1833,72 @@ void checkTheLanding() {
 }
 
 // ---------------------------------------------------------------------------
+// 5f-i. The hull stops a body, from every side and at every height.
+//
+// Reported as "I often fall through the wall of the ship", and it was not a
+// collision bug: GameModule::resolvePosition existed, TessaraModule implemented
+// it, and NOTHING EVER CALLED IT. The hull has never been solid to the player.
+//
+// The old checks asked whether Ground::blocked answers correctly at points, and it
+// always did -- which is why none of them caught this. What was missing is the
+// thing a player does: keep pushing. So this walks a body INTO the hull a step at a
+// time, applying the push-out every step exactly as the host now does, and asks
+// whether it ends up inside. A query cannot see this; only the loop can.
+// ---------------------------------------------------------------------------
+void checkTheHullStopsYou() {
+    Scene s(0.0f, {0.0f, 0.0f}, 34.0f);
+
+    // A player's body: soles on the deck or the dirt, a bit under two units tall,
+    // shoulder's width across -- the numbers the host passes.
+    const float height = 1.90f, radius = 0.40f;
+
+    int tried = 0, gotIn = 0;
+    float deepest = 0.0f;
+
+    // From all round the ship, at deck height and at ground height, walked straight
+    // at the centre. Two heights because the hull is a belly below the deck and a
+    // bay above it, and they are different solids.
+    for (int a = 0; a < 24; ++a) {
+        const float ang = a * (6.2831853f / 24.0f);
+        const glm::vec3 dir(std::cos(ang), 0.0f, std::sin(ang));
+
+        for (int level = 0; level < 2; ++level) {
+            const float footY = level ? s.deckY() : s.ship.origin().y;
+            glm::vec2 at(s.ship.origin().x - dir.x * 40.0f,
+                         s.ship.origin().z - dir.z * 40.0f);
+            ++tried;
+
+            // Walk in, half a unit at a time, resolving every step. The ramp is shut
+            // so there is no legitimate way in.
+            s.closeRamp();
+            for (int step = 0; step < 120; ++step) {
+                at += glm::vec2(dir.x, dir.z) * 0.5f;
+                glm::vec2 fixed = s.ground.resolve(at, footY, height, radius);
+                at = fixed;
+            }
+
+            // Inside the bay, or inside the belly? Either is through the hull.
+            const glm::vec3 here(at.x, footY, at.y);
+            if (s.ground.blocked(at.x, at.y, footY, height, radius)) {
+                ++gotIn;
+            } else if (level == 1 && s.ground.enclosureAt(here + glm::vec3(0, 0.5f, 0)) >= 0) {
+                ++gotIn;   // standing in the sealed hold, having walked in from outside
+            }
+
+            const float into = glm::length(glm::vec2(at.x - s.ship.origin().x,
+                                                     at.y - s.ship.origin().z));
+            deepest = std::max(deepest, s.ship.params.length * 0.5f - into);
+        }
+    }
+
+    char detail[176];
+    std::snprintf(detail, sizeof detail,
+                  "%d approaches from all round, at deck and ground height: %d got "
+                  "inside", tried, gotIn);
+    report("the hull stops a body pushing into it", gotIn == 0, detail);
+}
+
+// ---------------------------------------------------------------------------
 // 5f-ii. Fly somewhere and land, and everything that rode along is still there.
 //
 // Reported: "the walker goes along for the whole ride but when we land where does
@@ -2396,6 +2462,7 @@ int runShipChecks(bool verbose) {
     checkThePlayerRides();
     checkTheHelmView();
     checkTheLanding();
+    checkTheHullStopsYou();
     checkEverythingLands();
     checkTheRampExtension();
     checkTheLandingGear();

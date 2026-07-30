@@ -686,7 +686,31 @@ void Walker::escapeIfBuried(const Ground& hf) {
                 m_footY[i] = hf.heightAt(m_feet[i], hf.terrain().heightAt(m_feet[i]), reach);
             }
 
+            // Clear THERE is not enough -- the way there has to be clear too.
+            //
+            // This walks up to four blocks in a straight line and takes the first
+            // spot it is not buried in, and it never asked what was in between. Inside
+            // a hold, the nearest unburied spot is very often the open ground on the
+            // far side of the hull, and he arrives there by passing through the wall.
+            // That is a creature teleporting out of a sealed ship, and it looks
+            // exactly like "the walker did not land with us".
+            bool crossedSomething = false;
             if (!buried(hf)) {
+                for (int step = 1; step <= distance && !crossedSomething; ++step) {
+                    const glm::ivec2 through = was + dirVec(d) * step;
+                    for (int i = 0; i < 4 && !crossedSomething; ++i) {
+                        static const glm::ivec2 kOff[4] = {{0,0},{1,0},{1,1},{0,1}};
+                        const glm::ivec2 node = through + kOff[i];
+                        const glm::vec3 w = hf.terrain().worldAt(node);
+                        const float under = hf.heightAt(node, m_footY[i], reach);
+                        if (hf.blocked(w.x, w.z, under, params.bodyRise)) {
+                            crossedSomething = true;
+                        }
+                    }
+                }
+            }
+
+            if (!buried(hf) && !crossedSomething) {
                 for (int i = 0; i < 4; ++i) {
                     m_prevFeet[i]  = m_feet[i];       // no interpolating across a lurch
                     m_prevFootY[i] = m_footY[i];
