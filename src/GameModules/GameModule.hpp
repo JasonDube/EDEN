@@ -30,6 +30,12 @@ struct ModuleRenderFrame {
     VkCommandBuffer cmd;
     glm::mat4       viewProj;
     glm::vec3       eye;
+
+    // The target's size THIS frame. A module binding its own pipeline has to set
+    // its own viewport and scissor; inheriting whatever the host last set is a
+    // guess about draw order, and a pipeline that bakes them in is wrong the
+    // moment the window changes size.
+    VkExtent2D      extent{0, 0};
 };
 
 /**

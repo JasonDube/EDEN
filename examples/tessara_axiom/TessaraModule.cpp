@@ -1057,6 +1057,18 @@ void TessaraModule::renderWorld(const eden::ModuleRenderFrame& frame) {
 
     vkCmdBindPipeline(frame.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipeline->getHandle());
 
+    // Our own viewport and scissor, every frame, at this frame's size. See the
+    // note in ScenePipeline: baking these into the pipeline is what cut the right
+    // of the ship off while the terrain behind it drew perfectly.
+    if (frame.extent.width > 0 && frame.extent.height > 0) {
+        VkViewport vp{0.0f, 0.0f,
+                      static_cast<float>(frame.extent.width),
+                      static_cast<float>(frame.extent.height), 0.0f, 1.0f};
+        VkRect2D sc{{0, 0}, frame.extent};
+        vkCmdSetViewport(frame.cmd, 0, 1, &vp);
+        vkCmdSetScissor(frame.cmd, 0, 1, &sc);
+    }
+
     ScenePush push{};
     push.mvp  = frame.viewProj;
     push.tint = glm::vec4(1.0f);

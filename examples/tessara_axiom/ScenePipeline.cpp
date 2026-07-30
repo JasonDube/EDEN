@@ -120,6 +120,23 @@ VkPipeline ScenePipeline::createVariant(VkRenderPass renderPass, VkExtent2D exte
     blendAttachment.dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
     blendAttachment.alphaBlendOp        = VK_BLEND_OP_ADD;
 
+    // Viewport and scissor are DYNAMIC, and this is not a detail.
+    //
+    // They used to be baked into the pipeline from the extent it was built with.
+    // The host sets them per frame for its own draws, so the terrain always filled
+    // the window while this pipeline kept scissoring to whatever size the window
+    // had been at attach time -- and anything outside that stale rectangle was
+    // simply not drawn. Reported as the right of the ship missing with the terrain
+    // behind it rendering fine, and the boundary sliding across the hull as you
+    // moved, because the geometry moves and the rectangle does not. Any resize at
+    // all does it, and starting the window hidden and maximized guarantees one.
+    const VkDynamicState dynamics[] = {VK_DYNAMIC_STATE_VIEWPORT,
+                                       VK_DYNAMIC_STATE_SCISSOR};
+    VkPipelineDynamicStateCreateInfo dynamic{};
+    dynamic.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
+    dynamic.dynamicStateCount = 2;
+    dynamic.pDynamicStates = dynamics;
+
     VkPipelineColorBlendStateCreateInfo blend{};
     blend.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
     blend.attachmentCount = 1;
@@ -136,6 +153,7 @@ VkPipeline ScenePipeline::createVariant(VkRenderPass renderPass, VkExtent2D exte
     info.pMultisampleState = &multisample;
     info.pDepthStencilState = &depth;
     info.pColorBlendState = &blend;
+    info.pDynamicState = &dynamic;
     info.layout = m_layout;
     info.renderPass = renderPass;
     info.subpass = 0;

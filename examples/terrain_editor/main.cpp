@@ -4605,7 +4605,8 @@ protected:
         // A game module's own world content, in this pass with this camera. Play
         // mode only: an editor showing you a level should show you the level.
         if (m_gameModule && m_isPlayMode) {
-            eden::ModuleRenderFrame frame{ cmd, vp, m_camera.getPosition() };
+            eden::ModuleRenderFrame frame{ cmd, vp, m_camera.getPosition(),
+                                           getSwapchain().getExtent() };
             m_gameModule->renderWorld(frame);
         }
 
