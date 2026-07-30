@@ -60,6 +60,8 @@
 #include "LevelChecks.hpp"
 // What a module may DO to the world, as opposed to be asked about.
 #include "EditorModuleHost.hpp"
+// The shop: .lime prefabs the player buys and stands on a deck.
+#include "PrefabCatalog.hpp"
 
 // OS / Filesystem
 #include "OS/FilesystemBrowser.hpp"
@@ -446,6 +448,54 @@ protected:
             };
             deps.objectsChanged = [this] { updateSceneObjectsList(); };
             m_moduleHost.setDeps(deps);
+        }
+
+        // The shop.
+        {
+            PrefabCatalogHooks shop;
+            shop.credits = [this] { return m_playerCredits; };
+            shop.spend   = [this](float amount) { m_playerCredits -= amount; };
+            shop.viewYawDegrees = [this] { return m_camera.getYaw(); };
+
+            // The crosshair, which in play mode is the middle of the screen.
+            shop.aimRay = [this](glm::vec3& origin, glm::vec3& dir) {
+                origin = m_camera.getPosition();
+                dir    = m_camera.getFront();
+            };
+
+            // Every h-slab the player has laid down. buildingType is what the
+            // build tool stamps on one, so "a deck" means exactly "a thing you
+            // built with the H-Slab tool" and nothing else in the level.
+            shop.decks = [this] {
+                std::vector<CatalogDeck> decks;
+                for (auto& obj : m_sceneObjects) {
+                    if (!obj || obj->getBuildingType() != "platform_slab") continue;
+                    AABB wb = obj->getWorldBounds();
+                    decks.push_back(CatalogDeck{obj->getName(), wb.min, wb.max});
+                }
+                return decks;
+            };
+
+            // Bought items are ordinary scene objects -- in the outliner,
+            // selectable, movable, saved with the level. Deliberately NOT
+            // module-owned: the player paid for it, so unloading a game module
+            // must not delete it.
+            shop.place = [this](const std::string& path, const glm::vec3& pos,
+                                float yaw) -> std::string {
+                const std::size_t before = m_sceneObjects.size();
+                importLimeModel(path);
+                if (m_sceneObjects.size() <= before) return {};
+                auto* obj = m_sceneObjects.back().get();
+                if (!obj) return {};
+                obj->getTransform().setPosition(pos);
+                obj->getTransform().setRotation(glm::vec3(0.0f, yaw, 0.0f));
+                obj->setAABBCollision(true);
+                updateSceneObjectsList();
+                return obj->getName();
+            };
+
+            m_catalog.setHooks(shop);
+            m_catalog.load("assets/models/prefabs");
         }
 
         m_videoEditor = std::make_unique<eden::VideoEditor>(getContext());
@@ -7772,6 +7822,76 @@ private:
         };
 
 
+        // The player's loop, without a player: lay a deck in front of the camera,
+        // buy the first thing in the shop, and require it to be standing ON the
+        // deck with the money gone. Driven through buyAndPlace, which is the same
+        // call the Buy button makes -- a check that reimplemented the purchase
+        // would be testing itself.
+        h.catalogSelfTest = [this]() -> std::string {
+            if (m_catalog.entries().empty())
+                return "nothing for sale -- assets/models/prefabs missing from the build dir?";
+            const PrefabCatalogEntry& item = m_catalog.entries().front();
+
+            // A deck ten units ahead, wide enough that the crosshair lands on it.
+            const glm::vec3 centre = m_camera.getPosition() + m_camera.getFront() * 10.0f;
+            auto mesh = PrimitiveMeshBuilder::createCube(1.0f, glm::vec4(0.7f, 0.7f, 0.7f, 1.0f));
+            auto slab = std::make_unique<SceneObject>("CheckDeck");
+            slab->setBufferHandle(m_modelRenderer->createModel(mesh.vertices, mesh.indices));
+            slab->setIndexCount(static_cast<uint32_t>(mesh.indices.size()));
+            slab->setVertexCount(static_cast<uint32_t>(mesh.vertices.size()));
+            slab->setLocalBounds(mesh.bounds);
+            slab->setMeshData(mesh.vertices, mesh.indices);
+            slab->setPrimitiveType(PrimitiveType::Cube);
+            slab->setBuildingType("platform_slab");     // what makes it a deck
+            slab->getTransform().setPosition(centre);
+            // Deliberately THICK, not a realistic 0.5 deck. With a thin slab the
+            // aim ray enters through the top face, where "snapped to the top" and
+            // "wherever the ray hit" are the same point -- so the check passed
+            // even with the snapping removed. A tall box forces the ray in
+            // through a side, and the two answers differ by metres.
+            slab->getTransform().setScale(glm::vec3(12.0f, 4.0f, 12.0f));
+            const float deckTop = slab->getWorldBounds().max.y;
+            m_sceneObjects.push_back(std::move(slab));
+            updateSceneObjectsList();
+
+            const float before = m_playerCredits;
+            m_playerCredits = std::max(m_playerCredits, item.price);   // afford it
+            const float funded = m_playerCredits;
+
+            std::string problems;
+            auto fail = [&problems](const std::string& s) {
+                if (!problems.empty()) problems += "; ";
+                problems += s;
+            };
+
+            const std::string placed = m_catalog.buyAndPlace(item);
+            if (placed.empty()) {
+                fail("buyAndPlace refused: " + m_catalog.lastMessage());
+            } else {
+                if (std::fabs((funded - m_playerCredits) - item.price) > 0.01f)
+                    fail("credits did not go down by the price");
+                SceneObject* bought = nullptr;
+                for (auto& o : m_sceneObjects)
+                    if (o && o->getName() == placed) bought = o.get();
+                if (!bought) {
+                    fail("nothing named " + placed + " is in the level");
+                } else if (std::fabs(bought->getTransform().getPosition().y - deckTop) > 0.01f) {
+                    // The whole point: it sits ON the deck, not in it or under it.
+                    fail("bought item is not standing on the deck");
+                }
+                for (int i = 0; i < static_cast<int>(m_sceneObjects.size()); ++i)
+                    if (m_sceneObjects[i] && m_sceneObjects[i]->getName() == placed) {
+                        deleteObject(i); break;
+                    }
+            }
+
+            for (int i = 0; i < static_cast<int>(m_sceneObjects.size()); ++i)
+                if (m_sceneObjects[i] && m_sceneObjects[i]->getName() == "CheckDeck") {
+                    deleteObject(i); break;
+                }
+            m_playerCredits = before;    // the check does not get to make you rich
+            return problems;
+        };
         h.destroyModuleOwned = [this] { m_moduleHost.destroyAllOwned(); };
         h.addASceneObject = [this] {
             auto mesh = PrimitiveMeshBuilder::createCube(1.0f, glm::vec4(1.0f));
@@ -20500,6 +20620,15 @@ private:
                 ImGui::Checkbox("Verbose (size / file count)", &m_tooltipVerbose);
             } else {
                 // === Game Building Mode ===
+                // The shop, above the build tools, because the loop reads
+                // "lay a deck, then buy things to put on it".
+                if (ImGui::Button(m_showCatalog ? "Close Catalog" : "Open Catalog",
+                                  ImVec2(220, 0))) {
+                    m_showCatalog = !m_showCatalog;
+                }
+                ImGui::TextDisabled("Buy components for your ship");
+                ImGui::Separator();
+
                 ImGui::Text("Horizontal Slab");
                 ImGui::Checkbox("H-Slab Brush", &m_hSlabBrushMode);
                 if (m_hSlabBrushMode) {
@@ -21400,6 +21529,9 @@ private:
     void renderPlayModeUI() {
         renderPlayModeTopBar();
         renderSiloConfigWindow();
+        // Play mode only: the shop is a thing the PLAYER opens, not an editor panel.
+        if (m_isPlayMode) m_catalog.render(m_showCatalog);
+        else m_showCatalog = false;
         renderPlatformMapMode();
         renderPerfWindow();
 
@@ -31793,6 +31925,11 @@ private:
     // wireGameModule alongside the terrain; it remembers what it spawned so the
     // host can take it all back.
     EditorModuleHost m_moduleHost;
+
+    // The shop. Its stock is whatever .lime files are in assets/models/prefabs,
+    // so nothing here knows what a helm is or costs.
+    PrefabCatalog m_catalog;
+    bool m_showCatalog = false;
 
     enum class PlayerZone { Silo, Basement, Outside, Void };
     PlayerZone m_playerZone = PlayerZone::Outside;

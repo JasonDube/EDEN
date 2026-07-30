@@ -143,6 +143,15 @@ int runEmptyLevelChecks(const LevelCheckHooks& hooks, bool verbose) {
         report("module host: works", false, "no hook -- the seam is NOT checked");
     }
 
+    // Can a player buy something and stand it on a deck they built?
+    if (hooks.catalogSelfTest) {
+        const std::string problem = hooks.catalogSelfTest();
+        report("catalog: buy and place", problem.empty(),
+               problem.empty() ? "deck -> helm -> credits deducted" : problem);
+    } else {
+        report("catalog: buy and place", false, "no hook -- the shop is NOT checked");
+    }
+
     // Unloading a module takes its objects with it, WITHOUT wiping the level.
     //
     // Checked on its own because it is the only cleanup path that has to delete

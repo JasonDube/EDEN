@@ -74,6 +74,10 @@ struct LevelCheckHooks {
     // and exited 0, so a script watching the exit code would have been told the
     // seam was fine while it was demonstrably broken.
     std::function<std::string()> moduleHostSelfTest;
+
+    // Lay a deck, buy a helm, and confirm it is standing on it and the credits
+    // are gone. The player's whole loop, driven without a mouse.
+    std::function<std::string()> catalogSelfTest;
     // ModuleHost::destroyAllOwned() -- the Unload Module path, where the level
     // stays and only the module's objects go. Distinct from a wipe, and the one
     // that can leave real objects behind rather than just a stale name list.
