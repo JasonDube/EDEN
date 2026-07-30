@@ -8804,11 +8804,27 @@ private:
         }
 
         // Compute early so we can skip camera's onSpacePressed when Jolt handles jump
+        // BUILD MODE NO LONGER TURNS THE BODY OFF.
+        //
+        // This used to end with !(m_playModeCursorVisible && m_showSiloConfig),
+        // which switched the character controller off for the whole time the Tab
+        // build panel was up. No controller means no capsule, and no capsule means
+        // nothing holds you up -- so you fell through the platform you had just
+        // built, while the slab's collider sat there in Jolt working perfectly.
+        //
+        // It was survivable before only by accident: a left-click on the world
+        // used to recapture the mouse, which hid the cursor and quietly switched
+        // the body back on. Making build mode keep its cursor -- so a slab drag
+        // would stop losing the pointer mid-drag -- removed that escape hatch and
+        // left the body off for good.
+        //
+        // Gravity and collision while building is also just what you want: you
+        // stand on the deck you are working on, and you walk to the spot you want
+        // to put the next thing.
         bool useCharacterController = m_isPlayMode && m_characterController &&
                                 m_camera.getMovementMode() == MovementMode::Walk &&
                                 !m_filesystemBrowser.isActive() &&
-                                !m_inPanelFocusMode &&
-                                !(m_playModeCursorVisible && m_showSiloConfig);
+                                !m_inPanelFocusMode;
 
         // Double-tap space toggles fly/walk mode; spacebar on selected spinning model toggles spin
         // Skip when character controller handles jump — prevents accidental fly mode toggle
