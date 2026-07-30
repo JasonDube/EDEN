@@ -2064,18 +2064,35 @@ void checkTheHullStopsYou() {
             // Walk in, half a unit at a time, resolving every step. The ramp is shut
             // so there is no legitimate way in.
             s.closeRamp();
+            const glm::vec3 hatch = s.ship.hatchCentre();
+            bool usedTheDoor = false;
             for (int step = 0; step < 120; ++step) {
                 at += glm::vec2(dir.x, dir.z) * 0.5f;
-                glm::vec2 fixed = s.ground.resolve(at, footY, height, radius);
-                at = fixed;
+                at = s.ground.resolve(at, footY, height, radius);
+
+                // Whether it came in through the hatch is a question about the
+                // WHOLE walk, not about where it stopped: anything that gets in
+                // keeps going to the middle, so by the end it is nowhere near the
+                // door it used.
+                if (glm::length(glm::vec2(at.x - hatch.x, at.y - hatch.z)) < 3.2f) {
+                    usedTheDoor = true;
+                }
             }
 
-            // Inside the bay, or inside the belly? Either is through the hull.
+            // Inside the bay, or inside the belly? Either is through the hull --
+            // EXCEPT at the hatch, which is a door and is supposed to let you in.
+            //
+            // The guarantee is not "nothing gets in anywhere". It is that the hull
+            // is solid to a body on the DIRT, and that the only openings above it
+            // are the ramp and the hatch. You reach the hatch by climbing the
+            // ladder; the deck is 2.2 up and the best jump in the game is 1.77, so
+            // it is not a shortcut from the ground.
             const glm::vec3 here(at.x, footY, at.y);
             if (s.ground.blocked(at.x, at.y, footY, height, radius)) {
                 ++gotIn;
-            } else if (level == 1 && s.ground.enclosureAt(here + glm::vec3(0, 0.5f, 0)) >= 0) {
-                ++gotIn;   // standing in the sealed hold, having walked in from outside
+            } else if (level == 1 && !usedTheDoor &&
+                       s.ground.enclosureAt(here + glm::vec3(0, 0.5f, 0)) >= 0) {
+                ++gotIn;   // in the sealed hold, and not by the door
             }
 
             const float into = glm::length(glm::vec2(at.x - s.ship.origin().x,

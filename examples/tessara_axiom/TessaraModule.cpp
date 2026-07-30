@@ -197,6 +197,7 @@ void TessaraModule::republishGround() {
     m_ground->clearPatches();
     m_ground->addPatch(m_ship.deckPatch());
     m_ground->addPatch(m_ship.rampPatch());
+    m_ground->addPatch(m_ship.ladderPlatformPatch());
 
     std::vector<Blocker> solids;
     m_ship.appendBlockers(solids);
@@ -415,7 +416,7 @@ void TessaraModule::updateLadder(float dt) {
     m_atLadder = toLadder < 2.2f && !m_ship.airborne();
 
     if (m_climbing) {
-        // Up at a climbing pace, and stop at the deck. Wandering off the ladder
+        // Up at a climbing pace, and stop at the platform. Wandering off the ladder
         // ends it -- he is holding rungs, not riding a lift.
         m_climbY += 3.2f * dt;
         if (toLadder > 3.0f || m_climbY >= m_ship.ladderTopY()) {

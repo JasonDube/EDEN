@@ -423,6 +423,35 @@ glm::vec3 Ship::ladderFoot() const {
          + forward() * (params.length * 0.30f);
 }
 
+glm::vec3 Ship::hatchCentre() const {
+    return m_origin
+         + right() * (params.width * 0.5f)
+         + forward() * (params.length * 0.30f)
+         + up() * params.deckHeight;
+}
+
+SurfacePatch Ship::ladderPlatformPatch() const {
+    // From the hull face out past the ladder, at deck height, so stepping off the
+    // top rung puts you on something and one pace inboard puts you through the
+    // hatch.
+    const glm::vec3 foot = ladderFoot();
+    const float out = params.width * 0.5f;
+
+    SurfacePatch patch;
+    patch.right  = forward();                       // its own long axis runs fore-aft
+    patch.along  = right();
+    patch.origin = m_origin
+                 + right() * ((out + 1.35f) * 0.5f + out * 0.5f)
+                 + forward() * (params.length * 0.30f)
+                 + up() * params.deckHeight;
+    patch.halfWidth  = 1.35f;                       // fore and aft of the hatch
+    patch.halfLength = (1.35f + 0.35f) * 0.5f;      // hull face out past the rungs
+    patch.solidUnder = true;
+    patch.enabled = true;
+    (void)foot;
+    return patch;
+}
+
 glm::vec3 Ship::innerControlPosition() const {
     // On the starboard bay wall by the doorway, at the same height above the
     // floor as the one outside is above the ground. Somebody who has used one
@@ -555,6 +584,29 @@ void Ship::appendBlockers(std::vector<Blocker>& out) const {
         b.halfLength = halfL;
         b.floorY     = m_origin.y + split;
         b.ceilingY   = m_origin.y + roof;
+
+        // Starboard has a HATCH in it, level with the deck, where the ladder comes
+        // up. Cut by emitting the wall as two lengths rather than one, which is the
+        // same trick the bulkhead uses for its doorway -- there is no such thing
+        // here as a solid with a hole in it, so a gap has to be a gap.
+        if (sx > 0.0f) {
+            const float at = params.length * 0.30f;   // the ladder's station
+            const float half = 1.35f;
+            const float aftEnd  = at - half;
+            const float foreEnd = at + half;
+
+            Blocker aft = b;
+            aft.halfLength = (aftEnd + halfL) * 0.5f;
+            aft.origin = b.origin + forward() * ((aftEnd - halfL) * 0.5f);
+            out.push_back(aft);
+
+            Blocker fore = b;
+            fore.halfLength = (halfL - foreEnd) * 0.5f;
+            fore.origin = b.origin + forward() * ((halfL + foreEnd) * 0.5f);
+            out.push_back(fore);
+            continue;
+        }
+
         out.push_back(b);
     }
 
@@ -1073,6 +1125,33 @@ void appendShipMesh(const Ship& ship,
     appendBox(verts, indices, (hinge + foot) * 0.5f, r, rampUp, dir,
               glm::vec3(p.bayWidth * 0.46f, 0.16f, glm::length(foot - hinge) * 0.5f),
               kRamp);
+
+    // ---- the platform at the top of the ladder, and the hatch beside it ----
+    {
+        const glm::vec3 hatch = ship.hatchCentre();
+        const float outw = p.width * 0.5f;
+
+        // The landing itself: a grating from the hull face out past the rungs.
+        appendBox(verts, indices,
+                  o + r * (outw + 0.68f) + f * (p.length * 0.30f)
+                    + u * (p.deckHeight - 0.09f),
+                  r, u, f, glm::vec3(0.78f, 0.09f, 1.35f), kTrim);
+
+        // A rail along its outer edge, so it reads as somewhere to stand rather
+        // than a shelf, and a frame round the opening so the hatch reads as a way in.
+        appendBox(verts, indices,
+                  o + r * (outw + 1.42f) + f * (p.length * 0.30f)
+                    + u * (p.deckHeight + 0.45f),
+                  r, u, f, glm::vec3(0.06f, 0.45f, 1.35f), kHazard);
+        for (int e = 0; e < 2; ++e) {
+            const float sz = e ? 1.0f : -1.0f;
+            appendBox(verts, indices,
+                      hatch + f * (sz * 1.38f) + u * (p.bayHeight * 0.32f),
+                      r, u, f, glm::vec3(0.14f, p.bayHeight * 0.32f, 0.10f), kTrim);
+        }
+        appendBox(verts, indices, hatch + u * (p.bayHeight * 0.64f),
+                  r, u, f, glm::vec3(0.14f, 0.10f, 1.38f), kTrim);
+    }
 
     // ---- the boarding ladder ----------------------------------------------
     // Two rails and a set of rungs up the hull by the bridge. Drawn from the same

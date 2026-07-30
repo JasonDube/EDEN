@@ -180,6 +180,15 @@ public:
     glm::vec3 ladderFoot() const;    // at the ground, outside the hull
     float ladderTopY() const { return m_origin.y + params.deckHeight; }
 
+    // The landing at the top of it, and the hatch it leads through.
+    //
+    // A ladder that ends in mid-air is not a way aboard: the climb stops, there is
+    // no floor at his feet, and the next question anything asks about the ground
+    // gets the terrain twenty units below. So the top of the ladder is a real
+    // platform you stand on, and the hull has a real opening beside it.
+    SurfacePatch ladderPlatformPatch() const;
+    glm::vec3 hatchCentre() const;   // in the starboard wall, level with the deck
+
     // ---- landing gear ------------------------------------------------------
     // Four legs, each as long as the ground under IT requires.
     //
