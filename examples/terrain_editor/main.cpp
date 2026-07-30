@@ -20802,6 +20802,10 @@ private:
                     obj->getTransform().setScale({m_hSlabLength, m_hSlabThickness, m_hSlabWidth});
                     obj->setAABBCollision(true);
                     m_sceneObjects.push_back(std::move(obj));
+                    // This button was missed when the other four build tools were
+                    // given physics at creation time -- so a slab placed from HERE
+                    // was still a ghost while a dragged-out one was solid.
+                    if (m_isPlayMode) addBuildPieceCollision(m_sceneObjects.back().get());
                 }
 
                 ImGui::Separator();
@@ -26876,7 +26880,12 @@ private:
         // not: they never go away, and the count climbs every time you enter play.
         // Calling this from the build tools would have compounded it, so it stops
         // here for both callers.
-        if (obj->getJoltBodyId() != UINT32_MAX) return;
+        if (obj->getJoltBodyId() != UINT32_MAX) {
+            std::printf("[Collide] %s SKIP already has body %u\n",
+                        obj->getName().c_str(), obj->getJoltBodyId());
+            std::fflush(stdout);
+            return;
+        }
         const auto& bt = obj->getBuildingType();
 
         // Window/door frames: zero collision always
@@ -26887,7 +26896,17 @@ private:
         }
 
         if (bt != "platform_slab" && bt != "platform_wall") return;
-        if (obj->isKinematicPlatform()) return;
+        if (obj->isKinematicPlatform()) {
+            std::printf("[Collide] %s SKIP kinematic platform\n", obj->getName().c_str());
+            std::fflush(stdout);
+            return;
+        }
+        if (!m_characterController) {
+            std::printf("[Collide] %s SKIP no character controller (play mode not entered?)\n",
+                        obj->getName().c_str());
+            std::fflush(stdout);
+            return;
+        }
 
         // Building pieces use AABB collision for character controller (supports wall hole skip).
         obj->setAABBCollision(true);
@@ -26917,6 +26936,13 @@ private:
                 glm::vec3 center = position + rotation * localCenterOffset;
                 uint32_t bodyId = m_characterController->addStaticBoxWithId(localHalfExtents, center, rotation);
                 obj->setJoltBodyId(bodyId);
+                std::printf("[Collide] %s ADDED half=(%.2f,%.2f,%.2f) centre=(%.1f,%.1f,%.1f) "
+                            "id=%u backend=%s\n",
+                            obj->getName().c_str(),
+                            localHalfExtents.x, localHalfExtents.y, localHalfExtents.z,
+                            center.x, center.y, center.z, bodyId,
+                            m_physicsBackend == PhysicsBackend::Jolt ? "jolt" : "homebrew");
+                std::fflush(stdout);
             } else {
                 // Wall with holes — split into solid pieces around each hole.
                 // Work in world space since holes are stored in world space.
