@@ -1833,6 +1833,69 @@ void checkTheLanding() {
 }
 
 // ---------------------------------------------------------------------------
+// 5e-ii. A crate only reaches the pile if the CARRIER reached the pile.
+//
+// Reported as "the walker is delivering packages without even going inside, he
+// just gets close to the ship and they teleport there". Two causes, both mine.
+//
+// Three activities read `m_pathIndex >= m_path.size()` as HAVING ARRIVED, because
+// an empty route used to only ever mean a walked one. Then the stall recovery
+// started throwing stale routes away -- so discarding a route told the hauling code
+// he was standing at the pile, and the crate was filed there from wherever he was.
+// It replans to the same goal now instead of discarding.
+//
+// And the module trusted the creature's word: task over and carrying, therefore
+// delivered. A task can end for reasons that are not arrival. Now the crate goes
+// where the CARRIER is, and only the pile counts as the pile.
+//
+// Checked by watching every crate for a teleport: a stored crate whose carrier was
+// never near the pile is the bug, however it got there.
+// ---------------------------------------------------------------------------
+void checkNoTeleportedCrates() {
+    Scene s(0.0f, {0.0f, 0.0f}, 34.0f);
+
+    Walker w;
+    const glm::vec3 o = s.ship.origin();
+    w.reset(s.ground, s.ground.nodeNear(o - s.f() * 46.0f), 0);
+    w.setHome(o, 250.0f);
+
+    const glm::vec3 pile = s.ship.bayStoragePoint();
+    glm::vec3 crate = o - s.f() * 52.0f + s.r() * 8.0f;
+    crate.y = s.terrain.heightAtWorld(crate.x, crate.z) + 0.42f;
+
+    w.assignFetch(s.ground, crate, pile);
+
+    int teleports = 0, delivered = 0;
+    float nearestWhenFiled = 1e9f;
+    bool wasCarrying = false;
+
+    for (int i = 0; i < 60 * 180; ++i) {
+        s.ship.update(1.0f / 60.0f, s.ship.isOnRamp(w.bodyCentre(s.ground)));
+        s.republish();
+        w.update(s.ground, 1.0f / 60.0f);
+
+        const glm::vec3 at = w.bodyCentre(s.ground);
+        if (w.hasCargo()) crate = w.cargoPosition(s.ground);
+
+        // The moment he stops carrying, where was he? That is the only question.
+        if (wasCarrying && !w.hasCargo()) {
+            const float toPile = glm::length(glm::vec2(at.x - pile.x, at.z - pile.z));
+            nearestWhenFiled = std::min(nearestWhenFiled, toPile);
+            if (toPile < 6.0f) ++delivered; else ++teleports;
+            break;
+        }
+        wasCarrying = w.hasCargo();
+    }
+
+    char detail[176];
+    std::snprintf(detail, sizeof detail,
+                  "let go of the crate %.1f from the pile: %d delivered, %d filed "
+                  "from nowhere near it",
+                  nearestWhenFiled, delivered, teleports);
+    report("a crate only reaches the pile if he does", teleports == 0, detail);
+}
+
+// ---------------------------------------------------------------------------
 // 5f-i. The hull stops a body, from every side and at every height.
 //
 // Reported as "I often fall through the wall of the ship", and it was not a
@@ -2462,6 +2525,7 @@ int runShipChecks(bool verbose) {
     checkThePlayerRides();
     checkTheHelmView();
     checkTheLanding();
+    checkNoTeleportedCrates();
     checkTheHullStopsYou();
     checkEverythingLands();
     checkTheRampExtension();

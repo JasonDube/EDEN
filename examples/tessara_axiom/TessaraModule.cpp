@@ -332,11 +332,32 @@ void TessaraModule::updateHauling() {
                 m_crates[h.crate].position = walker ? m_walker.cargoPosition(*m_ground)
                                                     : m_biped.cargoPosition();
             } else if (!busy) {
-                if (h.wasCarrying) {
+                // Filed on the pile only if he actually GOT to the pile.
+                //
+                // This used to trust the creature's word: task over and he was
+                // carrying, therefore it is delivered. But a task can end for
+                // reasons that are not arrival -- a route abandoned, a plan thrown
+                // away -- and then the crate was filed on the pile from wherever he
+                // was standing. Crates appearing in the hold with nobody ever having
+                // walked in. Whatever ends a task, the crate goes where the CARRIER
+                // is, and only the pile counts as the pile.
+                const float toPile = glm::length(glm::vec2(at.x - m_storage.x,
+                                                          at.z - m_storage.z));
+                if (h.wasCarrying && toPile < 6.0f) {
                     m_crates[h.crate].position = stackSlot(h.slot);
                     m_crates[h.crate].yaw = dropYaw;
                     m_crates[h.crate].stored = true;
                     ++m_stored;
+                } else if (h.wasCarrying) {
+                    // Put down where he stands, on the ground, for someone to
+                    // collect again -- including him.
+                    Crate& dropped = m_crates[h.crate];
+                    dropped.position = glm::vec3(at.x,
+                        m_ground->heightAt(at.x, at.z, at.y, 2.0f) + kCrateSize * 0.5f,
+                        at.z);
+                    dropped.yaw = dropYaw;
+                    dropped.stored = false;
+                    m_freeSlots.push_back(h.slot);
                 } else {
                     m_freeSlots.push_back(h.slot);
                 }

@@ -253,6 +253,10 @@ private:
     // Consecutive ticks a routed step has been refused. See tick(): a plan is
     // only true of the world it was made in.
     int m_routeStall = 0;
+
+    // What the current route was planned to REACH, so a stale one can be replanned
+    // rather than discarded -- discarding it reads as arrival. See tick().
+    glm::ivec2 m_pathGoal{0, 0};
     bool m_stationStalled = false;
 
     float m_accum = 0.0f;        // fraction of the way to the next tick

@@ -332,6 +332,7 @@ bool Walker::blockCanStep(const Ground& hf, const glm::ivec2& block, int dir,
 // knowing that up front is the difference between giving up immediately and
 // grinding at a wall for half a minute.
 bool Walker::planPath(const Ground& hf, const glm::ivec2& goalBlock) {
+    m_pathGoal = goalBlock;
     m_path.clear();
     m_pathNodes.clear();
     m_pathIndex = 0;
@@ -563,9 +564,25 @@ void Walker::tick(const Ground& hf) {
                 // because the thing in the way is a door finishing its travel.
                 if (++m_routeStall >= kStallTicks) {
                     m_routeStall = 0;
-                    m_path.clear();
-                    m_pathNodes.clear();
-                    m_pathIndex = 0;
+
+                    // REPLANNED to the same goal, not thrown away.
+                    //
+                    // Clearing it was the obvious thing and it was wrong, because
+                    // three activities read `m_pathIndex >= m_path.size()` as HAVING
+                    // ARRIVED. An empty route is indistinguishable from a walked one,
+                    // so discarding a stale route told the hauling code he was
+                    // standing at the pile -- and the crate was filed on the pile
+                    // from wherever he happened to be. Crates teleporting into the
+                    // hold from out on the field, with nobody ever walking in.
+                    //
+                    // Only if a fresh route cannot be found at all does the path go,
+                    // which is the case the activity layer already knows how to
+                    // handle.
+                    if (!planPath(hf, m_pathGoal)) {
+                        m_path.clear();
+                        m_pathNodes.clear();
+                        m_pathIndex = 0;
+                    }
                 }
                 return;
             }
