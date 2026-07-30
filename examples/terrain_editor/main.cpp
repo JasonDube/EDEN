@@ -11401,8 +11401,21 @@ private:
                 glm::vec3 camPos = m_camera.getPosition();
                 glm::vec3 camFront = m_camera.getFront();
                 glm::vec3 spawnPos;
-                float objHalfH = m_toolbarSlots[i].modelBounds.getSize().y * m_toolbarSlots[i].modelScale.y * 0.5f;
-                if (objHalfH < 0.05f) objHalfH = 0.05f;
+                // How far the model's LOWEST point sits below its own origin.
+                //
+                // This used to be half the model's height, which silently assumed
+                // every model is centred on its origin. helm.lime is not: it was
+                // authored with its base at y = 0 so that its deck_mount port sits
+                // exactly where it touches the floor -- the right way to author
+                // something meant to stand on a deck. Lifting it by half its
+                // height therefore left it HOVERING 0.72 units above the surface.
+                //
+                // Using the bounds' own minimum handles both conventions: a
+                // centre-origin cube has min.y = -half, giving the old number
+                // back; a base-origin model gives zero, and it lands flush.
+                const AABB& mb = m_toolbarSlots[i].modelBounds;
+                float objLift = -mb.min.y * m_toolbarSlots[i].modelScale.y;
+                if (objLift < 0.0f) objLift = 0.0f;   // origin already below the mesh
 
                 bool placedInFrame = false;
                 if (ctrlHeld) {
@@ -11558,16 +11571,35 @@ private:
                         const char* placeSource = "none";
                         float placeDist = -1.0f;
 
+                        // WITHIN ARM'S REACH, not wherever the ray eventually lands.
+                        //
+                        // The reach used to be 20 units, and on akelba that felt
+                        // fine because the ground has relief and the place is full
+                        // of things -- the ray hits something close. A fresh
+                        // terrain cell is dead flat, and on flat ground the
+                        // distance to the ground is eyeHeight / sin(angle below
+                        // horizontal): look down 5 degrees from 1.7 units up and
+                        // the ray does not touch the floor for nineteen and a half
+                        // units. Same code, same numbers, a level with nothing in
+                        // it, and the object lands twenty units away. That is the
+                        // "20 metres" being reported, and the terrain is the only
+                        // thing that changed.
+                        //
+                        // So it places what is in front of you, close enough to
+                        // walk to -- which is what akelba felt like, rather than
+                        // what akelba did differently.
+                        constexpr float kPlaceReach = 5.0f;
+
                         // Check slabs first (they're not in Jolt physics)
                         for (auto& so : m_sceneObjects) {
                             if (!so) continue;
                             if (so->getBuildingType() != "platform_slab") continue;
                             float d = so->getWorldBounds().intersect(camPos, camFront);
-                            if (d >= 0 && d < 20.0f && d < bestPlaceDist) {
+                            if (d >= 0 && d < kPlaceReach && d < bestPlaceDist) {
                                 bestPlaceDist = d;
                                 float topY = so->getWorldBounds().max.y;
                                 glm::vec3 hp = camPos + camFront * d;
-                                spawnPos = {hp.x, topY + objHalfH, hp.z};
+                                spawnPos = {hp.x, topY + objLift, hp.z};
                                 foundPlace = true;
                                 placeSource = "slab";
                                 placeDist = d;
@@ -11575,13 +11607,13 @@ private:
                         }
 
                         // Jolt raycast (terrain + dynamic bodies)
-                        glm::vec3 rayEnd = camPos + camFront * 20.0f;
+                        glm::vec3 rayEnd = camPos + camFront * kPlaceReach;
                         if (m_characterController) {
                             auto hit = m_characterController->raycast(camPos, rayEnd);
                             if (hit.hit) {
                                 float hitDist = glm::length(hit.hitPoint - camPos);
                                 if (hitDist < bestPlaceDist) {
-                                    spawnPos = hit.hitPoint + glm::vec3(0, objHalfH, 0);
+                                    spawnPos = hit.hitPoint + glm::vec3(0, objLift, 0);
                                     foundPlace = true;
                                     placeSource = "jolt";
                                     placeDist = hitDist;
@@ -11590,10 +11622,34 @@ private:
                         }
 
                         if (!foundPlace) {
-                            spawnPos = camPos + camFront * 3.0f;
-                            spawnPos.y = m_terrain.getHeightAt(spawnPos.x, spawnPos.z) + objHalfH;
-                            placeSource = "fallback3m";
-                            placeDist = 3.0f;
+                            // Nothing within reach along the line of sight -- which
+                            // on flat ground is the NORMAL case, not an error. Put
+                            // it a couple of paces ahead and drop it onto whatever
+                            // is under that spot.
+                            //
+                            // Checking slabs here as well as terrain is the other
+                            // half of the reported bug: the fallback only ever
+                            // asked the terrain, so standing on a platform and
+                            // placing something put it at the GROUND height under
+                            // the platform -- through the deck and out of sight,
+                            // which reads as "it refuses to place on the platform"
+                            // while the same click on open ground works.
+                            glm::vec3 ahead = camPos + camFront * 2.5f;
+                            float surfaceY = m_terrain.getHeightAt(ahead.x, ahead.z);
+                            if (surfaceY < -1000.0f) surfaceY = camPos.y;   // hole sentinel
+                            for (auto& so : m_sceneObjects) {
+                                if (!so || so->getBuildingType() != "platform_slab") continue;
+                                AABB wb = so->getWorldBounds();
+                                if (ahead.x < wb.min.x || ahead.x > wb.max.x) continue;
+                                if (ahead.z < wb.min.z || ahead.z > wb.max.z) continue;
+                                // Only decks at or below the eye -- a slab overhead
+                                // is a ceiling, not the floor you are standing on.
+                                if (wb.max.y > camPos.y + 0.1f) continue;
+                                if (wb.max.y > surfaceY) surfaceY = wb.max.y;
+                            }
+                            spawnPos = glm::vec3(ahead.x, surfaceY + objLift, ahead.z);
+                            placeSource = "ahead2.5";
+                            placeDist = 2.5f;
                         }
 
                         // Everything needed to tell where it went WRONG rather than
