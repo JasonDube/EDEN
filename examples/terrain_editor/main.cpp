@@ -55,6 +55,9 @@
 
 // The tribe sim, which used to be 1,357 lines of this file.
 #include "TribeSim.hpp"
+// Does a new level come up empty? The assertions live in LevelChecks.cpp; this
+// file only says how each poke is performed.
+#include "LevelChecks.hpp"
 
 // OS / Filesystem
 #include "OS/FilesystemBrowser.hpp"
@@ -7608,6 +7611,78 @@ private:
         }
     }
 
+    // ---- the empty-level check --------------------------------------------
+    // What this level is currently carrying. Also useful on its own: it is the
+    // only place that enumerates the state a wipe has to deal with.
+    LevelStateReport levelStateReport() {
+        LevelStateReport r;
+        r.gameModuleName  = m_gameModule ? m_gameModule->getName() : "";
+        r.tribeSimEnabled = m_tribeSim.enabled();
+        r.grassEnabled    = m_grassEnabled;
+        r.grassBlades     = m_grassBlades.size();
+        r.sceneObjects    = m_sceneObjects.size();
+        r.aiNodes         = m_aiNodes.size();
+        r.hasSpawnPoint   = m_hasSpawnPoint;
+        r.waterVisible    = m_editorUI.getWaterVisible();
+        r.testLevel       = m_isTestLevel;
+        r.spaceLevel      = m_isSpaceLevel;
+        r.edenOSLevel     = m_isEdenOSLevel;
+        r.occupiedSlots   = 0;
+        for (int i = 0; i < TOOLBAR_SLOT_COUNT; ++i)
+            if (m_toolbarSlots[i].occupied) ++r.occupiedSlots;
+        return r;
+    }
+
+    LevelCheckHooks levelCheckHooks() {
+        LevelCheckHooks h;
+        h.snapshot = [this] { return levelStateReport(); };
+
+        // Any registered module will do -- the check is about whether a module
+        // survives a wipe, not about which one.
+        h.loadAGameModule = [this] {
+            auto names = eden::GameModuleFactory::getAvailableModules();
+            if (names.empty()) return;               // reported as a dirty failure
+            if (m_gameModule) { m_gameModule->shutdown(); m_gameModule.reset(); }
+            m_gameModule = eden::GameModuleFactory::create(names.front());
+            if (m_gameModule) { m_gameModule->initialize(); wireGameModule(); }
+        };
+        h.enableTribeSim = [this] { m_tribeSim.setEnabled(true); };
+        h.enableGrass    = [this] {
+            m_grassEnabled = true;
+            m_editorUI.setGrassEnabled(true);
+            ensureGrassAssets();
+            regenerateGrassBlades();                 // scatter now, so blades exist to leak
+        };
+        // A slot with a path in it, without touching ~/eden/inventory -- the
+        // check must not be able to edit your actual inventory.
+        h.occupyAHotbarSlot = [this] {
+            m_toolbarSlots[0].occupied    = true;
+            m_toolbarSlots[0].filePath    = "/check/not-a-real-file";
+            m_toolbarSlots[0].displayName = "check";
+        };
+        h.addASceneObject = [this] {
+            auto mesh = PrimitiveMeshBuilder::createCube(1.0f, glm::vec4(1.0f));
+            auto obj = std::make_unique<SceneObject>("CheckCube");
+            obj->setBufferHandle(m_modelRenderer->createModel(mesh.vertices, mesh.indices));
+            obj->setIndexCount(static_cast<uint32_t>(mesh.indices.size()));
+            obj->setVertexCount(static_cast<uint32_t>(mesh.vertices.size()));
+            obj->setLocalBounds(mesh.bounds);
+            obj->setMeshData(mesh.vertices, mesh.indices);
+            obj->setPrimitiveType(PrimitiveType::Cube);
+            m_sceneObjects.push_back(std::move(obj));
+            updateSceneObjectsList();
+        };
+        h.setASpawnPoint = [this] {
+            m_hasSpawnPoint = true;
+            m_spawnPosition = glm::vec3(7.0f, 7.0f, 7.0f);
+        };
+
+        h.newLevel            = [this] { newLevel(); };
+        h.newFoundationLevel  = [this] { newFoundationLevel(); };
+        h.newTerrainCellLevel = [this] { newTerrainCellLevel(); };
+        return h;
+    }
+
     void cleanupInventoryThumbnails() {
         for (int i = 0; i < TOOLBAR_SLOT_COUNT; i++) {
             destroySlotThumbnail(i);
@@ -8947,6 +9022,20 @@ private:
                 std::cout << "[Startup] Entering play mode" << std::endl;
                 enterPlayMode();
             }
+        }
+
+        // --check-levels: run the empty-level checks on the first frame and quit.
+        //
+        // On a frame rather than headlessly because the state under test lives in
+        // a Vulkan application -- there is no TerrainEditor without a device, a
+        // swapchain and renderers, and the leaks being checked for are exactly the
+        // ones that only appear when the real newLevel() runs against the real
+        // thing. So it boots, checks, and closes the window before you can read
+        // what is on it.
+        if (m_runLevelChecks && !m_ranLevelChecks) {
+            m_ranLevelChecks = true;
+            m_levelCheckFailures = runEmptyLevelChecks(levelCheckHooks(), m_levelChecksVerbose);
+            getWindow().close();
         }
 
         // --perf-log: the frame breakdown to stdout once a second, which is the
@@ -31177,6 +31266,11 @@ public:
     void setStartupLevel(const std::string& p) { m_startupLevel = p; }
     void setStartupPlay(bool on) { m_startupPlay = on; }
     void setPerfLog(bool on) { m_perfLog = on; }
+    void setRunLevelChecks(bool on, bool verbose) {
+        m_runLevelChecks = on;
+        m_levelChecksVerbose = verbose;
+    }
+    int levelCheckFailures() const { return m_levelCheckFailures; }
 private:
     std::string m_startupLevel;          // --level <path>: load on first frame
     bool m_startupPlay = false;          // --play: enter play mode once it is loaded
@@ -31187,6 +31281,10 @@ private:
     int m_marksSeen = 0;
     std::vector<std::pair<const char*, std::chrono::high_resolution_clock::time_point>> m_marks;
     bool m_loadedStartupLevel = false;
+    bool m_runLevelChecks = false;       // --check-levels
+    bool m_levelChecksVerbose = false;   // -v alongside it: say what passed too
+    bool m_ranLevelChecks = false;
+    int  m_levelCheckFailures = 0;       // becomes the process exit code
     std::string m_pendingLevelLoad;      // Load-dialog result, applied at frame start (see update())
     bool m_playRTSCamera = false;        // F6 in play mode: false = first-person WASD (default), true = RTS/battle cam
 
@@ -32136,6 +32234,8 @@ int main(int argc, char* argv[]) {
     bool bootEdenOS = false;
     bool startupPlay = false;
     bool perfLog = false;
+    bool checkLevels = false;   // --check-levels: assert a new level is new, then quit
+    bool verbose = false;       // -v: say what passed, not only what failed
     std::string startupLevel;
     for (int i = 1; i < argc; ++i) {
         if (std::string(argv[i]) == "--session-mode") {
@@ -32148,6 +32248,10 @@ int main(int argc, char* argv[]) {
             startupPlay = true;
         } else if (std::string(argv[i]) == "--perf-log") {
             perfLog = true;
+        } else if (std::string(argv[i]) == "--check-levels") {
+            checkLevels = true;
+        } else if (std::string(argv[i]) == "-v" || std::string(argv[i]) == "--verbose") {
+            verbose = true;
         }
     }
 
@@ -32164,7 +32268,11 @@ int main(int argc, char* argv[]) {
         }
         editor.setStartupPlay(startupPlay);
         editor.setPerfLog(perfLog);
+        editor.setRunLevelChecks(checkLevels, verbose);
         editor.run();
+        // The checks decide the exit code, so this is usable from a script and
+        // from CI without anybody reading the output.
+        if (checkLevels) return editor.levelCheckFailures() == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
     } catch (const std::exception& e) {
         std::cerr << "\n=== EXCEPTION: " << e.what() << " ===" << std::endl;
         std::cerr.flush();
