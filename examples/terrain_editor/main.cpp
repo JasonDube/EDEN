@@ -7614,6 +7614,26 @@ private:
         }
     }
 
+    // Empty the hotbar, in memory only.
+    //
+    // The slots you start with are EDEN OS's: they are symlinks in ~/eden/inventory
+    // to real files in your home directory, loaded once at launch for every level
+    // because akelba wanted its placeables back. Two games sharing one hotbar, so a
+    // brand new terrain level came up holding whatever EDEN OS was last carrying.
+    //
+    // ON DISK IS LEFT ALONE, deliberately. saveInventorySlot only runs when you put
+    // something in a slot yourself, so clearing here cannot delete your inventory --
+    // it is still there next launch, and still there in EDEN OS. A new level simply
+    // does not start holding it.
+    void clearInventorySlots() {
+        for (int i = 0; i < TOOLBAR_SLOT_COUNT; i++) {
+            destroySlotThumbnail(i);          // frees the texture/model GPU handles
+            m_toolbarSlots[i] = ToolbarSlot{};
+        }
+        m_activeToolbarSlot = 0;
+        syncExcludedPaths();                  // the browser can show those files again
+    }
+
     void syncExcludedPaths() {
         std::set<std::string> paths;
         for (int i = 0; i < TOOLBAR_SLOT_COUNT; i++) {
@@ -21403,16 +21423,19 @@ private:
             }
             ImGui::End();
         } else {
-            // Credits + City Credits + Game time display (upper right corner)
+            // Credits + game time (upper right corner).
+            //
+            // The city's purse used to sit between them. It belongs to the city
+            // simulation -- CityGovernor, auto-build, the economy experiment --
+            // which is a different branch of the game entirely, and a number
+            // nothing in this level can spend or earn is just noise in the corner.
+            // m_cityCredits and the governor are untouched; only the readout goes.
             std::string timeStr = formatGameTimeDisplay(m_gameTimeMinutes);
             char creditsStr[64];
             snprintf(creditsStr, sizeof(creditsStr), "%d CR", static_cast<int>(m_playerCredits));
-            char cityCreditsStr[64];
-            snprintf(cityCreditsStr, sizeof(cityCreditsStr), "City: %d CR", static_cast<int>(m_cityCredits));
             ImVec2 timeSize = ImGui::CalcTextSize(timeStr.c_str());
             ImVec2 creditsSize = ImGui::CalcTextSize(creditsStr);
-            ImVec2 cityCreditsSize = ImGui::CalcTextSize(cityCreditsStr);
-            float hudWindowWidth = creditsSize.x + 20.0f + cityCreditsSize.x + 20.0f + timeSize.x + 20.0f;
+            float hudWindowWidth = creditsSize.x + 20.0f + timeSize.x + 20.0f;
             ImGui::SetNextWindowPos(ImVec2(getWindow().getWidth() - hudWindowWidth - 10, 25));
             ImGui::SetNextWindowBgAlpha(0.5f);
             if (ImGui::Begin("##GameHUD", nullptr,
@@ -21420,8 +21443,6 @@ private:
                 ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoMove |
                 ImGuiWindowFlags_NoSavedSettings)) {
                 ImGui::TextColored(ImVec4(0.3f, 1.0f, 0.5f, 1.0f), "%s", creditsStr);
-                ImGui::SameLine(0, 20.0f);
-                ImGui::TextColored(ImVec4(0.4f, 0.7f, 1.0f, 1.0f), "%s", cityCreditsStr);
                 ImGui::SameLine(0, 20.0f);
                 ImGui::TextColored(ImVec4(1.0f, 1.0f, 0.5f, 1.0f), "%s", timeStr.c_str());
             }
@@ -24549,6 +24570,10 @@ private:
         m_grassBlades.clear();
         m_grassDirty = false;
         m_editorUI.setGrassEnabled(false);
+
+        // And an empty hotbar. The items in it are EDEN OS's, and until the two
+        // games stop sharing one inventory this is the line that keeps them apart.
+        clearInventorySlots();
 
         // Clear physics worlds
         if (m_physicsWorld) {
