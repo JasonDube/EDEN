@@ -437,6 +437,33 @@ void TessaraModule::updateLadder(float dt) {
     m_atLadder = nearRungs && (feet.y < groundHere + 1.2f ||
                                std::fabs(feet.y - top) < 1.2f);
 
+    // The key is read HERE, above everything, and the edge state is updated on
+    // every single frame.
+    //
+    // It used to be read at the bottom, past an early return taken for the whole
+    // of a climb -- so for those two seconds `m_wasClimbKeyDown` remembered a key
+    // state from before the climb started, and whether the next press registered
+    // depended on what the key happened to be doing when the climb began. That is
+    // the "sometimes it works, sometimes it loops": not a different bug on
+    // different tries, the same bug sampled at a different moment. An edge
+    // detector that stops watching is not an edge detector.
+    const bool eDown = (m_climbKeyTest >= 0)
+                     ? (m_climbKeyTest != 0)
+                     : eden::Input::isKeyDown(eden::Input::KEY_E);
+    const bool pressed = eDown && !m_wasClimbKeyDown;
+    m_wasClimbKeyDown = eDown;
+
+    // LET GO before it will take you the other way.
+    //
+    // The edge above is the intent; this is the guarantee. An edge detector is
+    // only as good as the frames it is sampled on, and this one sits behind an
+    // early return, a cooldown and a host that can skip an update -- which is
+    // what "sometimes it works, sometimes it throws you in a loop" sounds like:
+    // one bug, sampled differently. So a finished climb latches, and only the key
+    // coming UP unlatches it. Holding E cannot produce a second climb by any
+    // route, whatever the edge did.
+    if (!eDown) m_climbLatched = false;
+
     if (m_climbing) {
         // Pulled onto the rungs as he goes, which is what climbing a ladder is.
         //
@@ -464,22 +491,20 @@ void TessaraModule::updateLadder(float dt) {
         if (std::fabs(m_climbY - m_climbTo) < 0.01f || toLadder > 3.0f) {
             m_climbing = false;
             m_climbCooldown = 0.5f;
+            m_climbLatched = eDown;   // still holding? then you must let go first
+
+            std::printf("[ladder] arrived y=%.2f (wanted %.2f) %.2f from the rungs, "
+                        "key %s\n", m_climbY, m_climbTo, toLadder,
+                        eDown ? "still held" : "released");
+            std::fflush(stdout);
         }
         return;
     }
 
     if (m_climbCooldown > 0.0f) m_climbCooldown = std::max(0.0f, m_climbCooldown - dt);
 
-    // On the PRESS, not while held.
-    //
-    // Now that the ladder goes both ways, a held key is a loop: E carries you up,
-    // the climb ends, E is still down, and "the end you are not at" is the bottom --
-    // so it takes you straight back. One press became up-and-down, and holding it
-    // became a shuttle. Tracked here rather than trusting an engine-wide edge,
-    // because this reads the key from inside the module's own update.
-    const bool eDown = eden::Input::isKeyDown(eden::Input::KEY_E);
-    if (m_atLadder && eDown && !m_wasClimbKeyDown) climbLadder();
-    m_wasClimbKeyDown = eDown;
+    // On the PRESS, not while held. Holding E is one climb, not a shuttle.
+    if (m_atLadder && pressed && !m_climbLatched) climbLadder();
 }
 
 void TessaraModule::climbLadder() {
@@ -493,6 +518,14 @@ void TessaraModule::climbLadder() {
     m_climbing = true;
     m_climbY = feet.y;
     m_climbTo = (std::fabs(feet.y - top) < 1.2f) ? ground : top;
+
+    // Said out loud, because this is the one thing in here nobody has been able
+    // to catch in the act. If it goes the wrong way, the reason is on this line.
+    std::printf("[ladder] climb from y=%.2f -> %.2f (ground %.2f, top %.2f, "
+                "%.2f from the rungs)\n",
+                m_climbY, m_climbTo, ground, top,
+                glm::length(glm::vec2(feet.x - foot.x, feet.z - foot.z)));
+    std::fflush(stdout);
 }
 
 void TessaraModule::callRally() {

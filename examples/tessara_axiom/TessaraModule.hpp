@@ -81,6 +81,12 @@ public:
     // Start the climb without a keypress, so the whole thing can be driven in a
     // check. Ignored unless the player is actually at the foot of the ladder.
     void climbLadder();
+
+    // Drive the climb key without an input device, for checks. -1 hands the
+    // question back to the real keyboard. A held key is the case that broke, so
+    // it has to be expressible.
+    void holdClimbKey(int state) { m_climbKeyTest = state; }
+    bool climbCoolingDown() const { return m_climbCooldown > 0.0f; }
     bool climbing() const { return m_climbing; }
     bool atLadder() const { return m_atLadder; }
 
@@ -224,6 +230,8 @@ private:
     // and a way aboard you cannot leave by is half a door.
     float m_climbTo = 0.0f;
     bool  m_wasClimbKeyDown = false;
+    int   m_climbKeyTest = -1;   // -1 real key, 0/1 forced (checks only)
+    bool  m_climbLatched = false;  // a finished climb; needs the key released
 
     // A moment's rest after arriving, so nothing can bounce you straight back down
     // the way you came. The key edge already stops the common case; this stops the

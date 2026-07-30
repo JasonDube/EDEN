@@ -2012,6 +2012,106 @@ void checkNobodyWalksInEmpty() {
 }
 
 // ---------------------------------------------------------------------------
+// 5e-iv-c. Hold E at the foot of the ladder, from anywhere, and go up ONCE.
+//
+// Reported as "sometimes it works, sometimes it doesn't -- hold E at the base
+// and sometimes it throws you in a loop". No description beyond that, and none
+// was needed: "sometimes" with a held key means the outcome depends on something
+// the player is not choosing. The only free variables at the foot of a ladder
+// are where you are standing and how long you hold, so sweep both and let the
+// failures name themselves.
+//
+// One press must produce exactly ONE climb. Counting the climbs is the whole
+// check -- ending up at the top is not enough, because up-down-up ends at the
+// top too and that is precisely what was reported.
+// ---------------------------------------------------------------------------
+void checkHoldingEClimbsOnce() {
+    eden::TerrainConfig cfg;
+    cfg.heightScale = 0.0f;
+    cfg.useFixedBounds = true;
+    eden::Terrain terrain(cfg);
+
+    TessaraModule mod;
+    mod.initialize();
+    mod.setTerrain(&terrain);
+    mod.onEnterPlayMode();
+
+    const Ship& ship = mod.ship();
+    constexpr float kEye = 1.7f;
+    const glm::vec3 foot = ship.ladderFoot();
+    const float deck = ship.origin().y + ship.params.deckHeight;
+
+    int tried = 0, looped = 0, neverWent = 0, wrongEnd = 0;
+    float worstRadius = 0.0f;
+
+    // A ring of standing spots, and a range of hold lengths that straddles the
+    // climb itself -- released early, released mid-climb, still held long after.
+    for (int a = 0; a < 12; ++a) {
+        for (int rIdx = 0; rIdx < 3; ++rIdx) {
+            // 600 = held for the whole run, long past the climb and the cooldown.
+            for (int holdFrames : {6, 45, 90, 600}) {
+                const float ang = a * (6.2831853f / 12.0f);
+                const float rad = 0.2f + rIdx * 0.55f;
+                glm::vec3 eye = foot + glm::vec3(std::cos(ang) * rad, kEye,
+                                                 std::sin(ang) * rad);
+                ++tried;
+
+                mod.holdClimbKey(-1);
+                int climbs = 0;
+                bool wasClimbing = false;
+
+                for (int i = 0; i < 600; ++i) {
+                    mod.holdClimbKey(i < holdFrames ? 1 : 0);
+                    mod.setPlayerPosition(eye);
+                    mod.update(1.0f / 60.0f);
+
+                    glm::vec3 move(0.0f), about(0.0f);
+                    float spun = 0.0f;
+                    if (mod.carriedPlayer(move, spun, about)) eye += move;
+
+                    // THE HOST'S RULE, not an approximation of it. main.cpp does
+                    // height = terrain, then raises it to the module's answer only
+                    // if the module answers AND is higher. The difference matters
+                    // exactly when the module declines: this harness used to leave
+                    // the player hanging where he was, while the real game drops
+                    // him to the terrain. Every ladder check passed because of it.
+                    float h = terrain.getHeightAt(eye.x, eye.z);
+                    float fromModule = 0.0f;
+                    if (mod.groundHeight(eye.x, eye.z, eye.y - kEye, fromModule) &&
+                        fromModule > h) h = fromModule;
+                    eye.y = h + kEye;
+
+                    if (mod.climbing() && !wasClimbing) ++climbs;
+                    wasClimbing = mod.climbing();
+                }
+                mod.holdClimbKey(-1);
+
+                const float ended = eye.y - kEye;
+                if (climbs == 0)      ++neverWent;
+                else if (climbs > 1) { ++looped; worstRadius = std::max(worstRadius, rad); }
+                else if (std::fabs(ended - deck) > 0.4f) ++wrongEnd;
+
+                // Put him back for the next spot.
+                for (int i = 0; i < 40; ++i) {
+                    eye = foot + glm::vec3(40.0f, kEye, 40.0f);
+                    mod.setPlayerPosition(eye);
+                    mod.update(1.0f / 60.0f);
+                }
+            }
+        }
+    }
+
+    char detail[208];
+    std::snprintf(detail, sizeof detail,
+                  "%d spots x hold lengths: %d climbed more than once (worst "
+                  "radius %.2f), %d never left the ground, %d ended somewhere "
+                  "other than the deck",
+                  tried, looped, worstRadius, neverWent, wrongEnd);
+    report("holding E at the foot climbs once, from anywhere",
+           looped == 0 && neverWent == 0 && wrongEnd == 0, detail);
+}
+
+// ---------------------------------------------------------------------------
 // 5e-v. The ladder takes you up AND leaves you there.
 //
 // Reported twice: "it puts me back on the ground after I reach the top". The
@@ -2055,8 +2155,12 @@ void checkTheLadderHolds() {
         float spun = 0.0f;
         if (mod.carriedPlayer(move, spun, about)) eye += move;
 
-        float h = 0.0f;
-        if (mod.groundHeight(eye.x, eye.z, eye.y - kEye, h)) eye.y = h + kEye;
+        // The host's rule verbatim -- see checkHoldingEClimbsOnce.
+        float h = terrain.getHeightAt(eye.x, eye.z);
+        float fromModule = 0.0f;
+        if (mod.groundHeight(eye.x, eye.z, eye.y - kEye, fromModule) && fromModule > h)
+            h = fromModule;
+        eye.y = h + kEye;
     };
 
     const float deck = ship.origin().y + ship.params.deckHeight;
@@ -2938,6 +3042,7 @@ int runShipChecks(bool verbose) {
     checkTheLanding();
     checkNoTeleportedCrates();
     checkNobodyWalksInEmpty();
+    checkHoldingEClimbsOnce();
     checkTheLadderHolds();
     checkTheLandingForecast();
     checkTheBoardingLadder();
