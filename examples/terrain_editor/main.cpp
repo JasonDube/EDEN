@@ -8927,6 +8927,8 @@ private:
                             c.worst, c.worstName, c.worstPhase,
                             m_chunksDrawn, m_chunksConsidered,
                             getSwapchain().getPresentModeName());
+                std::printf("[perf] window is %s\n",
+                            getWindow().focused() ? "FOCUSED" : "in the background");
                 std::printf("[perf] update() from inside: %.2f ms over %d checkpoints\n",
                             m_lastUpdateSpan, m_marksSeen);
                 std::fflush(stdout);

@@ -26,6 +26,11 @@ public:
     int getWidth() const { return m_width; }
     int getHeight() const { return m_height; }
     bool wasResized() const { return m_framebufferResized; }
+
+    // Does the compositor consider this window focused? Reported rather than
+    // assumed, because a frame time measured on a background surface is a
+    // measurement of the compositor's throttling and nothing else.
+    bool focused() const;
     void resetResizedFlag() { m_framebufferResized = false; }
 
     VkSurfaceKHR createSurface(VkInstance instance);

@@ -53,8 +53,20 @@ Window::Window(int width, int height, const std::string& title)
     // The maximized window won't match the requested size
     glfwGetWindowSize(m_window, &m_width, &m_height);
 
+    // Ask for focus on launch, like any application being started.
+    //
+    // Not cosmetic: Wayland compositors throttle surfaces that are not focused,
+    // and a performance measurement taken on a background window measures the
+    // throttling rather than the program. Whether the request is granted is the
+    // compositor's business, which is why `focused()` exists to be asked.
+    glfwFocusWindow(m_window);
+
     glfwSetWindowUserPointer(m_window, this);
     glfwSetFramebufferSizeCallback(m_window, framebufferResizeCallback);
+}
+
+bool Window::focused() const {
+    return m_window && glfwGetWindowAttrib(m_window, GLFW_FOCUSED) == GLFW_TRUE;
 }
 
 Window::~Window() {
