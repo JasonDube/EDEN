@@ -7715,6 +7715,8 @@ private:
         r.spaceLevel      = m_isSpaceLevel;
         r.edenOSLevel     = m_isEdenOSLevel;
         r.moduleOwned     = m_moduleHost.ownedCount();
+        r.playerCredits   = m_playerCredits;
+        r.creditsAtStart  = std::fabs(m_playerCredits - kStartingPlayerCredits) < 0.01f;
         r.occupiedSlots   = 0;
         for (int i = 0; i < TOOLBAR_SLOT_COUNT; ++i)
             if (m_toolbarSlots[i].occupied) ++r.occupiedSlots;
@@ -7905,6 +7907,8 @@ private:
             m_sceneObjects.push_back(std::move(obj));
             updateSceneObjectsList();
         };
+        // The way a level's savegame does it: quietly change the number.
+        h.spendCredits = [this] { m_playerCredits -= 1234.0f; };
         h.setASpawnPoint = [this] {
             m_hasSpawnPoint = true;
             m_spawnPosition = glm::vec3(7.0f, 7.0f, 7.0f);
@@ -24923,6 +24927,14 @@ private:
         // games stop sharing one inventory this is the line that keeps them apart.
         clearInventorySlots();
 
+        // And a full purse. loadGame() overwrites credits from a level's
+        // .savegame.json, and the editor auto-loads a default level at boot -- so
+        // without this, every new level started with whatever red_planet's save
+        // file said, which is how a fresh level came up with 1000 CR when the
+        // starting figure had just been raised to 100k.
+        m_playerCredits = kStartingPlayerCredits;
+        m_cityCredits   = kStartingCityCredits;
+
         // Clear physics worlds
         if (m_physicsWorld) {
             m_physicsWorld->clear();
@@ -31943,11 +31955,19 @@ private:
     float m_gameTimeScale = 0.0f;      // 0 = no advance; restore to 4.8 for the day/night cycle
 
     // Player economy
+    //
     // 100k while the catalogue is being built and tested -- a helm is 2500, and
     // running out of money mid-experiment tells you nothing about whether the
     // shop works. Balance is a decision for when there is something to balance.
-    float m_playerCredits = 100000.0f;   // Starting credits
-    float m_cityCredits = 5000.0f;     // City treasury (separate from player)
+    //
+    // Named constants because a new level has to be able to get BACK to them: a
+    // level with a .savegame.json beside it overwrites credits on load, and the
+    // editor auto-loads a default level at boot, so without this a fresh level
+    // inherits whatever red_planet's save file happened to say.
+    static constexpr float kStartingPlayerCredits = 100000.0f;
+    static constexpr float kStartingCityCredits   = 5000.0f;
+    float m_playerCredits = kStartingPlayerCredits;
+    float m_cityCredits   = kStartingCityCredits;   // City treasury (separate from player)
 
     // Camera speed (tracked separately since Camera doesn't expose getter)
     float m_cameraSpeed = 15.0f;

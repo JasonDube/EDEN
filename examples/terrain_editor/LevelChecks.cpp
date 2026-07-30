@@ -65,6 +65,17 @@ std::vector<Channel> channelsFor(const LevelCheckHooks& h) {
          h.addASceneObject,
          [](const LevelStateReport& r) { return r.sceneObjects > 0; },
          [](const LevelStateReport& r) { return count("objects", r.sceneObjects); }},
+        // A level's .savegame.json overwrites credits on load, and the editor
+        // auto-loads a default level at boot -- so a new level inherited a purse
+        // from whichever level happened to be open. Same class as every other
+        // channel here, and it survived until somebody tried to buy something.
+        {"credits",
+         h.spendCredits,
+         [](const LevelStateReport& r) { return !r.creditsAtStart; },
+         [](const LevelStateReport& r) {
+             return "credits = " + std::to_string(static_cast<long long>(r.playerCredits)) +
+                    (r.creditsAtStart ? " (starting)" : " (INHERITED)");
+         }},
         {"spawn point",
          h.setASpawnPoint,
          [](const LevelStateReport& r) { return r.hasSpawnPoint; },

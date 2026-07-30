@@ -47,6 +47,8 @@ struct LevelStateReport {
     std::size_t sceneObjects    = 0;
     std::size_t aiNodes         = 0;
     bool        hasSpawnPoint   = false;
+    float       playerCredits   = 0.0f;
+    bool        creditsAtStart  = true;   // false = carrying a previous level's purse
     bool        waterVisible    = false;
     bool        testLevel       = false;
     bool        spaceLevel      = false;
@@ -84,6 +86,8 @@ struct LevelCheckHooks {
     std::function<void()> destroyModuleOwned;
     std::function<void()> addASceneObject;
     std::function<void()> setASpawnPoint;
+    // Spend some, the way loading a level with a .savegame.json does.
+    std::function<void()> spendCredits;
 
     // The wipes under test.
     std::function<void()> newLevel;
