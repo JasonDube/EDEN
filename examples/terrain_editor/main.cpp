@@ -11550,6 +11550,13 @@ private:
                         // First check platform slabs (AABB), then Jolt raycast, use closest
                         float bestPlaceDist = std::numeric_limits<float>::max();
                         bool foundPlace = false;
+                        // Which branch decided, for the [Place] line below. Objects
+                        // have been landing nowhere near where the player pointed
+                        // and reading this code has not explained it -- three
+                        // branches can set spawnPos and the log said which one only
+                        // by inference. Now it says.
+                        const char* placeSource = "none";
+                        float placeDist = -1.0f;
 
                         // Check slabs first (they're not in Jolt physics)
                         for (auto& so : m_sceneObjects) {
@@ -11562,6 +11569,8 @@ private:
                                 glm::vec3 hp = camPos + camFront * d;
                                 spawnPos = {hp.x, topY + objHalfH, hp.z};
                                 foundPlace = true;
+                                placeSource = "slab";
+                                placeDist = d;
                             }
                         }
 
@@ -11574,6 +11583,8 @@ private:
                                 if (hitDist < bestPlaceDist) {
                                     spawnPos = hit.hitPoint + glm::vec3(0, objHalfH, 0);
                                     foundPlace = true;
+                                    placeSource = "jolt";
+                                    placeDist = hitDist;
                                 }
                             }
                         }
@@ -11581,6 +11592,32 @@ private:
                         if (!foundPlace) {
                             spawnPos = camPos + camFront * 3.0f;
                             spawnPos.y = m_terrain.getHeightAt(spawnPos.x, spawnPos.z) + objHalfH;
+                            placeSource = "fallback3m";
+                            placeDist = 3.0f;
+                        }
+
+                        // Everything needed to tell where it went WRONG rather than
+                        // only that it did. `ahead` is the giveaway: it is the dot
+                        // of (spawn - eye) with the way the camera faces, so a
+                        // negative number means the object landed BEHIND the
+                        // viewer -- which no branch above should ever produce, and
+                        // is what is being reported.
+                        {
+                            const glm::vec3 toSpawn = spawnPos - camPos;
+                            const float ahead = glm::dot(toSpawn, camFront);
+                            std::printf("[Place] %s d=%.2f  eye=(%.1f,%.1f,%.1f) "
+                                        "front=(%.2f,%.2f,%.2f)  spawn=(%.1f,%.1f,%.1f) "
+                                        "dist=%.2f ahead=%.2f%s  rts=%d cursor=%d build=%d\n",
+                                        placeSource, placeDist,
+                                        camPos.x, camPos.y, camPos.z,
+                                        camFront.x, camFront.y, camFront.z,
+                                        spawnPos.x, spawnPos.y, spawnPos.z,
+                                        glm::length(toSpawn), ahead,
+                                        ahead < 0.0f ? "  <-- BEHIND THE CAMERA" : "",
+                                        m_playRTSCamera ? 1 : 0,
+                                        m_playModeCursorVisible ? 1 : 0,
+                                        m_showSiloConfig ? 1 : 0);
+                            std::fflush(stdout);
                         }
                     }
                 } else {
