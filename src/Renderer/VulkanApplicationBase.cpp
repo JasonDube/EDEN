@@ -189,8 +189,15 @@ void VulkanApplicationBase::mainLoop() {
                 peakName = "outside the loop";
             }
         }
+        // Six hundred frames, not two thousand.
+        //
+        // A window has to TURN OVER faster than the thing being watched changes.
+        // At two thousand frames and fifty hertz that is forty-one seconds, so the
+        // one 414 ms frame where a level loaded stayed the reported max for longer
+        // than most test runs last. Six hundred ages out in about twelve seconds
+        // and is still ample for a p99.
         window.push_back(whole);
-        if (window.size() > 2048) window.erase(window.begin());
+        if (window.size() > 600) window.erase(window.begin());
 
         peakWindow += whole;
         if (peakWindow > 1000.0f) {
@@ -207,11 +214,27 @@ void VulkanApplicationBase::mainLoop() {
                 const size_t at = static_cast<size_t>(sorted.size() * 0.99f);
                 m_frameCost.p99 = sorted[std::min(at, sorted.size() - 1)];
 
-                // How often the budget is blown. The refresh rate is the budget
-                // under any waiting present mode, so this is the honest answer to
-                // "is it smooth" -- one number, and a mean cannot hide in it.
+                // How often the budget is blown -- measured against the budget
+                // this machine actually has.
+                //
+                // 16.7 ms was hardcoded here on the assumption that a monitor
+                // reporting 60.000 Hz presents at 60 Hz. On this box it does not:
+                // vkcube-wayland renders 1140 frames at a dead-linear 20.12 ms
+                // each, which is 49.7 Hz, and three independent slopes agree to two
+                // decimals. Every "we are losing 20% of our frames" conclusion
+                // reached today came from subtracting from 16.7 instead.
+                //
+                // So the budget is learned from the frames themselves: the fastest
+                // sustained frame time a waiting present mode can produce IS the
+                // refresh period. p10 rather than the minimum, because the minimum
+                // is whatever the one frame that did not have to wait managed.
+                // Late = took more than one whole extra period. Under a waiting
+                // present mode almost every frame sits AT the period, so anything
+                // tighter than that counts ordinary jitter as a fault and reports
+                // half the frames late on a scene that is behaving perfectly.
+                const float budget = std::max(sorted[sorted.size() / 10], 1.0f);
                 size_t late = 0;
-                for (float f : sorted) if (f > 16.7f) ++late;
+                for (float f : sorted) if (f > budget * 1.9f) ++late;
                 m_frameCost.over = static_cast<float>(late) / sorted.size();
             }
 
