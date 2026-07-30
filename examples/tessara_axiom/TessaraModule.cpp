@@ -1030,6 +1030,21 @@ void TessaraModule::renderUI(float, float) {
                                    "  ground below varies %.1f%s", drop,
                                    level ? " - the gear can take it"
                                          : " - TOO ROUGH, it will stand on two legs");
+
+                // And what the RAMP would manage here, which is the question that
+                // actually strands people. A site can be flat enough for the gear
+                // and still be a cliff at the back, and you only find out when the
+                // ramp swings out over the drop -- by which time you are parked.
+                // Asked of the ground below while there is still altitude to leave.
+                const float reach = m_ship.rampGapIfLandedHere(*m_source);
+                if (reach > 0.9f) {
+                    ImGui::TextColored(ImVec4(0.95f, 0.45f, 0.35f, 1.0f),
+                                       "  the ramp would stop %.1f short here"
+                                       " - NOTHING WALKS OFF", reach);
+                } else {
+                    ImGui::TextColored(ImVec4(0.35f, 0.9f, 0.45f, 1.0f),
+                                       "  the ramp reaches the ground here");
+                }
             }
 
             // Coming down is flown, so the two numbers that matter while you do it

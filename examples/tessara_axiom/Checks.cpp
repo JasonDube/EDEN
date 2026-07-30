@@ -1914,6 +1914,69 @@ void checkNoTeleportedCrates() {
 }
 
 // ---------------------------------------------------------------------------
+// 5e-iv. The pre-landing warning tells the truth.
+//
+// The ship already says whether the GEAR can take a site. It could not say whether
+// the RAMP could, and that is the question that strands people: flat enough on top
+// to stand on, a cliff at the back, and you only learn it once you are parked.
+//
+// A warning is only worth having if it agrees with what happens. So this hovers
+// over a site, asks what the ramp WOULD manage, then lands and measures what it
+// actually managed. The two have to be the same number -- a prediction computed
+// differently from the thing it predicts is worse than no prediction, which is why
+// both go through Ship::fitRamp.
+// ---------------------------------------------------------------------------
+void checkTheLandingForecast() {
+    int sites = 0, wrong = 0, warned = 0;
+    float worstError = 0.0f;
+
+    for (float relief : {8.0f, 22.0f}) {
+        for (float yaw : {0.0f, 70.0f, 155.0f, 250.0f}) {
+            Scene s(relief, {0.0f, 0.0f}, yaw);
+
+            s.closeRamp();
+            s.ship.setAirborne(true);
+            for (int i = 0; i < 60 * 2; ++i)
+                s.ship.fly(1.0f / 60.0f, 0.0f, 0.0f, 1.0f, s.terrain);
+            for (int i = 0; i < 60 * 1; ++i)
+                s.ship.fly(1.0f / 60.0f, 1.0f, 0.0f, 0.0f, s.terrain);
+
+            const glm::vec3 o = s.ship.origin();
+            if (std::fabs(o.x) > 82.0f || std::fabs(o.z) > 82.0f) continue;
+
+            // Asked while still in the air.
+            const float forecast = s.ship.rampGapIfLandedHere(s.terrain);
+            if (forecast > 0.9f) ++warned;
+
+            s.ship.beginLanding();
+            for (int i = 0; i < 60 * 60 && s.ship.airborne(); ++i) {
+                const float rate = -s.ship.verticalSpeed();
+                s.ship.fly(1.0f / 60.0f, 0.0f, 0.0f, rate > 4.0f ? 1.0f : 0.0f, s.terrain);
+            }
+            if (s.ship.airborne()) continue;
+            ++sites;
+
+            s.ship.openRamp();
+            s.ship.autoRampExtension();
+            for (int i = 0; i < 500; ++i) s.ship.update(1.0f / 60.0f);
+            const float actual = s.ship.rampGap(s.terrain);
+
+            const float err = std::fabs(actual - forecast);
+            worstError = std::max(worstError, err);
+            if (err > 0.5f) ++wrong;
+        }
+    }
+
+    char detail[176];
+    std::snprintf(detail, sizeof detail,
+                  "%d sites, %d of them warned about: forecast off by at most %.2f, "
+                  "%d disagreed with what happened",
+                  sites, warned, worstError, wrong);
+    report("the pre-landing warning matches the landing", sites > 0 && wrong == 0,
+           detail);
+}
+
+// ---------------------------------------------------------------------------
 // 5e-iii. There is a way back aboard, and it is not next to the ramp.
 //
 // A landing site can pass every test the ship makes -- flat enough on top to stand
@@ -2615,6 +2678,7 @@ int runShipChecks(bool verbose) {
     checkTheHelmView();
     checkTheLanding();
     checkNoTeleportedCrates();
+    checkTheLandingForecast();
     checkTheBoardingLadder();
     checkTheHullStopsYou();
     checkEverythingLands();

@@ -217,6 +217,18 @@ public:
     // pilot before committing, this is the difference between a bad landing SITE
     // and a bad landing.
     float siteDrop(const TerrainSource& ground) const;
+
+    // What the ramp would manage if the ship set down where it is hovering.
+    //
+    // rampGap() answers for a ship that has already landed, which is exactly too
+    // late: the site that strands you passes every test -- flat enough on top for
+    // the gear -- and only reveals itself when the ramp swings out over a drop.
+    // This asks the same question of the ground BELOW, while there is still fuel
+    // and altitude to go somewhere else.
+    //
+    // Positive is the tip hanging in the air. Anything past a stride is a site you
+    // can land on and not walk off.
+    float rampGapIfLandedHere(const TerrainSource& ground) const;
     bool  standsLevel(const TerrainSource& ground) const {
         return siteDrop(ground) <= params.legTravel;
     }
@@ -355,6 +367,13 @@ private:
     bool  m_opening = false;
     bool  m_rampHeld = false;
     float m_bridgeDoor = 0.0f;   // 0 shut, 1 open
+    // Best angle and extension for a hull resting at `restY`, and the gap it
+    // leaves. Shared so the prediction and the real solve cannot disagree -- a
+    // warning computed differently from the thing it warns about is worse than no
+    // warning.
+    struct RampFit { float degrees; float extension; float gap; };
+    RampFit fitRamp(const TerrainSource& ground, float restY) const;
+
     void solveRampAngle(const TerrainSource& ground);
     void solveLegs(const TerrainSource& ground);
 

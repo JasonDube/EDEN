@@ -218,37 +218,60 @@ float Ship::legSpread() const {
 // guess oscillates on real terrain; four passes of that put the ramp somewhere
 // arbitrary and the biped stopped delivering, which is how it was caught. Five
 // hundred height lookups once per landing is nothing, and a table cannot diverge.
-void Ship::solveRampAngle(const TerrainSource& ground) {
+Ship::RampFit Ship::fitRamp(const TerrainSource& ground, float restY) const {
     const float halfL = params.length * 0.5f;
 
     // Never shallower than the nominal, or the ramp lifts off a level pad.
     const float nominal = glm::degrees(std::asin(
         std::clamp((params.deckHeight + params.groundBite) / m_rampLength, 0.0f, 0.95f)));
 
+    const glm::vec3 base(m_origin.x, restY, m_origin.z);
+
     auto gapAt = [&](float degrees, float ext) {
         const float rad = glm::radians(degrees);
         const float span = m_rampLength + params.rampExtend * ext;
-        const glm::vec3 tip = m_origin + up() * params.deckHeight
+        const glm::vec3 tip = base + up() * params.deckHeight
                             - forward() * (halfL + span * std::cos(rad))
                             - up() * (span * std::sin(rad));
         return tip.y - ground.heightAtWorld(tip.x, tip.z) + params.groundBite;
     };
 
-    float bestAngle = nominal, bestExt = 0.0f, bestScore = 1e9f;
+    RampFit best{nominal, 0.0f, gapAt(nominal, 0.0f)};
+    float bestScore = 1e9f;
     for (float d = nominal; d <= params.rampMaxDegrees + 0.01f; d += 0.5f) {
         for (float e = 0.0f; e <= 1.0f + 0.001f; e += 0.05f) {
             const float gap = gapAt(d, e);
+            // Stopping short is a step to climb down; driving the tip through the
+            // dirt is a spike out of the ground. Weighted so it prefers the former.
             const float score = gap < 0.0f ? -gap * 3.0f : gap;
-            // Strictly better, so the shallowest angle reached first keeps a tie.
+            // Strictly better, so the shallowest angle reached first keeps a tie:
+            // length is free to walk on and steepness is not.
             if (score < bestScore - 0.01f) {
                 bestScore = score;
-                bestAngle = d;
-                bestExt = e;
+                best = RampFit{d, e, gap};
             }
         }
     }
-    m_openAngle = bestAngle;
-    m_rampExtAuto = bestExt;
+    return best;
+}
+
+float Ship::rampGapIfLandedHere(const TerrainSource& ground) const {
+    return fitRamp(ground, groundUnderHull(ground)).gap;
+}
+
+// Angle AND extension, solved together, because both move the tip.
+//
+// Solving them apart cannot work: pick the angle with the extension stowed and it
+// comes out steep, then the extension slides out and drives the tip through the
+// dirt. They are one geometry problem with two levers.
+//
+// Swept, never iterated. Feeding a height function its own output back through a
+// guess oscillates on real terrain; four passes of that put the ramp somewhere
+// arbitrary and the biped stopped delivering, which is how it was caught.
+void Ship::solveRampAngle(const TerrainSource& ground) {
+    const RampFit fit = fitRamp(ground, m_origin.y);
+    m_openAngle = fit.degrees;
+    m_rampExtAuto = fit.extension;
 }
 
 // Kept as its own name because the call sites read better for it, and because the
