@@ -51,7 +51,7 @@
 
 // Game Modules
 #include "GameModules/GameModule.hpp"
-#include "TessaraModule.hpp"
+#include "Register.hpp"          // tessara::registerGameModule -- no module headers
 
 // OS / Filesystem
 #include "OS/FilesystemBrowser.hpp"
@@ -13232,9 +13232,7 @@ private:
     void wireGameModule() {
         if (!m_gameModule) return;
 
-        if (auto* tessara = dynamic_cast<tessara::TessaraModule*>(m_gameModule.get())) {
-            tessara->setTerrain(&m_terrain);
-        }
+        m_gameModule->setTerrain(&m_terrain);
 
         eden::ModuleRenderSetup setup{
             getContext(),
@@ -33400,9 +33398,7 @@ int main(int argc, char* argv[]) {
     // engine, because a game knows about the engine and never the other way
     // round -- see GameModuleFactory. A level asks for one by name in its
     // gameModuleName and gets it if this binary was built with it.
-    eden::GameModuleFactory::registerModule("tessara", [] {
-        return std::make_unique<tessara::TessaraModule>();
-    });
+    tessara::registerGameModule();
     signal(SIGSEGV, crashHandler);
     signal(SIGABRT, crashHandler);
     signal(SIGFPE, crashHandler);

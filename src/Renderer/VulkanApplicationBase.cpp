@@ -367,6 +367,11 @@ void VulkanApplicationBase::endFrame(uint32_t imageIndex) {
 
     VkResult result = vkQueuePresentKHR(m_context->getPresentQueue(), &presentInfo);
 
+    // There is a frame on the screen now, so the window may as well be on it.
+    // Idempotent after the first call, and skipped entirely on the KMS backend
+    // where there is no window to show.
+    if (m_window) m_window->reveal();
+
     if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR || m_framebufferResized) {
         m_framebufferResized = false;
         recreateSwapchain();

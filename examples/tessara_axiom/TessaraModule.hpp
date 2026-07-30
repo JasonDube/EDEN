@@ -56,7 +56,7 @@ public:
 
     // The host hands us the level's terrain. Without one the module is inert
     // rather than broken -- there is simply nowhere to put a ship.
-    void setTerrain(eden::Terrain* terrain);
+    void setTerrain(eden::Terrain* terrain) override;
 
     // ---- the launch sequence -----------------------------------------------
     // Rally, seal, ready. Deliberately a sequence with named states rather than

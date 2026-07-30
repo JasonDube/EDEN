@@ -11,6 +11,7 @@ namespace eden {
 
 class VulkanContext;
 class BufferManager;
+class Terrain;
 
 // What a module needs from the host to put geometry on the screen, and what it
 // gets handed each frame to draw with.
@@ -137,6 +138,16 @@ public:
     // Input handling - return true if module consumed the input
     virtual bool wantsCaptureKeyboard() const { return false; }
     virtual bool wantsCaptureMouse() const { return false; }
+
+    // Optional: the host's terrain, for a module that walks on it.
+    //
+    // On the base class rather than reached for with a dynamic_cast, because the
+    // cast is what forced the host to #include the module's own header -- and that
+    // header dragged four more in behind it, into a 33k-line translation unit.
+    // Editing any tessara header then recompiled the whole editor: fifty-one
+    // seconds, paid by whoever next launched the desktop icon. A seam exists so
+    // the host does not have to know what is on the other side of it.
+    virtual void setTerrain(Terrain*) {}
 
     // Optional: Module can receive player position for proximity-based features
     virtual void setPlayerPosition(const glm::vec3& pos) { m_playerPosition = pos; }

@@ -3,6 +3,7 @@
 # hosts the same content as a game module on whatever planet a level is made of.
 # Nothing in here creates a window or owns a frame loop.
 add_library(tessara_core STATIC
+    Register.cpp
     Heightfield.cpp
     Ground.cpp
     Ship.cpp

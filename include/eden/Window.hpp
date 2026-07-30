@@ -30,6 +30,10 @@ public:
     // Does the compositor consider this window focused? Reported rather than
     // assumed, because a frame time measured on a background surface is a
     // measurement of the compositor's throttling and nothing else.
+    // Show the window, once there is a frame in it. Idempotent; the first call
+    // wins and the rest are free, so the frame loop can simply call it.
+    void reveal();
+
     bool focused() const;
     void resetResizedFlag() { m_framebufferResized = false; }
 
@@ -41,6 +45,7 @@ public:
 private:
     static void framebufferResizeCallback(GLFWwindow* window, int width, int height);
 
+    bool m_revealed = false;
     GLFWwindow* m_window = nullptr;
     int m_width;
     int m_height;

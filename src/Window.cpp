@@ -18,6 +18,15 @@ Window::Window(int width, int height, const std::string& title)
     glfwWindowHint(GLFW_RESIZABLE, GLFW_TRUE);
     glfwWindowHint(GLFW_MAXIMIZED, GLFW_TRUE);
 
+    // Born hidden. Revealed by the first frame that has something in it.
+    //
+    // Startup is four seconds -- three of them the default level -- and the window
+    // used to exist for all of it with nothing drawn in it. A maximized, empty,
+    // focused surface is something a tiling compositor will happily place against
+    // your other windows, which is exactly what it looked like: a split screen on
+    // launch. Nothing was wrong with the render; there simply was not one yet.
+    glfwWindowHint(GLFW_VISIBLE, GLFW_FALSE);
+
     // What the displays actually are, said once.
     //
     // FIFO waits for a vertical blank, so the refresh rate IS the frame budget --
@@ -76,16 +85,22 @@ Window::Window(int width, int height, const std::string& title)
     // The maximized window won't match the requested size
     glfwGetWindowSize(m_window, &m_width, &m_height);
 
-    // Ask for focus on launch, like any application being started.
-    //
-    // Not cosmetic: Wayland compositors throttle surfaces that are not focused,
-    // and a performance measurement taken on a background window measures the
-    // throttling rather than the program. Whether the request is granted is the
-    // compositor's business, which is why `focused()` exists to be asked.
-    glfwFocusWindow(m_window);
-
     glfwSetWindowUserPointer(m_window, this);
     glfwSetFramebufferSizeCallback(m_window, framebufferResizeCallback);
+}
+
+void Window::reveal() {
+    if (!m_window || m_revealed) return;
+    m_revealed = true;
+    glfwShowWindow(m_window);
+
+    // Focus goes with the reveal, not with the creation.
+    //
+    // Wayland compositors throttle unfocused surfaces, so a performance number
+    // taken on a background window measures the throttling rather than the
+    // program -- that is why this is asked for at all. Whether it is granted is
+    // the compositor's business, which is what `focused()` is for.
+    glfwFocusWindow(m_window);
 }
 
 bool Window::focused() const {
