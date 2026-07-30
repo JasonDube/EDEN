@@ -3,6 +3,8 @@
 #include <stdexcept>
 #include <iostream>
 #include <cstdio>
+#include <algorithm>
+#include <vector>
 #include <cstdlib>
 
 namespace eden {
@@ -113,6 +115,12 @@ void VulkanApplicationBase::mainLoop() {
     float peakWhole = 0.0f, peakWindow = 0.0f, peakPhase = 0.0f;
     const char* peakName = "-";
 
+    // A rolling window of whole-frame times, so max and p99 are available rather
+    // than only a mean. Two seconds at sixty is plenty and at four hundred it is
+    // still only a few thousand floats.
+    std::vector<float> window;
+    window.reserve(1024);
+
     while (!shouldClose()) {
         auto phase = std::chrono::high_resolution_clock::now();
         const auto frameBegan = phase;
@@ -181,11 +189,32 @@ void VulkanApplicationBase::mainLoop() {
                 peakName = "outside the loop";
             }
         }
+        window.push_back(whole);
+        if (window.size() > 2048) window.erase(window.begin());
+
         peakWindow += whole;
         if (peakWindow > 1000.0f) {
             m_frameCost.worst = peakWhole;
             m_frameCost.worstPhase = peakPhase;
             m_frameCost.worstName = peakName;
+
+            // Sorted copy: p99 and max over the whole window, not the last second,
+            // so a stall three times a second cannot slip between reports.
+            if (!window.empty()) {
+                std::vector<float> sorted = window;
+                std::sort(sorted.begin(), sorted.end());
+                m_frameCost.max = sorted.back();
+                const size_t at = static_cast<size_t>(sorted.size() * 0.99f);
+                m_frameCost.p99 = sorted[std::min(at, sorted.size() - 1)];
+
+                // How often the budget is blown. The refresh rate is the budget
+                // under any waiting present mode, so this is the honest answer to
+                // "is it smooth" -- one number, and a mean cannot hide in it.
+                size_t late = 0;
+                for (float f : sorted) if (f > 16.7f) ++late;
+                m_frameCost.over = static_cast<float>(late) / sorted.size();
+            }
+
             peakWhole = 0.0f;
             peakWindow = 0.0f;
         }

@@ -55,15 +55,26 @@ public:
         float present = 0.0f;   // submit and hand it over
         float total   = 0.0f;
 
-        // The WORST whole frame in the last second, and what phase it was in.
+        // ---- the numbers that must lead ---------------------------------
+        // A MEAN IS THE WRONG STATISTIC FOR A STALL, by construction.
         //
-        // Averages cannot show a spike, and a spike is the thing that matters
-        // under vsync: one frame over the refresh budget costs a whole refresh, so
-        // a scene doing 11 ms of work with an occasional 20 ms frame reads as the
-        // fifties rather than a solid sixty. The average says everything is fine.
-        float worst      = 0.0f;
-        float worstPhase = 0.0f;   // the biggest single phase in that frame
+        // This is not a style note, it is a bug that already happened. With the
+        // frame rate uncapped this loop ran at 400 fps, and four hundred clean
+        // frames a second bury any number of fifty-millisecond outliers: the mean
+        // read 2.4 ms while sixty-five frames a run were over 30 ms. That mean was
+        // reported as "the stall is gone". It was not gone. It was averaged away.
+        //
+        // So max and p99 are part of the cost, computed over a rolling window, and
+        // anything printing a frame cost is expected to lead with them. `total` is
+        // the mean and comes last on purpose.
+        float p99   = 0.0f;
+        float max   = 0.0f;
+        float over  = 0.0f;   // fraction of frames past the refresh budget, 0..1
+        float worstPhase = 0.0f;
         const char* worstName = "-";
+
+        // Kept for the callers written before p99 existed.
+        float worst = 0.0f;
     };
     const FrameCost& frameCost() const { return m_frameCost; }
 

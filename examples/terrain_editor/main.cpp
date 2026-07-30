@@ -8921,10 +8921,12 @@ private:
             if (m_perfLogAt >= 1.0f) {
                 m_perfLogAt = 0.0f;
                 const FrameCost& c = frameCost();
-                std::printf("[perf] %.1f ms avg | upd %.2f acq %.2f rec %.2f pre %.2f "
-                            "| worst %.1f (%s %.1f) | chunks %d/%d | %s\n",
-                            c.total, c.update, c.acquire, c.record, c.present,
-                            c.worst, c.worstName, c.worstPhase,
+                std::printf("[perf] max %.1f p99 %.1f late %.0f%% | mean %.1f | "
+                            "upd %.2f acq %.2f rec %.2f pre %.2f | worst phase %s %.1f "
+                            "| chunks %d/%d | %s\n",
+                            c.max, c.p99, c.over * 100.0f, c.total,
+                            c.update, c.acquire, c.record, c.present,
+                            c.worstName, c.worstPhase,
                             m_chunksDrawn, m_chunksConsidered,
                             getSwapchain().getPresentModeName());
                 std::printf("[perf] window is %s\n",
@@ -20690,8 +20692,17 @@ private:
             // up as a WAIT in acq or pre and as work nowhere at all.
             {
                 const FrameCost& cost = frameCost();
-                ImGui::TextDisabled("upd %.1f  acq %.1f  rec %.1f  pre %.1f",
-                                    cost.update, cost.acquire, cost.record, cost.present);
+                // max and p99 FIRST. The mean is last and dimmest on purpose: a
+                // mean of 2.4 ms once sat next to sixty-five frames over 30 ms and
+                // was read as "fine".
+                const bool rough = cost.over > 0.05f;
+                ImGui::TextColored(rough ? ImVec4(0.95f, 0.55f, 0.35f, 1.0f)
+                                         : ImVec4(0.45f, 0.85f, 0.55f, 1.0f),
+                                   "max %.1f  p99 %.1f  late %.0f%%",
+                                   cost.max, cost.p99, cost.over * 100.0f);
+                ImGui::TextDisabled("mean %.1f | upd %.1f acq %.1f rec %.1f pre %.1f",
+                                    cost.total, cost.update, cost.acquire,
+                                    cost.record, cost.present);
                 ImGui::TextDisabled("chunks: %d of %d drawn", m_chunksDrawn, m_chunksConsidered);
                 ImGui::TextDisabled("present: %s, %u images",
                                     getSwapchain().getPresentModeName(),
