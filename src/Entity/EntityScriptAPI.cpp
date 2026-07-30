@@ -3,6 +3,7 @@
 #include <eden/Transform.hpp>
 #include "Editor/SceneObject.hpp"   // getLocalBounds() — feet-aware ground snap
 #include <cmath>
+#include <unordered_map>
 
 namespace eden {
 
@@ -197,6 +198,70 @@ void self_snap_to_ground() {
     // Place the model's BOTTOM on the ground, not its origin — a centered-origin
     // model (feet at local -Y) would otherwise sink.
     t->setPosition(s.x, ground + feetOffset, s.z);
+}
+
+// ---- leaving the ground ---------------------------------------------------
+// Vertical velocity per entity, keyed by the transform the script is pointed at.
+//
+// A map rather than a member on Transform because Transform is the renderer's and
+// has no business knowing about gravity, and because the set of things that jump is
+// small and short-lived. Erased on landing, so it does not grow with the scene.
+namespace {
+std::unordered_map<const void*, float> g_verticalSpeed;
+constexpr float kGravity = 22.0f;      // units per second per second
+
+float feetOffsetOf(eden::Transform* t) {
+    if (auto* o = eden::currentScriptObject())
+        return -o->getLocalBounds().min.y * t->getScale().y;
+    (void)t;
+    return 0.0f;
+}
+} // namespace
+
+void self_jump(float speed) {
+    auto* t = currentScriptTransform();
+    if (!t) return;
+    // Only from the ground: holding the key must not fly, and a second jump in
+    // mid-air is a decision the game can add later rather than a side effect of
+    // how this is stored.
+    if (g_verticalSpeed.count(t)) return;
+    g_verticalSpeed[t] = speed;
+}
+
+float self_airborne() {
+    auto* t = currentScriptTransform();
+    return (t && g_verticalSpeed.count(t)) ? 1.0f : 0.0f;
+}
+
+float self_vertical_speed() {
+    auto* t = currentScriptTransform();
+    if (!t) return 0.0f;
+    auto it = g_verticalSpeed.find(t);
+    return it == g_verticalSpeed.end() ? 0.0f : it->second;
+}
+
+void self_fall(float dt) {
+    auto* t = currentScriptTransform();
+    if (!t) return;
+    auto it = g_verticalSpeed.find(t);
+    if (it == g_verticalSpeed.end()) return;   // planted; snap_to_ground has it
+
+    it->second -= kGravity * dt;
+
+    const glm::vec3 s = t->getPosition();
+    const float feet = feetOffsetOf(t);
+    float y = s.y + it->second * dt;
+
+    // The ground is asked from where the feet were, not from where they are going:
+    // reaching down from a point already below a ledge is how a jump ends inside it.
+    const float ground = eden::s_groundHeightFn
+                       ? eden::s_groundHeightFn(s.x, s.z, s.y - feet) : 0.0f;
+
+    if (it->second <= 0.0f && y - feet <= ground) {
+        y = ground + feet;                     // landed
+        g_verticalSpeed.erase(it);
+    }
+    t->setPosition(s.x, y, s.z);
 }
 
 } // extern "C"

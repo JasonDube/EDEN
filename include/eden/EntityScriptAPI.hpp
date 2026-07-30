@@ -95,6 +95,27 @@ extern "C" {
     // Terrain: keep a ground creature on the surface as it moves over hills.
     float self_ground_y();                     // terrain height at this entity's (x,z)
     void  self_snap_to_ground();               // set this entity's Y to the ground
+
+    // ---- leaving the ground -----------------------------------------------
+    // A jump needs vertical velocity carried from one frame to the next, and a
+    // HEIDIC script has nowhere to put it: `let` is function-local and there are no
+    // globals. So the ENGINE holds it, per entity, and the script asks.
+    //
+    // This is the first state a scripted entity gets that outlives a frame, which
+    // matters beyond jumping -- anything with momentum, a cooldown or a memory was
+    // previously inexpressible in a controller script.
+    //
+    //   if input_jump() > 0.5 { self_jump(7.0); }
+    //   if self_airborne() < 0.5 { self_snap_to_ground(); }
+    //
+    // self_jump is ignored while already off the ground, so holding the key does
+    // not fly. Gravity is applied by self_fall, which the script calls every frame
+    // -- explicitly, rather than hidden inside snap_to_ground, because a controller
+    // that does not know whether it is falling cannot be read.
+    void  self_jump(float speed);              // upward, once, from the ground only
+    void  self_fall(float dt);                 // integrate gravity + rise, land on ground
+    float self_airborne();                     // 1 while off the ground, else 0
+    float self_vertical_speed();               // + up, - down, 0 when planted
     // Player input (for scripted controllers). Valid in play mode; 0 otherwise.
     float input_move_x();                      // -1 (A/left) .. +1 (D/right)
     float input_move_z();                      // -1 (S/back) .. +1 (W/forward)
