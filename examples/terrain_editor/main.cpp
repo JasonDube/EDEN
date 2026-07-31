@@ -455,66 +455,24 @@ protected:
             PrefabCatalogHooks shop;
             shop.credits = [this] { return m_playerCredits; };
             shop.spend   = [this](float amount) { m_playerCredits -= amount; };
-            shop.viewYawDegrees = [this] { return m_camera.getYaw(); };
-
-            // Where the player is pointing. With the cursor visible (build mode)
-            // that is the MOUSE -- same ray construction as the H-slab brush, so
-            // the shop and the build tools agree about where you point. With the
-            // mouse captured it falls back to the crosshair at screen centre,
-            // which is also what the headless self-test aims with.
-            shop.aimRay = [this](glm::vec3& origin, glm::vec3& dir) {
-                if (m_playModeCursorVisible && !Input::isMouseCaptured()) {
-                    const float w = static_cast<float>(getWindow().getWidth());
-                    const float h = static_cast<float>(getWindow().getHeight());
-                    glm::mat4 invVP = glm::inverse(
-                        m_camera.getProjectionMatrix(w / h, 0.1f, 5000.0f) *
-                        m_camera.getViewMatrix());
-                    glm::vec2 mouse = Input::getMousePosition();
-                    const float ndcX = (2.0f * mouse.x / w) - 1.0f;
-                    const float ndcY = 1.0f - (2.0f * mouse.y / h);
-                    glm::vec4 nearPt = invVP * glm::vec4(ndcX, ndcY, -1, 1); nearPt /= nearPt.w;
-                    glm::vec4 farPt  = invVP * glm::vec4(ndcX, ndcY,  1, 1); farPt  /= farPt.w;
-                    origin = glm::vec3(nearPt);
-                    dir    = glm::normalize(glm::vec3(farPt - nearPt));
-                } else {
-                    origin = m_camera.getPosition();
-                    dir    = m_camera.getFront();
+            // A purchase goes into the first free hotbar slot, exactly like an
+            // item picked up off the ground -- createSlotThumbnail loads the
+            // geometry (.lime and .glb both), and the ordinary right-click
+            // placement flow takes it from there. In memory only: purchases are
+            // NOT written to ~/eden/inventory, which is EDEN OS's.
+            shop.giveToPlayer = [this](const std::string& path,
+                                       const std::string& title) -> int {
+                for (int i = 0; i < TOOLBAR_SLOT_COUNT; ++i) {
+                    if (m_toolbarSlots[i].occupied) continue;
+                    m_toolbarSlots[i].occupied = true;
+                    m_toolbarSlots[i].filePath = path;
+                    m_toolbarSlots[i].displayName = title;
+                    m_toolbarSlots[i].baseModelName = title;
+                    createSlotThumbnail(i);
+                    return i;
                 }
+                return -1;
             };
-
-            // Every h-slab the player has laid down. buildingType is what the
-            // build tool stamps on one, so "a deck" means exactly "a thing you
-            // built with the H-Slab tool" and nothing else in the level.
-            shop.decks = [this] {
-                std::vector<CatalogDeck> decks;
-                for (auto& obj : m_sceneObjects) {
-                    if (!obj || obj->getBuildingType() != "platform_slab") continue;
-                    AABB wb = obj->getWorldBounds();
-                    decks.push_back(CatalogDeck{obj->getName(), wb.min, wb.max});
-                }
-                return decks;
-            };
-
-            // Bought items are ordinary scene objects -- in the outliner,
-            // selectable, movable, saved with the level. Deliberately NOT
-            // module-owned: the player paid for it, so unloading a game module
-            // must not delete it.
-            shop.place = [this](const std::string& path, const glm::vec3& pos,
-                                float yaw) -> std::string {
-                const std::size_t before = m_sceneObjects.size();
-                // importModel dispatches on extension -- .lime and .glb prefabs
-                // both arrive as ordinary scene objects.
-                importModel(path);
-                if (m_sceneObjects.size() <= before) return {};
-                auto* obj = m_sceneObjects.back().get();
-                if (!obj) return {};
-                obj->getTransform().setPosition(pos);
-                obj->getTransform().setRotation(glm::vec3(0.0f, yaw, 0.0f));
-                obj->setAABBCollision(true);
-                updateSceneObjectsList();
-                return obj->getName();
-            };
-
             m_catalog.setHooks(shop);
             m_catalog.load("assets/models/prefabs");
         }
@@ -7847,37 +7805,16 @@ private:
         };
 
 
-        // The player's loop, without a player: lay a deck in front of the camera,
-        // buy the first thing in the shop, and require it to be standing ON the
-        // deck with the money gone. Driven through buyAndPlace, which is the same
-        // call the Buy button makes -- a check that reimplemented the purchase
-        // would be testing itself.
+        // The purchase, without a mouse: buy the first thing on the shelf and
+        // require it to land in a hotbar slot as a REAL 3D MODEL with the
+        // credits gone. Driven through the same buy() the button calls, and the
+        // is3DModel assertion is the strong one -- it proves the file's geometry
+        // (the 27 MB .glb included) actually loads into the slot, not a labeled
+        // file-cube standing in for it.
         h.catalogSelfTest = [this]() -> std::string {
             if (m_catalog.entries().empty())
                 return "nothing for sale -- assets/models/prefabs missing from the build dir?";
             const PrefabCatalogEntry& item = m_catalog.entries().front();
-
-            // A deck ten units ahead, wide enough that the crosshair lands on it.
-            const glm::vec3 centre = m_camera.getPosition() + m_camera.getFront() * 10.0f;
-            auto mesh = PrimitiveMeshBuilder::createCube(1.0f, glm::vec4(0.7f, 0.7f, 0.7f, 1.0f));
-            auto slab = std::make_unique<SceneObject>("CheckDeck");
-            slab->setBufferHandle(m_modelRenderer->createModel(mesh.vertices, mesh.indices));
-            slab->setIndexCount(static_cast<uint32_t>(mesh.indices.size()));
-            slab->setVertexCount(static_cast<uint32_t>(mesh.vertices.size()));
-            slab->setLocalBounds(mesh.bounds);
-            slab->setMeshData(mesh.vertices, mesh.indices);
-            slab->setPrimitiveType(PrimitiveType::Cube);
-            slab->setBuildingType("platform_slab");     // what makes it a deck
-            slab->getTransform().setPosition(centre);
-            // Deliberately THICK, not a realistic 0.5 deck. With a thin slab the
-            // aim ray enters through the top face, where "snapped to the top" and
-            // "wherever the ray hit" are the same point -- so the check passed
-            // even with the snapping removed. A tall box forces the ray in
-            // through a side, and the two answers differ by metres.
-            slab->getTransform().setScale(glm::vec3(12.0f, 4.0f, 12.0f));
-            const float deckTop = slab->getWorldBounds().max.y;
-            m_sceneObjects.push_back(std::move(slab));
-            updateSceneObjectsList();
 
             const float before = m_playerCredits;
             m_playerCredits = std::max(m_playerCredits, item.price);   // afford it
@@ -7889,32 +7826,21 @@ private:
                 problems += s;
             };
 
-            const std::string placed = m_catalog.buyAndPlace(item);
-            if (placed.empty()) {
-                fail("buyAndPlace refused: " + m_catalog.lastMessage());
+            const int slot = m_catalog.buy(item);
+            if (slot < 0) {
+                fail("buy refused: " + m_catalog.lastMessage());
             } else {
                 if (std::fabs((funded - m_playerCredits) - item.price) > 0.01f)
                     fail("credits did not go down by the price");
-                SceneObject* bought = nullptr;
-                for (auto& o : m_sceneObjects)
-                    if (o && o->getName() == placed) bought = o.get();
-                if (!bought) {
-                    fail("nothing named " + placed + " is in the level");
-                } else if (std::fabs(bought->getTransform().getPosition().y - deckTop) > 0.01f) {
-                    // The whole point: it sits ON the deck, not in it or under it.
-                    fail("bought item is not standing on the deck");
-                }
-                for (int i = 0; i < static_cast<int>(m_sceneObjects.size()); ++i)
-                    if (m_sceneObjects[i] && m_sceneObjects[i]->getName() == placed) {
-                        deleteObject(i); break;
-                    }
+                if (!m_toolbarSlots[slot].occupied)
+                    fail("slot not occupied after purchase");
+                else if (!m_toolbarSlots[slot].is3DModel)
+                    fail("slot holds a file card, not the model -- geometry failed to load");
+                // Put the shelf back the way it was.
+                destroySlotThumbnail(slot);
+                m_toolbarSlots[slot] = ToolbarSlot{};
             }
-
-            for (int i = 0; i < static_cast<int>(m_sceneObjects.size()); ++i)
-                if (m_sceneObjects[i] && m_sceneObjects[i]->getName() == "CheckDeck") {
-                    deleteObject(i); break;
-                }
-            m_playerCredits = before;    // the check does not get to make you rich
+            m_playerCredits = before;   // the check does not get to make you rich
             return problems;
         };
         h.destroyModuleOwned = [this] { m_moduleHost.destroyAllOwned(); };

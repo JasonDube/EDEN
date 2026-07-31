@@ -154,13 +154,13 @@ int runEmptyLevelChecks(const LevelCheckHooks& hooks, bool verbose) {
         report("module host: works", false, "no hook -- the seam is NOT checked");
     }
 
-    // Can a player buy something and stand it on a deck they built?
+    // Can a player buy something into their hotbar?
     if (hooks.catalogSelfTest) {
         const std::string problem = hooks.catalogSelfTest();
-        report("catalog: buy and place", problem.empty(),
-               problem.empty() ? "deck -> helm -> credits deducted" : problem);
+        report("catalog: buy to hotbar", problem.empty(),
+               problem.empty() ? "buy -> slot holds the model -> credits deducted" : problem);
     } else {
-        report("catalog: buy and place", false, "no hook -- the shop is NOT checked");
+        report("catalog: buy to hotbar", false, "no hook -- the shop is NOT checked");
     }
 
     // Unloading a module takes its objects with it, WITHOUT wiping the level.

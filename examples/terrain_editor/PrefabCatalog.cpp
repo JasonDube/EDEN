@@ -34,31 +34,6 @@ float toFloat(const std::string& s, float fallback) {
     try { return std::stof(s); } catch (...) { return fallback; }
 }
 
-// Ray against a box. Returns the near hit distance, or -1 for a miss.
-//
-// Written here rather than borrowed because the editor does not have one -- it
-// picks with bounds tests against the whole object, and what this needs is the
-// distance along the aim ray so the NEAREST deck wins when two overlap.
-float rayBoxDistance(const glm::vec3& origin, const glm::vec3& dir,
-                     const glm::vec3& lo, const glm::vec3& hi) {
-    float tNear = -1e30f, tFar = 1e30f;
-    for (int axis = 0; axis < 3; ++axis) {
-        const float o = origin[axis], d = dir[axis];
-        if (std::fabs(d) < 1e-8f) {
-            if (o < lo[axis] || o > hi[axis]) return -1.0f;   // parallel and outside
-            continue;
-        }
-        float t1 = (lo[axis] - o) / d;
-        float t2 = (hi[axis] - o) / d;
-        if (t1 > t2) std::swap(t1, t2);
-        tNear = std::max(tNear, t1);
-        tFar  = std::min(tFar, t2);
-        if (tNear > tFar) return -1.0f;
-    }
-    if (tFar < 0.0f) return -1.0f;          // box is behind the eye
-    return tNear >= 0.0f ? tNear : 0.0f;    // 0 = already inside it
-}
-
 } // namespace
 
 void PrefabCatalog::load(const std::string& dir) {
@@ -125,36 +100,10 @@ void PrefabCatalog::load(const std::string& dir) {
     m_message = buf;
 }
 
-bool PrefabCatalog::aimedDeckPoint(glm::vec3& outPoint, std::string& outDeck) const {
-    if (!m_hooks.aimRay || !m_hooks.decks) return false;
-
-    glm::vec3 origin(0.0f), dir(0.0f);
-    m_hooks.aimRay(origin, dir);
-    if (glm::length(dir) < 0.0001f) return false;
-    dir = glm::normalize(dir);
-
-    const std::vector<CatalogDeck> decks = m_hooks.decks();
-    float best = 1e30f;
-    bool  hit  = false;
-    for (const CatalogDeck& deck : decks) {
-        const float t = rayBoxDistance(origin, dir, deck.min, deck.max);
-        if (t < 0.0f || t >= best) continue;
-        best = t;
-        outDeck = deck.name;
-        const glm::vec3 where = origin + dir * t;
-        // On TOP of the deck, wherever along it the player is pointing. Using
-        // the hit point's own y would bury the helm in the side of the slab
-        // when the player aims at its edge.
-        outPoint = glm::vec3(where.x, deck.max.y, where.z);
-        hit = true;
-    }
-    return hit;
-}
-
-std::string PrefabCatalog::buyAndPlace(const PrefabCatalogEntry& entry) {
-    if (!m_hooks.place || !m_hooks.credits || !m_hooks.spend) {
+int PrefabCatalog::buy(const PrefabCatalogEntry& entry) {
+    if (!m_hooks.credits || !m_hooks.spend || !m_hooks.giveToPlayer) {
         m_message = "the shop is not connected to anything";
-        return {};
+        return -1;
     }
 
     const float have = m_hooks.credits();
@@ -164,38 +113,24 @@ std::string PrefabCatalog::buyAndPlace(const PrefabCatalogEntry& entry) {
                       entry.title.c_str(), static_cast<int>(entry.price),
                       static_cast<int>(have));
         m_message = buf;
-        return {};
+        return -1;
     }
 
-    // The cached mouse target when there is one; the live aim otherwise (the
-    // headless self-test buys without a mouse, aiming with the camera).
-    glm::vec3 where = m_targetPoint;
-    std::string deck = m_targetDeck;
-    if (!m_haveTarget && !aimedDeckPoint(where, deck)) {
-        m_message = "point the mouse at a deck you have built, then buy";
-        return {};
+    const int slot = m_hooks.giveToPlayer(entry.filePath, entry.title);
+    if (slot < 0) {
+        m_message = "your hotbar is full -- place or drop something first";
+        return -1;
     }
 
-    // Face the buyer, so a helm bought while standing behind it is one you can
-    // then walk up to and use.
-    const float yaw = m_hooks.viewYawDegrees ? m_hooks.viewYawDegrees() + 180.0f : 0.0f;
-
-    const std::string name = m_hooks.place(entry.filePath, where, yaw);
-    if (name.empty()) {
-        m_message = "could not place " + entry.title + " (is the file still there?)";
-        return {};
-    }
-
-    // Charged only once it is actually standing on the deck. Deducting on the
-    // click and refunding on failure is two states and a bug waiting to happen;
-    // this way there is no path where the money leaves and nothing arrives.
+    // Charged only once it is actually in your hand. There is no path where
+    // the money leaves and nothing arrives.
     m_hooks.spend(entry.price);
 
     char buf[192];
-    std::snprintf(buf, sizeof buf, "%s placed on %s  (-%d CR)",
-                  entry.title.c_str(), deck.c_str(), static_cast<int>(entry.price));
+    std::snprintf(buf, sizeof buf, "%s -> hotbar slot %d  (-%d CR). Right-click to place.",
+                  entry.title.c_str(), (slot + 1) % 10, static_cast<int>(entry.price));
     m_message = buf;
-    return name;
+    return slot;
 }
 
 void PrefabCatalog::render(bool& open) {
@@ -209,35 +144,14 @@ void PrefabCatalog::render(bool& open) {
     ImGui::TextColored(ImVec4(0.3f, 1.0f, 0.5f, 1.0f), "%d CR", static_cast<int>(have));
     ImGui::SameLine();
     if (ImGui::SmallButton("Rescan")) load(m_dir);
-
-    // Aim is sampled only while the mouse is over the WORLD; the moment it
-    // crosses onto this window to reach a Buy button, the last target is held.
-    // Without that, moving the mouse to the button un-aimed the purchase, and
-    // the button was permanently grey -- which is exactly how it shipped.
-    if (!ImGui::GetIO().WantCaptureMouse) {
-        glm::vec3 pt;
-        std::string deck;
-        if (aimedDeckPoint(pt, deck)) {
-            m_haveTarget = true;
-            m_targetPoint = pt;
-            m_targetDeck = deck;
-        } else {
-            m_haveTarget = false;
-        }
-    }
-    if (m_haveTarget) {
-        ImGui::TextColored(ImVec4(0.5f, 0.9f, 1.0f, 1.0f), "will place on %s", m_targetDeck.c_str());
-    } else {
-        ImGui::TextColored(ImVec4(1.0f, 0.7f, 0.3f, 1.0f), "point the mouse at a deck first");
-    }
-    const bool aimed = m_haveTarget;
+    ImGui::TextDisabled("Bought items go to your hotbar. Right-click places them.");
 
     ImGui::Separator();
 
     if (m_entries.empty()) {
         ImGui::TextDisabled("Nothing for sale.");
-        ImGui::TextWrapped("Prefabs are .lime files in assets/models/prefabs "
-                           "that carry `meta prefab: 1`.");
+        ImGui::TextWrapped("Prefabs are .lime files (or .glb + .meta sidecars) in "
+                           "assets/models/prefabs that carry `meta prefab: 1`.");
     }
 
     std::string shelf;
@@ -258,8 +172,8 @@ void PrefabCatalog::render(bool& open) {
                            "%d CR", static_cast<int>(entry.price));
         if (!entry.summary.empty()) ImGui::TextWrapped("%s", entry.summary.c_str());
 
-        ImGui::BeginDisabled(!affordable || !aimed);
-        if (ImGui::Button("Buy & Place")) buyAndPlace(entry);
+        ImGui::BeginDisabled(!affordable);
+        if (ImGui::Button("Buy")) buy(entry);
         ImGui::EndDisabled();
 
         ImGui::PopID();
