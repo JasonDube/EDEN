@@ -66,7 +66,19 @@ if '--rooms-json' in sys.argv:
     ROOMS_JSON = sys.argv[sys.argv.index('--rooms-json') + 1]
     ORIGIN_X = ORIGIN_Z = 0.0
 rows = [r.rstrip('\n') for r in open(plan_path)]
+# The LOFT LINE: an optional trailer 'loft: h h h ...' -- wall-top height per
+# station (plan row), bow first. The keel stays flat (ships land); the loft
+# sculpts the silhouette. Rows without a value, and plans without the line,
+# get the classic WALL_H.
+loft_line = None
+rows = [r for r in rows if not (r.startswith('loft:') and (loft_line := r))]
 W = max(len(r) for r in rows); H = len(rows)
+LOFT = [WALL_H] * H
+if loft_line:
+    for i, v in enumerate(loft_line.split(':', 1)[1].split()):
+        if i < H:
+            try: LOFT[i] = max(2.0, min(9.0, float(v)))
+            except ValueError: pass
 def cell(x, y):
     if 0 <= y < H and 0 <= x < len(rows[y]): return rows[y][x]
     return '_'
@@ -202,7 +214,9 @@ def run_pass(match, out):
                 for i in range(w): wclaimed[y][x+i] = True
                 out.append((x, y, w, 1)); continue
             h = 1
-            while y+h < H and not wclaimed[y+h][x] and match(cell(x, y+h)): h += 1
+            # A vertical run only merges stations of EQUAL loft -- a wall
+            # cannot be one box and two heights.
+            while y+h < H and not wclaimed[y+h][x] and match(cell(x, y+h)) and LOFT[y+h] == LOFT[y]: h += 1
             for i in range(h): wclaimed[y+i][x] = True
             out.append((x, y, 1, h))
 run_pass(lambda c: c == '#', walls)
@@ -258,14 +272,14 @@ deck_top = FLOOR_Y + FLOOR_T
 for i, (x, y, w, h) in enumerate(walls):
     objs.append(prim(f"{stem}_wall_{i+1}", "platform_wall",
                      wx(x, w), deck_top, wz(y, h),
-                     w*CELL, WALL_H, h*CELL, (0.58, 0.60, 0.66, 1.0)))
+                     w*CELL, LOFT[y], h*CELL, (0.58, 0.60, 0.66, 1.0)))
 # Windows: wall-shaped, glass-coloured, nearly transparent -- the pilot's view.
 # Same buildingType as walls so collision and the vessel weld treat them as
 # hull; only the glazing differs.
 for i, (x, y, w, h) in enumerate(windows):
     objs.append(prim(f"{stem}_window_{i+1}", "platform_wall",
                      wx(x, w), deck_top, wz(y, h),
-                     w*CELL, WALL_H, h*CELL, (0.45, 0.70, 1.00, 0.22)))
+                     w*CELL, LOFT[y], h*CELL, (0.45, 0.70, 1.00, 0.22)))
 counts = {}
 for (c, x, y, w, h) in sockets:
     role, color = ROLE[c]

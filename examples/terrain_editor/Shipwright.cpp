@@ -78,12 +78,13 @@ const HullMat kHullMats[] = {
 // make_ship_from_plan.py (CELL 2.0, FLOOR_T 0.4, WALL_H 3.0, walls full-cell
 // thick) and VesselFlight.cpp (stock engine thrust 2500 / mass 400, stock
 // helm steering 900 / mass 180, turn clamp 8..80).
-float planVolume(const std::vector<char>& cells) {
-    constexpr float kFloorCell = 2.0f * 0.4f * 2.0f;                     // plate
-    constexpr float kWallCell  = 2.0f * 3.0f * 2.0f + 2.0f * 0.4f * 2.0f; // wall + frame
+float planVolume(const std::vector<char>& cells, const std::vector<float>& loft) {
+    constexpr float kFloorCell = 2.0f * 0.4f * 2.0f;   // plate (also under walls)
     float v = 0.0f;
-    for (char c : cells) {
-        if (c == '#' || c == 'W') v += kWallCell;
+    for (size_t i = 0; i < cells.size(); ++i) {
+        const char c = cells[i];
+        const int y = static_cast<int>(i) / Shipwright::kW;
+        if (c == '#' || c == 'W') v += 2.0f * loft[y] * 2.0f + kFloorCell;
         else if (c == '.' || c == 'D' || isRoom(c)) v += kFloorCell;
     }
     return v;
@@ -91,10 +92,15 @@ float planVolume(const std::vector<char>& cells) {
 
 } // namespace
 
-Shipwright::Shipwright() : m_cells(kW * kH, '_') {}
+constexpr float kLoftDefault = 3.0f;   // classic WALL_H
+constexpr float kLoftMin = 2.0f;       // low enough to duck through, no lower
+constexpr float kLoftMax = 9.0f;       // three storeys of superstructure
+
+Shipwright::Shipwright() : m_cells(kW * kH, '_'), m_loft(kH, kLoftDefault) {}
 
 void Shipwright::clear() {
     std::fill(m_cells.begin(), m_cells.end(), '_');
+    std::fill(m_loft.begin(), m_loft.end(), kLoftDefault);
     m_overlay.clear();
     m_overlayIdx.clear();
     m_status = "cleared";
@@ -111,9 +117,21 @@ void Shipwright::paint(int x, int y, char c) {
 
 std::string Shipwright::serialize() const {
     std::string out;
-    out.reserve((kW + 1) * kH);
+    out.reserve((kW + 1) * kH + 8 * kH);
     for (int y = 0; y < kH; ++y) {
         out.append(&m_cells[y * kW], kW);
+        out.push_back('\n');
+    }
+    // The loft trailer travels only when it says something.
+    bool lofted = false;
+    for (float h : m_loft) if (std::fabs(h - kLoftDefault) > 0.01f) lofted = true;
+    if (lofted) {
+        out += "loft:";
+        char num[16];
+        for (float h : m_loft) {
+            std::snprintf(num, sizeof num, " %.2f", h);
+            out += num;
+        }
         out.push_back('\n');
     }
     return out;
@@ -124,8 +142,14 @@ bool Shipwright::deserialize(const std::string& text) {
     std::istringstream in(text);
     std::string line;
     int y = 0;
+    std::vector<float> loft(kH, kLoftDefault);
     while (std::getline(in, line) && y < kH) {
         if (line.empty()) continue;
+        if (line.rfind("loft:", 0) == 0) {
+            std::istringstream lv(line.substr(5));
+            for (int i = 0; i < kH && (lv >> loft[i]); ++i) {}
+            continue;
+        }
         for (int x = 0; x < kW && x < static_cast<int>(line.size()); ++x) {
             const char c = line[x];
             next[y * kW + x] =
@@ -135,6 +159,7 @@ bool Shipwright::deserialize(const std::string& text) {
     }
     if (y == 0) return false;
     m_cells = std::move(next);
+    m_loft = std::move(loft);
     m_overlay.clear();
     m_overlayIdx.clear();
     return true;
@@ -196,7 +221,7 @@ void Shipwright::render(bool& open) {
 
     // The displacement line: hull weight as drawn, the materials bill, how
     // many stock engines she will demand, and how she answers a stock helm.
-    const float vol = planVolume(m_cells);
+    const float vol = planVolume(m_cells, m_loft);
     const HullMat& mat = kHullMats[m_material - 1];
     const float tons = vol * mat.density;
     if (tons > 0.0f) {
@@ -359,16 +384,37 @@ void Shipwright::render(bool& open) {
     if (m_sideView) {
         const float pxU = cell / 2.0f;           // pixels per world unit (CELL=2)
         const float floorPx = 0.4f * pxU;        // FLOOR_T
-        const float wallPx  = 3.0f * pxU;        // WALL_H
-        const float stripH  = wallPx + floorPx + 18.0f;
-        ImGui::SetNextWindowSize(ImVec2(kW * cell + 24.0f, stripH + 44.0f), ImGuiCond_FirstUseEver);
+        const float stripH  = kLoftMax * pxU + floorPx + 20.0f;
+        ImGui::SetNextWindowSize(ImVec2(kW * cell + 24.0f, stripH + 76.0f), ImGuiCond_FirstUseEver);
         ImGui::SetNextWindowPos(ImVec2(90, 850), ImGuiCond_FirstUseEver);
         if (!ImGui::Begin("Profile -- port side, bow right", &m_sideView)) { ImGui::End(); }
         else {
+        // THE LOFT: drag along the strip to sculpt the wall-top height per
+        // station -- the silhouette the yard will build. RMB resets a
+        // station; the keel never moves (ships land on their bellies).
+        if (ImGui::Button("Flatten")) std::fill(m_loft.begin(), m_loft.end(), kLoftDefault);
+        ImGui::SameLine();
+        ImGui::TextDisabled("LMB drag = loft the line   RMB = level a station   keel stays flat");
+
         ImDrawList* dl = ImGui::GetWindowDrawList();
         const ImVec2 po = ImGui::GetCursorScreenPos();
-        ImGui::Dummy(ImVec2(kW * cell, stripH));
+        ImGui::InvisibleButton("loft_strip", ImVec2(kW * cell, stripH));
         const float keelY = po.y + stripH - 4.0f;
+
+        if (ImGui::IsItemHovered()) {
+            const ImVec2 mp = ImGui::GetIO().MousePos;
+            const int station = kH - 1 - static_cast<int>((mp.x - po.x) / cell);
+            if (station >= 0 && station < kH) {
+                if (ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+                    float h = (keelY - floorPx - mp.y) / pxU;
+                    h = std::clamp(std::round(h * 4.0f) / 4.0f, kLoftMin, kLoftMax);
+                    m_loft[station] = h;
+                }
+                if (ImGui::IsMouseDown(ImGuiMouseButton_Right))
+                    m_loft[station] = kLoftDefault;
+            }
+        }
+
         bool any = false;
         for (int y = 0; y < kH; ++y) {
             bool hasFloor = false, hasWall = false, hasWin = false;
@@ -384,6 +430,7 @@ void Shipwright::render(bool& open) {
             dl->AddRectFilled(ImVec2(sx, keelY - floorPx), ImVec2(sx + cell, keelY),
                               IM_COL32(70, 72, 80, 255));
             if (hasWall) {
+                const float wallPx = m_loft[y] * pxU;
                 const float top = keelY - floorPx - wallPx;
                 dl->AddRectFilled(ImVec2(sx, top), ImVec2(sx + cell, keelY - floorPx),
                                   IM_COL32(150, 155, 165, 255));
@@ -393,12 +440,21 @@ void Shipwright::render(bool& open) {
                                       IM_COL32(120, 180, 255, 255));
             }
         }
+        // The loft line itself, across every station -- sculptable before
+        // the walls exist, honoured when they do.
+        for (int y = 0; y + 1 < kH; ++y) {
+            const float x0 = po.x + (kH - 1 - y) * cell + cell * 0.5f;
+            const float x1 = po.x + (kH - 2 - y) * cell + cell * 0.5f;
+            dl->AddLine(ImVec2(x0, keelY - floorPx - m_loft[y] * pxU),
+                        ImVec2(x1, keelY - floorPx - m_loft[y + 1] * pxU),
+                        IM_COL32(255, 220, 90, 170), 1.5f);
+        }
         dl->AddLine(ImVec2(po.x, keelY), ImVec2(po.x + kW * cell, keelY),
                     IM_COL32(255, 255, 255, 40));
         dl->AddText(ImVec2(po.x + kW * cell - 42.0f, po.y), IM_COL32(255, 255, 120, 200), "BOW>");
         if (!any)
             dl->AddText(ImVec2(po.x + 8.0f, po.y + 4.0f), IM_COL32(140, 140, 140, 255),
-                        "profile -- draw a hull to see her from the side");
+                        "profile -- draw a hull, then loft her line");
         ImGui::End();
         }
     }

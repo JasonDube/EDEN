@@ -77,7 +77,8 @@ private:
     std::function<void()> m_openCatalog;
     std::vector<char> m_cells;      // kW * kH, row-major
     char m_tool = '#';
-    bool m_sideView = false;        // the profile strip under the grid
+    bool m_sideView = false;        // the profile window toggle
+    std::vector<float> m_loft;      // wall-top height per station (plan row)
     bool m_mirrorX = true;          // ships are symmetric; paint both halves
     std::string m_status;
 };
