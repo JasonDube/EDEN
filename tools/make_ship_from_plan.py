@@ -58,19 +58,97 @@ n_walk = sum(1 for y in range(H) for x in range(W) if walk(cell(x, y)))
 if len(seen) != n_walk:
     print(f"WARNING: walkable area is not connected ({len(seen)} of {n_walk} reachable)")
 
-# ---- floors: greedy rectangles over the hull footprint ---------------------
-claimed = [[False]*W for _ in range(H)]
-floors = []
+# ---- rooms: doors are what separate them -----------------------------------
+# Flood walkable cells WITHOUT crossing doors -> each region is a room. Door
+# cells then adopt an adjacent room so their floor belongs somewhere. Rooms
+# get names -- and the names go onto the floor plates, because a named plate
+# is an ADDRESS: ship-to-ship damage lands on a slab, and the slab already
+# says "engine_room_deck_2". The user asked for exactly this.
+room_of = {}
+rooms = []          # list of dicts: cells, letters
 for y in range(H):
     for x in range(W):
-        if claimed[y][x] or not hull(cell(x, y)): continue
-        w = 0
-        while x+w < W and not claimed[y][x+w] and hull(cell(x+w, y)): w += 1
+        c = cell(x, y)
+        if not walk(c) or c == 'D' or (x, y) in room_of: continue
+        rid = len(rooms)
+        blob, letters, stack = [], {}, [(x, y)]
+        while stack:
+            px, py = stack.pop()
+            pc = cell(px, py)
+            if (px, py) in room_of or not walk(pc) or pc == 'D': continue
+            room_of[(px, py)] = rid
+            blob.append((px, py))
+            if pc in ROLE: letters[pc] = letters.get(pc, 0) + 1
+            stack += [(px+1,py),(px-1,py),(px,py+1),(px,py-1)]
+        rooms.append({'cells': blob, 'letters': letters})
+
+# Room centroids first -- door adoption and naming both need them.
+ship_cx = sum(x for r in rooms for (x, _) in r['cells']) / max(1, sum(len(r['cells']) for r in rooms))
+for r in rooms:
+    xs = [p[0] for p in r['cells']]; ys = [p[1] for p in r['cells']]
+    r['cx'] = sum(xs)/len(xs); r['cy'] = sum(ys)/len(ys)
+
+# Door cells adopt the adjacent room FARTHEST from the centreline (outboard),
+# so port doors belong to the port bay and starboard doors to the starboard
+# bay -- the first version adopted west-first and the two sides came out
+# different sizes, which the room table caught immediately.
+for y in range(H):
+    for x in range(W):
+        if cell(x, y) != 'D': continue
+        best = None
+        for nx, ny in ((x, y-1), (x-1, y), (x+1, y), (x, y+1)):
+            if (nx, ny) in room_of:
+                rid = room_of[(nx, ny)]
+                d = abs(rooms[rid]['cx'] - ship_cx)
+                if best is None or d > best[0]: best = (d, rid)
+        if best:
+            room_of[(x, y)] = best[1]
+            rooms[best[1]]['cells'].append((x, y))
+
+# Names: equipment first (engine room announces itself), then position --
+# forwardmost unnamed room is the bridge (bow is the top of the plan),
+# side rooms are port/starboard bays, the rest are holds.
+for r in rooms:
+    if   'E' in r['letters']: r['name'] = 'engine_room'
+    elif 'R' in r['letters']: r['name'] = 'robot_hall'
+    elif 'C' in r['letters']: r['name'] = 'cargo_hold'
+    elif 'B' in r['letters']: r['name'] = 'bridge'
+    else: r['name'] = None
+# Only a centreline room can be the bridge -- a wing cannot.
+centreline = [r for r in rooms if r['name'] is None and abs(r['cx'] - ship_cx) <= 1.5]
+if centreline:
+    min(centreline, key=lambda r: r['cy'])['name'] = 'bridge'
+for r in rooms:
+    if r['name'] is None:
+        r['name'] = 'port_bay' if r['cx'] < ship_cx - 1 else \
+                    'starboard_bay' if r['cx'] > ship_cx + 1 else 'hold'
+seen_names = {}
+for r in rooms:
+    n = seen_names.get(r['name'], 0) + 1
+    seen_names[r['name']] = n
+    if n > 1: r['name'] += f"_{n}"
+
+def rects_over(cells):
+    cells = set(cells)
+    out = []
+    while cells:
+        x, y = min(cells, key=lambda p: (p[1], p[0]))
+        w = 1
+        while (x+w, y) in cells: w += 1
         h = 1
-        while y+h < H and all(not claimed[y+h][x+i] and hull(cell(x+i, y+h)) for i in range(w)): h += 1
+        while all((x+i, y+h) in cells for i in range(w)): h += 1
         for yy in range(y, y+h):
-            for xx in range(x, x+w): claimed[yy][xx] = True
-        floors.append((x, y, w, h))
+            for xx in range(x, x+w): cells.discard((xx, yy))
+        out.append((x, y, w, h))
+    return out
+
+floors = []                       # (x, y, w, h, room_name)
+for r in rooms:
+    for (x, y, w, h) in rects_over(r['cells']):
+        floors.append((x, y, w, h, r['name']))
+# Floor under the walls too -- the hull frame.
+frame_cells = [(x, y) for y in range(H) for x in range(W) if solid(cell(x, y))]
+frames = rects_over(frame_cells)
 
 # ---- walls: greedy runs over '#' -------------------------------------------
 wclaimed = [[False]*W for _ in range(H)]
@@ -120,14 +198,23 @@ def prim(name, bt, px, py, pz, sx, sy, sz, color, collide=True):
             "brightness": 1.0, "hueShift": 0.0, "saturation": 1.0,
             "dailySchedule": False, "patrolSpeed": 5.0}
 
+import os
+stem = os.path.splitext(os.path.basename(plan_path))[0]
+
 objs = []
-for i, (x, y, w, h) in enumerate(floors):
-    objs.append(prim(f"Plan_Floor_{i}", "platform_slab",
+deck_counts = {}
+for (x, y, w, h, rname) in floors:
+    deck_counts[rname] = deck_counts.get(rname, 0) + 1
+    objs.append(prim(f"{stem}_{rname}_deck_{deck_counts[rname]}", "platform_slab",
                      wx(x, w), FLOOR_Y, wz(y, h),
                      w*CELL, FLOOR_T, h*CELL, (0.42, 0.44, 0.50, 1.0)))
+for i, (x, y, w, h) in enumerate(frames):
+    objs.append(prim(f"{stem}_frame_{i+1}", "platform_slab",
+                     wx(x, w), FLOOR_Y, wz(y, h),
+                     w*CELL, FLOOR_T, h*CELL, (0.38, 0.40, 0.45, 1.0)))
 deck_top = FLOOR_Y + FLOOR_T
 for i, (x, y, w, h) in enumerate(walls):
-    objs.append(prim(f"Plan_Wall_{i}", "platform_wall",
+    objs.append(prim(f"{stem}_wall_{i+1}", "platform_wall",
                      wx(x, w), deck_top, wz(y, h),
                      w*CELL, WALL_H, h*CELL, (0.58, 0.60, 0.66, 1.0)))
 counts = {}
@@ -141,13 +228,17 @@ for (c, x, y, w, h) in sockets:
 src = json.load(open('build/examples/terrain_editor/levels/shipyard.eden'))
 out = copy.deepcopy(src)
 out['objects'] = objs
-stern_z = ORIGIN_Z + (max(y+h for (x,y,w,h) in floors) - H/2.0) * CELL
+stern_z = ORIGIN_Z + (max(y+h for (x,y,w,h,_) in floors) - H/2.0) * CELL
 out['settings']['spawnPosition'] = [ORIGIN_X, 2.0, stern_z + 8.0]
 out['name'] = 'plan_ship'
 dst = 'build/examples/terrain_editor/levels/plan_ship.eden'
 json.dump(out, open(dst, 'w'), indent=1)
 
-print(f"{dst}: {len(floors)} floor slabs, {len(walls)} wall runs, "
+print("rooms:")
+for r in rooms:
+    print(f"  {r['name']:16s} {len(r['cells']):3d} cells   "
+          f"{deck_counts.get(r['name'], 0)} deck plate(s)   letters {r['letters'] or '--'}")
+print(f"{dst}: {len(floors)} room plates + {len(frames)} frame plates, {len(walls)} wall runs, "
       f"{sum(1 for y in range(H) for x in range(W) if cell(x,y)=='D')} door cells, "
       f"{len(sockets)} sockets {[(ROLE[c][0], w, h) for (c,x,y,w,h) in sockets]}")
 if not any(c == 'B' for (c, *_ ) in sockets):
