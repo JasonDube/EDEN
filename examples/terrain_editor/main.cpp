@@ -8816,27 +8816,29 @@ private:
         }
 
         // Compute early so we can skip camera's onSpacePressed when Jolt handles jump
-        // BUILD MODE NO LONGER TURNS THE BODY OFF.
+        // The build panel deliberately turns the character controller OFF.
         //
-        // This used to end with !(m_playModeCursorVisible && m_showSiloConfig),
-        // which switched the character controller off for the whole time the Tab
-        // build panel was up. No controller means no capsule, and no capsule means
-        // nothing holds you up -- so you fell through the platform you had just
-        // built, while the slab's collider sat there in Jolt working perfectly.
+        // DO NOT REMOVE THIS AGAIN. I did, to fix falling through a slab built in
+        // play mode, and it broke doors in akelba -- because the two movement
+        // paths do not agree about walls:
         //
-        // It was survivable before only by accident: a left-click on the world
-        // used to recapture the mouse, which hid the cursor and quietly switched
-        // the body back on. Making build mode keep its cursor -- so a slab drag
-        // would stop losing the pointer mid-drag -- removed that escape hatch and
-        // left the body off for good.
+        //   - the character controller collides against Jolt bodies, and a wall's
+        //     Jolt collider is only split around its holes at enterPlayMode. Cut a
+        //     doorway during play and Jolt still has the SOLID wall, so the capsule
+        //     is stopped by a hole you can see through;
+        //   - the AABB path at main.cpp:9118 checks getWallHoles() every frame and
+        //     skips collision while the player is inside an opening. That is what
+        //     makes a door you just cut walkable, and it only runs when the
+        //     controller is off.
         //
-        // Gravity and collision while building is also just what you want: you
-        // stand on the deck you are working on, and you walk to the spot you want
-        // to put the next thing.
+        // So building with the controller off is not an oversight -- it is the
+        // path that understands holes. Falling through a new slab is a real
+        // problem, but it is heightQuery's floor rule to answer, not this.
         bool useCharacterController = m_isPlayMode && m_characterController &&
                                 m_camera.getMovementMode() == MovementMode::Walk &&
                                 !m_filesystemBrowser.isActive() &&
-                                !m_inPanelFocusMode;
+                                !m_inPanelFocusMode &&
+                                !(m_playModeCursorVisible && m_showSiloConfig);
 
         // Double-tap space toggles fly/walk mode; spacebar on selected spinning model toggles spin
         // Skip when character controller handles jump — prevents accidental fly mode toggle
