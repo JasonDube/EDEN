@@ -163,6 +163,15 @@ int runEmptyLevelChecks(const LevelCheckHooks& hooks, bool verbose) {
         report("catalog: buy to hotbar", false, "no hook -- the shop is NOT checked");
     }
 
+    // Does a deck fly as one thing?
+    if (hooks.vesselSelfTest) {
+        const std::string problem = hooks.vesselSelfTest();
+        report("vessel: flies", problem.empty(),
+               problem.empty() ? "helm -> manifest -> moved together, bystander stayed" : problem);
+    } else {
+        report("vessel: flies", false, "no hook -- flight is NOT checked");
+    }
+
     // Unloading a module takes its objects with it, WITHOUT wiping the level.
     //
     // Checked on its own because it is the only cleanup path that has to delete

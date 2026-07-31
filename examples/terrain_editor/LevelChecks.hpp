@@ -80,6 +80,11 @@ struct LevelCheckHooks {
     // Lay a deck, buy a helm, and confirm it is standing on it and the credits
     // are gone. The player's whole loop, driven without a mouse.
     std::function<std::string()> catalogSelfTest;
+
+    // Build a deck with a helm and cargo aboard and a bystander off it, take
+    // the helm, fly a step, and confirm the vessel moved as ONE THING and the
+    // bystander did not. The whole point of the containment rule, checked.
+    std::function<std::string()> vesselSelfTest;
     // ModuleHost::destroyAllOwned() -- the Unload Module path, where the level
     // stays and only the module's objects go. Distinct from a wipe, and the one
     // that can leave real objects behind rather than just a stale name list.

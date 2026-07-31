@@ -43,7 +43,7 @@ struct PrefabCatalogHooks {
     // Put the file in the first free hotbar slot; returns the slot index, or
     // -1 when the hotbar is full. The host owns slot mechanics -- how geometry
     // loads, what a thumbnail is -- the shop only asks.
-    std::function<int(const std::string& path, const std::string& title)> giveToPlayer;
+    std::function<int(const PrefabCatalogEntry& entry)> giveToPlayer;
 };
 
 class PrefabCatalog {

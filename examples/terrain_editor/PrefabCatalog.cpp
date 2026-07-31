@@ -116,7 +116,7 @@ int PrefabCatalog::buy(const PrefabCatalogEntry& entry) {
         return -1;
     }
 
-    const int slot = m_hooks.giveToPlayer(entry.filePath, entry.title);
+    const int slot = m_hooks.giveToPlayer(entry);
     if (slot < 0) {
         m_message = "your hotbar is full -- place or drop something first";
         return -1;

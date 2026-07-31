@@ -1,4 +1,4 @@
-add_executable(terrain_editor main.cpp grove_host.cpp MCPServer.cpp TribeSim.cpp LevelChecks.cpp EditorModuleHost.cpp PrefabCatalog.cpp
+add_executable(terrain_editor main.cpp grove_host.cpp MCPServer.cpp TribeSim.cpp LevelChecks.cpp EditorModuleHost.cpp PrefabCatalog.cpp VesselFlight.cpp
     ${CMAKE_SOURCE_DIR}/src/Terminal/EdenTerminal.cpp
     ${CMAKE_SOURCE_DIR}/src/OS/FilesystemBrowser.cpp
     ${CMAKE_SOURCE_DIR}/src/OS/PlatformGrid.cpp

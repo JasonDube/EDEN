@@ -62,6 +62,8 @@
 #include "EditorModuleHost.hpp"
 // The shop: .lime prefabs the player buys and stands on a deck.
 #include "PrefabCatalog.hpp"
+// Take the helm and the deck flies.
+#include "VesselFlight.hpp"
 
 // OS / Filesystem
 #include "OS/FilesystemBrowser.hpp"
@@ -460,14 +462,19 @@ protected:
             // geometry (.lime and .glb both), and the ordinary right-click
             // placement flow takes it from there. In memory only: purchases are
             // NOT written to ~/eden/inventory, which is EDEN OS's.
-            shop.giveToPlayer = [this](const std::string& path,
-                                       const std::string& title) -> int {
+            shop.giveToPlayer = [this](const PrefabCatalogEntry& entry) -> int {
                 for (int i = 0; i < TOOLBAR_SLOT_COUNT; ++i) {
                     if (m_toolbarSlots[i].occupied) continue;
                     m_toolbarSlots[i].occupied = true;
-                    m_toolbarSlots[i].filePath = path;
-                    m_toolbarSlots[i].displayName = title;
-                    m_toolbarSlots[i].baseModelName = title;
+                    m_toolbarSlots[i].filePath = entry.filePath;
+                    m_toolbarSlots[i].displayName = entry.title;
+                    m_toolbarSlots[i].baseModelName = entry.title;
+                    // The role rides in the slot's metadata, and the ordinary
+                    // placement path copies slot metadata onto the placed
+                    // object -- which is how the flight system knows a helm
+                    // from a crate: the FILE said so, all the way through.
+                    m_toolbarSlots[i].metadata["role"]  = entry.role;
+                    m_toolbarSlots[i].metadata["title"] = entry.title;
                     createSlotThumbnail(i);
                     return i;
                 }
@@ -475,6 +482,26 @@ protected:
             };
             m_catalog.setHooks(shop);
             m_catalog.load("assets/models/prefabs");
+        }
+
+        // Flight.
+        {
+            VesselFlightDeps fly;
+            fly.sceneObjects = &m_sceneObjects;
+            fly.terrain      = &m_terrain;
+            fly.camera       = &m_camera;
+            fly.playerFeet   = [this] {
+                return m_camera.getPosition() - glm::vec3(0.0f, 1.65f, 0.0f);
+            };
+            // Uses only the API that already exists; the flight system itself
+            // never reaches into collision.
+            fly.dropStaticBody = [this](eden::SceneObject* o) {
+                if (o && o->hasJoltBody() && m_characterController) {
+                    m_characterController->removeStaticBody(o->getJoltBodyId());
+                    o->clearJoltBody();
+                }
+            };
+            m_vessel.setDeps(fly);
         }
 
         m_videoEditor = std::make_unique<eden::VideoEditor>(getContext());
@@ -2226,6 +2253,10 @@ protected:
                                ImGui::GetIO().WantTextInput || ImGui::GetIO().WantCaptureKeyboard,
                                ImGui::GetIO().WantCaptureMouse);
         m_tribeSim.update(deltaTime, m_isPlayMode);
+        // The vessel: prompt, takeoff, per-frame flight movement. Runs before
+        // the movement block below, which asks isFlying() and playerCarry().
+        m_vessel.update(deltaTime, m_isPlayMode,
+                        ImGui::GetIO().WantTextInput || ImGui::GetIO().WantCaptureKeyboard);
 
         // Poll for AI backend responses
         if (m_httpClient) {
@@ -7843,6 +7874,76 @@ private:
             m_playerCredits = before;   // the check does not get to make you rich
             return problems;
         };
+        // Fly the vessel without a keyboard: deck + helm + cargo aboard, one
+        // bystander on the ground beside it. Take the helm, move one step,
+        // require the three aboard to move IDENTICALLY and the bystander not
+        // at all -- the containment rule itself, checked end to end.
+        h.vesselSelfTest = [this]() -> std::string {
+            auto makeBox = [this](const std::string& name, const glm::vec3& pos,
+                                  const glm::vec3& scale, const char* bt) -> eden::SceneObject* {
+                auto mesh = PrimitiveMeshBuilder::createCube(1.0f, glm::vec4(0.8f, 0.8f, 0.8f, 1.0f));
+                auto obj = std::make_unique<SceneObject>(name);
+                obj->setBufferHandle(m_modelRenderer->createModel(mesh.vertices, mesh.indices));
+                obj->setIndexCount(static_cast<uint32_t>(mesh.indices.size()));
+                obj->setVertexCount(static_cast<uint32_t>(mesh.vertices.size()));
+                obj->setLocalBounds(mesh.bounds);
+                obj->setMeshData(mesh.vertices, mesh.indices);
+                obj->setPrimitiveType(PrimitiveType::Cube);
+                if (bt) obj->setBuildingType(bt);
+                obj->getTransform().setPosition(pos);
+                obj->getTransform().setScale(scale);
+                m_sceneObjects.push_back(std::move(obj));
+                return m_sceneObjects.back().get();
+            };
+            // Deck top sits at y = 0.5 (unit cube is 0..1 in Y, scaled 0.5).
+            makeBox("VesselCheckDeck",  glm::vec3(300.0f, 0.0f, 300.0f), glm::vec3(12.0f, 0.5f, 12.0f), "platform_slab");
+            auto* helm  = makeBox("VesselCheckHelm",  glm::vec3(302.0f, 0.5f, 300.0f), glm::vec3(1.0f, 1.4f, 1.0f), nullptr);
+            makeBox("VesselCheckCargo", glm::vec3(298.0f, 0.5f, 302.0f), glm::vec3(1.0f, 1.0f, 1.0f), nullptr);
+            auto* stray = makeBox("VesselCheckStray", glm::vec3(320.0f, 0.0f, 300.0f), glm::vec3(1.0f, 1.0f, 1.0f), nullptr);
+            helm->setModelMetadata({{"role", "helm"}});
+            updateSceneObjectsList();
+
+            std::string problems;
+            auto fail = [&problems](const std::string& s) {
+                if (!problems.empty()) problems += "; ";
+                problems += s;
+            };
+            auto posOf = [this](const char* n) {
+                for (auto& o : m_sceneObjects)
+                    if (o && o->getName() == n) return o->getTransform().getPosition();
+                return glm::vec3(1e9f);
+            };
+
+            const glm::vec3 strayBefore = posOf("VesselCheckStray");
+            if (!m_vessel.takeHelm("VesselCheckHelm")) {
+                fail("takeHelm refused: " + m_vessel.lastError());
+            } else {
+                if (m_vessel.manifest().size() != 3)
+                    fail("manifest has " + std::to_string(m_vessel.manifest().size()) + " aboard, expected 3");
+                const glm::vec3 move(30.0f, 20.0f, 10.0f);   // one step at dt=0.1
+                m_vessel.tick(0.1f, move);
+                const glm::vec3 expect = move * 0.1f;
+                for (const char* n : {"VesselCheckDeck", "VesselCheckHelm", "VesselCheckCargo"}) {
+                    const glm::vec3 p = posOf(n);
+                    const glm::vec3 base = (std::string(n) == "VesselCheckDeck") ? glm::vec3(300.0f, 0.0f, 300.0f)
+                                        : (std::string(n) == "VesselCheckHelm") ? glm::vec3(302.0f, 0.5f, 300.0f)
+                                                                                : glm::vec3(298.0f, 0.5f, 302.0f);
+                    if (glm::length(p - (base + expect)) > 0.01f)
+                        fail(std::string(n) + " did not move with the vessel");
+                }
+                if (glm::length(posOf("VesselCheckStray") - strayBefore) > 0.001f)
+                    fail("the bystander was dragged along");
+                (void)stray;
+                m_vessel.releaseHelm();
+            }
+
+            for (const char* n : {"VesselCheckDeck", "VesselCheckHelm", "VesselCheckCargo", "VesselCheckStray"}) {
+                for (int i = 0; i < static_cast<int>(m_sceneObjects.size()); ++i) {
+                    if (m_sceneObjects[i] && m_sceneObjects[i]->getName() == n) { deleteObject(i); break; }
+                }
+            }
+            return problems;
+        };
         h.destroyModuleOwned = [this] { m_moduleHost.destroyAllOwned(); };
         h.addASceneObject = [this] {
             auto mesh = PrimitiveMeshBuilder::createCube(1.0f, glm::vec4(1.0f));
@@ -8865,7 +8966,18 @@ private:
         }
 
         // Character controller path (already computed above)
-        if (useCharacterController) {
+        if (useCharacterController && m_vessel.isFlying()) {
+            // FLYING: the ship has the keys, and the pilot rides the deck. The
+            // character controller is bypassed entirely -- gravity would fight
+            // vertical flight, and WASD already moved the deck. The player is
+            // displaced by exactly what the deck moved this frame, so pilot
+            // and ship cannot drift apart; mouse-look stays the camera's.
+            const glm::vec3 carry = m_vessel.playerCarry();
+            glm::vec3 cp = m_characterController->getPosition() + carry;
+            m_characterController->setPosition(cp);
+            const float centerToEye = 1.65f - 0.5f;   // same numbers as below
+            m_camera.setPosition(glm::vec3(cp.x, cp.y + centerToEye, cp.z));
+        } else if (useCharacterController) {
             // Calculate desired velocity from input
             float yaw = glm::radians(m_camera.getYaw());
             glm::vec3 forward(std::cos(yaw), 0.0f, std::sin(yaw));
@@ -21645,6 +21757,10 @@ private:
         // Play mode only: the shop is a thing the PLAYER opens, not an editor panel.
         if (m_isPlayMode) m_catalog.render(m_showCatalog);
         else m_showCatalog = false;
+        if (m_isPlayMode) {
+            m_vessel.renderUI(static_cast<float>(getWindow().getWidth()),
+                              static_cast<float>(getWindow().getHeight()));
+        }
         renderPlatformMapMode();
         renderPerfWindow();
 
@@ -32084,6 +32200,11 @@ private:
     // so nothing here knows what a helm is or costs.
     PrefabCatalog m_catalog;
     bool m_showCatalog = false;
+
+    // Flight for the player's platform: stand at a placed helm, press E, and
+    // the slab it stands on -- with everything aboard -- flies. Own TU; see
+    // VesselFlight.hpp for the v1 limits, stated plainly.
+    VesselFlight m_vessel;
 
     enum class PlayerZone { Silo, Basement, Outside, Void };
     PlayerZone m_playerZone = PlayerZone::Outside;
