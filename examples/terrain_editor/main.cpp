@@ -3763,10 +3763,13 @@ protected:
                 if (!obj || !obj->isSelected()) continue;
                 const auto& bt = obj->getBuildingType();
                 bool isInteraction = (obj->getBeingType() == BeingType::INTERACTION || bt == "salvage");
-                if (!isInteraction && bt != "filesystem" && bt != "filesystem_wall" && bt != "wall_frame" && bt != "wall_widget" && bt != "platform_wall") continue;
-                // Skip building pieces in game mode — they use the build selection highlight instead
-                // But allow wall_frame through so it gets the selection outline
-                if (m_isPlayMode && (bt == "platform_wall" || bt == "platform_slab")) continue;
+                if (!isInteraction && bt != "filesystem" && bt != "filesystem_wall" && bt != "wall_frame" && bt != "wall_widget" && bt != "platform_wall" && bt != "platform_slab") continue;
+                // Building pieces: while the BUILD panel is up, its own highlight
+                // draws them -- defer. In plain play mode this outline is the ONLY
+                // feedback, and skipping it here is why the pocketing experiment
+                // "couldn't select" pieces twice: the click landed, setSelected
+                // fired, and nothing on screen ever said so.
+                if (m_isPlayMode && m_showSiloConfig && (bt == "platform_wall" || bt == "platform_slab")) continue;
                 bool isDragHover = (m_fsDragActive && obj.get() == m_fsDragHoverWall);
                 const AABB& lb = obj->getLocalBounds();
                 if (lb.getSize().x > 0.001f || lb.getSize().y > 0.001f || lb.getSize().z > 0.001f) {
