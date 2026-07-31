@@ -8163,12 +8163,22 @@ private:
                 // A socket pad aboard weighs NOTHING -- painted intent, not
                 // cargo. (Nine pads at the default part mass once added a
                 // phantom 225 t.)
-                makeBox("VesselCheckPad", glm::vec3(301.0f, 0.5f, 301.0f),
+                // On the MOVED ship -- she has translated and turned since
+                // her plates were laid, and a pad at the original coordinates
+                // is not aboard anything (the first version of this check was
+                // vacuous for exactly that reason: break-verification caught
+                // it passing with the rule disabled).
+                makeBox("VesselCheckPad", posOf("VesselCheckHelm") + glm::vec3(0.3f, 1.6f, 0.3f),
                         glm::vec3(1.0f, 0.1f, 1.0f), "socket_marker");
                 updateSceneObjectsList();
                 if (!m_vessel.takeHelm("VesselCheckHelm")) {
                     fail("takeHelm refused with a socket pad aboard: " + m_vessel.lastError());
                 } else {
+                    bool padAboard = false;
+                    for (const auto& n : m_vessel.manifest())
+                        if (n == "VesselCheckPad") padAboard = true;
+                    if (!padAboard)
+                        fail("the pad check is vacuous -- pad not aboard the moved ship");
                     if (std::fabs(m_vessel.tonnage() - tonsBefore) > 0.01f)
                         fail("a socket pad changed the tonnage");
                     m_vessel.releaseHelm();
