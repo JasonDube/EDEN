@@ -167,10 +167,12 @@ std::string PrefabCatalog::buyAndPlace(const PrefabCatalogEntry& entry) {
         return {};
     }
 
-    glm::vec3 where(0.0f);
-    std::string deck;
-    if (!aimedDeckPoint(where, deck)) {
-        m_message = "look at a deck you have built, then buy";
+    // The cached mouse target when there is one; the live aim otherwise (the
+    // headless self-test buys without a mouse, aiming with the camera).
+    glm::vec3 where = m_targetPoint;
+    std::string deck = m_targetDeck;
+    if (!m_haveTarget && !aimedDeckPoint(where, deck)) {
+        m_message = "point the mouse at a deck you have built, then buy";
         return {};
     }
 
@@ -208,16 +210,27 @@ void PrefabCatalog::render(bool& open) {
     ImGui::SameLine();
     if (ImGui::SmallButton("Rescan")) load(m_dir);
 
-    // Say plainly whether a purchase can land right now, because "nothing
-    // happened" is the worst possible answer to clicking Buy.
-    glm::vec3 where(0.0f);
-    std::string deck;
-    const bool aimed = aimedDeckPoint(where, deck);
-    if (aimed) {
-        ImGui::TextColored(ImVec4(0.5f, 0.9f, 1.0f, 1.0f), "aiming at %s", deck.c_str());
-    } else {
-        ImGui::TextColored(ImVec4(1.0f, 0.7f, 0.3f, 1.0f), "look at a deck to buy");
+    // Aim is sampled only while the mouse is over the WORLD; the moment it
+    // crosses onto this window to reach a Buy button, the last target is held.
+    // Without that, moving the mouse to the button un-aimed the purchase, and
+    // the button was permanently grey -- which is exactly how it shipped.
+    if (!ImGui::GetIO().WantCaptureMouse) {
+        glm::vec3 pt;
+        std::string deck;
+        if (aimedDeckPoint(pt, deck)) {
+            m_haveTarget = true;
+            m_targetPoint = pt;
+            m_targetDeck = deck;
+        } else {
+            m_haveTarget = false;
+        }
     }
+    if (m_haveTarget) {
+        ImGui::TextColored(ImVec4(0.5f, 0.9f, 1.0f, 1.0f), "will place on %s", m_targetDeck.c_str());
+    } else {
+        ImGui::TextColored(ImVec4(1.0f, 0.7f, 0.3f, 1.0f), "point the mouse at a deck first");
+    }
+    const bool aimed = m_haveTarget;
 
     ImGui::Separator();
 

@@ -457,10 +457,29 @@ protected:
             shop.spend   = [this](float amount) { m_playerCredits -= amount; };
             shop.viewYawDegrees = [this] { return m_camera.getYaw(); };
 
-            // The crosshair, which in play mode is the middle of the screen.
+            // Where the player is pointing. With the cursor visible (build mode)
+            // that is the MOUSE -- same ray construction as the H-slab brush, so
+            // the shop and the build tools agree about where you point. With the
+            // mouse captured it falls back to the crosshair at screen centre,
+            // which is also what the headless self-test aims with.
             shop.aimRay = [this](glm::vec3& origin, glm::vec3& dir) {
-                origin = m_camera.getPosition();
-                dir    = m_camera.getFront();
+                if (m_playModeCursorVisible && !Input::isMouseCaptured()) {
+                    const float w = static_cast<float>(getWindow().getWidth());
+                    const float h = static_cast<float>(getWindow().getHeight());
+                    glm::mat4 invVP = glm::inverse(
+                        m_camera.getProjectionMatrix(w / h, 0.1f, 5000.0f) *
+                        m_camera.getViewMatrix());
+                    glm::vec2 mouse = Input::getMousePosition();
+                    const float ndcX = (2.0f * mouse.x / w) - 1.0f;
+                    const float ndcY = 1.0f - (2.0f * mouse.y / h);
+                    glm::vec4 nearPt = invVP * glm::vec4(ndcX, ndcY, -1, 1); nearPt /= nearPt.w;
+                    glm::vec4 farPt  = invVP * glm::vec4(ndcX, ndcY,  1, 1); farPt  /= farPt.w;
+                    origin = glm::vec3(nearPt);
+                    dir    = glm::normalize(glm::vec3(farPt - nearPt));
+                } else {
+                    origin = m_camera.getPosition();
+                    dir    = m_camera.getFront();
+                }
             };
 
             // Every h-slab the player has laid down. buildingType is what the

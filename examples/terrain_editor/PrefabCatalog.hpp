@@ -87,6 +87,12 @@ private:
     bool aimedDeckPoint(glm::vec3& outPoint, std::string& outDeck) const;
 
     PrefabCatalogHooks m_hooks;
+    // The last deck the mouse actually pointed at, HELD while the mouse crosses
+    // the shop window to reach the Buy button -- at click time the live aim is
+    // the button itself, which is never a deck.
+    bool        m_haveTarget = false;
+    glm::vec3   m_targetPoint{0.0f};
+    std::string m_targetDeck;
     std::vector<PrefabCatalogEntry> m_entries;
     std::string m_message;
     std::string m_dir;
