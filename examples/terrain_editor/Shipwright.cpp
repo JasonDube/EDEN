@@ -135,9 +135,18 @@ void Shipwright::render(bool& open) {
     // she will demand, and how she will answer a stock helm.
     const float tons = planTonnage(m_cells);
     if (tons > 0.0f) {
-        const int engines = static_cast<int>(std::ceil(tons / 2500.0f));
-        const float turn = std::clamp(100.0f * 900.0f / tons, 8.0f, 80.0f);
+        // AS FITTED, not bare hull -- the misread that grounded a corvette:
+        // the table said "1 engine" for the hull alone, the helm weighed hull
+        // PLUS the 180 t helm PLUS the 400 t engine and refused. Each stock
+        // engine lifts 2500 but carries 400 of itself, so the count solves
+        // n*2500 >= hull + 180 + n*400.
+        constexpr float kHelmMass = 180.0f, kEngineMass = 400.0f, kEngineThrust = 2500.0f;
+        const int engines = static_cast<int>(std::ceil((tons + kHelmMass) / (kEngineThrust - kEngineMass)));
+        const float fitted = tons + kHelmMass + engines * kEngineMass;
+        const float turn = std::clamp(100.0f * 900.0f / fitted, 8.0f, 80.0f);
         ImGui::Text("hull %.0f t", tons);
+        ImGui::SameLine(0, 18);
+        ImGui::Text("fitted ~%.0f t", fitted);
         ImGui::SameLine(0, 18);
         ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.35f, 1.0f),
                            "needs %d stock engine%s", engines, engines == 1 ? "" : "s");

@@ -8157,7 +8157,22 @@ private:
                 if (glm::length(posOf("VesselCheckGapDeck") - glm::vec3(315.6f, 0.0f, 300.0f)) > 0.001f)
                     fail("the gap plate was dragged by the turn");
 
+                const float tonsBefore = m_vessel.tonnage();
                 m_vessel.releaseHelm();
+
+                // A socket pad aboard weighs NOTHING -- painted intent, not
+                // cargo. (Nine pads at the default part mass once added a
+                // phantom 225 t.)
+                makeBox("VesselCheckPad", glm::vec3(301.0f, 0.5f, 301.0f),
+                        glm::vec3(1.0f, 0.1f, 1.0f), "socket_marker");
+                updateSceneObjectsList();
+                if (!m_vessel.takeHelm("VesselCheckHelm")) {
+                    fail("takeHelm refused with a socket pad aboard: " + m_vessel.lastError());
+                } else {
+                    if (std::fabs(m_vessel.tonnage() - tonsBefore) > 0.01f)
+                        fail("a socket pad changed the tonnage");
+                    m_vessel.releaseHelm();
+                }
             }
 
             for (const char* n : {"VesselCheckDeck", "VesselCheckDeck2", "VesselCheckHelm",

@@ -84,6 +84,7 @@ public:
     // about the deck's centre. Everything aboard orbits and rotates.
     bool turnVessel(float deg);
     const std::vector<std::string>& manifest() const { return m_manifest; }
+    float tonnage() const { return m_tonnage; }
     // Is this object part of the flying vessel? The host's collision pass asks,
     // because what is aboard is your floor and furniture, not an obstacle.
     bool isAboard(const std::string& name) const {

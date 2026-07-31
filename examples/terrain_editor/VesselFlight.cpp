@@ -161,7 +161,11 @@ bool VesselFlight::takeHelm(const std::string& helmName) {
         SceneObject* o = find(name);
         if (!o) continue;
         const auto& bt = o->getBuildingType();
-        if (bt == "platform_slab" || bt == "platform_wall") {
+        if (bt == "socket_marker") {
+            // A socket pad is painted intent -- where a part WILL go, not a
+            // part. Weighing pads at the default part mass once inflated a
+            // corvette by 225 t and cost her a clean takeoff.
+        } else if (bt == "platform_slab" || bt == "platform_wall") {
             const glm::vec3 sc = o->getTransform().getScale();
             m_tonnage += sc.x * sc.y * sc.z * kPlateDensity;
         } else {
