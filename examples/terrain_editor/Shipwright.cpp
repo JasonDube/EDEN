@@ -2,6 +2,8 @@
 
 #include <imgui.h>
 
+#include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <fstream>
 #include <sstream>
@@ -38,6 +40,22 @@ ImU32 fillFor(char c) {
 }
 
 bool isRoom(char c) { return c=='B' || c=='C' || c=='E' || c=='R'; }
+
+// THE LIVE WEIGHING. Same arithmetic the yard and the helm use, run over the
+// plan as it is drawn, so the designer watches her get heavier stroke by
+// stroke. Keep in sync with make_ship_from_plan.py (CELL 2.0, FLOOR_T 0.4,
+// WALL_H 3.0, walls full-cell thick) and VesselFlight.cpp (2 t per unit^3,
+// stock engine thrust 2500, stock helm steering 900, turn clamp 8..80).
+float planTonnage(const std::vector<char>& cells) {
+    constexpr float kFloorCell = 2.0f * 0.4f * 2.0f * 2.0f;            // plate
+    constexpr float kWallCell  = (2.0f * 3.0f * 2.0f + 2.0f * 0.4f * 2.0f) * 2.0f; // wall + frame
+    float t = 0.0f;
+    for (char c : cells) {
+        if (c == '#' || c == 'W') t += kWallCell;
+        else if (c == '.' || c == 'D' || isRoom(c)) t += kFloorCell;
+    }
+    return t;
+}
 
 } // namespace
 
@@ -112,6 +130,22 @@ void Shipwright::render(bool& open) {
     ImGui::Checkbox("Mirror (ships are symmetric)", &m_mirrorX);
     ImGui::SameLine(0, 20);
     ImGui::TextDisabled("LMB paint   RMB erase   top of grid = BOW");
+
+    // The displacement line: hull weight as drawn, how many stock engines
+    // she will demand, and how she will answer a stock helm.
+    const float tons = planTonnage(m_cells);
+    if (tons > 0.0f) {
+        const int engines = static_cast<int>(std::ceil(tons / 2500.0f));
+        const float turn = std::clamp(100.0f * 900.0f / tons, 8.0f, 80.0f);
+        ImGui::Text("hull %.0f t", tons);
+        ImGui::SameLine(0, 18);
+        ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.35f, 1.0f),
+                           "needs %d stock engine%s", engines, engines == 1 ? "" : "s");
+        ImGui::SameLine(0, 18);
+        ImGui::TextDisabled("turns %.0f deg/s on a stock helm", turn);
+    } else {
+        ImGui::TextDisabled("hull 0 t -- draw, and watch her take on weight");
+    }
 
     // ---- actions -----------------------------------------------------------
     if (ImGui::Button("Copy as text")) {
