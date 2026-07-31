@@ -26,8 +26,9 @@ bool hasRole(SceneObject* o, const char* role) {
 }
 bool isHelm(SceneObject* o) { return hasRole(o, "helm"); }
 
-constexpr float kFlySpeed  = 8.0f;   // units/s along the deck
+constexpr float kFlySpeed  = 8.0f;   // units/s along the heading
 constexpr float kLiftSpeed = 5.0f;   // units/s up and down
+constexpr float kTurnRate  = 50.0f;  // degrees/s of rudder
 constexpr float kReach     = 3.0f;   // how close "at the helm" is
 
 } // namespace
@@ -128,6 +129,11 @@ bool VesselFlight::takeHelm(const std::string& helmName) {
     m_helmName = helmName;
     m_flying = true;
     m_frameDelta = glm::vec3(0.0f);
+    m_frameTurn = 0.0f;
+    // The bow points wherever the pilot faces as they take the helm -- the
+    // most natural "which way is forward" there is, and it needs no authored
+    // forward on the deck.
+    m_headingDeg = m_deps.camera ? m_deps.camera->getYaw() : 0.0f;
     if (g_diagnostics) std::printf("[Vessel] took the helm '%s' -- deck '%s', %zu aboard\n",
                 helmName.c_str(), m_deckName.c_str(), m_manifest.size());
     std::fflush(stdout);
@@ -156,6 +162,34 @@ void VesselFlight::applyMove(const glm::vec3& delta) {
     m_frameDelta = delta;
 }
 
+// Rotate everything aboard by `deg` about `pivot`: positions orbit, facings
+// turn with them. glm's positive rotation about +Y runs opposite to the
+// camera-yaw convention this class speaks, hence the negation -- worked out
+// from R_y(+90) taking +X to -Z while camera yaw+ takes +X to +Z.
+void VesselFlight::applyYaw(float deg, const glm::vec3& pivot) {
+    const glm::quat q = glm::angleAxis(glm::radians(-deg), glm::vec3(0.0f, 1.0f, 0.0f));
+    for (const std::string& name : m_manifest) {
+        if (SceneObject* o = find(name)) {
+            const glm::vec3 rel = o->getTransform().getPosition() - pivot;
+            o->getTransform().setPosition(pivot + q * rel);
+            o->getTransform().setRotation(q * o->getTransform().getRotation());
+        }
+    }
+    m_frameTurn += deg;
+    m_framePivot = pivot;
+}
+
+bool VesselFlight::turnVessel(float deg) {
+    if (!m_flying) return false;
+    SceneObject* deck = find(m_deckName);
+    if (!deck) return false;
+    // The pivot is the deck's own position -- the slab primitive is centred on
+    // it in X and Z, so the ship turns about its middle, not a corner.
+    applyYaw(deg, deck->getTransform().getPosition());
+    m_headingDeg += deg;
+    return true;
+}
+
 bool VesselFlight::tick(float dt, const glm::vec3& worldMove) {
     if (!m_flying) return false;
     glm::vec3 delta = worldMove * dt;
@@ -181,6 +215,7 @@ bool VesselFlight::tick(float dt, const glm::vec3& worldMove) {
 
 void VesselFlight::update(float dt, bool isPlayMode, bool guiWantsKeys) {
     m_frameDelta = glm::vec3(0.0f);
+    m_frameTurn  = 0.0f;
     m_showPrompt = false;
 
     if (!isPlayMode) {
@@ -204,17 +239,20 @@ void VesselFlight::update(float dt, bool isPlayMode, bool guiWantsKeys) {
     if (e) { releaseHelm(); return; }
     if (guiWantsKeys || !m_deps.camera) return;
 
-    // WASD relative to where the pilot looks, flattened -- the same scheme the
-    // tessara ship flies with. Space lifts, Shift descends.
-    const float yaw = glm::radians(m_deps.camera->getYaw());
-    const glm::vec3 fwd(std::cos(yaw), 0.0f, std::sin(yaw));
-    const glm::vec3 right(-fwd.z, 0.0f, fwd.x);
+    // A ship's controls, not a strafing camera's: A/D are the rudder, W/S run
+    // along the vessel's own heading. Mouse-look plays no part in steering --
+    // the pilot can look over the stern while flying forward.
+    float rudder = 0.0f;
+    if (Input::isKeyDown(Input::KEY_D)) rudder += kTurnRate * dt;
+    if (Input::isKeyDown(Input::KEY_A)) rudder -= kTurnRate * dt;
+    if (rudder != 0.0f) turnVessel(rudder);
+
+    const float h = glm::radians(m_headingDeg);
+    const glm::vec3 fwd(std::cos(h), 0.0f, std::sin(h));
 
     glm::vec3 move(0.0f);
     if (Input::isKeyDown(Input::KEY_W)) move += fwd;
     if (Input::isKeyDown(Input::KEY_S)) move -= fwd;
-    if (Input::isKeyDown(Input::KEY_D)) move += right;
-    if (Input::isKeyDown(Input::KEY_A)) move -= right;
     if (glm::length(move) > 0.001f) move = glm::normalize(move) * kFlySpeed;
 
     float lift = 0.0f;
@@ -226,7 +264,7 @@ void VesselFlight::update(float dt, bool isPlayMode, bool guiWantsKeys) {
 
 void VesselFlight::renderUI(float screenW, float screenH) const {
     const char* line = nullptr;
-    if (m_flying)               line = "FLYING -- WASD move, Space/Shift up/down, E to set down";
+    if (m_flying)               line = "FLYING -- W/S ahead/astern, A/D turn, Space/Shift lift, E to set down";
     else if (m_errorTimer > 0.0f) line = m_error.c_str();
     else if (m_showPrompt)      line = "E -- take the helm";
     if (!line) return;

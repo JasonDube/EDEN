@@ -7994,6 +7994,25 @@ private:
                 if (glm::length(posOf("VesselCheckStray") - strayBefore) > 0.001f)
                     fail("the bystander was dragged along");
                 (void)stray;
+
+                // The turn: 90 degrees about the deck's centre. Invariants, not
+                // self-referential math: the deck (the pivot) stays put, the
+                // cargo keeps its DISTANCE from the pivot but changes position
+                // (it orbited), and the bystander still has not moved.
+                const glm::vec3 pivotBefore = posOf("VesselCheckDeck");
+                const glm::vec3 cargoBefore = posOf("VesselCheckCargo");
+                const float cargoR = glm::length(cargoBefore - pivotBefore);
+                m_vessel.turnVessel(90.0f);
+                if (glm::length(posOf("VesselCheckDeck") - pivotBefore) > 0.01f)
+                    fail("the deck moved while turning about itself");
+                const glm::vec3 cargoAfter = posOf("VesselCheckCargo");
+                if (glm::length(cargoAfter - cargoBefore) < 0.5f)
+                    fail("cargo did not orbit on a 90-degree turn");
+                if (std::fabs(glm::length(cargoAfter - pivotBefore) - cargoR) > 0.01f)
+                    fail("cargo changed distance from the pivot while turning");
+                if (glm::length(posOf("VesselCheckStray") - strayBefore) > 0.001f)
+                    fail("the bystander was dragged by the turn");
+
                 m_vessel.releaseHelm();
             }
 
@@ -9045,8 +9064,19 @@ private:
             // vertical flight, and WASD already moved the deck. The player is
             // displaced by exactly what the deck moved this frame, so pilot
             // and ship cannot drift apart; mouse-look stays the camera's.
-            const glm::vec3 carry = m_vessel.playerCarry();
-            glm::vec3 cp = m_characterController->getPosition() + carry;
+            glm::vec3 cp = m_characterController->getPosition();
+            // The turn first, in the vessel's own order: the pilot's position
+            // orbits the same pivot the deck turned about, and their VIEW turns
+            // with the ship -- stand at the helm, touch nothing, and the world
+            // wheels past exactly as it would on a real deck. Mouse-look still
+            // adds freely on top.
+            const float turnDeg = m_vessel.carryTurnDeg();
+            if (turnDeg != 0.0f) {
+                const glm::quat q = glm::angleAxis(glm::radians(-turnDeg), glm::vec3(0, 1, 0));
+                cp = m_vessel.carryPivot() + q * (cp - m_vessel.carryPivot());
+                m_camera.setYaw(m_camera.getYaw() + turnDeg);
+            }
+            cp += m_vessel.playerCarry();
             m_characterController->setPosition(cp);
             const float centerToEye = 1.65f - 0.5f;   // same numbers as below
             m_camera.setPosition(glm::vec3(cp.x, cp.y + centerToEye, cp.z));

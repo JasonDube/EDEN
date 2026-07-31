@@ -9,10 +9,17 @@
 // Containment is SPATIAL, not wired: what makes something part of the vessel
 // is that it is aboard, decided once at takeoff.
 //
+// CONTROLS ARE A SHIP'S, not a strafing camera's: A and D TURN the vessel,
+// W and S run it forward and astern along its own heading, Space and Shift
+// are lift. The heading is set to wherever the pilot faces at the moment they
+// take the helm. Turning rotates everything aboard around the deck's centre
+// -- positions orbit, facings turn, and the pilot's view turns with the ship
+// (the mouse still looks freely on top of that).
+//
 // V1 limits, stated rather than hidden: one deck (the slab under the helm, no
-// flood-fill across joined slabs); translation only, no yaw; the manifest is
-// frozen at takeoff -- nothing joins mid-flight; and flying is for the
-// walking-mode player (build-mode's cursor movement is not carried).
+// flood-fill across joined slabs); the manifest is frozen at takeoff --
+// nothing joins mid-flight; and flying is for the walking-mode player
+// (build-mode's cursor movement is not carried).
 //
 // WHAT THIS DELIBERATELY DOES NOT TOUCH: the collision system. At takeoff each
 // carried object's parked static body is dropped through a host hook (a parked
@@ -58,9 +65,12 @@ public:
 
     bool isFlying() const { return m_flying; }
 
-    // The displacement the deck made THIS frame. The host applies the same to
-    // the player, so pilot and ship cannot drift apart.
+    // What the deck did THIS frame, for the host to apply identically to the
+    // player so pilot and ship cannot drift apart: a translation, and a turn
+    // (degrees, camera-yaw convention) about a pivot.
     const glm::vec3& playerCarry() const { return m_frameDelta; }
+    float carryTurnDeg() const { return m_frameTurn; }
+    const glm::vec3& carryPivot() const { return m_framePivot; }
 
     // The prompt / flight HUD line.
     void renderUI(float screenW, float screenH) const;
@@ -70,7 +80,17 @@ public:
     bool takeHelm(const std::string& helmName);
     void releaseHelm();
     bool tick(float dt, const glm::vec3& worldMove);
+    // Turn the whole vessel by `deg` (camera-yaw convention: positive = right)
+    // about the deck's centre. Everything aboard orbits and rotates.
+    bool turnVessel(float deg);
     const std::vector<std::string>& manifest() const { return m_manifest; }
+    // Is this object part of the flying vessel? The host's collision pass asks,
+    // because what is aboard is your floor and furniture, not an obstacle.
+    bool isAboard(const std::string& name) const {
+        if (!m_flying) return false;
+        for (const auto& n : m_manifest) if (n == name) return true;
+        return false;
+    }
     const std::string& lastError() const { return m_error; }
 
 private:
@@ -78,6 +98,7 @@ private:
     eden::SceneObject* helmNearPlayer(float within) const;
     bool buildManifest(eden::SceneObject* helm);
     void applyMove(const glm::vec3& delta);
+    void applyYaw(float deg, const glm::vec3& pivot);
 
     VesselFlightDeps m_deps;
     bool m_flying = false;
@@ -88,6 +109,9 @@ private:
     // name that stops resolving is an object that left the vessel, not a crash.
     std::vector<std::string> m_manifest;
     glm::vec3 m_frameDelta{0.0f};
+    float m_frameTurn = 0.0f;          // this frame's turn, camera-yaw degrees
+    glm::vec3 m_framePivot{0.0f};      // about the deck's centre
+    float m_headingDeg = 0.0f;         // where the bow points, camera-yaw degrees
     std::string m_error;
     float m_errorTimer = 0.0f;   // seconds the HUD keeps showing a refusal
 };
