@@ -7,3 +7,4 @@ meta catalog: controls
 meta price: 2500
 meta mass: 180
 meta summary: Steers a vessel. Needs an engine on the same hull.
+meta steering: 900

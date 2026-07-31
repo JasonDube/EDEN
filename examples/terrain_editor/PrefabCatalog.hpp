@@ -34,6 +34,11 @@ struct PrefabCatalogEntry {
     std::string stationPort;           // where a body stands to use it
     float       price = 0.0f;
     float       mass  = 0.0f;
+    // Performance ratings, straight from the file. Thrust is how many tons of
+    // ship an engine can push; steering is a helm's rotational authority over
+    // tonnage. Zero means the file did not say -- flight applies its defaults.
+    float       thrust   = 0.0f;
+    float       steering = 0.0f;
 };
 
 struct PrefabCatalogHooks {

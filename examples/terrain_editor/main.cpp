@@ -482,6 +482,20 @@ protected:
                     // from a crate: the FILE said so, all the way through.
                     m_toolbarSlots[i].metadata["role"]  = entry.role;
                     m_toolbarSlots[i].metadata["title"] = entry.title;
+                    // The ratings ride too: the weighing at takeoff reads
+                    // mass/thrust/steering off the PLACED OBJECT's metadata,
+                    // so the numbers must survive file -> shelf -> slot.
+                    char num[32];
+                    std::snprintf(num, sizeof num, "%g", entry.mass);
+                    m_toolbarSlots[i].metadata["mass"] = num;
+                    if (entry.thrust > 0.0f) {
+                        std::snprintf(num, sizeof num, "%g", entry.thrust);
+                        m_toolbarSlots[i].metadata["thrust"] = num;
+                    }
+                    if (entry.steering > 0.0f) {
+                        std::snprintf(num, sizeof num, "%g", entry.steering);
+                        m_toolbarSlots[i].metadata["steering"] = num;
+                    }
                     m_toolbarSlots[i].modelSourcePath   = entry.filePath;
                     createSlotThumbnail(i);
                     return i;
@@ -8073,6 +8087,17 @@ private:
 
             auto* engine = makeBox("VesselCheckEngine", glm::vec3(297.0f, 0.5f, 299.0f),
                                    glm::vec3(1.2f, 1.0f, 1.6f), nullptr);
+            // AN ENGINE TOO WEAK TO LIFT HER: aboard, but 10 t of thrust
+            // against a ~300 t hull -- the helm must refuse, and name tonnage.
+            engine->setModelMetadata({{"role", "engine"}, {"thrust", "10"}});
+            updateSceneObjectsList();
+            if (m_vessel.takeHelm("VesselCheckHelm"))
+                fail("takeHelm accepted a 10-thrust engine under a ~300 t ship");
+            else if (m_vessel.lastError().find("lift") == std::string::npos)
+                fail("underpowered refusal did not mention lift: " + m_vessel.lastError());
+
+            // No thrust key at all -> the default applies (engines authored
+            // before thrust existed keep flying) and the ship lifts.
             engine->setModelMetadata({{"role", "engine"}});
             updateSceneObjectsList();
 

@@ -112,6 +112,13 @@ private:
     float m_frameTurn = 0.0f;          // this frame's turn, camera-yaw degrees
     glm::vec3 m_framePivot{0.0f};      // about the deck's centre
     float m_headingDeg = 0.0f;         // where the bow points, camera-yaw degrees
+    // The weighing, computed at takeoff from the manifest's files.
+    float m_tonnage  = 0.0f;
+    float m_thrust   = 0.0f;
+    float m_steering = 0.0f;
+    float m_flySpeed  = 8.0f;
+    float m_liftSpeed = 5.0f;
+    float m_turnRate  = 50.0f;
     std::string m_error;
     float m_errorTimer = 0.0f;   // seconds the HUD keeps showing a refusal
 };

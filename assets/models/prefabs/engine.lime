@@ -675,4 +675,5 @@ meta prefab: 1
 meta price: 4000
 meta role: engine
 meta summary: Pushes a hull. A vessel flies only with an engine aboard.
+meta thrust: 2500
 meta title: Ion Thruster

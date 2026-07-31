@@ -102,6 +102,7 @@ PORTS = [
 ]
 
 META = {
+    "thrust": "2500",  # tons of ship this engine can push -- the lift rule
     "role":    "engine",         # what the game does with it
     "catalog": "propulsion",     # which shelf it appears on
     "title":   "Ion Thruster",

@@ -26,11 +26,23 @@ bool hasRole(SceneObject* o, const char* role) {
 }
 bool isHelm(SceneObject* o) { return hasRole(o, "helm"); }
 
-constexpr float kFlySpeed  = 8.0f;   // units/s along the heading
-constexpr float kLiftSpeed = 5.0f;   // units/s up and down
-constexpr float kTurnRate  = 50.0f;  // degrees/s of rudder
-constexpr float kReach     = 3.0f;   // how close "at the helm" is
+// Performance is DERIVED, not declared: tonnage from what the ship is made
+// of, thrust from her engines' files, steering from her helm's. The engine is
+// linear authority (does she lift, how fast), the helm rotational authority
+// (how sharply this tonnage answers the rudder) -- which is exactly why a
+// player buys a better one of either.
+constexpr float kPlateDensity   = 2.0f;    // tons per unit^3 of slab/wall
+constexpr float kDefaultMass    = 25.0f;   // a part with no mass metadata
+constexpr float kDefaultThrust  = 3000.0f; // an engine authored before thrust existed
+constexpr float kDefaultSteer   = 700.0f;  // a helm authored before steering existed
+constexpr float kReach          = 3.0f;    // how close "at the helm" is
 
+float metaFloat(SceneObject* o, const char* key, float fallback) {
+    const auto& meta = o->getModelMetadata();
+    auto it = meta.find(key);
+    if (it == meta.end()) return fallback;
+    try { return std::stof(it->second); } catch (...) { return fallback; }
+}
 } // namespace
 
 SceneObject* VesselFlight::find(const std::string& name) const {
@@ -138,22 +150,59 @@ bool VesselFlight::takeHelm(const std::string& helmName) {
     if (!isHelm(helm)) { m_error = helmName + " is not a helm"; return false; }
     if (!buildManifest(helm)) return false;
 
-    // NO ENGINE, NO LIFT. The helm's own summary has promised this since the
-    // day it was authored -- "Needs an engine on the same hull" -- and the rule
-    // is spatial like everything else: an engine counts if it is ABOARD. The
-    // role comes from the engine's file, through the shop, through placement.
+    // THE WEIGHING. Plates by volume, parts by their files' mass metadata;
+    // engines contribute thrust, the helm contributes steering. All of it
+    // came out of files the player bought -- nothing here is declared.
+    m_tonnage = 0.0f;
+    m_thrust = 0.0f;
+    m_steering = 0.0f;
     bool engineAboard = false;
     for (const std::string& name : m_manifest) {
-        if (SceneObject* o = find(name)) {
-            if (hasRole(o, "engine")) { engineAboard = true; break; }
+        SceneObject* o = find(name);
+        if (!o) continue;
+        const auto& bt = o->getBuildingType();
+        if (bt == "platform_slab" || bt == "platform_wall") {
+            const glm::vec3 sc = o->getTransform().getScale();
+            m_tonnage += sc.x * sc.y * sc.z * kPlateDensity;
+        } else {
+            m_tonnage += metaFloat(o, "mass", kDefaultMass);
+        }
+        if (hasRole(o, "engine")) {
+            engineAboard = true;
+            m_thrust += metaFloat(o, "thrust", kDefaultThrust);
+        }
+        if (hasRole(o, "helm")) {
+            m_steering = std::max(m_steering, metaFloat(o, "steering", kDefaultSteer));
         }
     }
+    if (m_steering <= 0.0f) m_steering = kDefaultSteer;
+
+    // NO ENGINE, NO LIFT -- and now also: NOT ENOUGH ENGINE, NO LIFT. The
+    // helm's summary has promised the first since the day it was authored;
+    // tonnage makes the second true. A heavier ship needs more or better
+    // engines, which is what the catalogue's expensive shelf is FOR.
     if (!engineAboard) {
         m_error = "no engine aboard -- the deck will not lift";
         m_manifest.clear();
         m_deckName.clear();
         return false;
     }
+    if (m_thrust < m_tonnage) {
+        char buf[128];
+        std::snprintf(buf, sizeof buf,
+                      "engines cannot lift her -- %.0f t of ship, %.0f t of thrust",
+                      m_tonnage, m_thrust);
+        m_error = buf;
+        m_manifest.clear();
+        m_deckName.clear();
+        return false;
+    }
+
+    // The flight envelope, from power-to-weight and helm authority.
+    const float pw = m_thrust / m_tonnage;
+    m_flySpeed  = std::clamp(8.0f * pw, 3.0f, 16.0f);
+    m_liftSpeed = 0.6f * m_flySpeed;
+    m_turnRate  = std::clamp(100.0f * m_steering / m_tonnage, 8.0f, 80.0f);
 
     // Parked collision bodies would stay behind at the old spot -- solid air
     // there, ghost deck at the new one. Dropped through the host's hook; the
@@ -296,8 +345,8 @@ void VesselFlight::update(float dt, bool isPlayMode, bool guiWantsKeys) {
     // along the vessel's own heading. Mouse-look plays no part in steering --
     // the pilot can look over the stern while flying forward.
     float rudder = 0.0f;
-    if (Input::isKeyDown(Input::KEY_D)) rudder += kTurnRate * dt;
-    if (Input::isKeyDown(Input::KEY_A)) rudder -= kTurnRate * dt;
+    if (Input::isKeyDown(Input::KEY_D)) rudder += m_turnRate * dt;
+    if (Input::isKeyDown(Input::KEY_A)) rudder -= m_turnRate * dt;
     if (rudder != 0.0f) turnVessel(rudder);
 
     const float h = glm::radians(m_headingDeg);
@@ -306,18 +355,24 @@ void VesselFlight::update(float dt, bool isPlayMode, bool guiWantsKeys) {
     glm::vec3 move(0.0f);
     if (Input::isKeyDown(Input::KEY_W)) move += fwd;
     if (Input::isKeyDown(Input::KEY_S)) move -= fwd;
-    if (glm::length(move) > 0.001f) move = glm::normalize(move) * kFlySpeed;
+    if (glm::length(move) > 0.001f) move = glm::normalize(move) * m_flySpeed;
 
     float lift = 0.0f;
-    if (Input::isKeyDown(Input::KEY_SPACE))      lift += kLiftSpeed;
-    if (Input::isKeyDown(Input::KEY_LEFT_SHIFT)) lift -= kLiftSpeed;
+    if (Input::isKeyDown(Input::KEY_SPACE))      lift += m_liftSpeed;
+    if (Input::isKeyDown(Input::KEY_LEFT_SHIFT)) lift -= m_liftSpeed;
 
     tick(dt, move + glm::vec3(0.0f, lift, 0.0f));
 }
 
 void VesselFlight::renderUI(float screenW, float screenH) const {
+    char flyLine[160];
     const char* line = nullptr;
-    if (m_flying)               line = "FLYING -- W/S ahead/astern, A/D turn, Space/Shift lift, E to set down";
+    if (m_flying) {
+        std::snprintf(flyLine, sizeof flyLine,
+                      "FLYING  %.0f t  |  spd %.0f  turn %.0f deg/s  |  W/S A/D Space/Shift, E to set down",
+                      m_tonnage, m_flySpeed, m_turnRate);
+        line = flyLine;
+    }
     else if (m_errorTimer > 0.0f) line = m_error.c_str();
     else if (m_showPrompt)      line = "E -- take the helm";
     if (!line) return;

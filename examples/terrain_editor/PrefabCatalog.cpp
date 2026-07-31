@@ -80,6 +80,8 @@ void PrefabCatalog::load(const std::string& dir) {
             else if (key == "station") entry.stationPort = value;
             else if (key == "price")   entry.price = toFloat(value, 0.0f);
             else if (key == "mass")    entry.mass = toFloat(value, 0.0f);
+            else if (key == "thrust")   entry.thrust   = toFloat(value, 0.0f);
+            else if (key == "steering") entry.steering = toFloat(value, 0.0f);
         }
 
         // A .lime in this folder that does not say it is a prefab is not one --
