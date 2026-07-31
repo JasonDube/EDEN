@@ -9192,6 +9192,42 @@ private:
                 m_camera.setPosition(m_thirdPersonPlayerPos);
             }
 
+            // EDGE-LOOK for build mode: the cursor is the picker, so the screen
+            // EDGE is the steering. Push the mouse into the border zone and the
+            // camera turns that way -- analog and omnidirectional, not cardinal:
+            // strength ramps from nothing at the zone's inner rim to full at
+            // the screen edge, X and Y independently, so the top-right corner
+            // turns up-and-right at whatever blend the cursor position says.
+            // Quiet while the mouse is over a panel; a docked window's edge is
+            // for its widgets, not for spinning the world.
+            if (m_isPlayMode && m_playModeCursorVisible && m_showSiloConfig &&
+                !m_filesystemBrowser.isActive() && !m_vessel.isFlying() &&
+                !ImGui::GetIO().WantCaptureMouse &&
+                m_camera.getMovementMode() == MovementMode::Walk) {
+                const glm::vec2 mp = Input::getMousePosition();
+                const float w = static_cast<float>(getWindow().getWidth());
+                const float h = static_cast<float>(getWindow().getHeight());
+                constexpr float kEdgeZone     = 48.0f;   // px of border that steers
+                constexpr float kEdgeYawRate  = 120.0f;  // deg/s at the very edge
+                constexpr float kEdgePitchRate = 80.0f;
+
+                float xIn = 0.0f, yIn = 0.0f;            // -1..1, signed strength
+                if      (mp.x < kEdgeZone)      xIn = -(kEdgeZone - mp.x) / kEdgeZone;
+                else if (mp.x > w - kEdgeZone)  xIn =  (mp.x - (w - kEdgeZone)) / kEdgeZone;
+                if      (mp.y < kEdgeZone)      yIn = -(kEdgeZone - mp.y) / kEdgeZone;
+                else if (mp.y > h - kEdgeZone)  yIn =  (mp.y - (h - kEdgeZone)) / kEdgeZone;
+                xIn = std::clamp(xIn, -1.0f, 1.0f);
+                yIn = std::clamp(yIn, -1.0f, 1.0f);
+
+                if (xIn != 0.0f || yIn != 0.0f) {
+                    m_camera.setYaw(m_camera.getYaw() + xIn * kEdgeYawRate * deltaTime);
+                    // Screen y grows downward; camera pitch grows upward. Top
+                    // edge (yIn negative) must look UP, hence the minus.
+                    float pitch = m_camera.getPitch() - yIn * kEdgePitchRate * deltaTime;
+                    m_camera.setPitch(std::clamp(pitch, -85.0f, 85.0f));
+                }
+            }
+
             // The legacy WASD walk, revived for BUILD MODE exactly. The character
             // controller is deliberately off while the build panel is up (the
             // AABB path is the one that understands wall holes -- see the
