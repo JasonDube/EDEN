@@ -40,6 +40,8 @@
 struct LevelStateReport {
     std::string gameModuleName;      // empty = no module loaded
     bool        tribeSimEnabled = false;
+    bool        battleSimEnabled = false;
+    std::size_t battleUnits     = 0;
     bool        grassEnabled    = false;
     std::size_t grassBlades     = 0;
     int         occupiedSlots   = 0;   // hotbar
@@ -63,6 +65,7 @@ struct LevelCheckHooks {
     // Dirtying. Each must make its own field of the snapshot non-empty.
     std::function<void()> loadAGameModule;
     std::function<void()> enableTribeSim;
+    std::function<void()> enableBattleSim;   // enable AND spawn the squads
     std::function<void()> enableGrass;
     std::function<void()> occupyAHotbarSlot;
     // Spawns through eden::ModuleHost, the way a module would. This is the only

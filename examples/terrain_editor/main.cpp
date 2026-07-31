@@ -64,6 +64,8 @@
 #include "PrefabCatalog.hpp"
 // Take the helm and the deck flies.
 #include "VesselFlight.hpp"
+// The battle test -- squads, formations, box-select -- off unless asked for.
+#include "BattleSim.hpp"
 
 // OS / Filesystem
 #include "OS/FilesystemBrowser.hpp"
@@ -502,6 +504,22 @@ protected:
                 }
             };
             m_vessel.setDeps(fly);
+        }
+
+        // The battle test.
+        {
+            BattleSimHost war;
+            war.sceneObjects  = &m_sceneObjects;
+            war.terrain       = &m_terrain;
+            war.camera        = &m_camera;
+            war.models        = m_modelRenderer.get();
+            war.window        = &getWindow();
+            war.cursorVisible = &m_playModeCursorVisible;
+            war.showMessage   = [this](const std::string& msg) {
+                m_screenMessage = msg;
+                m_screenMessageTimer = 3.0f;
+            };
+            m_battleSim.setHost(war);
         }
 
         m_videoEditor = std::make_unique<eden::VideoEditor>(getContext());
@@ -1727,7 +1745,7 @@ protected:
 
         // Battle test (only updates in play mode / F5)
         mark("machines");
-        if (m_isPlayMode) updateBattle(deltaTime);
+        if (m_isPlayMode) m_battleSim.update(deltaTime);
 
         // Water flow sound attenuation (same curve as generator)
         if (m_waterLoopId >= 0 && m_flowSource) {
@@ -3006,7 +3024,7 @@ protected:
             m_dialogueRenderer.render(viewProj, (float)extent.width, (float)extent.height);
 
             // HP bars over battle-test units (play mode only)
-            if (m_isPlayMode) renderBattleHpBars();
+            if (m_isPlayMode) m_battleSim.renderHpBars();
 
             // 5-ft grid overlay (toggled by U). On terrain levels it follows the
             // terrain via the ImGui overlay; on a flat foundation it's drawn as
@@ -7717,6 +7735,8 @@ private:
         LevelStateReport r;
         r.gameModuleName  = m_gameModule ? m_gameModule->getName() : "";
         r.tribeSimEnabled = m_tribeSim.enabled();
+        r.battleSimEnabled = m_battleSim.enabled();
+        r.battleUnits      = m_battleSim.unitCount();
         r.grassEnabled    = m_grassEnabled;
         r.grassBlades     = m_grassBlades.size();
         r.sceneObjects    = m_sceneObjects.size();
@@ -7749,6 +7769,10 @@ private:
             if (m_gameModule) { m_gameModule->initialize(); wireGameModule(); }
         };
         h.enableTribeSim = [this] { m_tribeSim.setEnabled(true); };
+        h.enableBattleSim = [this] {
+            m_battleSim.setEnabled(true);
+            m_battleSim.spawnTest();   // real units, so the wipe has bodies to forget
+        };
         h.enableGrass    = [this] {
             m_grassEnabled = true;
             m_editorUI.setGrassEnabled(true);
@@ -9937,31 +9961,10 @@ private:
             wasK = k; wasL = l;
         }
 
-        // B — spawn battle test (only in play mode / F5)
-        if (m_isPlayMode && !ImGui::GetIO().WantCaptureKeyboard) {
-            static bool wasB = false;
-            bool b = Input::isKeyDown(66); // GLFW_KEY_B
-            if (b && !wasB) spawnBattleTest();
-            wasB = b;
-        }
-
-        // Formation reform hotkeys — 1/2/3 reshape blue, 8/9/0 reshape red. Play mode only.
-        if (m_isPlayMode && !ImGui::GetIO().WantCaptureKeyboard) {
-            static bool was1=false, was2=false, was3=false, was8=false, was9=false, was0=false;
-            bool k1 = Input::isKeyDown(49); // '1' — blue 5×2 long-forward
-            bool k2 = Input::isKeyDown(50); // '2' — blue 2×5 column (short-forward)
-            bool k3 = Input::isKeyDown(51); // '3' — blue 1×10 line, 4m spacing
-            bool k8 = Input::isKeyDown(56); // '8' — red 1×10 line, 4m spacing
-            bool k9 = Input::isKeyDown(57); // '9' — red 5×2 long-forward
-            bool k0 = Input::isKeyDown(48); // '0' — red 2×5 column (short-forward)
-            if (k1 && !was1) reformTeam(1, /*cols=*/5,  /*rows=*/2, /*colSp=*/2.0f, /*rowSp=*/1.5f);
-            if (k2 && !was2) reformTeam(1, /*cols=*/2,  /*rows=*/5, /*colSp=*/2.0f, /*rowSp=*/1.5f);
-            if (k3 && !was3) reformTeam(1, /*cols=*/10, /*rows=*/1, /*colSp=*/4.0f, /*rowSp=*/0.0f);
-            if (k8 && !was8) reformTeam(0, /*cols=*/10, /*rows=*/1, /*colSp=*/4.0f, /*rowSp=*/0.0f);
-            if (k9 && !was9) reformTeam(0, /*cols=*/5,  /*rows=*/2, /*colSp=*/2.0f, /*rowSp=*/1.5f);
-            if (k0 && !was0) reformTeam(0, /*cols=*/2,  /*rows=*/5, /*colSp=*/2.0f, /*rowSp=*/1.5f);
-            was1=k1; was2=k2; was3=k3; was8=k8; was9=k9; was0=k0;
-        }
+        // The battle test lives in BattleSim now, off unless asked for -- it was
+        // a whole different game idea (RTS squads, formations, box-select) keyed
+        // into every level. B spawns, 1/2/3 and 8/9/0 reform, all inside it.
+        m_battleSim.handleInput(m_isPlayMode, ImGui::GetIO().WantCaptureKeyboard);
 
         // F9 — toggle filesystem browser (load OS level objects + spawn silo, or dismiss)
         {
@@ -21372,126 +21375,6 @@ private:
         ImGui::End();
     }
 
-    // RTS-style unit selection: LMB click picks one, LMB-drag box-selects many.
-    // Shift adds to selection. Requires play-mode cursor visible (Alt+RMB toggles).
-    void updateUnitSelection() {
-        if (!m_isPlayMode) return;
-        if (m_battleUnits.empty()) { m_selectedUnits.clear(); m_boxSelectActive = false; return; }
-
-        if (!m_playModeCursorVisible) {
-            // Cancel any in-progress drag if cursor mode flips off
-            m_boxSelectActive = false;
-            return;
-        }
-
-        // Don't start selections through ImGui windows, but always allow finishing one
-        ImGuiIO& io = ImGui::GetIO();
-        bool overUI = io.WantCaptureMouse && !m_boxSelectActive;
-
-        float windowW = static_cast<float>(getWindow().getWidth());
-        float windowH = static_cast<float>(getWindow().getHeight());
-        float aspect  = windowW / windowH;
-        glm::mat4 view = m_camera.getViewMatrix();
-        glm::mat4 proj = m_camera.getProjectionMatrix(aspect, 0.1f, 5000.0f);
-        glm::mat4 vp   = proj * view;
-
-        auto projectToScreen = [&](const glm::vec3& worldPos, glm::vec2& out) -> bool {
-            glm::vec4 clip = vp * glm::vec4(worldPos, 1.0f);
-            if (clip.w <= 0.0f) return false;
-            glm::vec3 ndc = glm::vec3(clip) / clip.w;
-            out.x = (ndc.x + 1.0f) * 0.5f * windowW;
-            out.y = (1.0f - ndc.y) * 0.5f * windowH;
-            return true;
-        };
-
-        glm::vec2 mousePos = Input::getMousePosition();
-        bool lmbDown    = Input::isMouseButtonDown(Input::MOUSE_LEFT);
-        bool shiftHeld  = Input::isKeyDown(Input::KEY_LEFT_SHIFT) || Input::isKeyDown(Input::KEY_RIGHT_SHIFT);
-
-        static bool wasLmbDown = false;
-        bool lmbPressed  =  lmbDown && !wasLmbDown;
-        bool lmbReleased = !lmbDown &&  wasLmbDown;
-        wasLmbDown = lmbDown;
-
-        if (lmbPressed && !overUI) {
-            m_boxSelectActive = true;
-            m_boxSelectStart  = mousePos;
-            m_boxSelectEnd    = mousePos;
-        } else if (lmbDown && m_boxSelectActive) {
-            m_boxSelectEnd = mousePos;
-        } else if (lmbReleased && m_boxSelectActive) {
-            glm::vec2 delta = m_boxSelectEnd - m_boxSelectStart;
-            float dragLen = std::sqrt(delta.x * delta.x + delta.y * delta.y);
-
-            std::set<int> hits;
-            if (dragLen < 4.0f) {
-                // Click: pick nearest alive unit within 30px of cursor
-                int   bestIdx  = -1;
-                float bestDist = 30.0f;
-                for (size_t i = 0; i < m_battleUnits.size(); ++i) {
-                    const BattleUnit& u = m_battleUnits[i];
-                    if (!u.alive || !u.obj) continue;
-                    glm::vec2 sp;
-                    if (!projectToScreen(u.obj->getTransform().getPosition(), sp)) continue;
-                    float dx = sp.x - mousePos.x, dy = sp.y - mousePos.y;
-                    float d = std::sqrt(dx * dx + dy * dy);
-                    if (d < bestDist) { bestDist = d; bestIdx = static_cast<int>(i); }
-                }
-                if (bestIdx >= 0) hits.insert(bestIdx);
-            } else {
-                float minX = std::min(m_boxSelectStart.x, m_boxSelectEnd.x);
-                float maxX = std::max(m_boxSelectStart.x, m_boxSelectEnd.x);
-                float minY = std::min(m_boxSelectStart.y, m_boxSelectEnd.y);
-                float maxY = std::max(m_boxSelectStart.y, m_boxSelectEnd.y);
-                for (size_t i = 0; i < m_battleUnits.size(); ++i) {
-                    const BattleUnit& u = m_battleUnits[i];
-                    if (!u.alive || !u.obj) continue;
-                    glm::vec2 sp;
-                    if (!projectToScreen(u.obj->getTransform().getPosition(), sp)) continue;
-                    if (sp.x >= minX && sp.x <= maxX && sp.y >= minY && sp.y <= maxY) {
-                        hits.insert(static_cast<int>(i));
-                    }
-                }
-            }
-
-            if (shiftHeld) {
-                for (int idx : hits) m_selectedUnits.insert(idx);
-            } else {
-                m_selectedUnits = hits;
-            }
-            m_boxSelectActive = false;
-        }
-
-        // --- Render: drag box + selection rings ---
-        auto* drawList = ImGui::GetForegroundDrawList();
-
-        if (m_boxSelectActive) {
-            float minX = std::min(m_boxSelectStart.x, m_boxSelectEnd.x);
-            float maxX = std::max(m_boxSelectStart.x, m_boxSelectEnd.x);
-            float minY = std::min(m_boxSelectStart.y, m_boxSelectEnd.y);
-            float maxY = std::max(m_boxSelectStart.y, m_boxSelectEnd.y);
-            drawList->AddRectFilled(ImVec2(minX, minY), ImVec2(maxX, maxY), IM_COL32(80, 220, 120, 40));
-            drawList->AddRect      (ImVec2(minX, minY), ImVec2(maxX, maxY), IM_COL32(120, 255, 160, 220), 0.0f, 0, 1.5f);
-        }
-
-        // Rings around each selected unit. Centered on the unit, radius computed
-        // from a camera-right offset so it stays aligned with the screen plane.
-        glm::vec3 camRight = m_camera.getRight();
-        for (int idx : m_selectedUnits) {
-            if (idx < 0 || idx >= static_cast<int>(m_battleUnits.size())) continue;
-            const BattleUnit& u = m_battleUnits[idx];
-            if (!u.alive || !u.obj) continue;
-            glm::vec3 center = u.obj->getTransform().getPosition();
-            glm::vec2 sp, spEdge;
-            if (!projectToScreen(center, sp)) continue;
-            float radius = 12.0f;
-            if (projectToScreen(center + camRight * 0.9f, spEdge)) {
-                radius = std::clamp(glm::length(spEdge - sp), 8.0f, 60.0f);
-            }
-            drawList->AddCircle(ImVec2(sp.x, sp.y), radius, IM_COL32(120, 255, 160, 220), 28, 2.0f);
-        }
-    }
-
     void renderToolbarUI() {
         auto* drawList = ImGui::GetForegroundDrawList();
         float windowW = static_cast<float>(getWindow().getWidth());
@@ -21772,7 +21655,7 @@ private:
         }
         if (m_showServerManager) m_serverManager.renderImGui(&m_showServerManager);
         renderToolbarUI();  // TEMP RESTORE (akelba plumbing): hotbar slot bar back on
-        updateUnitSelection();
+        m_battleSim.updateSelection(m_isPlayMode);
 
         // SAM2 segmentation progress overlay
         if (m_filesystemBrowser.isSegmenting()) {
@@ -23772,6 +23655,10 @@ private:
                                    "  takes U and L from the grid/grass brush");
             }
 
+            bool battleOn = m_battleSim.enabled();
+            if (ImGui::Checkbox("Battle sim", &battleOn)) m_battleSim.setEnabled(battleOn);
+            if (battleOn) ImGui::TextDisabled("  B spawn squads  1/2/3 blue  8/9/0 red");
+
             ImGui::Separator();
             ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), "Press M to toggle this panel");
         }
@@ -25145,6 +25032,10 @@ private:
         // whatever was played last -- pointing at bodies the wipe below deletes.
         m_tribeSim.setEnabled(false);
         m_tribeSim.reset();
+
+        // And no battle either, same reasoning.
+        m_battleSim.setEnabled(false);
+        m_battleSim.reset();
 
         // And no grass, for the same reason: a new level shows what you put in it.
         m_grassEnabled = false;
@@ -29221,324 +29112,6 @@ private:
 
     // Battle test: 10 red vs 10 blue cubes, line spawn, boids movement + d20/d6 combat.
     // Ported from Desktop/PYTHON_PROJECTS/war_game/boids_battle.py.
-    void spawnBattleTest() {
-        // Wipe any prior battle units
-        for (auto& u : m_battleUnits) {
-            if (!u.obj) continue;
-            for (auto it = m_sceneObjects.begin(); it != m_sceneObjects.end(); ++it) {
-                if (it->get() == u.obj) { m_sceneObjects.erase(it); break; }
-            }
-        }
-        m_battleUnits.clear();
-
-        // Spawn at fixed world positions: red square center (-25,0,0), blue (+25,0,0).
-        // Each square is 50×50, so spawns are 25m from any edge of their square.
-        auto rnd      = []() { return static_cast<float>(rand()) / static_cast<float>(RAND_MAX); };
-        auto rndRange = [&](float lo, float hi) { return lo + (hi - lo) * rnd(); };
-
-        auto spawnTeam = [&](int team, const glm::vec3& origin, const glm::vec4& color, const char* prefix,
-                             int cols, int rows, float colSp, float rowSp) {
-            auto meshData = PrimitiveMeshBuilder::createCube(1.0f, color);
-            int total = cols * rows;
-            for (int i = 0; i < total; ++i) {
-                int col = i % cols;
-                int row = i / cols;
-
-                auto obj = std::make_unique<SceneObject>(generateUniqueName(prefix));
-                uint32_t handle = m_modelRenderer->createModel(meshData.vertices, meshData.indices);
-                obj->setBufferHandle(handle);
-                obj->setIndexCount(static_cast<uint32_t>(meshData.indices.size()));
-                obj->setVertexCount(static_cast<uint32_t>(meshData.vertices.size()));
-                obj->setLocalBounds(meshData.bounds);
-                obj->setPrimitiveType(PrimitiveType::Cube);
-                obj->setPrimitiveSize(1.0f);
-                obj->setPrimitiveColor(color);
-
-                glm::vec3 pos = origin;
-                pos.z += (static_cast<float>(col) - (cols - 1) * 0.5f) * colSp;
-                pos.x += (static_cast<float>(row) - (rows - 1) * 0.5f) * rowSp
-                         * (team == 0 ? +1.0f : -1.0f);
-                pos.y = m_terrain.getHeightAt(pos.x, pos.z) + 0.5f;
-                obj->getTransform().setPosition(pos);
-
-                BattleUnit u;
-                u.obj        = obj.get();
-                u.team       = team;
-                u.alive      = true;
-                u.maxHp      = 25.0f;
-                u.hp         = u.maxHp;
-                u.maxSpeed   = rndRange(2.5f, 3.5f);
-                u.aggression = rndRange(0.7f, 1.3f);
-                u.wanderAmt  = rndRange(0.3f, 0.8f);
-                m_battleUnits.push_back(u);
-                m_sceneObjects.push_back(std::move(obj));
-            }
-        };
-
-        // Spawns at the centers of two adjacent 50×50 grid cells (cells share X=0 edge).
-        // Red cell:  X=-50..0,  Z=0..+50 → center (-25, 0, +25)
-        // Blue cell: X=0..+50, Z=0..+50 → center (+25, 0, +25)
-        spawnTeam(0, glm::vec3(-25.0f, 0.0f, +25.0f),
-                  glm::vec4(1.0f, 0.1f, 0.1f, 1.0f), "RedUnit",
-                  /*cols=*/5, /*rows=*/2, /*colSp=*/2.0f, /*rowSp=*/1.5f);
-        spawnTeam(1, glm::vec3(+25.0f, 0.0f, +25.0f),
-                  glm::vec4(0.1f, 0.3f, 1.0f, 1.0f), "BlueUnit",
-                  /*cols=*/5, /*rows=*/2, /*colSp=*/2.0f, /*rowSp=*/1.5f);
-
-        std::cout << "[Battle] Spawned 10 red vs 10 blue" << std::endl;
-        m_screenMessage = "Battle: 10 red vs 10 blue spawned";
-        m_screenMessageTimer = 2.0f;
-    }
-
-    // Teleport an alive team into a new formation (cols × rows) centered on its current
-    // center of mass, oriented to face the enemy team. Velocities reset.
-    void reformTeam(int team, int cols, int rows, float colSp, float rowSp) {
-        glm::vec2 myCenter(0.0f), enemyCenter(0.0f);
-        int myCount = 0, enemyCount = 0;
-        for (auto& u : m_battleUnits) {
-            if (!u.alive) continue;
-            glm::vec3 p = u.obj->getTransform().getPosition();
-            if (u.team == team) { myCenter += glm::vec2(p.x, p.z); myCount++; }
-            else                { enemyCenter += glm::vec2(p.x, p.z); enemyCount++; }
-        }
-        if (myCount == 0) return;
-        myCenter /= static_cast<float>(myCount);
-
-        glm::vec2 forward(1.0f, 0.0f);
-        if (enemyCount > 0) {
-            enemyCenter /= static_cast<float>(enemyCount);
-            glm::vec2 d = enemyCenter - myCenter;
-            float len = std::sqrt(d.x * d.x + d.y * d.y);
-            if (len > 0.001f) forward = d / len;
-        }
-        glm::vec2 lateral(-forward.y, forward.x);
-
-        int slot = 0;
-        for (auto& u : m_battleUnits) {
-            if (!u.alive || u.team != team) continue;
-            int col = slot % cols;
-            int row = slot / cols;
-            float lateralOff = (static_cast<float>(col) - (cols - 1) * 0.5f) * colSp;
-            float forwardOff = -(static_cast<float>(row) - (rows - 1) * 0.5f) * rowSp;
-            glm::vec2 xz = myCenter + lateral * lateralOff + forward * forwardOff;
-            glm::vec3 newPos(xz.x, m_terrain.getHeightAt(xz.x, xz.y) + 0.5f, xz.y);
-            u.obj->getTransform().setPosition(newPos);
-            u.vel = glm::vec2(0.0f);  // reset so they don't drift from prior momentum
-            slot++;
-        }
-        std::cout << "[Battle] Reformed team " << team << " into " << cols << "x" << rows << std::endl;
-    }
-
-    void updateBattle(float dt) {
-        if (m_battleUnits.empty()) return;
-        if (dt > 0.1f) dt = 0.1f;  // clamp big steps so the sim doesn't blow up
-
-        // 1. Team centers (alive only)
-        glm::vec2 centers[2] = { glm::vec2(0.0f), glm::vec2(0.0f) };
-        int aliveCount[2]    = { 0, 0 };
-        for (auto& u : m_battleUnits) {
-            if (!u.alive) continue;
-            glm::vec3 p = u.obj->getTransform().getPosition();
-            centers[u.team] += glm::vec2(p.x, p.z);
-            aliveCount[u.team]++;
-        }
-        if (aliveCount[0]) centers[0] /= static_cast<float>(aliveCount[0]);
-        if (aliveCount[1]) centers[1] /= static_cast<float>(aliveCount[1]);
-
-        // 2. Movement (boids: charge to enemy center + target seek + separation + wander)
-        for (size_t i = 0; i < m_battleUnits.size(); ++i) {
-            BattleUnit& u = m_battleUnits[i];
-            if (!u.alive) continue;
-
-            glm::vec3 p3 = u.obj->getTransform().getPosition();
-            glm::vec2 pos(p3.x, p3.z);
-            glm::vec2 force(0.0f);
-            int enemy = 1 - u.team;
-
-            // (a) Charge toward enemy team center
-            if (aliveCount[enemy] > 0) {
-                glm::vec2 toCenter = centers[enemy] - pos;
-                float dSq = glm::dot(toCenter, toCenter);
-                if (dSq > 9.0f) {
-                    float d = std::sqrt(dSq);
-                    force += (toCenter / d) * (1.2f * u.aggression * u.maxSpeed);
-                }
-            }
-
-            // (b) Target reacquisition (every ~1s, or when current target is dead)
-            u.targetTimer -= dt;
-            BattleUnit* tgt = (u.targetIdx >= 0) ? &m_battleUnits[u.targetIdx] : nullptr;
-            if (u.targetTimer <= 0.0f || !tgt || !tgt->alive) {
-                float bestSq = 225.0f;  // 15m radius
-                int   bestIdx = -1;
-                for (size_t j = 0; j < m_battleUnits.size(); ++j) {
-                    BattleUnit& e = m_battleUnits[j];
-                    if (!e.alive || e.team == u.team) continue;
-                    glm::vec3 ep = e.obj->getTransform().getPosition();
-                    float dx = ep.x - pos.x, dz = ep.z - pos.y;
-                    float dSq = dx * dx + dz * dz;
-                    if (dSq < bestSq) { bestSq = dSq; bestIdx = static_cast<int>(j); }
-                }
-                u.targetIdx   = bestIdx;
-                u.targetTimer = 1.0f;
-                tgt = (bestIdx >= 0) ? &m_battleUnits[bestIdx] : nullptr;
-            }
-
-            // (c) Engage current target if it's between 1.5m and 15m
-            if (tgt && tgt->alive) {
-                glm::vec3 tp = tgt->obj->getTransform().getPosition();
-                glm::vec2 toT(tp.x - pos.x, tp.z - pos.y);
-                float dSq = glm::dot(toT, toT);
-                if (dSq > 2.25f && dSq < 225.0f) {
-                    float d = std::sqrt(dSq);
-                    force += (toT / d) * (0.8f * u.aggression * u.maxSpeed);
-                }
-            }
-
-            // (d) Separation from neighbors within 1.5m
-            for (size_t j = 0; j < m_battleUnits.size(); ++j) {
-                if (j == i) continue;
-                BattleUnit& o = m_battleUnits[j];
-                if (!o.alive) continue;
-                glm::vec3 op = o.obj->getTransform().getPosition();
-                float dx = pos.x - op.x, dz = pos.y - op.z;
-                float dSq = dx * dx + dz * dz;
-                if (dSq > 0.01f && dSq < 2.25f) {
-                    float d = std::sqrt(dSq);
-                    float strength = ((1.5f - d) / 1.5f) * 1.5f * u.maxSpeed;
-                    force += glm::vec2(dx, dz) / d * strength;
-                }
-            }
-
-            // (e) Wander noise
-            auto rnd01 = []() { return static_cast<float>(rand()) / static_cast<float>(RAND_MAX); };
-            float jx = (rnd01() - 0.5f) * 2.0f * u.wanderAmt * u.maxSpeed;
-            float jz = (rnd01() - 0.5f) * 2.0f * u.wanderAmt * u.maxSpeed;
-            force += glm::vec2(jx, jz);
-
-            // Smooth velocity toward force (framerate-independent ≈ 0.2 lerp at 60fps)
-            float alpha = 1.0f - std::exp(-12.0f * dt);
-            u.vel += (force - u.vel) * alpha;
-
-            // Cap speed
-            float spdSq = glm::dot(u.vel, u.vel);
-            float maxSq = u.maxSpeed * u.maxSpeed;
-            if (spdSq > maxSq) u.vel *= u.maxSpeed / std::sqrt(spdSq);
-
-            // Integrate
-            glm::vec2 newXZ = pos + u.vel * dt;
-            p3.x = newXZ.x;
-            p3.z = newXZ.y;
-            u.obj->getTransform().setPosition(p3);
-        }
-
-        // 3. Resolve cube overlap
-        const float contact = 1.0f;
-        for (size_t i = 0; i < m_battleUnits.size(); ++i) {
-            BattleUnit& a = m_battleUnits[i];
-            if (!a.alive) continue;
-            glm::vec3 ap = a.obj->getTransform().getPosition();
-            for (size_t j = i + 1; j < m_battleUnits.size(); ++j) {
-                BattleUnit& b = m_battleUnits[j];
-                if (!b.alive) continue;
-                glm::vec3 bp = b.obj->getTransform().getPosition();
-                float dx = bp.x - ap.x, dz = bp.z - ap.z;
-                float ax = std::abs(dx), az = std::abs(dz);
-                if (ax < contact && az < contact) {
-                    if (contact - ax < contact - az) {
-                        float push = (contact - ax) * 0.5f + 0.001f;
-                        if (dx >= 0) { ap.x -= push; bp.x += push; }
-                        else         { ap.x += push; bp.x -= push; }
-                    } else {
-                        float push = (contact - az) * 0.5f + 0.001f;
-                        if (dz >= 0) { ap.z -= push; bp.z += push; }
-                        else         { ap.z += push; bp.z -= push; }
-                    }
-                    a.obj->getTransform().setPosition(ap);
-                    b.obj->getTransform().setPosition(bp);
-                }
-            }
-        }
-
-        // 4. Combat — d20 ≥ 10 to hit, d6 damage, 0.25s cooldown, 1.5m reach
-        for (auto& u : m_battleUnits) {
-            if (!u.alive) continue;
-            if (u.cooldown > 0.0f) { u.cooldown -= dt; continue; }
-            BattleUnit* tgt = (u.targetIdx >= 0) ? &m_battleUnits[u.targetIdx] : nullptr;
-            if (!tgt || !tgt->alive) continue;
-
-            glm::vec3 up = u.obj->getTransform().getPosition();
-            glm::vec3 tp = tgt->obj->getTransform().getPosition();
-            float dx = tp.x - up.x, dz = tp.z - up.z;
-            if (dx * dx + dz * dz < 2.25f) {
-                int roll = (rand() % 20) + 1;
-                if (roll >= 10) {
-                    int dmg = (rand() % 6) + 1;
-                    tgt->hp -= static_cast<float>(dmg);
-                    if (tgt->hp <= 0.0f) {
-                        tgt->alive = false;
-                        if (tgt->obj) tgt->obj->setVisible(false);
-                    }
-                }
-                u.cooldown = 0.25f;
-            }
-        }
-
-        // 5. Snap living units to terrain
-        for (auto& u : m_battleUnits) {
-            if (!u.alive) continue;
-            glm::vec3 p = u.obj->getTransform().getPosition();
-            p.y = m_terrain.getHeightAt(p.x, p.z) + 0.5f;
-            u.obj->getTransform().setPosition(p);
-        }
-    }
-
-    // HP bar over each living, damaged unit (skips full-HP to reduce clutter).
-    void renderBattleHpBars() {
-        if (m_battleUnits.empty()) return;
-        VkExtent2D extent = getSwapchain().getExtent();
-        float screenW = static_cast<float>(extent.width);
-        float screenH = static_cast<float>(extent.height);
-        float aspect  = screenW / screenH;
-
-        glm::mat4 view = m_camera.getViewMatrix();
-        glm::mat4 proj = glm::perspective(glm::radians(60.0f), aspect, 0.1f, 5000.0f);
-        glm::mat4 vp = proj * view;
-
-        ImDrawList* dl = ImGui::GetForegroundDrawList();
-        const float barW = 36.0f, barH = 5.0f;
-
-        for (const auto& u : m_battleUnits) {
-            if (!u.alive || !u.obj) continue;
-            if (u.hp >= u.maxHp) continue;  // hide bar at full HP
-
-            glm::vec3 p = u.obj->getTransform().getPosition();
-            glm::vec3 above = p + glm::vec3(0.0f, 1.1f, 0.0f);
-            glm::vec4 clip = vp * glm::vec4(above, 1.0f);
-            if (clip.w <= 0.001f) continue;
-            glm::vec3 ndc = glm::vec3(clip) / clip.w;
-            if (ndc.z <= 0.0f || ndc.z >= 1.0f) continue;
-            float sx = (ndc.x *  0.5f + 0.5f) * screenW;
-            float sy = (ndc.y * -0.5f + 0.5f) * screenH;
-
-            float ratio = std::clamp(u.hp / u.maxHp, 0.0f, 1.0f);
-            ImVec2 tl(sx - barW * 0.5f, sy - barH * 0.5f);
-            ImVec2 br(sx + barW * 0.5f, sy + barH * 0.5f);
-            dl->AddRectFilled(tl, br, IM_COL32(50, 0, 0, 220));
-            if (ratio > 0.0f) {
-                ImVec2 fillBr(tl.x + barW * ratio, br.y);
-                ImU32 col = (ratio > 0.5f)  ? IM_COL32(0, 200, 0, 230)
-                          : (ratio > 0.25f) ? IM_COL32(220, 200, 0, 230)
-                                            : IM_COL32(220, 60, 0, 230);
-                dl->AddRectFilled(tl, fillBr, col);
-            }
-            dl->AddRect(tl, br, IM_COL32(0, 0, 0, 200));
-        }
-    }
-
-    // 5-ft (5-unit) grid matching the game board, over a window around the working
-    // focus. White lines; off by default, toggled with G. Each line is subdivided
-    // so the segments hug terrain height.
     void renderTerrainGrid() {
         VkExtent2D extent = getSwapchain().getExtent();
         float screenW = static_cast<float>(extent.width);
@@ -32206,6 +31779,9 @@ private:
     // VesselFlight.hpp for the v1 limits, stated plainly.
     VesselFlight m_vessel;
 
+    // The battle test, out of main and off by default (M panel -> Battle sim).
+    BattleSim m_battleSim;
+
     enum class PlayerZone { Silo, Basement, Outside, Void };
     PlayerZone m_playerZone = PlayerZone::Outside;
     float m_testFloorSize = 100.0f;
@@ -32666,23 +32242,6 @@ private:
     std::vector<std::unique_ptr<DogfightAI>> m_dogfighters;
     uint32_t m_nextDogfighterId = 1;
 
-    // Battle test (B key): 10 red vs 10 blue 1m cubes — boids movement + d20/d6 combat.
-    // Ported from Desktop/PYTHON_PROJECTS/war_game/boids_battle.py
-    struct BattleUnit {
-        SceneObject* obj = nullptr;
-        int team = 0;                  // 0 = red, 1 = blue
-        bool alive = true;
-        glm::vec2 vel{0.0f, 0.0f};     // XZ velocity (m/s); .y holds Z
-        float hp = 25.0f;
-        float maxHp = 25.0f;
-        float maxSpeed = 3.0f;
-        float aggression = 1.0f;
-        float wanderAmt = 0.5f;
-        float cooldown = 0.0f;         // s until next attack
-        int   targetIdx = -1;
-        float targetTimer = 0.0f;      // s until target reacquire
-    };
-    std::vector<BattleUnit> m_battleUnits;
     bool m_showTerrainGrid = false;  // off by default; toggled with G (5-ft squares)
 
     // --- Phase 1 grass (foliage) ---
@@ -32698,11 +32257,6 @@ private:
     struct GrassBlade { glm::vec3 pos; float yaw; float scale; float bright; };
     std::vector<GrassBlade> m_grassBlades;
 
-    // RTS-style unit selection (LMB click + LMB-drag box)
-    std::set<int> m_selectedUnits;       // indices into m_battleUnits
-    bool m_boxSelectActive = false;
-    glm::vec2 m_boxSelectStart{0.0f};    // pixel space, top-left origin
-    glm::vec2 m_boxSelectEnd{0.0f};
 
     // Jettisoned cargo (floating objects that can be picked up)
     struct JettisonedCargo {

@@ -44,6 +44,13 @@ std::vector<Channel> channelsFor(const LevelCheckHooks& h) {
          [](const LevelStateReport& r) {
              return std::string("enabled = ") + (r.tribeSimEnabled ? "true" : "false");
          }},
+        {"battle sim",
+         h.enableBattleSim,
+         [](const LevelStateReport& r) { return r.battleSimEnabled || r.battleUnits > 0; },
+         [](const LevelStateReport& r) {
+             return std::string("enabled = ") + (r.battleSimEnabled ? "true" : "false") +
+                    ", " + count("units", r.battleUnits);
+         }},
         {"grass",
          h.enableGrass,
          [](const LevelStateReport& r) { return r.grassEnabled || r.grassBlades > 0; },
