@@ -9192,10 +9192,19 @@ private:
                 m_camera.setPosition(m_thirdPersonPlayerPos);
             }
 
-            // WASD movement only in play mode (editor mode uses orbit/pan/zoom above)
-            // Skip when in building cursor mode — building mode has its own camera controls
-            // RTS mode: skip the FPS walk path entirely; updateRTSCamera handles WASD as pan
-            if (m_isPlayMode && false && !m_inPanelFocusMode && !(m_playModeCursorVisible && m_showSiloConfig)) {
+            // The legacy WASD walk, revived for BUILD MODE exactly. The character
+            // controller is deliberately off while the build panel is up (the
+            // AABB path is the one that understands wall holes -- see the
+            // collision notes), and this path is the walking that world was
+            // built around: heightQuery ground-follow, with the post-movement
+            // AABB pass handling walls and doorways. Gates: not while the
+            // controller drives (no double-move), not in EDEN OS's silo (its
+            // own fly handles keys), not while flying (the ship owns WASD),
+            // Walk mode only.
+            if (m_isPlayMode && !useCharacterController && !m_inPanelFocusMode &&
+                m_playModeCursorVisible && m_showSiloConfig &&
+                !m_filesystemBrowser.isActive() && !m_vessel.isFlying() &&
+                m_camera.getMovementMode() == MovementMode::Walk) {
                 // During conversation or quick chat: arrow keys, otherwise WASD
                 // When ImGui wants keyboard: no movement at all
                 if (imguiWantsKeyboard) {
@@ -15324,9 +15333,12 @@ private:
             m_editorUI.setSelectedObjectIndex(bestIdx);
         }
 
-        // D key: duplicate selected building piece (with holes, texture, everything)
+        // Shift+D: duplicate selected building piece (with holes, texture,
+        // everything). Was plain D, but D belongs to walking now that build
+        // mode lets the player move.
         if (m_isPlayMode && m_showSiloConfig && m_selectedBuildPiece >= 0
             && Input::isKeyPressed(Input::KEY_D)
+            && Input::isKeyDown(Input::KEY_LEFT_SHIFT)
             && !ImGui::GetIO().WantCaptureKeyboard) {
             int newIdx = duplicateObjectSilent(m_selectedBuildPiece);
             if (newIdx >= 0) {
