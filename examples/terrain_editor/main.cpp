@@ -528,6 +528,10 @@ protected:
             m_battleSim.setHost(war);
         }
 
+        // The yard's chandlery button -- Tab no longer passes through the old
+        // build panel that held "Open Catalog", so the Shipwright carries it.
+        m_shipwright.setCatalogHook([this] { m_showCatalog = true; });
+
         // The shipyard: BUILD SHIP raises the ship IN THE WORLD YOU ARE
         // STANDING IN -- ahead of where you face, keel on the terrain. The
         // first version loaded a standalone generated level instead, which

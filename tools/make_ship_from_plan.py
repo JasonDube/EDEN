@@ -46,7 +46,7 @@ def cell(x, y):
     return '_'
 
 walk  = lambda c: c == '.' or c == 'D' or c in ROLE
-solid = lambda c: c == '#'
+solid = lambda c: c == '#' or c == 'W'   # windows are walls that see
 hull  = lambda c: walk(c) or solid(c)
 
 # ---- validation: one connected walkable region, doors that go somewhere ----
@@ -157,21 +157,24 @@ for r in rooms:
 frame_cells = [(x, y) for y in range(H) for x in range(W) if solid(cell(x, y))]
 frames = rects_over(frame_cells)
 
-# ---- walls: greedy runs over '#' -------------------------------------------
+# ---- walls and windows: greedy runs, each material to itself ---------------
 wclaimed = [[False]*W for _ in range(H)]
-walls = []
-for y in range(H):
-    for x in range(W):
-        if wclaimed[y][x] or not solid(cell(x, y)): continue
-        w = 0
-        while x+w < W and not wclaimed[y][x+w] and solid(cell(x+w, y)): w += 1
-        if w >= 2:
-            for i in range(w): wclaimed[y][x+i] = True
-            walls.append((x, y, w, 1)); continue
-        h = 1
-        while y+h < H and not wclaimed[y+h][x] and solid(cell(x, y+h)): h += 1
-        for i in range(h): wclaimed[y+i][x] = True
-        walls.append((x, y, 1, h))
+walls, windows = [], []
+def run_pass(match, out):
+    for y in range(H):
+        for x in range(W):
+            if wclaimed[y][x] or not match(cell(x, y)): continue
+            w = 0
+            while x+w < W and not wclaimed[y][x+w] and match(cell(x+w, y)): w += 1
+            if w >= 2:
+                for i in range(w): wclaimed[y][x+i] = True
+                out.append((x, y, w, 1)); continue
+            h = 1
+            while y+h < H and not wclaimed[y+h][x] and match(cell(x, y+h)): h += 1
+            for i in range(h): wclaimed[y+i][x] = True
+            out.append((x, y, 1, h))
+run_pass(lambda c: c == '#', walls)
+run_pass(lambda c: c == 'W', windows)
 
 # ---- sockets: flood connected same-letter cells ----------------------------
 sclaimed = set()
@@ -224,6 +227,13 @@ for i, (x, y, w, h) in enumerate(walls):
     objs.append(prim(f"{stem}_wall_{i+1}", "platform_wall",
                      wx(x, w), deck_top, wz(y, h),
                      w*CELL, WALL_H, h*CELL, (0.58, 0.60, 0.66, 1.0)))
+# Windows: wall-shaped, glass-coloured, nearly transparent -- the pilot's view.
+# Same buildingType as walls so collision and the vessel weld treat them as
+# hull; only the glazing differs.
+for i, (x, y, w, h) in enumerate(windows):
+    objs.append(prim(f"{stem}_window_{i+1}", "platform_wall",
+                     wx(x, w), deck_top, wz(y, h),
+                     w*CELL, WALL_H, h*CELL, (0.45, 0.70, 1.00, 0.22)))
 counts = {}
 for (c, x, y, w, h) in sockets:
     role, color = ROLE[c]
@@ -239,7 +249,8 @@ if OBJ_JSON:
         print(f"  {r['name']:16s} {len(r['cells']):3d} cells   "
               f"{deck_counts.get(r['name'], 0)} deck plate(s)   letters {r['letters'] or '--'}")
     print(f"{OBJ_JSON}: {len(objs)} pieces for in-world spawn "
-          f"({len(floors)} room plates, {len(frames)} frame plates, {len(walls)} walls, {len(sockets)} sockets)")
+          f"({len(floors)} room plates, {len(frames)} frame plates, {len(walls)} walls, "
+          f"{len(windows)} windows, {len(sockets)} sockets)")
     sys.exit(0)
 
 src = json.load(open('build/examples/terrain_editor/levels/shipyard.eden'))

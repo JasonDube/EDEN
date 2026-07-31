@@ -27,6 +27,7 @@ const ToolDef kTools[] = {
     {'C', "Cargo",    IM_COL32(160, 110,  50, 255)},
     {'E', "Engine",   IM_COL32(200,  90,  40, 255)},
     {'R', "Robots",   IM_COL32(140,  90, 190, 255)},
+    {'W', "Window",   IM_COL32(120, 180, 255, 255)},
     {'_', "Erase",    IM_COL32( 25,  26,  30, 255)},
 };
 
@@ -73,7 +74,7 @@ bool Shipwright::deserialize(const std::string& text) {
         for (int x = 0; x < kW && x < static_cast<int>(line.size()); ++x) {
             const char c = line[x];
             next[y * kW + x] =
-                (c=='#'||c=='.'||c=='D'||isRoom(c)) ? c : '_';
+                (c=='#'||c=='.'||c=='D'||c=='W'||isRoom(c)) ? c : '_';
         }
         ++y;
     }
@@ -160,6 +161,13 @@ void Shipwright::render(bool& open) {
                 : result;
         }
     }
+    if (m_openCatalog) {
+        ImGui::SameLine();
+        if (ImGui::Button("Catalog")) {
+            m_openCatalog();
+            m_status = "the chandlery is open -- buy parts, Tab out, right-click to place";
+        }
+    }
 
     // ---- the grid ----------------------------------------------------------
     const float cell = 13.0f;
@@ -183,7 +191,7 @@ void Shipwright::render(bool& open) {
             const ImVec2 a(origin.x + x * cell, origin.y + y * cell);
             const ImVec2 b(a.x + cell - 1.0f, a.y + cell - 1.0f);
             dl->AddRectFilled(a, b, fillFor(c));
-            if (isRoom(c) || c == 'D') {
+            if (isRoom(c) || c == 'D' || c == 'W') {
                 const char label[2] = {c, 0};
                 dl->AddText(ImVec2(a.x + 3.0f, a.y), IM_COL32(0, 0, 0, 200), label);
             }

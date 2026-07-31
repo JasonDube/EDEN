@@ -21,6 +21,7 @@
 //   #  wall                D  door
 //   B  bridge              C  cargo hold
 //   E  engine room         R  robot station
+//   W  window (translucent wall -- glass to fly by)
 // Top of the grid is the BOW.
 
 #include <functional>
@@ -40,6 +41,10 @@ public:
     // yard's business.
     void setBuildShipHook(std::function<std::string(const std::string&)> h) { m_buildShip = std::move(h); }
 
+    // The yard's chandlery: opens the parts catalog beside the drafting table,
+    // because Tab no longer passes through the old build panel that held it.
+    void setCatalogHook(std::function<void()> h) { m_openCatalog = std::move(h); }
+
     // The plan as text, one row per line, exactly the legend above.
     std::string serialize() const;
     bool deserialize(const std::string& text);
@@ -52,6 +57,7 @@ private:
     void paint(int x, int y, char c);
 
     std::function<std::string(const std::string&)> m_buildShip;
+    std::function<void()> m_openCatalog;
     std::vector<char> m_cells;      // kW * kH, row-major
     char m_tool = '#';
     bool m_mirrorX = true;          // ships are symmetric; paint both halves
