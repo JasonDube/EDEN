@@ -76,20 +76,58 @@ bool VesselFlight::buildManifest(SceneObject* helm) {
 
     m_deckName = deck->getName();
     m_manifest.clear();
-    m_manifest.push_back(deck->getName());
 
-    // Everything standing ON the deck comes along: centre over the footprint,
-    // base within reach of the top. Frozen NOW -- what is aboard at takeoff is
-    // the crew, and nothing joins mid-flight.
-    const AABB db = deck->getWorldBounds();
+    // THE HULL IS A FLOOD FILL, not one slab. A drawn ship's floor is many
+    // abutting plates (the generator lays greedy rectangles over an irregular
+    // hull), and lifting only the plate under the helm would tear the ship
+    // apart along invisible seams. Starting from that plate, every slab that
+    // TOUCHES the hull -- same deck height, edges meeting within the weld
+    // tolerance -- joins, then everything touching those, until nothing new
+    // does. Level ground between two ships keeps them separate ships: the
+    // weld requires touching, not proximity.
+    constexpr float kWeldEps = 0.05f;
+    std::vector<SceneObject*> hullSlabs;
+    std::vector<AABB> hullBounds;
+    hullSlabs.push_back(deck);
+    hullBounds.push_back(deck->getWorldBounds());
+    m_manifest.push_back(deck->getName());
+    auto inHull = [&hullSlabs](SceneObject* o) {
+        for (SceneObject* h : hullSlabs) if (h == o) return true;
+        return false;
+    };
+    bool grew = true;
+    while (grew) {
+        grew = false;
+        for (auto& o : *m_deps.sceneObjects) {
+            if (!o || o->getBuildingType() != "platform_slab" || inHull(o.get())) continue;
+            const AABB wb = o->getWorldBounds();
+            for (const AABB& hb2 : hullBounds) {
+                if (std::fabs(wb.max.y - hb2.max.y) > kWeldEps) continue;
+                if (wb.min.x > hb2.max.x + kWeldEps || hb2.min.x > wb.max.x + kWeldEps) continue;
+                if (wb.min.z > hb2.max.z + kWeldEps || hb2.min.z > wb.max.z + kWeldEps) continue;
+                hullSlabs.push_back(o.get());
+                hullBounds.push_back(wb);
+                m_manifest.push_back(o->getName());
+                grew = true;
+                break;
+            }
+        }
+    }
+
+    // Everything standing ON any hull plate comes along: centre over that
+    // plate's footprint, base within reach of its top. Frozen NOW -- what is
+    // aboard at takeoff is the crew, and nothing joins mid-flight.
     for (auto& o : *m_deps.sceneObjects) {
-        if (!o || o.get() == deck) continue;
+        if (!o || inHull(o.get())) continue;
         const glm::vec3 p = o->getTransform().getPosition();
-        if (p.x < db.min.x - 0.3f || p.x > db.max.x + 0.3f) continue;
-        if (p.z < db.min.z - 0.3f || p.z > db.max.z + 0.3f) continue;
         const AABB ob = o->getWorldBounds();
-        if (ob.min.y < db.max.y - 0.4f || ob.min.y > db.max.y + 2.5f) continue;
-        m_manifest.push_back(o->getName());
+        for (const AABB& db2 : hullBounds) {
+            if (p.x < db2.min.x - 0.3f || p.x > db2.max.x + 0.3f) continue;
+            if (p.z < db2.min.z - 0.3f || p.z > db2.max.z + 0.3f) continue;
+            if (ob.min.y < db2.max.y - 0.4f || ob.min.y > db2.max.y + 2.5f) continue;
+            m_manifest.push_back(o->getName());
+            break;
+        }
     }
     return true;
 }
@@ -181,11 +219,22 @@ void VesselFlight::applyYaw(float deg, const glm::vec3& pivot) {
 
 bool VesselFlight::turnVessel(float deg) {
     if (!m_flying) return false;
-    SceneObject* deck = find(m_deckName);
-    if (!deck) return false;
-    // The pivot is the deck's own position -- the slab primitive is centred on
-    // it in X and Z, so the ship turns about its middle, not a corner.
-    applyYaw(deg, deck->getTransform().getPosition());
+    // The pivot is the centre of the whole hull's footprint -- her true
+    // midships -- not the seed plate's centre. With a multi-plate hull,
+    // turning about one plate would wheel the ship about her prow.
+    glm::vec3 mn(1e30f), mx(-1e30f);
+    bool any = false;
+    for (const std::string& name : m_manifest) {
+        if (SceneObject* o = find(name)) {
+            if (o->getBuildingType() != "platform_slab") continue;
+            const AABB wb = o->getWorldBounds();
+            mn = glm::min(mn, wb.min);
+            mx = glm::max(mx, wb.max);
+            any = true;
+        }
+    }
+    if (!any) return false;
+    applyYaw(deg, (mn + mx) * 0.5f);
     m_headingDeg += deg;
     return true;
 }
@@ -197,14 +246,18 @@ bool VesselFlight::tick(float dt, const glm::vec3& worldMove) {
     // The deck does not go underground. Clamped against the terrain under its
     // centre -- v1 of "flying", not v1 of "tunnelling".
     if (delta.y < 0.0f && m_deps.terrain) {
-        if (SceneObject* deck = find(m_deckName)) {
-            const AABB db = deck->getWorldBounds();
-            const glm::vec3 c = (db.min + db.max) * 0.5f;
+        // Every hull plate is checked, not just the seed -- a wing must not be
+        // driven into a hillside while the centre hovers clear.
+        for (const std::string& name : m_manifest) {
+            SceneObject* o = find(name);
+            if (!o || o->getBuildingType() != "platform_slab") continue;
+            const AABB db2 = o->getWorldBounds();
+            const glm::vec3 c = (db2.min + db2.max) * 0.5f;
             float ground = m_deps.terrain->getHeightAt(c.x, c.z);
             if (ground < -1000.0f) ground = 0.0f;   // hole sentinel
             const float floorY = ground + 0.2f;
-            if (db.min.y + delta.y < floorY) {
-                delta.y = std::min(0.0f, floorY - db.min.y);
+            if (db2.min.y + delta.y < floorY) {
+                delta.y = std::min(0.0f, floorY - db2.min.y);
             }
         }
     }

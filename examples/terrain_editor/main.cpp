@@ -7953,6 +7953,14 @@ private:
             auto* helm  = makeBox("VesselCheckHelm",  glm::vec3(302.0f, 0.5f, 300.0f), glm::vec3(1.0f, 1.4f, 1.0f), nullptr);
             makeBox("VesselCheckCargo", glm::vec3(298.0f, 0.5f, 302.0f), glm::vec3(1.0f, 1.0f, 1.0f), nullptr);
             auto* stray = makeBox("VesselCheckStray", glm::vec3(320.0f, 0.0f, 300.0f), glm::vec3(1.0f, 1.0f, 1.0f), nullptr);
+            // The hull weld: a second plate ABUTTING the first (same top, shared
+            // edge at x=306) with its own crate -- must join the hull -- and a
+            // third plate a real gap away (1.6 units) with a crate of its own --
+            // must NOT. The flood fill welds touching, refuses near.
+            makeBox("VesselCheckDeck2",    glm::vec3(309.0f, 0.0f, 300.0f), glm::vec3(6.0f, 0.5f, 12.0f), "platform_slab");
+            makeBox("VesselCheckCrate2",   glm::vec3(308.0f, 0.5f, 300.0f), glm::vec3(1.0f, 1.0f, 1.0f), nullptr);
+            makeBox("VesselCheckGapDeck",  glm::vec3(315.6f, 0.0f, 300.0f), glm::vec3(4.0f, 0.5f, 4.0f), "platform_slab");
+            makeBox("VesselCheckGapCrate", glm::vec3(315.6f, 0.5f, 300.0f), glm::vec3(1.0f, 1.0f, 1.0f), nullptr);
             helm->setModelMetadata({{"role", "helm"}});
             updateSceneObjectsList();
 
@@ -7983,47 +7991,65 @@ private:
             if (!m_vessel.takeHelm("VesselCheckHelm")) {
                 fail("takeHelm refused WITH an engine: " + m_vessel.lastError());
             } else {
-                if (m_vessel.manifest().size() != 4)
-                    fail("manifest has " + std::to_string(m_vessel.manifest().size()) + " aboard, expected 4");
+                // deck + deck2 (welded) + helm + cargo + engine + crate2 = 6;
+                // the gap plate and its crate must be refused.
+                if (m_vessel.manifest().size() != 6)
+                    fail("manifest has " + std::to_string(m_vessel.manifest().size()) + " aboard, expected 6");
+                bool gapAboard = false;
+                for (const auto& n : m_vessel.manifest())
+                    if (n == "VesselCheckGapDeck" || n == "VesselCheckGapCrate") gapAboard = true;
+                if (gapAboard)
+                    fail("the gap plate was annexed -- the weld accepted a non-touching slab");
                 const glm::vec3 move(30.0f, 20.0f, 10.0f);   // one step at dt=0.1
                 m_vessel.tick(0.1f, move);
                 const glm::vec3 expect = move * 0.1f;
-                for (const char* n : {"VesselCheckDeck", "VesselCheckHelm", "VesselCheckCargo", "VesselCheckEngine"}) {
-                    const glm::vec3 p = posOf(n);
-                    const glm::vec3 base = (std::string(n) == "VesselCheckDeck")   ? glm::vec3(300.0f, 0.0f, 300.0f)
-                                        : (std::string(n) == "VesselCheckHelm")   ? glm::vec3(302.0f, 0.5f, 300.0f)
-                                        : (std::string(n) == "VesselCheckEngine") ? glm::vec3(297.0f, 0.5f, 299.0f)
-                                                                                  : glm::vec3(298.0f, 0.5f, 302.0f);
-                    if (glm::length(p - (base + expect)) > 0.01f)
-                        fail(std::string(n) + " did not move with the vessel");
+                struct Aboard { const char* n; glm::vec3 base; };
+                const Aboard aboard[] = {
+                    {"VesselCheckDeck",   glm::vec3(300.0f, 0.0f, 300.0f)},
+                    {"VesselCheckDeck2",  glm::vec3(309.0f, 0.0f, 300.0f)},
+                    {"VesselCheckHelm",   glm::vec3(302.0f, 0.5f, 300.0f)},
+                    {"VesselCheckCargo",  glm::vec3(298.0f, 0.5f, 302.0f)},
+                    {"VesselCheckCrate2", glm::vec3(308.0f, 0.5f, 300.0f)},
+                    {"VesselCheckEngine", glm::vec3(297.0f, 0.5f, 299.0f)},
+                };
+                for (const auto& ab : aboard) {
+                    if (glm::length(posOf(ab.n) - (ab.base + expect)) > 0.01f)
+                        fail(std::string(ab.n) + " did not move with the vessel");
                 }
+                if (glm::length(posOf("VesselCheckGapDeck") - glm::vec3(315.6f, 0.0f, 300.0f)) > 0.001f)
+                    fail("the gap plate was dragged by the move");
                 if (glm::length(posOf("VesselCheckStray") - strayBefore) > 0.001f)
                     fail("the bystander was dragged along");
                 (void)stray;
 
-                // The turn: 90 degrees about the deck's centre. Invariants, not
-                // self-referential math: the deck (the pivot) stays put, the
-                // cargo keeps its DISTANCE from the pivot but changes position
-                // (it orbited), and the bystander still has not moved.
-                const glm::vec3 pivotBefore = posOf("VesselCheckDeck");
+                // The turn: rigid-body invariants, which survive the pivot
+                // moving to the hull's true midships. Every pairwise distance
+                // aboard is preserved, the cargo actually orbits (position
+                // changes), and neither the bystander nor the gap plate is
+                // dragged.
+                const glm::vec3 d1Before = posOf("VesselCheckDeck");
+                const glm::vec3 d2Before = posOf("VesselCheckDeck2");
                 const glm::vec3 cargoBefore = posOf("VesselCheckCargo");
-                const float cargoR = glm::length(cargoBefore - pivotBefore);
+                const float dDecks = glm::length(d2Before - d1Before);
+                const float dCargo = glm::length(cargoBefore - d1Before);
                 m_vessel.turnVessel(90.0f);
-                if (glm::length(posOf("VesselCheckDeck") - pivotBefore) > 0.01f)
-                    fail("the deck moved while turning about itself");
-                const glm::vec3 cargoAfter = posOf("VesselCheckCargo");
-                if (glm::length(cargoAfter - cargoBefore) < 0.5f)
+                if (std::fabs(glm::length(posOf("VesselCheckDeck2") - posOf("VesselCheckDeck")) - dDecks) > 0.01f)
+                    fail("the two welded plates changed distance while turning -- the hull sheared");
+                if (std::fabs(glm::length(posOf("VesselCheckCargo") - posOf("VesselCheckDeck")) - dCargo) > 0.01f)
+                    fail("cargo changed distance from the deck while turning");
+                if (glm::length(posOf("VesselCheckCargo") - cargoBefore) < 0.5f)
                     fail("cargo did not orbit on a 90-degree turn");
-                if (std::fabs(glm::length(cargoAfter - pivotBefore) - cargoR) > 0.01f)
-                    fail("cargo changed distance from the pivot while turning");
                 if (glm::length(posOf("VesselCheckStray") - strayBefore) > 0.001f)
                     fail("the bystander was dragged by the turn");
+                if (glm::length(posOf("VesselCheckGapDeck") - glm::vec3(315.6f, 0.0f, 300.0f)) > 0.001f)
+                    fail("the gap plate was dragged by the turn");
 
                 m_vessel.releaseHelm();
             }
 
-            for (const char* n : {"VesselCheckDeck", "VesselCheckHelm", "VesselCheckCargo",
-                                  "VesselCheckEngine", "VesselCheckStray"}) {
+            for (const char* n : {"VesselCheckDeck", "VesselCheckDeck2", "VesselCheckHelm",
+                                  "VesselCheckCargo", "VesselCheckCrate2", "VesselCheckEngine",
+                                  "VesselCheckGapDeck", "VesselCheckGapCrate", "VesselCheckStray"}) {
                 for (int i = 0; i < static_cast<int>(m_sceneObjects.size()); ++i) {
                     if (m_sceneObjects[i] && m_sceneObjects[i]->getName() == n) { deleteObject(i); break; }
                 }
