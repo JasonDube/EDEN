@@ -594,6 +594,12 @@ protected:
                 obj->setPrimitiveType(PrimitiveType::Cube);
                 obj->setPrimitiveSize(1.0f);
                 obj->setPrimitiveColor(col);
+                // Glass declares itself: anything the generator tinted with
+                // alpha below 1 joins the renderer's existing transparent pass
+                // (drawn after opaques, blend pipeline, no depth write). The
+                // windows were fully opaque before this line because nothing
+                // ever claimed the flag -- the pipeline was there all along.
+                if (col.a < 0.999f) obj->setTransparent(true);
                 obj->setBuildingType(std::string(o["buildingType"]));
                 obj->setAABBCollision(o["aabbCollision"].get<bool>());
                 obj->getTransform().setPosition(glm::vec3(
