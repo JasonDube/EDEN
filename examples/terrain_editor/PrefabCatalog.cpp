@@ -74,13 +74,23 @@ void PrefabCatalog::load(const std::string& dir) {
 
     for (const auto& item : fs::directory_iterator(dir, ec)) {
         if (!item.is_regular_file(ec)) continue;
-        if (item.path().extension() != ".lime") continue;
+        const std::string ext = item.path().extension().string();
+        if (ext != ".lime" && ext != ".glb") continue;
 
-        std::ifstream file(item.path());
+        // A .lime carries its own `meta` lines. A .glb cannot -- it is somebody
+        // else's binary format -- so its metadata rides in a SIDECAR next to it:
+        // helm_model.glb + helm_model.meta, the sidecar holding the same
+        // `meta key: value` lines a .lime would. No sidecar, not for sale.
+        std::ifstream file(ext == ".lime"
+            ? item.path()
+            : item.path().parent_path() / (item.path().stem().string() + ".meta"));
         if (!file) continue;
 
         PrefabCatalogEntry entry;
-        entry.filePath = item.path().string();
+        // Absolute, because importModel treats a relative path as a name under
+        // its own models/ folder and quietly misses -- the self-test caught a
+        // .glb prefab failing to place for exactly that reason.
+        entry.filePath = fs::absolute(item.path()).string();
         bool declaresPrefab = false;
 
         std::string line, key, value;

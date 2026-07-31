@@ -1,0 +1,9 @@
+# Sidecar metadata for helm_model.glb -- same `meta key: value` lines a .lime
+# carries in-file. The catalog reads THIS; the .glb is only geometry.
+meta prefab: 1
+meta title: Helm Console
+meta role: helm
+meta catalog: controls
+meta price: 2500
+meta mass: 180
+meta summary: Steers a vessel. Needs an engine on the same hull.

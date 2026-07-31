@@ -725,7 +725,7 @@ port 1: "pilot_station" 0.0000 0.0000 -0.9500 | 0.0000 0.0000 1.0000 | 0.0000 1.
 meta catalog: controls
 meta mass: 180
 meta mount: deck_mount
-meta prefab: 1
+meta prefab: 0
 meta price: 2500
 meta role: helm
 meta station: pilot_station

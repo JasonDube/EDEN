@@ -483,7 +483,9 @@ protected:
             shop.place = [this](const std::string& path, const glm::vec3& pos,
                                 float yaw) -> std::string {
                 const std::size_t before = m_sceneObjects.size();
-                importLimeModel(path);
+                // importModel dispatches on extension -- .lime and .glb prefabs
+                // both arrive as ordinary scene objects.
+                importModel(path);
                 if (m_sceneObjects.size() <= before) return {};
                 auto* obj = m_sceneObjects.back().get();
                 if (!obj) return {};
@@ -577,12 +579,14 @@ protected:
         m_imageReferences.setColorPickCallback([this](const glm::vec3& c) {
             m_editorUI.setPaintColor(c);
         });
-        // TEMP RESTORE (akelba plumbing): load the global hotbar inventory for ALL
-        // levels, not just the EDEN OS background level. The hotbar holds the
-        // placeable items (pipes, machines) you drop with number keys / RMB. This
-        // is scaffolding — the whole build/place flow moves out to HEIDIC-scripted
-        // levels later; for now akelba needs its inventory back.
-        loadInventory();
+        // The persistent hotbar (~/eden/inventory) belongs to EDEN OS, and it is
+        // loaded ONLY when booting into EDEN OS. It used to load for every level
+        // ("TEMP RESTORE (akelba plumbing)"), which meant a brand new game level
+        // came up holding whatever EDEN OS was last carrying -- reported twice as
+        // a bug, because it is one. Game levels start with empty slots; what you
+        // pick up in a level is yours for that session; the disk inventory is
+        // never touched, so EDEN OS keeps everything.
+        if (m_bootEdenOS) loadInventory();
         syncExcludedPaths();
 
         // Create scripts directory
@@ -24891,6 +24895,10 @@ private:
 
         // Auto-load game save if it exists
         loadGame();
+
+        // The hotbar does not follow you between games. In-memory only, same as
+        // New Level -- ~/eden/inventory on disk is EDEN OS's and stays intact.
+        if (!m_isEdenOSLevel) clearInventorySlots();
     }
 
     // Get the game save file path derived from the current level path
@@ -26113,6 +26121,12 @@ private:
 
     void spawnEdenOSFromHome() {
         m_isEdenOSLevel = true;
+        // EDEN OS gets its persistent hotbar, from disk, whenever you enter it --
+        // the boot-time load only covers --eden-os, and the slots may hold (or
+        // have cleared) a game level's items by now.
+        clearInventorySlots();
+        loadInventory();
+        syncExcludedPaths();
         m_terrain.getConfigMutable().heightScale = 0.0f; // EDEN OS has no terrain
 
         const char* home = getenv("HOME");
