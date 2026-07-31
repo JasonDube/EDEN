@@ -68,6 +68,9 @@
 #include "BattleSim.hpp"
 // The one switch the investigation prints all check first.
 #include "Diag.hpp"
+// The 2D deck-plan grid -- Tab in play mode. First descendant of the real
+// player build system; see the design decision in Shipwright.hpp.
+#include "Shipwright.hpp"
 
 // OS / Filesystem
 #include "OS/FilesystemBrowser.hpp"
@@ -10308,24 +10311,14 @@ private:
         bool tabKeyDown = Input::isKeyDown(Input::KEY_TAB);
         if (tabKeyDown && !wasTabKeyDown && !ImGui::GetIO().WantTextInput && !m_quickChatMode) {
             if (m_isPlayMode && !m_filesystemBrowser.isActive()) {
-                // Toggle building mode
-                m_showSiloConfig = !m_showSiloConfig;
-                if (m_showSiloConfig) {
-                    // Entering building mode — show cursor
-                    m_playModeCursorVisible = true;
-                    Input::setMouseCaptured(false);
-                } else {
-                    // Leaving building mode — hide cursor, clear tools, deselect
-                    m_playModeCursorVisible = false;
-                    Input::setMouseCaptured(true);
-                    m_hSlabBrushMode = false;
-                    m_wallBrushMode = false;
-                    m_roomBrushMode = false;
-                    m_framePlacementMode = false;
-                    m_framePreviewValid = false;
-                    m_buildMoveMode = false;
-                    clearBuildSelection();
-                }
+                // Tab is the SHIPWRIGHT now -- the 2D deck-plan grid, first
+                // descendant of the real player build system (2026-07-31
+                // decision: freeform 3D building is out for ships). The old 3D
+                // build panel still exists in edit mode via Window > Build; its
+                // machinery is untouched, only this key moved.
+                m_showShipwright = !m_showShipwright;
+                m_playModeCursorVisible = m_showShipwright;
+                Input::setMouseCaptured(!m_showShipwright);
             } else if (!m_isPlayMode) {
                 m_showWorldChatHistory = !m_showWorldChatHistory;
             }
@@ -21893,6 +21886,8 @@ private:
         // Play mode only: the shop is a thing the PLAYER opens, not an editor panel.
         if (m_isPlayMode) m_catalog.render(m_showCatalog);
         else m_showCatalog = false;
+        if (m_isPlayMode) m_shipwright.render(m_showShipwright);
+        else m_showShipwright = false;
         if (m_isPlayMode) {
             m_vessel.renderUI(static_cast<float>(getWindow().getWidth()),
                               static_cast<float>(getWindow().getHeight()));
@@ -32043,6 +32038,10 @@ private:
 
     // The battle test, out of main and off by default (M panel -> Battle sim).
     BattleSim m_battleSim;
+
+    // The Shipwright: Tab in play mode opens the 2D deck-plan grid.
+    Shipwright m_shipwright;
+    bool m_showShipwright = false;
 
     enum class PlayerZone { Silo, Basement, Outside, Void };
     PlayerZone m_playerZone = PlayerZone::Outside;
