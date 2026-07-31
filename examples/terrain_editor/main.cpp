@@ -477,6 +477,7 @@ protected:
                     // from a crate: the FILE said so, all the way through.
                     m_toolbarSlots[i].metadata["role"]  = entry.role;
                     m_toolbarSlots[i].metadata["title"] = entry.title;
+                    m_toolbarSlots[i].modelSourcePath   = entry.filePath;
                     createSlotThumbnail(i);
                     return i;
                 }
@@ -7550,16 +7551,33 @@ private:
                 }
 
                 if (loaded && !allVerts.empty()) {
-                    // Center on origin so it rotates nicely
+                    // The mesh goes into the slot EXACTLY as authored -- no
+                    // recentring. This used to shift everything onto its
+                    // bounding-box centre so the slot preview would spin
+                    // nicely, but the same mesh is what right-click PLACES:
+                    // a prefab authored base-at-origin (so it sits flush on a
+                    // deck) got buried half its height, and the slot kept no
+                    // bounds and no mesh data at all -- so the placed fixture
+                    // had a zero-size AABB, which the selection ray can never
+                    // hit, which is why R-rotation silently did not work on
+                    // bought items. The preview pivoting slightly off-centre
+                    // is the cost, and it is cosmetic.
                     glm::vec3 bmin(FLT_MAX), bmax(-FLT_MAX);
                     for (auto& v : allVerts) {
                         bmin = glm::min(bmin, v.position);
                         bmax = glm::max(bmax, v.position);
                     }
-                    glm::vec3 center = (bmin + bmax) * 0.5f;
-                    for (auto& v : allVerts) v.position -= center;
+                    slot.modelBounds.min = bmin;
+                    slot.modelBounds.max = bmax;
+                    slot.meshVertices = allVerts;
+                    slot.meshIndices  = allIndices;
 
                     const unsigned char* texData = texStorage.empty() ? nullptr : texStorage.data();
+                    if (!texStorage.empty()) {
+                        slot.textureData   = texStorage;
+                        slot.textureWidth  = texW;
+                        slot.textureHeight = texH;
+                    }
                     slot.gpuHandle = m_modelRenderer->createModel(allVerts, allIndices, texData, texW, texH);
                     slot.modelIndexCount = static_cast<uint32_t>(allIndices.size());
                     slot.is3DModel = true;
@@ -7891,6 +7909,13 @@ private:
                     fail("slot not occupied after purchase");
                 else if (!m_toolbarSlots[slot].is3DModel)
                     fail("slot holds a file card, not the model -- geometry failed to load");
+                else {
+                    const AABB& sb = m_toolbarSlots[slot].modelBounds;
+                    if (sb.max.y <= sb.min.y)
+                        fail("slot has no bounds -- the placed fixture would be unselectable");
+                    if (m_toolbarSlots[slot].meshVertices.empty())
+                        fail("slot has no mesh data -- the placed fixture would have no collision");
+                }
                 // Put the shelf back the way it was.
                 destroySlotThumbnail(slot);
                 m_toolbarSlots[slot] = ToolbarSlot{};
