@@ -348,17 +348,24 @@ void Shipwright::render(bool& open) {
         }
     }
 
-    // THE PROFILE: the ship from her port side, bow to the RIGHT. Rows of the
-    // plan become stations along her length; a row with hull shows the floor
-    // plate, a row with walls shows the full wall height, windows glaze
-    // their band. Today, with no height variation, she reads as a straight
-    // line -- this strip is where superstructure, decks, and a real
+    // THE PROFILE: the ship from her port side, bow to the RIGHT. Its own
+    // window -- the first version drew a strip below the grid, but the grid
+    // already fills the drafting table to its bottom edge, so the profile
+    // landed past the fold, clipped into invisibility (field report:
+    // "nothing changes when i press side view"). A window cannot be painted
+    // over or clipped. Today, with no height variation, she reads as a
+    // straight line -- this is where superstructure, decks, and a real
     // silhouette will appear the day the plan learns height.
     if (m_sideView) {
         const float pxU = cell / 2.0f;           // pixels per world unit (CELL=2)
         const float floorPx = 0.4f * pxU;        // FLOOR_T
         const float wallPx  = 3.0f * pxU;        // WALL_H
         const float stripH  = wallPx + floorPx + 18.0f;
+        ImGui::SetNextWindowSize(ImVec2(kW * cell + 24.0f, stripH + 44.0f), ImGuiCond_FirstUseEver);
+        ImGui::SetNextWindowPos(ImVec2(90, 850), ImGuiCond_FirstUseEver);
+        if (!ImGui::Begin("Profile -- port side, bow right", &m_sideView)) { ImGui::End(); }
+        else {
+        ImDrawList* dl = ImGui::GetWindowDrawList();
         const ImVec2 po = ImGui::GetCursorScreenPos();
         ImGui::Dummy(ImVec2(kW * cell, stripH));
         const float keelY = po.y + stripH - 4.0f;
@@ -392,6 +399,8 @@ void Shipwright::render(bool& open) {
         if (!any)
             dl->AddText(ImVec2(po.x + 8.0f, po.y + 4.0f), IM_COL32(140, 140, 140, 255),
                         "profile -- draw a hull to see her from the side");
+        ImGui::End();
+        }
     }
 
     // The survey legend: swatch, plate name, size -- the ship's future
