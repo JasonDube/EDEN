@@ -9455,6 +9455,15 @@ private:
             for (const auto& obj : m_sceneObjects) {
                 if (!obj || !obj->isVisible()) continue;
 
+                // While FLYING, everything aboard is exempt. Collision boxes are
+                // axis-aligned and INFLATE when the hull yaws -- past roughly 30
+                // degrees the ship's own swollen boxes reach the pilot's spot and
+                // this pass shoves the carried player out of their own helm,
+                // frame after frame: the reported "player and ship pan
+                // separately past a certain angle, re-sync coming back". Your
+                // own ship is furniture, not an obstacle.
+                if (m_vessel.isFlying() && m_vessel.isAboard(obj->getName())) continue;
+
                 // Skip AABB if object has Bullet collision (Bullet takes priority)
                 if (obj->hasBulletCollision()) continue;
 
