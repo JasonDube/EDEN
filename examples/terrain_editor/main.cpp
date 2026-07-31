@@ -13419,10 +13419,6 @@ private:
                     obj->getTransform().setScale({floorW, m_hSlabThickness, floorD});
 
                     m_sceneObjects.push_back(std::move(obj));
-                    // Physics NOW, not at the next enterPlayMode. That was the only place
-                    // build pieces ever got a Jolt body, so anything laid down while
-                    // already playing was scenery you fell straight through.
-                    if (m_isPlayMode) addBuildPieceCollision(m_sceneObjects.back().get());
                 }
                 // Auto-deactivate after placing in play mode (one-shot); in the
                 // edit-mode Build panel keep the tool armed to place several floors.
@@ -13588,10 +13584,6 @@ private:
                     obj->getTransform().setScale(wallScale);
 
                     m_sceneObjects.push_back(std::move(obj));
-                    // Physics NOW, not at the next enterPlayMode. That was the only place
-                    // build pieces ever got a Jolt body, so anything laid down while
-                    // already playing was scenery you fell straight through.
-                    if (m_isPlayMode) addBuildPieceCollision(m_sceneObjects.back().get());
                 }
                 // Auto-deactivate after placing in play mode; the editor keeps it armed.
                 if (m_isPlayMode) m_wallBrushMode = false;
@@ -13725,10 +13717,6 @@ private:
                         obj->getTransform().setScale({walls[i].sx, wallH, walls[i].sz});
 
                         m_sceneObjects.push_back(std::move(obj));
-                        // Physics NOW, not at the next enterPlayMode. That was the only place
-                        // build pieces ever got a Jolt body, so anything laid down while
-                        // already playing was scenery you fell straight through.
-                        if (m_isPlayMode) addBuildPieceCollision(m_sceneObjects.back().get());
                     }
                 }
                 if (m_isPlayMode) m_roomBrushMode = false;
@@ -14169,10 +14157,6 @@ private:
                         obj->getTransform().setScale(wallScale);
 
                         m_sceneObjects.push_back(std::move(obj));
-                        // Physics NOW, not at the next enterPlayMode. That was the only place
-                        // build pieces ever got a Jolt body, so anything laid down while
-                        // already playing was scenery you fell straight through.
-                        if (m_isPlayMode) addBuildPieceCollision(m_sceneObjects.back().get());
 
                         // Save brush wall to grid for persistence
                         BrushWall bw;
@@ -20849,10 +20833,6 @@ private:
                     obj->getTransform().setScale({m_hSlabLength, m_hSlabThickness, m_hSlabWidth});
                     obj->setAABBCollision(true);
                     m_sceneObjects.push_back(std::move(obj));
-                    // This button was missed when the other four build tools were
-                    // given physics at creation time -- so a slab placed from HERE
-                    // was still a ghost while a dragged-out one was solid.
-                    if (m_isPlayMode) addBuildPieceCollision(m_sceneObjects.back().get());
                 }
 
                 ImGui::Separator();
@@ -26909,150 +26889,6 @@ private:
     }
 #endif
 
-    // Give one build piece its physics.
-    //
-    // Extracted from enterPlayMode, which was the ONLY place it ran -- so a slab
-    // laid down while already playing never got a Jolt body and you walked
-    // straight through it. The build tools call this the moment they create one
-    // now, which is why "the code is all there" was true and it still did not
-    // work: the code was there, it just never ran again after the level started.
-    void addBuildPieceCollision(eden::SceneObject* obj) {
-        if (!obj || !obj->isVisible()) return;
-
-        // Already has one, so do not give it a second.
-        //
-        // Bodies are only ever cleared by newLevel(), not by leaving play mode --
-        // so enterPlayMode was already handing every slab a fresh static body on
-        // each F5, stacking duplicates on top of one another. Harmless-looking and
-        // not: they never go away, and the count climbs every time you enter play.
-        // Calling this from the build tools would have compounded it, so it stops
-        // here for both callers.
-        if (obj->getJoltBodyId() != UINT32_MAX) {
-            std::printf("[Collide] %s SKIP already has body %u\n",
-                        obj->getName().c_str(), obj->getJoltBodyId());
-            std::fflush(stdout);
-            return;
-        }
-        const auto& bt = obj->getBuildingType();
-
-        // Window/door frames: zero collision always
-        if (bt == "window_frame") {
-            obj->setAABBCollision(false);
-            obj->setBulletCollisionType(BulletCollisionType::NONE);
-            return;
-        }
-
-        if (bt != "platform_slab" && bt != "platform_wall") return;
-        if (obj->isKinematicPlatform()) {
-            std::printf("[Collide] %s SKIP kinematic platform\n", obj->getName().c_str());
-            std::fflush(stdout);
-            return;
-        }
-        if (!m_characterController) {
-            std::printf("[Collide] %s SKIP no character controller (play mode not entered?)\n",
-                        obj->getName().c_str());
-            std::fflush(stdout);
-            return;
-        }
-
-        // Building pieces use AABB collision for character controller (supports wall hole skip).
-        obj->setAABBCollision(true);
-        obj->setBulletCollisionType(BulletCollisionType::NONE);
-
-        // Add slabs and walls to Jolt so physics objects collide with them.
-        // Walls with holes get split into solid segments around each hole.
-        if (m_characterController) {
-            // Minimum collision thickness so Jolt CCD can reliably catch impacts
-            // 0.5 half = 1m total — generous so even small fast objects get caught
-            constexpr float MIN_HALF_THICK = 0.5f;
-
-            if (bt == "platform_slab" || !obj->hasWallHoles()) {
-                // No holes — add as single Jolt box
-                AABB localBounds = obj->getLocalBounds();
-                glm::vec3 localHalfExtents = (localBounds.max - localBounds.min) * 0.5f;
-                glm::vec3 localCenterOffset = (localBounds.min + localBounds.max) * 0.5f;
-                glm::vec3 scale = obj->getTransform().getScale();
-                localHalfExtents *= scale;
-                localCenterOffset *= scale;
-                // Enforce minimum thickness on the thinnest axis only
-                int thinAxis = (localHalfExtents.x <= localHalfExtents.y && localHalfExtents.x <= localHalfExtents.z) ? 0
-                             : (localHalfExtents.y <= localHalfExtents.z) ? 1 : 2;
-                localHalfExtents[thinAxis] = std::max(localHalfExtents[thinAxis], MIN_HALF_THICK);
-                glm::vec3 position = obj->getTransform().getPosition();
-                glm::quat rotation = obj->getTransform().getRotation();
-                glm::vec3 center = position + rotation * localCenterOffset;
-                uint32_t bodyId = m_characterController->addStaticBoxWithId(localHalfExtents, center, rotation);
-                obj->setJoltBodyId(bodyId);
-                std::printf("[Collide] %s ADDED half=(%.2f,%.2f,%.2f) centre=(%.1f,%.1f,%.1f) "
-                            "id=%u backend=%s\n",
-                            obj->getName().c_str(),
-                            localHalfExtents.x, localHalfExtents.y, localHalfExtents.z,
-                            center.x, center.y, center.z, bodyId,
-                            m_physicsBackend == PhysicsBackend::Jolt ? "jolt" : "homebrew");
-                std::fflush(stdout);
-            } else {
-                // Wall with holes — split into solid pieces around each hole.
-                // Work in world space since holes are stored in world space.
-                AABB wall = obj->getWorldBounds();
-                const auto& holes = obj->getWallHoles();
-
-                // Determine wall's thin axis (thickness axis)
-                glm::vec3 wallSize = wall.getSize();
-                bool thinX = wallSize.x < wallSize.z;
-
-                // Helper: add a Jolt box with minimum thickness on the wall's thin axis
-                auto addWallPiece = [&](glm::vec3 pMin, glm::vec3 pMax) {
-                    glm::vec3 halfExt = (pMax - pMin) * 0.5f;
-                    // Thicken on the wall's thin axis (X or Z)
-                    if (thinX) halfExt.x = std::max(halfExt.x, MIN_HALF_THICK);
-                    else       halfExt.z = std::max(halfExt.z, MIN_HALF_THICK);
-                    glm::vec3 center = (pMin + pMax) * 0.5f;
-                    uint32_t pieceId = m_characterController->addStaticBoxWithId(halfExt, center);
-                    // A holed wall becomes SEVERAL bodies, so the object can only
-                    // remember one of them -- but remembering the first is enough
-                    // for the "already has collision" guard above to see it, which
-                    // is the difference between one wall and one wall per F5.
-                    if (obj->getJoltBodyId() == UINT32_MAX) obj->setJoltBodyId(pieceId);
-                };
-
-                for (const auto& hole : holes) {
-                    glm::vec3 hMin = glm::max(hole.min, wall.min);
-                    glm::vec3 hMax = glm::min(hole.max, wall.max);
-
-                    if (thinX) {
-                        // Wall runs along Z, thin in X
-                        if (hMin.z - wall.min.z > 0.01f)
-                            addWallPiece(wall.min, {wall.max.x, wall.max.y, hMin.z});
-                        if (wall.max.z - hMax.z > 0.01f)
-                            addWallPiece({wall.min.x, wall.min.y, hMax.z}, wall.max);
-                    } else {
-                        // Wall runs along X, thin in Z
-                        if (hMin.x - wall.min.x > 0.01f)
-                            addWallPiece(wall.min, {hMin.x, wall.max.y, wall.max.z});
-                        if (wall.max.x - hMax.x > 0.01f)
-                            addWallPiece({hMax.x, wall.min.y, wall.min.z}, wall.max);
-                    }
-                    // Piece above the hole (full wall thickness)
-                    if (wall.max.y - hMax.y > 0.01f) {
-                        glm::vec3 pMin = {hMin.x, hMax.y, hMin.z};
-                        glm::vec3 pMax = {hMax.x, wall.max.y, hMax.z};
-                        if (thinX) { pMin.x = wall.min.x; pMax.x = wall.max.x; }
-                        else        { pMin.z = wall.min.z; pMax.z = wall.max.z; }
-                        addWallPiece(pMin, pMax);
-                    }
-                    // Piece below the hole (if hole doesn't start at floor)
-                    if (hMin.y - wall.min.y > 0.1f) {
-                        glm::vec3 pMin = {hMin.x, wall.min.y, hMin.z};
-                        glm::vec3 pMax = {hMax.x, hMin.y, hMax.z};
-                        if (thinX) { pMin.x = wall.min.x; pMax.x = wall.max.x; }
-                        else        { pMin.z = wall.min.z; pMax.z = wall.max.z; }
-                        addWallPiece(pMin, pMax);
-                    }
-                }
-            }
-        }
-    }
-
     void enterPlayMode() {
         m_isPlayMode = true;
         m_playModeDebug = false;          // Debug visuals off by default
@@ -27368,7 +27204,105 @@ private:
             }
 
             // Add building slabs/walls as Jolt static boxes (supports rotated ramps)
-            for (auto& obj : m_sceneObjects) addBuildPieceCollision(obj.get());
+            for (auto& obj : m_sceneObjects) {
+                if (!obj || !obj->isVisible()) continue;
+                const auto& bt = obj->getBuildingType();
+
+                // Window/door frames: zero collision always
+                if (bt == "window_frame") {
+                    obj->setAABBCollision(false);
+                    obj->setBulletCollisionType(BulletCollisionType::NONE);
+                    continue;
+                }
+
+                if (bt != "platform_slab" && bt != "platform_wall") continue;
+                if (obj->isKinematicPlatform()) continue;
+
+                // Building pieces use AABB collision for character controller (supports wall hole skip).
+                obj->setAABBCollision(true);
+                obj->setBulletCollisionType(BulletCollisionType::NONE);
+
+                // Add slabs and walls to Jolt so physics objects collide with them.
+                // Walls with holes get split into solid segments around each hole.
+                if (m_characterController) {
+                    // Minimum collision thickness so Jolt CCD can reliably catch impacts
+                    // 0.5 half = 1m total — generous so even small fast objects get caught
+                    constexpr float MIN_HALF_THICK = 0.5f;
+
+                    if (bt == "platform_slab" || !obj->hasWallHoles()) {
+                        // No holes — add as single Jolt box
+                        AABB localBounds = obj->getLocalBounds();
+                        glm::vec3 localHalfExtents = (localBounds.max - localBounds.min) * 0.5f;
+                        glm::vec3 localCenterOffset = (localBounds.min + localBounds.max) * 0.5f;
+                        glm::vec3 scale = obj->getTransform().getScale();
+                        localHalfExtents *= scale;
+                        localCenterOffset *= scale;
+                        // Enforce minimum thickness on the thinnest axis only
+                        int thinAxis = (localHalfExtents.x <= localHalfExtents.y && localHalfExtents.x <= localHalfExtents.z) ? 0
+                                     : (localHalfExtents.y <= localHalfExtents.z) ? 1 : 2;
+                        localHalfExtents[thinAxis] = std::max(localHalfExtents[thinAxis], MIN_HALF_THICK);
+                        glm::vec3 position = obj->getTransform().getPosition();
+                        glm::quat rotation = obj->getTransform().getRotation();
+                        glm::vec3 center = position + rotation * localCenterOffset;
+                        uint32_t bodyId = m_characterController->addStaticBoxWithId(localHalfExtents, center, rotation);
+                        obj->setJoltBodyId(bodyId);
+                    } else {
+                        // Wall with holes — split into solid pieces around each hole.
+                        // Work in world space since holes are stored in world space.
+                        AABB wall = obj->getWorldBounds();
+                        const auto& holes = obj->getWallHoles();
+
+                        // Determine wall's thin axis (thickness axis)
+                        glm::vec3 wallSize = wall.getSize();
+                        bool thinX = wallSize.x < wallSize.z;
+
+                        // Helper: add a Jolt box with minimum thickness on the wall's thin axis
+                        auto addWallPiece = [&](glm::vec3 pMin, glm::vec3 pMax) {
+                            glm::vec3 halfExt = (pMax - pMin) * 0.5f;
+                            // Thicken on the wall's thin axis (X or Z)
+                            if (thinX) halfExt.x = std::max(halfExt.x, MIN_HALF_THICK);
+                            else       halfExt.z = std::max(halfExt.z, MIN_HALF_THICK);
+                            glm::vec3 center = (pMin + pMax) * 0.5f;
+                            m_characterController->addStaticBoxWithId(halfExt, center);
+                        };
+
+                        for (const auto& hole : holes) {
+                            glm::vec3 hMin = glm::max(hole.min, wall.min);
+                            glm::vec3 hMax = glm::min(hole.max, wall.max);
+
+                            if (thinX) {
+                                // Wall runs along Z, thin in X
+                                if (hMin.z - wall.min.z > 0.01f)
+                                    addWallPiece(wall.min, {wall.max.x, wall.max.y, hMin.z});
+                                if (wall.max.z - hMax.z > 0.01f)
+                                    addWallPiece({wall.min.x, wall.min.y, hMax.z}, wall.max);
+                            } else {
+                                // Wall runs along X, thin in Z
+                                if (hMin.x - wall.min.x > 0.01f)
+                                    addWallPiece(wall.min, {hMin.x, wall.max.y, wall.max.z});
+                                if (wall.max.x - hMax.x > 0.01f)
+                                    addWallPiece({hMax.x, wall.min.y, wall.min.z}, wall.max);
+                            }
+                            // Piece above the hole (full wall thickness)
+                            if (wall.max.y - hMax.y > 0.01f) {
+                                glm::vec3 pMin = {hMin.x, hMax.y, hMin.z};
+                                glm::vec3 pMax = {hMax.x, wall.max.y, hMax.z};
+                                if (thinX) { pMin.x = wall.min.x; pMax.x = wall.max.x; }
+                                else        { pMin.z = wall.min.z; pMax.z = wall.max.z; }
+                                addWallPiece(pMin, pMax);
+                            }
+                            // Piece below the hole (if hole doesn't start at floor)
+                            if (hMin.y - wall.min.y > 0.1f) {
+                                glm::vec3 pMin = {hMin.x, wall.min.y, hMin.z};
+                                glm::vec3 pMax = {hMax.x, hMin.y, hMax.z};
+                                if (thinX) { pMin.x = wall.min.x; pMax.x = wall.max.x; }
+                                else        { pMin.z = wall.min.z; pMax.z = wall.max.z; }
+                                addWallPiece(pMin, pMax);
+                            }
+                        }
+                    }
+                }
+            }
 
             // Add collision bodies from scene objects with Bullet collision
             for (auto& obj : m_sceneObjects) {
