@@ -66,6 +66,8 @@
 #include "VesselFlight.hpp"
 // The battle test -- squads, formations, box-select -- off unless asked for.
 #include "BattleSim.hpp"
+// The one switch the investigation prints all check first.
+#include "Diag.hpp"
 
 // OS / Filesystem
 #include "OS/FilesystemBrowser.hpp"
@@ -9102,7 +9104,7 @@ private:
             m_groundLogAt += deltaTime;
             if (m_groundLogAt >= 1.0f) {
                 m_groundLogAt = 0.0f;
-                std::printf("[Ground] eye=(%.1f,%.1f,%.1f) floor=%.2f from '%s'  cc=%d walk=%d%s%s\n",
+                if (g_diagnostics) std::printf("[Ground] eye=(%.1f,%.1f,%.1f) floor=%.2f from '%s'  cc=%d walk=%d%s%s\n",
                             m_camera.getPosition().x, m_camera.getPosition().y,
                             m_camera.getPosition().z, terrainHeight,
                             m_groundSource.c_str(), useCharacterController ? 1 : 0,
@@ -9427,7 +9429,7 @@ private:
                     const glm::vec3 camDelta = cam - s_prevCam;
                     const glm::vec3 diff = camDelta - m_vessel.playerCarry();
                     if (glm::length(diff) > 0.02f) {
-                        std::printf("[FlightGlitch] DIVERGED diff=(%.3f,%.3f,%.3f) "
+                        if (g_diagnostics) std::printf("[FlightGlitch] DIVERGED diff=(%.3f,%.3f,%.3f) "
                                     "carry=(%.3f,%.3f,%.3f) camMoved=(%.3f,%.3f,%.3f) "
                                     "cc=%d guiKey=%d guiTxt=%d cursor=%d build=%d focus=%d\n",
                                     diff.x, diff.y, diff.z,
@@ -9450,7 +9452,7 @@ private:
                                           Input::isKeyDown(Input::KEY_S) || Input::isKeyDown(Input::KEY_D) ||
                                           Input::isKeyDown(Input::KEY_SPACE);
                     if (keysHeld && glm::length(m_vessel.playerCarry()) < 1e-6f) {
-                        std::printf("[FlightGlitch] PAUSED with keys held  guiKey=%d guiTxt=%d cc=%d\n",
+                        if (g_diagnostics) std::printf("[FlightGlitch] PAUSED with keys held  guiKey=%d guiTxt=%d cc=%d\n",
                                     ImGui::GetIO().WantCaptureKeyboard ? 1 : 0,
                                     ImGui::GetIO().WantTextInput ? 1 : 0,
                                     useCharacterController ? 1 : 0);
@@ -11879,7 +11881,7 @@ private:
                         {
                             const glm::vec3 toSpawn = spawnPos - camPos;
                             const float ahead = glm::dot(toSpawn, camFront);
-                            std::printf("[Place] %s d=%.2f  eye=(%.1f,%.1f,%.1f) "
+                            if (g_diagnostics) std::printf("[Place] %s d=%.2f  eye=(%.1f,%.1f,%.1f) "
                                         "front=(%.2f,%.2f,%.2f)  spawn=(%.1f,%.1f,%.1f) "
                                         "dist=%.2f ahead=%.2f%s  rts=%d cursor=%d build=%d\n",
                                         placeSource, placeDist,
@@ -23766,6 +23768,14 @@ private:
             if (ImGui::Checkbox("Battle sim", &battleOn)) m_battleSim.setEnabled(battleOn);
             if (battleOn) ImGui::TextDisabled("  B spawn squads  1/2/3 blue  8/9/0 red");
 
+            // The investigation prints, silenced by default. Not persisted on
+            // purpose -- it resets quiet every launch, so it can never be
+            // forgotten on and turn into wallpaper.
+            ImGui::Separator();
+            ImGui::Checkbox("Diagnostics (console prints)", &g_diagnostics);
+            if (g_diagnostics)
+                ImGui::TextDisabled("  [Place] [Ground] [BodyReg] [Vessel] [FlightGlitch]");
+
             ImGui::Separator();
             ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), "Press M to toggle this panel");
         }
@@ -27294,9 +27304,9 @@ private:
                 // and this loop looks identical for both. So it says what it did:
                 // every build piece it SEES, every one it SKIPS and why, every
                 // body it ADDS and where. Silence for a slab = never reached.
-                std::printf("[BodyReg] %s seen (%s)\n", obj->getName().c_str(), bt.c_str());
+                if (g_diagnostics) std::printf("[BodyReg] %s seen (%s)\n", obj->getName().c_str(), bt.c_str());
                 if (obj->isKinematicPlatform()) {
-                    std::printf("[BodyReg] %s SKIP kinematic\n", obj->getName().c_str());
+                    if (g_diagnostics) std::printf("[BodyReg] %s SKIP kinematic\n", obj->getName().c_str());
                     continue;
                 }
 
@@ -27328,7 +27338,7 @@ private:
                         glm::vec3 center = position + rotation * localCenterOffset;
                         uint32_t bodyId = m_characterController->addStaticBoxWithId(localHalfExtents, center, rotation);
                         obj->setJoltBodyId(bodyId);
-                        std::printf("[BodyReg] %s ADDED box half=(%.2f,%.2f,%.2f) centre=(%.2f,%.2f,%.2f) id=%u\n",
+                        if (g_diagnostics) std::printf("[BodyReg] %s ADDED box half=(%.2f,%.2f,%.2f) centre=(%.2f,%.2f,%.2f) id=%u\n",
                                     obj->getName().c_str(),
                                     localHalfExtents.x, localHalfExtents.y, localHalfExtents.z,
                                     center.x, center.y, center.z, bodyId);
@@ -27338,7 +27348,7 @@ private:
                         // Work in world space since holes are stored in world space.
                         AABB wall = obj->getWorldBounds();
                         const auto& holes = obj->getWallHoles();
-                        std::printf("[BodyReg] %s SPLIT wall around %zu hole(s)\n",
+                        if (g_diagnostics) std::printf("[BodyReg] %s SPLIT wall around %zu hole(s)\n",
                                     obj->getName().c_str(), holes.size());
                         std::fflush(stdout);
 

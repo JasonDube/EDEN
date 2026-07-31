@@ -1,4 +1,5 @@
 #include "VesselFlight.hpp"
+#include "Diag.hpp"
 
 #include "Editor/SceneObject.hpp"
 
@@ -127,7 +128,7 @@ bool VesselFlight::takeHelm(const std::string& helmName) {
     m_helmName = helmName;
     m_flying = true;
     m_frameDelta = glm::vec3(0.0f);
-    std::printf("[Vessel] took the helm '%s' -- deck '%s', %zu aboard\n",
+    if (g_diagnostics) std::printf("[Vessel] took the helm '%s' -- deck '%s', %zu aboard\n",
                 helmName.c_str(), m_deckName.c_str(), m_manifest.size());
     std::fflush(stdout);
     return true;
@@ -135,7 +136,7 @@ bool VesselFlight::takeHelm(const std::string& helmName) {
 
 void VesselFlight::releaseHelm() {
     if (m_flying) {
-        std::printf("[Vessel] released the helm -- deck '%s' is a floor again\n",
+        if (g_diagnostics) std::printf("[Vessel] released the helm -- deck '%s' is a floor again\n",
                     m_deckName.c_str());
         std::fflush(stdout);
     }
