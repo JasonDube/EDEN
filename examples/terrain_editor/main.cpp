@@ -27216,7 +27216,16 @@ private:
                 }
 
                 if (bt != "platform_slab" && bt != "platform_wall") continue;
-                if (obj->isKinematicPlatform()) continue;
+                // [BodyReg] print-only diagnosis: slabs built in-session stay
+                // ghosts even after a full F5 cycle while loaded ones go solid,
+                // and this loop looks identical for both. So it says what it did:
+                // every build piece it SEES, every one it SKIPS and why, every
+                // body it ADDS and where. Silence for a slab = never reached.
+                std::printf("[BodyReg] %s seen (%s)\n", obj->getName().c_str(), bt.c_str());
+                if (obj->isKinematicPlatform()) {
+                    std::printf("[BodyReg] %s SKIP kinematic\n", obj->getName().c_str());
+                    continue;
+                }
 
                 // Building pieces use AABB collision for character controller (supports wall hole skip).
                 obj->setAABBCollision(true);
@@ -27246,11 +27255,19 @@ private:
                         glm::vec3 center = position + rotation * localCenterOffset;
                         uint32_t bodyId = m_characterController->addStaticBoxWithId(localHalfExtents, center, rotation);
                         obj->setJoltBodyId(bodyId);
+                        std::printf("[BodyReg] %s ADDED box half=(%.2f,%.2f,%.2f) centre=(%.2f,%.2f,%.2f) id=%u\n",
+                                    obj->getName().c_str(),
+                                    localHalfExtents.x, localHalfExtents.y, localHalfExtents.z,
+                                    center.x, center.y, center.z, bodyId);
+                        std::fflush(stdout);
                     } else {
                         // Wall with holes — split into solid pieces around each hole.
                         // Work in world space since holes are stored in world space.
                         AABB wall = obj->getWorldBounds();
                         const auto& holes = obj->getWallHoles();
+                        std::printf("[BodyReg] %s SPLIT wall around %zu hole(s)\n",
+                                    obj->getName().c_str(), holes.size());
+                        std::fflush(stdout);
 
                         // Determine wall's thin axis (thickness axis)
                         glm::vec3 wallSize = wall.getSize();
