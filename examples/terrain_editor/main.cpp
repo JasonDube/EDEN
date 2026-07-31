@@ -2272,10 +2272,6 @@ protected:
                                ImGui::GetIO().WantTextInput || ImGui::GetIO().WantCaptureKeyboard,
                                ImGui::GetIO().WantCaptureMouse);
         m_tribeSim.update(deltaTime, m_isPlayMode);
-        // The vessel: prompt, takeoff, per-frame flight movement. Runs before
-        // the movement block below, which asks isFlying() and playerCarry().
-        m_vessel.update(deltaTime, m_isPlayMode,
-                        ImGui::GetIO().WantTextInput || ImGui::GetIO().WantCaptureKeyboard);
 
         // Poll for AI backend responses
         if (m_httpClient) {
@@ -8929,6 +8925,18 @@ private:
         }
 
         // Compute early so we can skip camera's onSpacePressed when Jolt handles jump
+        // The vessel: prompt, takeoff, this frame's flight movement. HERE --
+        // after ImGui::NewFrame -- and not up beside the tribe sim where it
+        // first lived. Up there it read LAST frame's WantCaptureKeyboard (the
+        // flags are rebuilt inside NewFrame at ~2775), so every one-frame flap
+        // of ImGui's keyboard focus became a frame where the ship refused held
+        // keys: the logged hiccup, 43 PAUSED frames in one flight and zero
+        // DIVERGED. Down here the flags are this frame's truth, the steering
+        // reads this frame's camera yaw, and the carry consumer below still
+        // runs after us.
+        m_vessel.update(deltaTime, m_isPlayMode,
+                        ImGui::GetIO().WantTextInput || ImGui::GetIO().WantCaptureKeyboard);
+
         // The build panel deliberately turns the character controller OFF.
         //
         // DO NOT REMOVE THIS AGAIN. I did, to fix falling through a slab built in
