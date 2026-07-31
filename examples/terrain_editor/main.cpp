@@ -11242,6 +11242,7 @@ private:
                                     m_toolbarSlots[i].occupied = false;
                                     m_toolbarSlots[i].filePath.clear();
                                     m_toolbarSlots[i].displayName.clear();
+                    m_toolbarSlots[i].buildingType.clear();
                                     m_toolbarSlots[i].targetLevel.clear();
                                     m_toolbarSlots[i].texturePath.clear();
                                     saveInventorySlot(i);
@@ -11284,6 +11285,7 @@ private:
                                     m_toolbarSlots[i].occupied = false;
                                     m_toolbarSlots[i].filePath.clear();
                                     m_toolbarSlots[i].displayName.clear();
+                    m_toolbarSlots[i].buildingType.clear();
                                     saveInventorySlot(i);
                                     syncExcludedPaths();
                                 }
@@ -11363,6 +11365,7 @@ private:
                                             m_toolbarSlots[i].occupied = false;
                                             m_toolbarSlots[i].filePath.clear();
                                             m_toolbarSlots[i].displayName.clear();
+                    m_toolbarSlots[i].buildingType.clear();
                                             saveInventorySlot(i);
                                             syncExcludedPaths();
                                         }
@@ -11376,6 +11379,7 @@ private:
                                             m_toolbarSlots[i].occupied = false;
                                             m_toolbarSlots[i].filePath.clear();
                                             m_toolbarSlots[i].displayName.clear();
+                    m_toolbarSlots[i].buildingType.clear();
                                             saveInventorySlot(i);
                                             syncExcludedPaths();
                                         }
@@ -11476,6 +11480,7 @@ private:
                                     m_toolbarSlots[i].occupied = false;
                                     m_toolbarSlots[i].filePath.clear();
                                     m_toolbarSlots[i].displayName.clear();
+                    m_toolbarSlots[i].buildingType.clear();
                                     saveInventorySlot(i);
                                     syncExcludedPaths();
                                     std::cout << "[FS] Dropped '" << srcPath << "' onto " << (hitIsFrame ? "frame" : "wall") << std::endl;
@@ -11542,7 +11547,9 @@ private:
                 if (m_selectedSalvageIndex >= 0 && m_selectedSalvageIndex < static_cast<int>(m_sceneObjects.size())
                     && m_sceneObjects[m_selectedSalvageIndex]
                     && (m_sceneObjects[m_selectedSalvageIndex]->getBeingType() == BeingType::INTERACTION
-                        || m_sceneObjects[m_selectedSalvageIndex]->getBuildingType() == "salvage")
+                        || m_sceneObjects[m_selectedSalvageIndex]->getBuildingType() == "salvage"
+                        || m_sceneObjects[m_selectedSalvageIndex]->getBuildingType() == "platform_slab"
+                        || m_sceneObjects[m_selectedSalvageIndex]->getBuildingType() == "platform_wall")
                     && !(m_toolbarSlots[i].occupied && m_toolbarSlots[i].is3DModel)) {
                     auto& salvObj = m_sceneObjects[m_selectedSalvageIndex];
 
@@ -11564,6 +11571,19 @@ private:
                     m_toolbarSlots[i].gpuHandle = salvObj->getBufferHandle();
                     m_toolbarSlots[i].modelIndexCount = salvObj->getIndexCount();
                     m_toolbarSlots[i].modelBounds = salvObj->getLocalBounds();
+                    // A pocketed building piece keeps its identity for the trip
+                    // (restored on placement), and takes its parked static body
+                    // with it -- a body left behind is solid air where a wall
+                    // used to be.
+                    {
+                        const auto& pbt = salvObj->getBuildingType();
+                        if (pbt == "platform_slab" || pbt == "platform_wall")
+                            m_toolbarSlots[i].buildingType = pbt;
+                        if (salvObj->hasJoltBody() && m_characterController) {
+                            m_characterController->removeStaticBody(salvObj->getJoltBodyId());
+                            salvObj->clearJoltBody();
+                        }
+                    }
                     m_toolbarSlots[i].modelScale = salvObj->getTransform().getScale();
                     m_toolbarSlots[i].modelSourcePath = salvObj->getModelPath();
                     if (salvObj->hasMeshData()) {
@@ -11996,7 +12016,12 @@ private:
                 obj->setIndexCount(m_toolbarSlots[i].modelIndexCount);
                 obj->getTransform().setPosition(spawnPos);
                 obj->getTransform().setScale(m_toolbarSlots[i].modelScale);
-                obj->setBuildingType("salvage");
+                // A pocketed building piece goes back into the world AS ITSELF.
+                // A deck that returned as "salvage" would lose its collision
+                // registration, vessel deck detection, build-mode selection --
+                // its whole civic identity. Ordinary items stay salvage.
+                obj->setBuildingType(m_toolbarSlots[i].buildingType.empty()
+                                     ? "salvage" : m_toolbarSlots[i].buildingType);
                 obj->setBeingType(BeingType::INTERACTION);
                 obj->setLocalBounds(m_toolbarSlots[i].modelBounds);
                 obj->setModelPath(m_toolbarSlots[i].modelSourcePath);
@@ -12087,6 +12112,7 @@ private:
                                         m_toolbarSlots[i].occupied = false;
                                         m_toolbarSlots[i].filePath.clear();
                                         m_toolbarSlots[i].displayName.clear();
+                    m_toolbarSlots[i].buildingType.clear();
                                         m_toolbarSlots[i].meshVertices.clear();
                                         m_toolbarSlots[i].meshIndices.clear();
                                         m_toolbarSlots[i].textureData.clear();
@@ -12303,6 +12329,7 @@ private:
                 m_toolbarSlots[i].occupied = false;
                 m_toolbarSlots[i].filePath.clear();
                 m_toolbarSlots[i].displayName.clear();
+                    m_toolbarSlots[i].buildingType.clear();
                 m_toolbarSlots[i].meshVertices.clear();
                 m_toolbarSlots[i].meshIndices.clear();
                 m_toolbarSlots[i].textureData.clear();
@@ -15620,8 +15647,12 @@ private:
                 if (si == m_selectedSalvageIndex) continue;
                 auto& obj = m_sceneObjects[si];
                 if (!obj) continue;
+                // EXPERIMENT (user-called): building pieces are pocketable in
+                // plain play mode -- select, pick up, place like any salvage.
                 if (obj->getBeingType() != BeingType::INTERACTION && obj->getBuildingType() != "salvage"
-                    && obj->getBuildingType() != "wall_frame") continue;
+                    && obj->getBuildingType() != "wall_frame"
+                    && obj->getBuildingType() != "platform_slab"
+                    && obj->getBuildingType() != "platform_wall") continue;
                 float dist = obj->getWorldBounds().intersect(rayO, rayD);
                 if (dist >= 0 && dist < 5.0f && dist < bestDist) {
                     bestDist = dist;
@@ -31668,6 +31699,7 @@ private:
                                    //        source; false = COPY (Shift+number) → paste duplicates
         std::string filePath;      // stripped fs:// path
         std::string displayName;   // filename
+        std::string buildingType;   // pocketed piece identity (platform_slab/_wall); restored on placement
         std::string targetLevel;   // preserved link target (e.g. "fs:///path" or "home://silo")
         std::string texturePath;   // custom door image (e.g. forge_door.jpeg, home.jpeg)
         VkDescriptorSet imguiDescriptor = VK_NULL_HANDLE; // for drawList->AddImage()
