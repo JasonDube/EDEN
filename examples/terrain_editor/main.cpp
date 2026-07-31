@@ -9202,8 +9202,9 @@ private:
             // for its widgets, not for spinning the world.
             if (m_isPlayMode && m_playModeCursorVisible && m_showSiloConfig &&
                 !m_filesystemBrowser.isActive() && !m_vessel.isFlying() &&
-                !ImGui::GetIO().WantCaptureMouse &&
-                m_camera.getMovementMode() == MovementMode::Walk) {
+                !ImGui::GetIO().WantCaptureMouse && !m_playRTSCamera &&
+                (m_camera.getMovementMode() == MovementMode::Walk ||
+                 m_camera.getMovementMode() == MovementMode::Fly)) {
                 const glm::vec2 mp = Input::getMousePosition();
                 const float w = static_cast<float>(getWindow().getWidth());
                 const float h = static_cast<float>(getWindow().getHeight());
@@ -9240,7 +9241,15 @@ private:
             if (m_isPlayMode && !useCharacterController && !m_inPanelFocusMode &&
                 m_playModeCursorVisible && m_showSiloConfig &&
                 !m_filesystemBrowser.isActive() && !m_vessel.isFlying() &&
-                m_camera.getMovementMode() == MovementMode::Walk) {
+                !m_playRTSCamera &&
+                (m_camera.getMovementMode() == MovementMode::Walk ||
+                 m_camera.getMovementMode() == MovementMode::Fly)) {
+                // Fly is here ON PURPOSE: double-tap space is the camera's own
+                // creative-fly toggle, and it fires in build mode -- the first
+                // field test double-tapped, toggled to Fly, and froze mid-air
+                // because this block only fed Walk. Now the toggle IS the
+                // Minecraft fly that was asked for: space up, Shift down,
+                // double-tap space again to drop back to walking.
                 // During conversation or quick chat: arrow keys, otherwise WASD
                 // When ImGui wants keyboard: no movement at all
                 if (imguiWantsKeyboard) {
@@ -9280,7 +9289,9 @@ private:
                         Input::isKeyDown(Input::KEY_W),
                         Input::isKeyDown(Input::KEY_S),
                         Input::isKeyDown(Input::KEY_A),
-                        Input::isKeyDown(Input::KEY_D),
+                        // Shift+D is the duplicate chord; a chord must not also
+                        // strafe. D moves only bare.
+                        Input::isKeyDown(Input::KEY_D) && !Input::isKeyDown(Input::KEY_LEFT_SHIFT),
                         suppressSpace ? false : Input::isKeyDown(Input::KEY_SPACE),
                         Input::isKeyDown(Input::KEY_LEFT_SHIFT),
                         heightQuery
@@ -15443,7 +15454,17 @@ private:
             glm::vec3 rayO = glm::vec3(nearPt);
             glm::vec3 rayD = glm::normalize(glm::vec3(farPt - nearPt));
 
-            float planeY = objPos.y;
+            // The drag plane sits where the piece was GRABBED, not at its base.
+            // A wall's base is at your feet, and looking level at a wall gives a
+            // ray that never meets a plane down there (t < 0) -- which is why
+            // v-slabs would select but silently refuse to drag while h-slabs
+            // (looked at from above) moved fine. Grab height fixes both.
+            float planeY = m_buildMoveDragging ? m_buildMovePlaneY : objPos.y;
+            if (!m_buildMoveDragging) {
+                float grabT = obj->getWorldBounds().intersect(rayO, rayD);
+                if (grabT >= 0.0f) planeY = (rayO + rayD * grabT).y;
+                m_buildMovePlaneY = planeY;
+            }
             glm::vec3 objScl = obj->getTransform().getScale();
             // Determine edge-aligned snap grid: if dimension is odd, center is at .5
             float snapOffX = (static_cast<int>(objScl.x) % 2 == 1) ? 0.5f : 0.0f;
@@ -15481,7 +15502,8 @@ private:
                         float snap = m_buildSnapAmount;
                         newPos.x = std::round((newPos.x - snapOffX) / snap) * snap + snapOffX;
                         newPos.z = std::round((newPos.z - snapOffZ) / snap) * snap + snapOffZ;
-                        newPos.y = planeY;
+                        newPos.y = objPos.y;   // the drag plane is for the RAY;
+                                               // the piece itself never changes height
 
                         obj->getTransform().setPosition(newPos);
                     }
@@ -32050,6 +32072,7 @@ private:
     glm::quat m_frameAlignRot{1, 0, 0, 0};  // Rotation for frame-aligned placement
     bool m_frameAligned = false;              // True if last placement used frame port alignment
     float m_buildRotateSnap = 45.0f;  // Rotation snap in degrees
+    float m_buildMovePlaneY = 0.0f;  // horizontal plane the current drag rides on
     bool m_buildMoveDragging = false;
     glm::vec3 m_buildMoveOrigPos{0.0f};
     glm::vec3 m_buildMoveOffset{0.0f};
