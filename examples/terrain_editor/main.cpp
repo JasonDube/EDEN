@@ -528,9 +528,13 @@ protected:
             m_battleSim.setHost(war);
         }
 
-        // The shipyard: BUILD SHIP in the Shipwright writes the plan, runs the
-        // generator, and queues the raised level for load. The generator's
-        // room table and counts land on stdout, which the console captures.
+        // The shipyard: BUILD SHIP raises the ship IN THE WORLD YOU ARE
+        // STANDING IN -- ahead of where you face, keel on the terrain. The
+        // first version loaded a standalone generated level instead, which
+        // teleported the shipwright into a terrainless void on top of their
+        // own hull: correct plan, wrong world. The generator now hands back
+        // just the pieces (origin at zero) and the host spawns them here.
+        // Its room-table report still lands in the console.
         m_shipwright.setBuildShipHook([this](const std::string& planText) -> std::string {
             const std::string root = CMAKE_SOURCE_DIR;
             const std::string planPath = root + "/tools/plans/from_ted.plan";
@@ -539,15 +543,67 @@ protected:
                 if (!f) return {};
                 f << planText;
             }
+            const std::string jsonPath = root + "/build/from_ted_objects.json";
             const std::string cmd =
-                "cd '" + root + "' && python3 tools/make_ship_from_plan.py tools/plans/from_ted.plan";
+                "cd '" + root + "' && python3 tools/make_ship_from_plan.py "
+                "tools/plans/from_ted.plan --objects-json '" + jsonPath + "'";
             if (std::system(cmd.c_str()) != 0) return {};
-            const std::string lvl = root + "/build/examples/terrain_editor/levels/from_ted.eden";
-            // Leave play mode first -- loadLevel rebuilds the world under the
-            // player, and the pending-load hook applies at frame start.
-            if (m_isPlayMode) exitPlayMode();
-            m_pendingLevelLoad = lvl;
-            return lvl;
+            std::ifstream jf(jsonPath);
+            if (!jf) return {};
+            nlohmann::json j;
+            try { jf >> j; } catch (...) { return {}; }
+            if (!j.contains("objects") || j["objects"].empty()) return {};
+
+            // Footprint of the ship, to drop her centred ahead of the player.
+            glm::vec3 mn(1e9f), mx(-1e9f);
+            for (auto& o : j["objects"]) {
+                const glm::vec3 p(o["position"][0], o["position"][1], o["position"][2]);
+                const glm::vec3 sc(o["scale"][0], o["scale"][1], o["scale"][2]);
+                mn = glm::min(mn, p - glm::vec3(sc.x * 0.5f, 0.0f, sc.z * 0.5f));
+                mx = glm::max(mx, p + glm::vec3(sc.x * 0.5f, sc.y, sc.z * 0.5f));
+            }
+            const float yawR = glm::radians(m_camera.getYaw());
+            const glm::vec3 fwd(std::cos(yawR), 0.0f, std::sin(yawR));
+            const float halfSpan = std::max(mx.x - mn.x, mx.z - mn.z) * 0.5f;
+            const glm::vec3 eye = m_camera.getPosition();
+            glm::vec3 drop = eye + fwd * (halfSpan + 8.0f);
+            float gy = m_terrain.getHeightAt(drop.x, drop.z);
+            if (gy < -1000.0f) gy = 0.0f;
+            const glm::vec3 centre((mn.x + mx.x) * 0.5f, 0.0f, (mn.z + mx.z) * 0.5f);
+            const glm::vec3 off(drop.x - centre.x, gy, drop.z - centre.z);
+
+            // Each build gets a serial prefix so two ships' plates never share
+            // a name -- the flight manifest finds objects BY name.
+            static int s_shipSerial = 0;
+            const std::string prefix = "ship" + std::to_string(++s_shipSerial) + "_";
+            int made = 0;
+            for (auto& o : j["objects"]) {
+                const glm::vec4 col(o["primitiveColor"][0], o["primitiveColor"][1],
+                                    o["primitiveColor"][2], o["primitiveColor"][3]);
+                auto mesh = PrimitiveMeshBuilder::createCube(1.0f, col);
+                auto obj = std::make_unique<SceneObject>(prefix + std::string(o["name"]));
+                obj->setBufferHandle(m_modelRenderer->createModel(mesh.vertices, mesh.indices));
+                obj->setIndexCount(static_cast<uint32_t>(mesh.indices.size()));
+                obj->setVertexCount(static_cast<uint32_t>(mesh.vertices.size()));
+                obj->setLocalBounds(mesh.bounds);
+                obj->setMeshData(mesh.vertices, mesh.indices);
+                obj->setPrimitiveType(PrimitiveType::Cube);
+                obj->setPrimitiveSize(1.0f);
+                obj->setPrimitiveColor(col);
+                obj->setBuildingType(std::string(o["buildingType"]));
+                obj->setAABBCollision(o["aabbCollision"].get<bool>());
+                obj->getTransform().setPosition(glm::vec3(
+                    o["position"][0].get<float>() + off.x,
+                    o["position"][1].get<float>() + off.y,
+                    o["position"][2].get<float>() + off.z));
+                obj->getTransform().setScale(glm::vec3(
+                    o["scale"][0], o["scale"][1], o["scale"][2]));
+                m_sceneObjects.push_back(std::move(obj));
+                ++made;
+            }
+            updateSceneObjectsList();
+            return "raised " + std::to_string(made) + " pieces ahead of you -- "
+                   "F5 out and in gives her collision, then walk aboard";
         });
 
         m_videoEditor = std::make_unique<eden::VideoEditor>(getContext());

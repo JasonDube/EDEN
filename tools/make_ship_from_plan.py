@@ -32,6 +32,13 @@ ROLE = {'E': ('engine', (0.78, 0.35, 0.16, 1.0)),
         'C': ('cargo',  (0.63, 0.43, 0.20, 1.0))}
 
 plan_path = sys.argv[1] if len(sys.argv) > 1 else 'tools/plans/midship_01.plan'
+# --objects-json <path>: emit ONLY the ship's pieces, origin at zero, for the
+# host to spawn into the CURRENT world wherever the player stands. The
+# standalone .eden mode below stays as the dev CLI.
+OBJ_JSON = None
+if '--objects-json' in sys.argv:
+    OBJ_JSON = sys.argv[sys.argv.index('--objects-json') + 1]
+    ORIGIN_X = ORIGIN_Z = 0.0
 rows = [r.rstrip('\n') for r in open(plan_path)]
 W = max(len(r) for r in rows); H = len(rows)
 def cell(x, y):
@@ -224,6 +231,16 @@ for (c, x, y, w, h) in sockets:
     objs.append(prim(f"Socket_{role}_{counts[role]}", "socket_marker",
                      wx(x, w), deck_top, wz(y, h),
                      w*CELL, 0.06, h*CELL, color, collide=False))
+
+if OBJ_JSON:
+    json.dump({"objects": objs}, open(OBJ_JSON, 'w'))
+    print("rooms:")
+    for r in rooms:
+        print(f"  {r['name']:16s} {len(r['cells']):3d} cells   "
+              f"{deck_counts.get(r['name'], 0)} deck plate(s)   letters {r['letters'] or '--'}")
+    print(f"{OBJ_JSON}: {len(objs)} pieces for in-world spawn "
+          f"({len(floors)} room plates, {len(frames)} frame plates, {len(walls)} walls, {len(sockets)} sockets)")
+    sys.exit(0)
 
 src = json.load(open('build/examples/terrain_editor/levels/shipyard.eden'))
 out = copy.deepcopy(src)

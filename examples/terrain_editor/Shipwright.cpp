@@ -154,10 +154,10 @@ void Shipwright::render(bool& open) {
         const bool go = ImGui::Button("BUILD SHIP");
         ImGui::PopStyleColor(3);
         if (go) {
-            const std::string lvl = m_buildShip(serialize());
-            m_status = lvl.empty()
+            const std::string result = m_buildShip(serialize());
+            m_status = result.empty()
                 ? "the yard refused the plan -- see the console for the generator's report"
-                : "ship raised -- loading " + lvl;
+                : result;
         }
     }
 
