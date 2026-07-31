@@ -57,6 +57,13 @@ MAT_KEY, MAT_NAME, MAT_DENSITY, MAT_PRICE, MAT_ARMOR, MAT_TINT = MATERIALS[MAT]
 OBJ_JSON = None
 if '--objects-json' in sys.argv:
     OBJ_JSON = sys.argv[sys.argv.index('--objects-json') + 1]
+# --rooms-json <path>: SURVEY ONLY -- run the segmentation and naming, emit
+# which cell belongs to which named room, build nothing. The drafting table's
+# Finalize button uses this so the preview IS the yard's verdict, not a copy
+# of its rules.
+ROOMS_JSON = None
+if '--rooms-json' in sys.argv:
+    ROOMS_JSON = sys.argv[sys.argv.index('--rooms-json') + 1]
     ORIGIN_X = ORIGIN_Z = 0.0
 rows = [r.rstrip('\n') for r in open(plan_path)]
 W = max(len(r) for r in rows); H = len(rows)
@@ -153,6 +160,12 @@ for r in rooms:
     n = seen_names.get(r['name'], 0) + 1
     seen_names[r['name']] = n
     if n > 1: r['name'] += f"_{n}"
+
+if ROOMS_JSON:
+    json.dump({"rooms": [{"name": r['name'], "cells": [list(c) for c in r['cells']]}
+                         for r in rooms]}, open(ROOMS_JSON, 'w'))
+    print(f"survey: {len(rooms)} rooms")
+    sys.exit(0)
 
 def rects_over(cells):
     cells = set(cells)

@@ -33,6 +33,16 @@ const ToolDef kTools[] = {
     {'_', "Erase",    IM_COL32( 25,  26,  30, 255)},
 };
 
+// Room colours for the survey overlay -- distinct, repeating past ten.
+const ImU32 kRoomPalette[] = {
+    IM_COL32( 45, 165, 155, 255), IM_COL32(205, 130,  50, 255),
+    IM_COL32(150, 100, 200, 255), IM_COL32( 95, 170,  70, 255),
+    IM_COL32(200, 175,  60, 255), IM_COL32(190,  80,  90, 255),
+    IM_COL32( 80, 130, 205, 255), IM_COL32(200, 110, 170, 255),
+    IM_COL32(130, 180, 180, 255), IM_COL32(160, 145, 100, 255),
+};
+constexpr int kRoomPaletteN = 10;
+
 ImU32 fillFor(char c) {
     for (const auto& t : kTools)
         if (t.c == c) return t.fill;
@@ -85,6 +95,8 @@ Shipwright::Shipwright() : m_cells(kW * kH, '_') {}
 
 void Shipwright::clear() {
     std::fill(m_cells.begin(), m_cells.end(), '_');
+    m_overlay.clear();
+    m_overlayIdx.clear();
     m_status = "cleared";
 }
 
@@ -92,6 +104,9 @@ void Shipwright::paint(int x, int y, char c) {
     if (x < 0 || x >= kW || y < 0 || y >= kH) return;
     m_cells[y * kW + x] = c;
     if (m_mirrorX) m_cells[y * kW + (kW - 1 - x)] = c;
+    // An edit voids the survey -- the colours must never lie.
+    m_overlay.clear();
+    m_overlayIdx.clear();
 }
 
 std::string Shipwright::serialize() const {
@@ -120,6 +135,8 @@ bool Shipwright::deserialize(const std::string& text) {
     }
     if (y == 0) return false;
     m_cells = std::move(next);
+    m_overlay.clear();
+    m_overlayIdx.clear();
     return true;
 }
 
@@ -242,6 +259,29 @@ void Shipwright::render(bool& open) {
     ImGui::SameLine();
     if (ImGui::Button("Clear")) clear();
     ImGui::SameLine(0, 24);
+    if (m_finalize) {
+        ImGui::PushStyleColor(ImGuiCol_Button, IM_COL32(45, 90, 140, 255));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, IM_COL32(55, 110, 170, 255));
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive, IM_COL32(40, 80, 125, 255));
+        const bool survey = ImGui::Button("Finalize");
+        ImGui::PopStyleColor(3);
+        if (survey) {
+            m_overlay.clear();
+            m_overlayIdx.clear();
+            if (m_finalize(serialize(), m_overlay) && !m_overlay.empty()) {
+                m_overlayIdx.assign(kW * kH, -1);
+                for (size_t i = 0; i < m_overlay.size(); ++i)
+                    for (const auto& [cx, cy] : m_overlay[i].cells)
+                        if (cx >= 0 && cx < kW && cy >= 0 && cy < kH)
+                            m_overlayIdx[cy * kW + cx] = static_cast<int>(i);
+                m_status = "the yard reads " + std::to_string(m_overlay.size()) +
+                           " room(s) -- her plates will carry the names below";
+            } else {
+                m_status = "the yard found no rooms in this plan";
+            }
+        }
+        ImGui::SameLine();
+    }
     if (m_buildShip) {
         ImGui::PushStyleColor(ImGuiCol_Button, IM_COL32(40, 120, 60, 255));
         ImGui::PushStyleColor(ImGuiCol_ButtonHovered, IM_COL32(50, 150, 75, 255));
@@ -284,7 +324,8 @@ void Shipwright::render(bool& open) {
             const char c = m_cells[y * kW + x];
             const ImVec2 a(origin.x + x * cell, origin.y + y * cell);
             const ImVec2 b(a.x + cell - 1.0f, a.y + cell - 1.0f);
-            dl->AddRectFilled(a, b, fillFor(c));
+            const int ri = m_overlayIdx.empty() ? -1 : m_overlayIdx[y * kW + x];
+            dl->AddRectFilled(a, b, ri >= 0 ? kRoomPalette[ri % kRoomPaletteN] : fillFor(c));
             if (isRoom(c) || c == 'D' || c == 'W') {
                 const char label[2] = {c, 0};
                 dl->AddText(ImVec2(a.x + 3.0f, a.y), IM_COL32(0, 0, 0, 200), label);
@@ -302,6 +343,23 @@ void Shipwright::render(bool& open) {
         if (m_mirrorX) {
             const ImVec2 m(origin.x + (kW - 1 - hx) * cell, origin.y + hy * cell);
             dl->AddRect(m, ImVec2(m.x + cell, m.y + cell), IM_COL32(255, 255, 120, 90));
+        }
+    }
+
+    // The survey legend: swatch, plate name, size -- the ship's future
+    // damage-model addresses, shown before a credit is spent.
+    if (!m_overlay.empty()) {
+        ImGui::Separator();
+        for (size_t i = 0; i < m_overlay.size(); ++i) {
+            const ImU32 col = kRoomPalette[i % kRoomPaletteN];
+            ImGui::ColorButton(("##room" + std::to_string(i)).c_str(),
+                               ImGui::ColorConvertU32ToFloat4(col),
+                               ImGuiColorEditFlags_NoTooltip, ImVec2(14, 14));
+            ImGui::SameLine();
+            ImGui::Text("%s", m_overlay[i].name.c_str());
+            ImGui::SameLine();
+            ImGui::TextDisabled("%d cells", static_cast<int>(m_overlay[i].cells.size()));
+            if (i % 3 < 2 && i + 1 < m_overlay.size()) ImGui::SameLine(0, 24);
         }
     }
 

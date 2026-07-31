@@ -45,6 +45,19 @@ public:
     // because Tab no longer passes through the old build panel that held it.
     void setCatalogHook(std::function<void()> h) { m_openCatalog = std::move(h); }
 
+    // The yard's SURVEY: Finalize hands the plan to the generator's
+    // segmentation (survey mode -- nothing is built) and gets back which cell
+    // belongs to which named room, so the designer sees the colour-coded
+    // verdict -- the very plate names the ship will carry -- before any
+    // credits change hands. Any edit voids the survey.
+    struct RoomPatch {
+        std::string name;
+        std::vector<std::pair<int, int>> cells;
+    };
+    void setFinalizeHook(std::function<bool(const std::string&, std::vector<RoomPatch>&)> h) {
+        m_finalize = std::move(h);
+    }
+
     // The plan as text, one row per line, exactly the legend above.
     std::string serialize() const;
     bool deserialize(const std::string& text);
@@ -57,6 +70,9 @@ private:
     void paint(int x, int y, char c);
 
     std::function<std::string(const std::string&, int)> m_buildShip;
+    std::function<bool(const std::string&, std::vector<RoomPatch>&)> m_finalize;
+    std::vector<RoomPatch> m_overlay;   // the survey's verdict, if current
+    std::vector<int>       m_overlayIdx; // per-cell room index, -1 = none
     int m_material = 1;             // hull material tier, 1..6
     std::function<void()> m_openCatalog;
     std::vector<char> m_cells;      // kW * kH, row-major

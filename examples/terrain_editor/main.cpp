@@ -656,6 +656,36 @@ protected:
             return done;
         });
 
+        // The survey: Finalize runs the SAME generator in --rooms-json mode --
+        // segmentation and naming only, nothing built, nothing charged -- so
+        // the drafting table's colours are the yard's own verdict.
+        m_shipwright.setFinalizeHook([this](const std::string& planText,
+                                            std::vector<Shipwright::RoomPatch>& out) -> bool {
+            const std::string root = CMAKE_SOURCE_DIR;
+            {
+                std::ofstream f(root + "/tools/plans/from_ted.plan");
+                if (!f) return false;
+                f << planText;
+            }
+            const std::string jsonPath = root + "/build/from_ted_rooms.json";
+            const std::string cmd =
+                "cd '" + root + "' && python3 tools/make_ship_from_plan.py "
+                "tools/plans/from_ted.plan --rooms-json '" + jsonPath + "'";
+            if (std::system(cmd.c_str()) != 0) return false;
+            std::ifstream jf(jsonPath);
+            if (!jf) return false;
+            nlohmann::json j;
+            try { jf >> j; } catch (...) { return false; }
+            for (auto& r : j["rooms"]) {
+                Shipwright::RoomPatch patch;
+                patch.name = r["name"].get<std::string>();
+                for (auto& c : r["cells"])
+                    patch.cells.emplace_back(c[0].get<int>(), c[1].get<int>());
+                out.push_back(std::move(patch));
+            }
+            return true;
+        });
+
         m_videoEditor = std::make_unique<eden::VideoEditor>(getContext());
         m_videoEditor->setDefaultDir(
             std::string(CMAKE_SOURCE_DIR) + "/examples/terrain_editor/assets/clips");
