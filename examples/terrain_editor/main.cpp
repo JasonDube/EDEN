@@ -9433,9 +9433,14 @@ private:
                                     m_inPanelFocusMode ? 1 : 0);
                         std::fflush(stdout);
                     }
+                    // NOT Shift: a grounded deck legitimately refuses to descend
+                    // (the terrain clamp zeroes it), and counting Shift here made
+                    // the detector cry wolf every frame the pilot held descend on
+                    // the ground -- which is exactly what the first field test
+                    // logged. W/A/S/D and Space can never be legitimately zeroed.
                     const bool keysHeld = Input::isKeyDown(Input::KEY_W) || Input::isKeyDown(Input::KEY_A) ||
                                           Input::isKeyDown(Input::KEY_S) || Input::isKeyDown(Input::KEY_D) ||
-                                          Input::isKeyDown(Input::KEY_SPACE) || Input::isKeyDown(Input::KEY_LEFT_SHIFT);
+                                          Input::isKeyDown(Input::KEY_SPACE);
                     if (keysHeld && glm::length(m_vessel.playerCarry()) < 1e-6f) {
                         std::printf("[FlightGlitch] PAUSED with keys held  guiKey=%d guiTxt=%d cc=%d\n",
                                     ImGui::GetIO().WantCaptureKeyboard ? 1 : 0,
