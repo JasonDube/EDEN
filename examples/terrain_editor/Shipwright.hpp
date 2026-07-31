@@ -39,7 +39,7 @@ public:
     // generator, queues the level load. Returns the level path, or empty on
     // failure. The Shipwright stays a drafting table; shipbuilding is the
     // yard's business.
-    void setBuildShipHook(std::function<std::string(const std::string&)> h) { m_buildShip = std::move(h); }
+    void setBuildShipHook(std::function<std::string(const std::string&, int)> h) { m_buildShip = std::move(h); }
 
     // The yard's chandlery: opens the parts catalog beside the drafting table,
     // because Tab no longer passes through the old build panel that held it.
@@ -56,7 +56,8 @@ private:
     void clear();
     void paint(int x, int y, char c);
 
-    std::function<std::string(const std::string&)> m_buildShip;
+    std::function<std::string(const std::string&, int)> m_buildShip;
+    int m_material = 1;             // hull material tier, 1..6
     std::function<void()> m_openCatalog;
     std::vector<char> m_cells;      // kW * kH, row-major
     char m_tool = '#';

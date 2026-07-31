@@ -32,6 +32,25 @@ ROLE = {'E': ('engine', (0.78, 0.35, 0.16, 1.0)),
         'C': ('cargo',  (0.63, 0.43, 0.20, 1.0))}
 
 plan_path = sys.argv[1] if len(sys.argv) > 1 else 'tools/plans/midship_01.plan'
+
+# ---- hull materials --------------------------------------------------------
+# The tech ladder, tier 1 -> 6. Density in t/unit^3, price in CR/unit^3,
+# armor for the future per-slab damage model. KEEP IN SYNC with the table in
+# Shipwright.cpp (the drafting table's live pricing) -- the yard here is the
+# authority; the tint is multiplied into every structural piece so a hull
+# wears its material. Most tiers are locked early game (the Shipwright
+# enforces availability; the yard builds whatever it is asked to).
+MATERIALS = {
+    1: ("light_alloy",       "Light Alloy",              1.4,   2,  1, (1.02, 1.00, 0.96)),
+    2: ("metallic_laminate", "Metallic Laminate",        2.0,   5,  2, (1.00, 1.00, 1.00)),
+    3: ("adv_laminate",      "Adv. Metallic Laminate",   2.2,  14,  4, (0.95, 0.97, 1.05)),
+    4: ("nanocomposite",     "Nanocomposite",            1.1,  40,  6, (0.85, 0.88, 0.92)),
+    5: ("diamondoid",        "Diamondoid",               1.6, 150, 10, (1.05, 1.05, 1.10)),
+    6: ("exotic_laminate",   "Exotic Armor Laminate",    5.0, 600, 25, (0.75, 0.72, 0.85)),
+}
+MAT = int(sys.argv[sys.argv.index('--material') + 1]) if '--material' in sys.argv else 1
+if MAT not in MATERIALS: MAT = 1
+MAT_KEY, MAT_NAME, MAT_DENSITY, MAT_PRICE, MAT_ARMOR, MAT_TINT = MATERIALS[MAT]
 # --objects-json <path>: emit ONLY the ship's pieces, origin at zero, for the
 # host to spawn into the CURRENT world wherever the player stands. The
 # standalone .eden mode below stays as the dev CLI.
@@ -242,8 +261,27 @@ for (c, x, y, w, h) in sockets:
                      wx(x, w), deck_top, wz(y, h),
                      w*CELL, 0.06, h*CELL, color, collide=False))
 
+# ---- the material is applied and the bill is drawn up ----------------------
+# Structural pieces (plates, frames, walls, windows) take the material's
+# density/armor as metadata -- the helm's weighing reads density off each
+# plate -- and its tint into their colour. Sockets are painted intent and
+# take neither. The bill is volume times price, whole hull.
+cost_cr = 0.0
+for o in objs:
+    if o["buildingType"] in ("platform_slab", "platform_wall"):
+        sx, sy, sz = o["scale"]
+        cost_cr += sx * sy * sz * MAT_PRICE
+        o["metadata"] = {"material": MAT_KEY, "density": f"{MAT_DENSITY:g}",
+                         "armor": str(MAT_ARMOR)}
+        c = o["primitiveColor"]
+        o["primitiveColor"] = [min(1.0, c[0]*MAT_TINT[0]), min(1.0, c[1]*MAT_TINT[1]),
+                               min(1.0, c[2]*MAT_TINT[2]), c[3]]
+cost_cr = round(cost_cr)
+
 if OBJ_JSON:
-    json.dump({"objects": objs}, open(OBJ_JSON, 'w'))
+    json.dump({"objects": objs, "cost_cr": cost_cr, "material": MAT_NAME},
+              open(OBJ_JSON, 'w'))
+    print(f"materials: {MAT_NAME} -- {cost_cr} CR")
     print("rooms:")
     for r in rooms:
         print(f"  {r['name']:16s} {len(r['cells']):3d} cells   "

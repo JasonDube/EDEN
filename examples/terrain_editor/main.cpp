@@ -553,7 +553,7 @@ protected:
         // own hull: correct plan, wrong world. The generator now hands back
         // just the pieces (origin at zero) and the host spawns them here.
         // Its room-table report still lands in the console.
-        m_shipwright.setBuildShipHook([this](const std::string& planText) -> std::string {
+        m_shipwright.setBuildShipHook([this](const std::string& planText, int material) -> std::string {
             const std::string root = CMAKE_SOURCE_DIR;
             const std::string planPath = root + "/tools/plans/from_ted.plan";
             {
@@ -564,13 +564,28 @@ protected:
             const std::string jsonPath = root + "/build/from_ted_objects.json";
             const std::string cmd =
                 "cd '" + root + "' && python3 tools/make_ship_from_plan.py "
-                "tools/plans/from_ted.plan --objects-json '" + jsonPath + "'";
+                "tools/plans/from_ted.plan --objects-json '" + jsonPath + "'"
+                " --material " + std::to_string(material);
             if (std::system(cmd.c_str()) != 0) return {};
             std::ifstream jf(jsonPath);
             if (!jf) return {};
             nlohmann::json j;
             try { jf >> j; } catch (...) { return {}; }
             if (!j.contains("objects") || j["objects"].empty()) return {};
+
+            // THE BILL. The yard prices the hull (volume times the material's
+            // rate) and will not lay a single plate on credit. Refusing BEFORE
+            // spawning keeps a failed purchase side-effect free.
+            const float cost = j.value("cost_cr", 0.0f);
+            const std::string matName = j.value("material", std::string("hull material"));
+            if (cost > m_playerCredits) {
+                char msg[160];
+                std::snprintf(msg, sizeof msg,
+                              "the yard wants %.0f CR of %s -- you hold %.0f",
+                              cost, matName.c_str(), m_playerCredits);
+                return msg;
+            }
+            m_playerCredits -= cost;
 
             // Footprint of the ship, to drop her centred ahead of the player.
             glm::vec3 mn(1e9f), mx(-1e9f);
@@ -615,6 +630,13 @@ protected:
                 // ever claimed the flag -- the pipeline was there all along.
                 if (col.a < 0.999f) obj->setTransparent(true);
                 obj->setBuildingType(std::string(o["buildingType"]));
+                // The material rides each plate: density feeds the helm's
+                // weighing, armor waits for the damage model.
+                if (o.contains("metadata")) {
+                    std::unordered_map<std::string, std::string> md;
+                    for (auto& [k, v] : o["metadata"].items()) md[k] = v.get<std::string>();
+                    obj->setModelMetadata(md);
+                }
                 obj->setAABBCollision(o["aabbCollision"].get<bool>());
                 obj->getTransform().setPosition(glm::vec3(
                     o["position"][0].get<float>() + off.x,
@@ -626,8 +648,12 @@ protected:
                 ++made;
             }
             updateSceneObjectsList();
-            return "raised " + std::to_string(made) + " pieces ahead of you -- "
-                   "F5 out and in gives her collision, then walk aboard";
+            char done[200];
+            std::snprintf(done, sizeof done,
+                          "raised %d pieces of %s for %.0f CR (%.0f CR left) -- "
+                          "F5 out and in gives her collision, then walk aboard",
+                          made, matName.c_str(), cost, m_playerCredits);
+            return done;
         });
 
         m_videoEditor = std::make_unique<eden::VideoEditor>(getContext());
@@ -8182,6 +8208,21 @@ private:
                     if (std::fabs(m_vessel.tonnage() - tonsBefore) > 0.01f)
                         fail("a socket pad changed the tonnage");
                     m_vessel.releaseHelm();
+
+                    // MATERIALS: a plate weighs what its density metadata
+                    // says. Deck2 (6x0.5x12 = 36 u^3) recast in a density-4
+                    // material must add exactly 36 * (4 - 2) = 72 t over the
+                    // default weighing.
+                    for (auto& o : m_sceneObjects)
+                        if (o && o->getName() == "VesselCheckDeck2")
+                            o->setModelMetadata({{"density", "4.0"}});
+                    if (!m_vessel.takeHelm("VesselCheckHelm")) {
+                        fail("takeHelm refused after a density recast: " + m_vessel.lastError());
+                    } else {
+                        if (std::fabs(m_vessel.tonnage() - (tonsBefore + 72.0f)) > 0.1f)
+                            fail("density metadata did not reweigh the plate");
+                        m_vessel.releaseHelm();
+                    }
                 }
             }
 

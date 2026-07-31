@@ -41,20 +41,42 @@ ImU32 fillFor(char c) {
 
 bool isRoom(char c) { return c=='B' || c=='C' || c=='E' || c=='R'; }
 
+// THE HULL MATERIALS LADDER, tier 1 -> 6. KEEP IN SYNC with MATERIALS in
+// make_ship_from_plan.py -- the yard is the authority; this copy prices the
+// drafting table live. Density t/unit^3, price CR/unit^3, armor for the
+// damage model to come. Most tiers are locked: visible on the shelf, not
+// sold in this star system -- the ladder is content before it is mechanics.
+struct HullMat {
+    const char* label;
+    float       density;
+    float       priceU3;
+    int         armor;
+    bool        available;
+};
+const HullMat kHullMats[] = {
+    {"Light Alloy",             1.4f,   2.0f,  1, true},
+    {"Metallic Laminate",       2.0f,   5.0f,  2, true},
+    {"Adv. Metallic Laminate",  2.2f,  14.0f,  4, false},
+    {"Nanocomposite",           1.1f,  40.0f,  6, false},
+    {"Diamondoid",              1.6f, 150.0f, 10, false},
+    {"Exotic Armor Laminate",   5.0f, 600.0f, 25, false},
+};
+
 // THE LIVE WEIGHING. Same arithmetic the yard and the helm use, run over the
 // plan as it is drawn, so the designer watches her get heavier stroke by
-// stroke. Keep in sync with make_ship_from_plan.py (CELL 2.0, FLOOR_T 0.4,
-// WALL_H 3.0, walls full-cell thick) and VesselFlight.cpp (2 t per unit^3,
-// stock engine thrust 2500, stock helm steering 900, turn clamp 8..80).
-float planTonnage(const std::vector<char>& cells) {
-    constexpr float kFloorCell = 2.0f * 0.4f * 2.0f * 2.0f;            // plate
-    constexpr float kWallCell  = (2.0f * 3.0f * 2.0f + 2.0f * 0.4f * 2.0f) * 2.0f; // wall + frame
-    float t = 0.0f;
+// stroke. Volume here, material applied by the caller. Keep in sync with
+// make_ship_from_plan.py (CELL 2.0, FLOOR_T 0.4, WALL_H 3.0, walls full-cell
+// thick) and VesselFlight.cpp (stock engine thrust 2500 / mass 400, stock
+// helm steering 900 / mass 180, turn clamp 8..80).
+float planVolume(const std::vector<char>& cells) {
+    constexpr float kFloorCell = 2.0f * 0.4f * 2.0f;                     // plate
+    constexpr float kWallCell  = 2.0f * 3.0f * 2.0f + 2.0f * 0.4f * 2.0f; // wall + frame
+    float v = 0.0f;
     for (char c : cells) {
-        if (c == '#' || c == 'W') t += kWallCell;
-        else if (c == '.' || c == 'D' || isRoom(c)) t += kFloorCell;
+        if (c == '#' || c == 'W') v += kWallCell;
+        else if (c == '.' || c == 'D' || isRoom(c)) v += kFloorCell;
     }
-    return t;
+    return v;
 }
 
 } // namespace
@@ -131,9 +153,35 @@ void Shipwright::render(bool& open) {
     ImGui::SameLine(0, 20);
     ImGui::TextDisabled("LMB paint   RMB erase   top of grid = BOW");
 
-    // The displacement line: hull weight as drawn, how many stock engines
-    // she will demand, and how she will answer a stock helm.
-    const float tons = planTonnage(m_cells);
+    // The material shelf: pick what she is made of. Locked tiers stay on
+    // display -- a ladder you can see is a reason to get rich.
+    {
+        const HullMat& cur = kHullMats[m_material - 1];
+        ImGui::SetNextItemWidth(240.0f);
+        if (ImGui::BeginCombo("##hullmat", cur.label)) {
+            for (int i = 0; i < 6; ++i) {
+                const HullMat& m = kHullMats[i];
+                char row[128];
+                std::snprintf(row, sizeof row, "%-24s %.1f t/u3  %.0f CR/u3  armor %d%s",
+                              m.label, m.density, m.priceU3, m.armor,
+                              m.available ? "" : "   -- not sold in this system");
+                if (!m.available) {
+                    ImGui::TextDisabled("%s", row);
+                } else if (ImGui::Selectable(row, m_material == i + 1)) {
+                    m_material = i + 1;
+                }
+            }
+            ImGui::EndCombo();
+        }
+        ImGui::SameLine();
+        ImGui::TextDisabled("hull material");
+    }
+
+    // The displacement line: hull weight as drawn, the materials bill, how
+    // many stock engines she will demand, and how she answers a stock helm.
+    const float vol = planVolume(m_cells);
+    const HullMat& mat = kHullMats[m_material - 1];
+    const float tons = vol * mat.density;
     if (tons > 0.0f) {
         // AS FITTED, not bare hull -- the misread that grounded a corvette:
         // the table said "1 engine" for the hull alone, the helm weighed hull
@@ -145,6 +193,9 @@ void Shipwright::render(bool& open) {
         const float fitted = tons + kHelmMass + engines * kEngineMass;
         const float turn = std::clamp(100.0f * 900.0f / fitted, 8.0f, 80.0f);
         ImGui::Text("hull %.0f t", tons);
+        ImGui::SameLine(0, 18);
+        ImGui::TextColored(ImVec4(0.55f, 0.85f, 0.55f, 1.0f),
+                           "materials %.0f CR", vol * mat.priceU3);
         ImGui::SameLine(0, 18);
         ImGui::Text("fitted ~%.0f t", fitted);
         ImGui::SameLine(0, 18);
@@ -198,7 +249,7 @@ void Shipwright::render(bool& open) {
         const bool go = ImGui::Button("BUILD SHIP");
         ImGui::PopStyleColor(3);
         if (go) {
-            const std::string result = m_buildShip(serialize());
+            const std::string result = m_buildShip(serialize(), m_material);
             m_status = result.empty()
                 ? "the yard refused the plan -- see the console for the generator's report"
                 : result;

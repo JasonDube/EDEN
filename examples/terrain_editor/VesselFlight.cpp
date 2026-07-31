@@ -166,8 +166,11 @@ bool VesselFlight::takeHelm(const std::string& helmName) {
             // part. Weighing pads at the default part mass once inflated a
             // corvette by 225 t and cost her a clean takeoff.
         } else if (bt == "platform_slab" || bt == "platform_wall") {
+            // A plate weighs what it is MADE OF: the yard stamps the hull
+            // material's density into each piece; plates from before the
+            // materials ladder weigh the old default.
             const glm::vec3 sc = o->getTransform().getScale();
-            m_tonnage += sc.x * sc.y * sc.z * kPlateDensity;
+            m_tonnage += sc.x * sc.y * sc.z * metaFloat(o, "density", kPlateDensity);
         } else {
             m_tonnage += metaFloat(o, "mass", kDefaultMass);
         }
