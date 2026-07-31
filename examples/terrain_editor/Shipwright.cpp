@@ -310,6 +310,8 @@ void Shipwright::render(bool& open) {
 
     ImGui::InvisibleButton("plan_grid", ImVec2(kW * cell, kH * cell));
     const bool hovered = ImGui::IsItemHovered();
+    ImGui::SameLine();
+    if (ImGui::Button(m_sideView ? "Side\nview\n[on]" : "Side\nview")) m_sideView = !m_sideView;
     const ImVec2 mouse = ImGui::GetIO().MousePos;
     const int hx = static_cast<int>((mouse.x - origin.x) / cell);
     const int hy = static_cast<int>((mouse.y - origin.y) / cell);
@@ -344,6 +346,52 @@ void Shipwright::render(bool& open) {
             const ImVec2 m(origin.x + (kW - 1 - hx) * cell, origin.y + hy * cell);
             dl->AddRect(m, ImVec2(m.x + cell, m.y + cell), IM_COL32(255, 255, 120, 90));
         }
+    }
+
+    // THE PROFILE: the ship from her port side, bow to the RIGHT. Rows of the
+    // plan become stations along her length; a row with hull shows the floor
+    // plate, a row with walls shows the full wall height, windows glaze
+    // their band. Today, with no height variation, she reads as a straight
+    // line -- this strip is where superstructure, decks, and a real
+    // silhouette will appear the day the plan learns height.
+    if (m_sideView) {
+        const float pxU = cell / 2.0f;           // pixels per world unit (CELL=2)
+        const float floorPx = 0.4f * pxU;        // FLOOR_T
+        const float wallPx  = 3.0f * pxU;        // WALL_H
+        const float stripH  = wallPx + floorPx + 18.0f;
+        const ImVec2 po = ImGui::GetCursorScreenPos();
+        ImGui::Dummy(ImVec2(kW * cell, stripH));
+        const float keelY = po.y + stripH - 4.0f;
+        bool any = false;
+        for (int y = 0; y < kH; ++y) {
+            bool hasFloor = false, hasWall = false, hasWin = false;
+            for (int x = 0; x < kW; ++x) {
+                const char c = m_cells[y * kW + x];
+                if (c == '#') hasWall = true;
+                else if (c == 'W') { hasWall = true; hasWin = true; }
+                else if (c == '.' || c == 'D' || isRoom(c)) hasFloor = true;
+            }
+            if (!hasFloor && !hasWall) continue;
+            any = true;
+            const float sx = po.x + (kH - 1 - y) * cell;   // bow (y=0) at the right
+            dl->AddRectFilled(ImVec2(sx, keelY - floorPx), ImVec2(sx + cell, keelY),
+                              IM_COL32(70, 72, 80, 255));
+            if (hasWall) {
+                const float top = keelY - floorPx - wallPx;
+                dl->AddRectFilled(ImVec2(sx, top), ImVec2(sx + cell, keelY - floorPx),
+                                  IM_COL32(150, 155, 165, 255));
+                if (hasWin)
+                    dl->AddRectFilled(ImVec2(sx, top + wallPx * 0.25f),
+                                      ImVec2(sx + cell, top + wallPx * 0.60f),
+                                      IM_COL32(120, 180, 255, 255));
+            }
+        }
+        dl->AddLine(ImVec2(po.x, keelY), ImVec2(po.x + kW * cell, keelY),
+                    IM_COL32(255, 255, 255, 40));
+        dl->AddText(ImVec2(po.x + kW * cell - 42.0f, po.y), IM_COL32(255, 255, 120, 200), "BOW>");
+        if (!any)
+            dl->AddText(ImVec2(po.x + 8.0f, po.y + 4.0f), IM_COL32(140, 140, 140, 255),
+                        "profile -- draw a hull to see her from the side");
     }
 
     // The survey legend: swatch, plate name, size -- the ship's future
