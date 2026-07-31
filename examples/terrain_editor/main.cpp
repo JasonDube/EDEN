@@ -15654,7 +15654,14 @@ private:
                     && obj->getBuildingType() != "platform_slab"
                     && obj->getBuildingType() != "platform_wall") continue;
                 float dist = obj->getWorldBounds().intersect(rayO, rayD);
-                if (dist >= 0 && dist < 5.0f && dist < bestDist) {
+                // 5 m is a bottle's reach. A building piece is room-sized -- the
+                // far side of a 12-unit deck or a wall across the hold is well
+                // past 5 m, which made pieces select fine in build mode (long
+                // reach) and "not at all" in play mode. Same reach as build.
+                const bool isPiece = obj->getBuildingType() == "platform_slab" ||
+                                     obj->getBuildingType() == "platform_wall";
+                const float reach = isPiece ? 20.0f : 5.0f;
+                if (dist >= 0 && dist < reach && dist < bestDist) {
                     bestDist = dist;
                     bestIdx = si;
                 }
@@ -15682,7 +15689,10 @@ private:
             for (auto& so : m_sceneObjects) {
                 if (!so || !so->isVisible()) continue;
                 if (so->getBeingType() != BeingType::INTERACTION && so->getBuildingType() != "salvage"
-                    && so->getBuildingType() != "wall_frame" && so->getName().find("dirt_pile") == std::string::npos) continue;
+                    && so->getBuildingType() != "wall_frame"
+                    && so->getBuildingType() != "platform_slab"
+                    && so->getBuildingType() != "platform_wall"
+                    && so->getName().find("dirt_pile") == std::string::npos) continue;
                 float d = so->getWorldBounds().intersect(focusCamPos, focusCamFront);
                 if (d >= 0 && d < focusBest) {
                     focusBest = d;
