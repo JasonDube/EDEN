@@ -528,6 +528,28 @@ protected:
             m_battleSim.setHost(war);
         }
 
+        // The shipyard: BUILD SHIP in the Shipwright writes the plan, runs the
+        // generator, and queues the raised level for load. The generator's
+        // room table and counts land on stdout, which the console captures.
+        m_shipwright.setBuildShipHook([this](const std::string& planText) -> std::string {
+            const std::string root = CMAKE_SOURCE_DIR;
+            const std::string planPath = root + "/tools/plans/from_ted.plan";
+            {
+                std::ofstream f(planPath);
+                if (!f) return {};
+                f << planText;
+            }
+            const std::string cmd =
+                "cd '" + root + "' && python3 tools/make_ship_from_plan.py tools/plans/from_ted.plan";
+            if (std::system(cmd.c_str()) != 0) return {};
+            const std::string lvl = root + "/build/examples/terrain_editor/levels/from_ted.eden";
+            // Leave play mode first -- loadLevel rebuilds the world under the
+            // player, and the pending-load hook applies at frame start.
+            if (m_isPlayMode) exitPlayMode();
+            m_pendingLevelLoad = lvl;
+            return lvl;
+        });
+
         m_videoEditor = std::make_unique<eden::VideoEditor>(getContext());
         m_videoEditor->setDefaultDir(
             std::string(CMAKE_SOURCE_DIR) + "/examples/terrain_editor/assets/clips");

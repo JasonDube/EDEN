@@ -23,6 +23,7 @@
 //   E  engine room         R  robot station
 // Top of the grid is the BOW.
 
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -32,6 +33,12 @@ public:
 
     // The window. `open` is the host's toggle (Tab in play mode).
     void render(bool& open);
+
+    // The host raises a ship from plan text: writes the plan, runs the
+    // generator, queues the level load. Returns the level path, or empty on
+    // failure. The Shipwright stays a drafting table; shipbuilding is the
+    // yard's business.
+    void setBuildShipHook(std::function<std::string(const std::string&)> h) { m_buildShip = std::move(h); }
 
     // The plan as text, one row per line, exactly the legend above.
     std::string serialize() const;
@@ -44,6 +51,7 @@ private:
     void clear();
     void paint(int x, int y, char c);
 
+    std::function<std::string(const std::string&)> m_buildShip;
     std::vector<char> m_cells;      // kW * kH, row-major
     char m_tool = '#';
     bool m_mirrorX = true;          // ships are symmetric; paint both halves

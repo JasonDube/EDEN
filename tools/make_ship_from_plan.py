@@ -230,8 +230,8 @@ out = copy.deepcopy(src)
 out['objects'] = objs
 stern_z = ORIGIN_Z + (max(y+h for (x,y,w,h,_) in floors) - H/2.0) * CELL
 out['settings']['spawnPosition'] = [ORIGIN_X, 2.0, stern_z + 8.0]
-out['name'] = 'plan_ship'
-dst = 'build/examples/terrain_editor/levels/plan_ship.eden'
+out['name'] = stem
+dst = f'build/examples/terrain_editor/levels/{stem}.eden'
 json.dump(out, open(dst, 'w'), indent=1)
 
 print("rooms:")

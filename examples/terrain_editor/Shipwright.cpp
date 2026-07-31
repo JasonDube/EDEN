@@ -146,6 +146,20 @@ void Shipwright::render(bool& open) {
     }
     ImGui::SameLine();
     if (ImGui::Button("Clear")) clear();
+    ImGui::SameLine(0, 24);
+    if (m_buildShip) {
+        ImGui::PushStyleColor(ImGuiCol_Button, IM_COL32(40, 120, 60, 255));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, IM_COL32(50, 150, 75, 255));
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive, IM_COL32(35, 100, 50, 255));
+        const bool go = ImGui::Button("BUILD SHIP");
+        ImGui::PopStyleColor(3);
+        if (go) {
+            const std::string lvl = m_buildShip(serialize());
+            m_status = lvl.empty()
+                ? "the yard refused the plan -- see the console for the generator's report"
+                : "ship raised -- loading " + lvl;
+        }
+    }
 
     // ---- the grid ----------------------------------------------------------
     const float cell = 13.0f;
