@@ -9396,6 +9396,61 @@ private:
             }
         }
 
+        // Flight discontinuity detector -- print-only, and the arbiter for the
+        // "occasional one-frame hiccup" reported in flight. A discontinuity has
+        // exactly two shapes, and this catches both on the frame they happen:
+        //
+        //  DIVERGED: the camera's actual motion since last frame disagrees with
+        //  what the deck moved (the carry). Whoever moved the player afterwards
+        //  -- a collision revert, a clamp, a mode flicker -- is the glitch.
+        //
+        //  PAUSED: the ship moved nothing this frame while movement keys are
+        //  physically held. Something ate the input for a frame (the usual
+        //  suspect is ImGui wanting the keyboard for one frame).
+        //
+        // Runs AFTER every pass that can touch the camera, so nothing that
+        // happens later in the frame can hide from it.
+        {
+            static glm::vec3 s_prevCam(0.0f);
+            static bool s_wasFlying = false;
+            if (m_vessel.isFlying()) {
+                const glm::vec3 cam = m_camera.getPosition();
+                if (s_wasFlying) {
+                    const glm::vec3 camDelta = cam - s_prevCam;
+                    const glm::vec3 diff = camDelta - m_vessel.playerCarry();
+                    if (glm::length(diff) > 0.02f) {
+                        std::printf("[FlightGlitch] DIVERGED diff=(%.3f,%.3f,%.3f) "
+                                    "carry=(%.3f,%.3f,%.3f) camMoved=(%.3f,%.3f,%.3f) "
+                                    "cc=%d guiKey=%d guiTxt=%d cursor=%d build=%d focus=%d\n",
+                                    diff.x, diff.y, diff.z,
+                                    m_vessel.playerCarry().x, m_vessel.playerCarry().y, m_vessel.playerCarry().z,
+                                    camDelta.x, camDelta.y, camDelta.z,
+                                    useCharacterController ? 1 : 0,
+                                    ImGui::GetIO().WantCaptureKeyboard ? 1 : 0,
+                                    ImGui::GetIO().WantTextInput ? 1 : 0,
+                                    m_playModeCursorVisible ? 1 : 0,
+                                    m_showSiloConfig ? 1 : 0,
+                                    m_inPanelFocusMode ? 1 : 0);
+                        std::fflush(stdout);
+                    }
+                    const bool keysHeld = Input::isKeyDown(Input::KEY_W) || Input::isKeyDown(Input::KEY_A) ||
+                                          Input::isKeyDown(Input::KEY_S) || Input::isKeyDown(Input::KEY_D) ||
+                                          Input::isKeyDown(Input::KEY_SPACE) || Input::isKeyDown(Input::KEY_LEFT_SHIFT);
+                    if (keysHeld && glm::length(m_vessel.playerCarry()) < 1e-6f) {
+                        std::printf("[FlightGlitch] PAUSED with keys held  guiKey=%d guiTxt=%d cc=%d\n",
+                                    ImGui::GetIO().WantCaptureKeyboard ? 1 : 0,
+                                    ImGui::GetIO().WantTextInput ? 1 : 0,
+                                    useCharacterController ? 1 : 0);
+                        std::fflush(stdout);
+                    }
+                }
+                s_prevCam = cam;
+                s_wasFlying = true;
+            } else {
+                s_wasFlying = false;
+            }
+        }
+
         // Track movement mode changes (engine hum disabled for now)
         m_lastMovementMode = m_camera.getMovementMode();
 
