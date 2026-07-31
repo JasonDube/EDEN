@@ -18,11 +18,12 @@ namespace {
 // A helm is a helm because its FILE said so: the catalog writes `role` into
 // the hotbar slot's metadata, and the ordinary placement path copies slot
 // metadata onto the placed object. No name matching, no special object class.
-bool isHelm(SceneObject* o) {
+bool hasRole(SceneObject* o, const char* role) {
     const auto& meta = o->getModelMetadata();
     auto it = meta.find("role");
-    return it != meta.end() && it->second == "helm";
+    return it != meta.end() && it->second == role;
 }
+bool isHelm(SceneObject* o) { return hasRole(o, "helm"); }
 
 constexpr float kFlySpeed  = 8.0f;   // units/s along the deck
 constexpr float kLiftSpeed = 5.0f;   // units/s up and down
@@ -96,6 +97,23 @@ bool VesselFlight::takeHelm(const std::string& helmName) {
     if (!helm) { m_error = "no such helm: " + helmName; return false; }
     if (!isHelm(helm)) { m_error = helmName + " is not a helm"; return false; }
     if (!buildManifest(helm)) return false;
+
+    // NO ENGINE, NO LIFT. The helm's own summary has promised this since the
+    // day it was authored -- "Needs an engine on the same hull" -- and the rule
+    // is spatial like everything else: an engine counts if it is ABOARD. The
+    // role comes from the engine's file, through the shop, through placement.
+    bool engineAboard = false;
+    for (const std::string& name : m_manifest) {
+        if (SceneObject* o = find(name)) {
+            if (hasRole(o, "engine")) { engineAboard = true; break; }
+        }
+    }
+    if (!engineAboard) {
+        m_error = "no engine aboard -- the deck will not lift";
+        m_manifest.clear();
+        m_deckName.clear();
+        return false;
+    }
 
     // Parked collision bodies would stay behind at the old spot -- solid air
     // there, ghost deck at the new one. Dropped through the host's hook; the
@@ -171,10 +189,14 @@ void VesselFlight::update(float dt, bool isPlayMode, bool guiWantsKeys) {
 
     const bool e = !guiWantsKeys && Input::isKeyPressed(Input::KEY_E);
 
+    if (m_errorTimer > 0.0f) m_errorTimer -= dt;
+
     if (!m_flying) {
         SceneObject* helm = helmNearPlayer(kReach);
         m_showPrompt = (helm != nullptr);
-        if (helm && e) takeHelm(helm->getName());
+        // A refusal is worth three seconds on screen -- "nothing happened" is
+        // the worst possible answer to pressing E.
+        if (helm && e && !takeHelm(helm->getName())) m_errorTimer = 3.0f;
         return;
     }
 
@@ -203,8 +225,9 @@ void VesselFlight::update(float dt, bool isPlayMode, bool guiWantsKeys) {
 
 void VesselFlight::renderUI(float screenW, float screenH) const {
     const char* line = nullptr;
-    if (m_flying)          line = "FLYING -- WASD move, Space/Shift up/down, E to set down";
-    else if (m_showPrompt) line = "E -- take the helm";
+    if (m_flying)               line = "FLYING -- WASD move, Space/Shift up/down, E to set down";
+    else if (m_errorTimer > 0.0f) line = m_error.c_str();
+    else if (m_showPrompt)      line = "E -- take the helm";
     if (!line) return;
 
     ImDrawList* dl = ImGui::GetForegroundDrawList();
@@ -212,6 +235,8 @@ void VesselFlight::renderUI(float screenW, float screenH) const {
     const ImVec2 at(screenW * 0.5f - sz.x * 0.5f, screenH - 140.0f);
     dl->AddRectFilled(ImVec2(at.x - 8, at.y - 4), ImVec2(at.x + sz.x + 8, at.y + sz.y + 4),
                       IM_COL32(0, 0, 0, 160), 4.0f);
-    dl->AddText(at, m_flying ? IM_COL32(120, 220, 255, 255) : IM_COL32(255, 230, 150, 255),
-                line);
+    const ImU32 col = m_flying              ? IM_COL32(120, 220, 255, 255)
+                    : (m_errorTimer > 0.0f) ? IM_COL32(255, 140, 110, 255)
+                                            : IM_COL32(255, 230, 150, 255);
+    dl->AddText(at, col, line);
 }

@@ -174,7 +174,7 @@ int runEmptyLevelChecks(const LevelCheckHooks& hooks, bool verbose) {
     if (hooks.vesselSelfTest) {
         const std::string problem = hooks.vesselSelfTest();
         report("vessel: flies", problem.empty(),
-               problem.empty() ? "helm -> manifest -> moved together, bystander stayed" : problem);
+               problem.empty() ? "engine rule enforced + vessel moved as one, bystander stayed" : problem);
     } else {
         report("vessel: flies", false, "no hook -- flight is NOT checked");
     }

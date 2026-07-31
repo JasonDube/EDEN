@@ -7939,19 +7939,32 @@ private:
             };
 
             const glm::vec3 strayBefore = posOf("VesselCheckStray");
+
+            // FIRST, the rule: without an engine aboard, the helm must refuse.
+            if (m_vessel.takeHelm("VesselCheckHelm"))
+                fail("takeHelm accepted a vessel with NO engine aboard");
+            else if (m_vessel.lastError().find("engine") == std::string::npos)
+                fail("refused, but not for the engine: " + m_vessel.lastError());
+
+            auto* engine = makeBox("VesselCheckEngine", glm::vec3(297.0f, 0.5f, 299.0f),
+                                   glm::vec3(1.2f, 1.0f, 1.6f), nullptr);
+            engine->setModelMetadata({{"role", "engine"}});
+            updateSceneObjectsList();
+
             if (!m_vessel.takeHelm("VesselCheckHelm")) {
-                fail("takeHelm refused: " + m_vessel.lastError());
+                fail("takeHelm refused WITH an engine: " + m_vessel.lastError());
             } else {
-                if (m_vessel.manifest().size() != 3)
-                    fail("manifest has " + std::to_string(m_vessel.manifest().size()) + " aboard, expected 3");
+                if (m_vessel.manifest().size() != 4)
+                    fail("manifest has " + std::to_string(m_vessel.manifest().size()) + " aboard, expected 4");
                 const glm::vec3 move(30.0f, 20.0f, 10.0f);   // one step at dt=0.1
                 m_vessel.tick(0.1f, move);
                 const glm::vec3 expect = move * 0.1f;
-                for (const char* n : {"VesselCheckDeck", "VesselCheckHelm", "VesselCheckCargo"}) {
+                for (const char* n : {"VesselCheckDeck", "VesselCheckHelm", "VesselCheckCargo", "VesselCheckEngine"}) {
                     const glm::vec3 p = posOf(n);
-                    const glm::vec3 base = (std::string(n) == "VesselCheckDeck") ? glm::vec3(300.0f, 0.0f, 300.0f)
-                                        : (std::string(n) == "VesselCheckHelm") ? glm::vec3(302.0f, 0.5f, 300.0f)
-                                                                                : glm::vec3(298.0f, 0.5f, 302.0f);
+                    const glm::vec3 base = (std::string(n) == "VesselCheckDeck")   ? glm::vec3(300.0f, 0.0f, 300.0f)
+                                        : (std::string(n) == "VesselCheckHelm")   ? glm::vec3(302.0f, 0.5f, 300.0f)
+                                        : (std::string(n) == "VesselCheckEngine") ? glm::vec3(297.0f, 0.5f, 299.0f)
+                                                                                  : glm::vec3(298.0f, 0.5f, 302.0f);
                     if (glm::length(p - (base + expect)) > 0.01f)
                         fail(std::string(n) + " did not move with the vessel");
                 }
@@ -7961,7 +7974,8 @@ private:
                 m_vessel.releaseHelm();
             }
 
-            for (const char* n : {"VesselCheckDeck", "VesselCheckHelm", "VesselCheckCargo", "VesselCheckStray"}) {
+            for (const char* n : {"VesselCheckDeck", "VesselCheckHelm", "VesselCheckCargo",
+                                  "VesselCheckEngine", "VesselCheckStray"}) {
                 for (int i = 0; i < static_cast<int>(m_sceneObjects.size()); ++i) {
                     if (m_sceneObjects[i] && m_sceneObjects[i]->getName() == n) { deleteObject(i); break; }
                 }

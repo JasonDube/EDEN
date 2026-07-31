@@ -89,4 +89,5 @@ private:
     std::vector<std::string> m_manifest;
     glm::vec3 m_frameDelta{0.0f};
     std::string m_error;
+    float m_errorTimer = 0.0f;   // seconds the HUD keeps showing a refusal
 };
