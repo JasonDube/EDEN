@@ -254,6 +254,7 @@ void Shipwright::render(bool& open) {
             "Finalize before you pay: the survey shows her rooms by name",
             "service is where you stand, power_out is where the kilowatts leave -- never plug a toaster into a doormat",
             "wrong connections have consequences -- blown transformers and friends",
+            "the floor is for boots, the wall is for wire -- the void carries no workers' comp",
         };
         static std::string reel;
         if (reel.empty()) {

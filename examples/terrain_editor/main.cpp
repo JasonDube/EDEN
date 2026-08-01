@@ -12650,8 +12650,14 @@ private:
                     // service points, not snap intent -- a reactor placed by
                     // its socket must stay where the socket put it.
                     bool portSnapped = false;
-                    const bool isCatalogPart = socketSeated ||
-                        m_toolbarSlots[i].metadata.count("role") > 0;
+                    // Surface-mounted gear is off limits too: the wall box
+                    // was seating correctly and then getting KIDNAPPED by
+                    // this snap -- re-posed upright beside whatever nearby
+                    // port it fancied (the ceiling only worked because
+                    // nothing with ports was overhead).
+                    const bool isCatalogPart = socketSeated || surfaceSeated ||
+                        m_toolbarSlots[i].metadata.count("role") > 0 ||
+                        m_toolbarSlots[i].metadata.count("surface_mount") > 0;
                     if (obj->hasPorts() && !isCatalogPart) {
                         auto snapResult = m_portSnap.trySnap(obj.get(), m_sceneObjects, camPos, camFront);
                         if (snapResult.snapped) {
