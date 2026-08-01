@@ -76,10 +76,13 @@ rows = [r for r in rows if not (r.startswith('loft:') and (loft_line := r))]
 # 'revolve: s' -- lathe the half-plan 180 degrees about the centreline, keel
 # flat, dome height = radius * s (an ellipse when s < 1).
 rows = [r for r in rows if not (r.startswith('revolve:') and (rev_line := r))]
-REVOLVE = 0.0
+REVOLVE, REV_GLASS, REV_360 = 0.0, False, False
 if rev_line:
-    try: REVOLVE = max(0.0, min(1.0, float(rev_line.split(':', 1)[1])))
-    except ValueError: pass
+    toks = rev_line.split(':', 1)[1].split()
+    try: REVOLVE = max(0.0, min(1.0, float(toks[0])))
+    except (ValueError, IndexError): pass
+    REV_GLASS = 'glass' in toks   # bulkhead fill: glass instead of opaque hull
+    REV_360   = '360' in toks     # full revolution -- space hulls, no flat keel
 W = max(len(r) for r in rows); H = len(rows)
 LOFT = [WALL_H] * H
 if loft_line:
@@ -303,8 +306,6 @@ if REVOLVE > 0.0:
                 b = max(b, abs(x + 0.5 - W / 2.0))
         half.append(b * CELL + CELL if b > 0 else 0.0)
         has_door.append(any(cell(x, y) == 'D' for x in range(W)))
-    # merge consecutive stations of equal (radius, doorness) into runs -- a
-    # door station must be its own run so the shell can arch over it
     runs, y0 = [], None
     key = lambda y: (half[y], has_door[y]) if y < H else None
     for y in range(H + 1):
@@ -314,43 +315,108 @@ if REVOLVE > 0.0:
             y0 = y
     LAYER = 2.0
     shell_n = 0
-    for (y, h, R, door) in runs:
+    FILL_COL = (0.45, 0.70, 1.00, 0.22) if REV_GLASS else (0.52, 0.55, 0.62, 1.0)
+
+    def shell_box(bt, px, zlo, zhi, sx, pz, szlen, color):
+        # One piece of shell, and its mirror below the deck when the revolve
+        # is full: 360 hulls have no flat keel -- they live in space.
+        global shell_n
+        shell_n += 1
+        objs.append(prim(f"{stem}_shell_{shell_n}", bt,
+                         px, deck_top + zlo, pz, sx, zhi - zlo, szlen, color))
+        if REV_360:
+            shell_n += 1
+            objs.append(prim(f"{stem}_shell_{shell_n}", bt,
+                             px, deck_top - zhi, pz, sx, zhi - zlo, szlen, color))
+
+    # Each run's stepped cross-section: layer k -> (z0, z1, outer half-width).
+    # Door runs record width 0 at the ground layer -- the arch is an absence
+    # the bulkheads must respect.
+    def section(R, door):
         DH = R * REVOLVE
         nL = max(1, int(math.ceil(DH / LAYER)))
+        sec = {}
         for k in range(nL):
-            # THE DOOR ARCH: at a station whose plan row holds a door, the
-            # shell skips its ground layer -- a doorway-height opening, the
-            # upper layers arching over it. The first shell sealed the ship
-            # ("no way in" -- field report); a hull you cannot enter is a
-            # sculpture, not a ship.
-            if door and k == 0:
-                continue
             z0 = k * LAYER
             z1 = min(z0 + LAYER, DH)
             w0 = R * math.sqrt(max(0.0, 1.0 - (z0 / DH) ** 2))
+            sec[k] = (z0, z1, 0.0 if (door and k == 0) else w0)
+        return sec
+
+    secs = [section(R, d) for (_, _, R, d) in runs]
+
+    for i, (y, h, R, door) in enumerate(runs):
+        DH = R * REVOLVE
+        nL = max(1, int(math.ceil(DH / LAYER)))
+        for k in range(nL):
+            if door and k == 0:
+                continue
+            z0, z1, w0 = secs[i][k]
             w1 = R * math.sqrt(max(0.0, 1.0 - (z1 / DH) ** 2))
             last = (k == nL - 1)
             for side in (-1.0, 1.0):
-                shell_n += 1
-                objs.append(prim(f"{stem}_shell_{shell_n}", "platform_wall",
-                                 ORIGIN_X + side * (w0 - 0.2), deck_top + z0, wz(y, h),
-                                 0.4, z1 - z0, h * CELL, (0.52, 0.55, 0.62, 1.0)))
-                # Plates stop flush at the riser's INNER face, and the final
-                # layer has no plates at all (the crown is its lid) -- both
-                # rules exist because coplanar overlapping tops z-fight.
+                shell_box("platform_wall", ORIGIN_X + side * (w0 - 0.2), z0, z1,
+                          0.4, wz(y, h), h * CELL, (0.52, 0.55, 0.62, 1.0))
                 if not last and (w0 - 0.4) - w1 > 0.05:
-                    shell_n += 1
-                    objs.append(prim(f"{stem}_shell_{shell_n}", "platform_slab",
-                                     ORIGIN_X + side * (w1 + (w0 - 0.4)) / 2.0, deck_top + z1 - 0.4, wz(y, h),
-                                     (w0 - 0.4) - w1, 0.4, h * CELL, (0.48, 0.51, 0.58, 1.0)))
-        # the crown: close the top, flush inside the last risers
+                    shell_box("platform_slab", ORIGIN_X + side * (w1 + (w0 - 0.4)) / 2.0,
+                              z1 - 0.4, z1, (w0 - 0.4) - w1, wz(y, h), h * CELL,
+                              (0.48, 0.51, 0.58, 1.0))
         zTop = (nL - 1) * LAYER
         wTop = R * math.sqrt(max(0.0, 1.0 - (zTop / DH) ** 2)) if nL > 1 else R
-        shell_n += 1
-        objs.append(prim(f"{stem}_shell_{shell_n}", "platform_slab",
-                         ORIGIN_X, deck_top + DH - 0.4, wz(y, h),
-                         max(2.0 * (wTop - 0.4), 1.0), 0.4, h * CELL, (0.48, 0.51, 0.58, 1.0)))
+        shell_box("platform_slab", ORIGIN_X, DH - 0.4, DH,
+                  max(2.0 * (wTop - 0.4), 1.0), wz(y, h), h * CELL,
+                  (0.48, 0.51, 0.58, 1.0))
+
+    # THE BULKHEADS ("could u fill those?"): at every step boundary and both
+    # ends, the exposed ring-difference is walled, layer by layer -- opaque
+    # hull or glass, the designer's call. Bands butt against the larger run
+    # and sit inside the smaller one's territory, so no two top faces share
+    # a plane (the z-fighting lesson, kept).
+    # A is always the bow (-z) side of the boundary, B the stern (+z) side.
+    # Each layer's band shifts toward whichever side is DEFICIENT AT THAT
+    # LAYER -- not per run: a door run's missing ground ring makes the empty
+    # side a per-layer fact, and shifting by run radius parked full-width
+    # bands inside intact rings, coplanar tops and all (the detector caught
+    # eight of them).
+    def bulkhead(zb, secA, secB, arch):
+        layers = sorted(set(secA) | set(secB))
+        for k in layers:
+            if arch and k == 0:
+                continue
+            gA = secA.get(k); gB = secB.get(k)
+            z0, z1 = (gA or gB)[0], (gA or gB)[1]
+            wA = gA[2] if gA else 0.0
+            wB = gB[2] if gB else 0.0
+            if abs(wA - wB) <= 0.05:
+                continue
+            wLo, wHi = sorted((wA, wB))
+            pz = zb + (0.2 if wB < wA else -0.2)
+            if wLo < 0.3:
+                shell_box("platform_wall", ORIGIN_X, z0, z1,
+                          max(2.0 * wHi, 1.0), pz, 0.4, FILL_COL)
+            else:
+                for side in (-1.0, 1.0):
+                    shell_box("platform_wall", ORIGIN_X + side * (wLo + wHi) / 2.0,
+                              z0, z1, wHi - wLo, pz, 0.4, FILL_COL)
+
+    for i in range(len(runs) + 1):
+        prev = runs[i - 1] if i > 0 else None
+        nxt = runs[i] if i < len(runs) else None
+        if prev is None and nxt is None:
+            continue
+        if prev is None:                      # bow cap of the first run
+            yb = nxt[0]
+            bulkhead((yb - H / 2.0) * CELL + ORIGIN_Z, {}, secs[i], nxt[3])
+        elif nxt is None:                     # stern cap of the last run
+            yb = prev[0] + prev[1]
+            bulkhead((yb - H / 2.0) * CELL + ORIGIN_Z, secs[i - 1], {}, prev[3])
+        elif prev[0] + prev[1] == nxt[0]:     # a step between adjacent runs
+            yb = nxt[0]
+            bulkhead((yb - H / 2.0) * CELL + ORIGIN_Z, secs[i - 1], secs[i], False)
+
     print(f"revolve: {shell_n} shell pieces at height scale {REVOLVE:g}"
+          + (", glass fill" if REV_GLASS else ", opaque fill")
+          + (", full 360" if REV_360 else "")
           + (", door arches cut" if any(d for (_, _, _, d) in runs) else ""))
 
 counts = {}

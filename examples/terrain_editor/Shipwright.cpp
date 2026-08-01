@@ -136,8 +136,10 @@ std::string Shipwright::serialize() const {
         out.push_back('\n');
     }
     if (m_revolveOn) {
-        char rev[32];
-        std::snprintf(rev, sizeof rev, "revolve: %.2f\n", m_revolveScale);
+        char rev[48];
+        std::snprintf(rev, sizeof rev, "revolve: %.2f%s%s\n", m_revolveScale,
+                      m_revolveFill == 1 ? " glass" : "",
+                      m_revolve360 ? " 360" : "");
         out += rev;
     }
     return out;
@@ -150,6 +152,7 @@ bool Shipwright::deserialize(const std::string& text) {
     int y = 0;
     std::vector<float> loft(kH, kLoftDefault);
     float revolve = 0.0f;
+    bool revGlass = false, rev360 = false;
     while (std::getline(in, line) && y < kH) {
         if (line.empty()) continue;
         if (line.rfind("loft:", 0) == 0) {
@@ -159,6 +162,8 @@ bool Shipwright::deserialize(const std::string& text) {
         }
         if (line.rfind("revolve:", 0) == 0) {
             revolve = std::strtof(line.c_str() + 8, nullptr);
+            revGlass = line.find(" glass") != std::string::npos;
+            rev360   = line.find(" 360")   != std::string::npos;
             continue;
         }
         for (int x = 0; x < kW && x < static_cast<int>(line.size()); ++x) {
@@ -172,7 +177,11 @@ bool Shipwright::deserialize(const std::string& text) {
     m_cells = std::move(next);
     m_loft = std::move(loft);
     m_revolveOn = revolve > 0.0f;
-    if (m_revolveOn) m_revolveScale = std::clamp(revolve, 0.2f, 1.0f);
+    if (m_revolveOn) {
+        m_revolveScale = std::clamp(revolve, 0.2f, 1.0f);
+        m_revolveFill = revGlass ? 1 : 0;
+        m_revolve360 = rev360;
+    }
     m_overlay.clear();
     m_overlayIdx.clear();
     return true;
@@ -418,6 +427,17 @@ void Shipwright::render(bool& open) {
         ImGui::SliderFloat("##revscale", &m_revolveScale, 0.2f, 1.0f, "height x%.2f");
         ImGui::SameLine();
         ImGui::TextDisabled("lathe the half-plan over the keel");
+        if (m_revolveOn) {
+            ImGui::TextDisabled("fill:");
+            ImGui::SameLine();
+            ImGui::RadioButton("opaque", &m_revolveFill, 0);
+            ImGui::SameLine();
+            ImGui::RadioButton("glass", &m_revolveFill, 1);
+            ImGui::SameLine(0, 24);
+            ImGui::Checkbox("360", &m_revolve360);
+            ImGui::SameLine();
+            ImGui::TextDisabled("full revolve -- a space hull; she will never land");
+        }
 
         ImDrawList* dl = ImGui::GetWindowDrawList();
         const ImVec2 po = ImGui::GetCursorScreenPos();

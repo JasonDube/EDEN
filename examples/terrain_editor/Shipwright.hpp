@@ -81,6 +81,8 @@ private:
     std::vector<float> m_loft;      // wall-top height per station (plan row)
     bool  m_revolveOn = false;      // lathe the half-plan 180 deg over the keel
     float m_revolveScale = 0.5f;    // dome height = radius * scale (ellipse)
+    int   m_revolveFill = 0;        // bulkhead fill: 0 opaque, 1 glass
+    bool  m_revolve360 = false;     // full revolution -- space hull, no keel
     bool m_mirrorX = true;          // ships are symmetric; paint both halves
     std::string m_status;
 };
