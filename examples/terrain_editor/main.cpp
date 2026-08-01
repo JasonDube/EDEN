@@ -633,8 +633,17 @@ protected:
             glm::vec3 drop = eye + fwd * (halfSpan + 8.0f);
             float gy = m_terrain.getHeightAt(drop.x, drop.z);
             if (gy < -1000.0f) gy = 0.0f;
+            // A FULL-REVOLVE HULL HOVERS. Her belly mirrors below deck
+            // level, and dropping the deck at terrain height buried half
+            // the ship ("i think half of it is under the terrain"). If the
+            // build carries below-deck geometry, the whole ship lifts so
+            // her lowest plate clears the ground by a metre -- she is a
+            // space hull; hovering is her resting state. Flat-keel ships
+            // land exactly as before.
+            float hover = 0.0f;
+            if (mn.y < -0.01f) hover = -mn.y + 1.0f;
             const glm::vec3 centre((mn.x + mx.x) * 0.5f, 0.0f, (mn.z + mx.z) * 0.5f);
-            const glm::vec3 off(drop.x - centre.x, gy, drop.z - centre.z);
+            const glm::vec3 off(drop.x - centre.x, gy + hover, drop.z - centre.z);
 
             // Each build gets a serial prefix so two ships' plates never share
             // a name -- the flight manifest finds objects BY name.
