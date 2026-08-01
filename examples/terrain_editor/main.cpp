@@ -652,6 +652,13 @@ protected:
                     o["position"][2].get<float>() + off.z));
                 obj->getTransform().setScale(glm::vec3(
                     o["scale"][0], o["scale"][1], o["scale"][2]));
+                // Exhaust grids come pre-painted: the ion_exhaust_grid
+                // texture from the building library, tiled one pattern per
+                // two units -- machinery should not need a paintbrush.
+                if (obj->getName().find("thruster_grid") != std::string::npos) {
+                    if (!applyBuildingTextureByName(obj.get(), "ion_exhaust_grid", 0.5f, 0.5f))
+                        std::printf("[Yard] texture 'ion_exhaust_grid' not in the library -- grids ship unpainted%c", 10);
+                }
                 m_sceneObjects.push_back(std::move(obj));
                 ++made;
             }
@@ -7471,6 +7478,47 @@ private:
                 }
             }
         }
+    }
+
+    // Apply a building texture BY NAME to a primitive piece -- the same
+    // recipe as the Building Textures panel's apply (whiten vertex colours,
+    // per-face-dimension UV tiling), callable by code. The yard uses it to
+    // paint exhaust grids at birth.
+    bool applyBuildingTextureByName(SceneObject* target, const std::string& texName,
+                                    float uScale, float vScale) {
+        for (auto& tex : m_buildingTextures) {
+            if (tex.name != texName) continue;
+            auto pixels = tex.pixels;
+            if (tex.hasAlpha) {
+                for (size_t pi = 3; pi < pixels.size(); pi += 4)
+                    pixels[pi] = static_cast<unsigned char>(std::min(255, (int)pixels[pi] + 40));
+            }
+            target->setTextureData(pixels, tex.width, tex.height);
+            target->setTransparent(tex.hasAlpha);
+            m_modelRenderer->updateTexture(target->getBufferHandle(), pixels.data(),
+                                           tex.width, tex.height);
+            if (target->hasMeshData() && target->getPrimitiveType() == PrimitiveType::Cube) {
+                auto freshMesh = PrimitiveMeshBuilder::createCube(1.0f, glm::vec4(1.0f));
+                auto vertices = target->getVertices();
+                const glm::vec3 sc = target->getTransform().getScale();
+                for (size_t vi = 0; vi < vertices.size() && vi < freshMesh.vertices.size(); vi++) {
+                    auto& v = vertices[vi];
+                    v.color = glm::vec4(1.0f);
+                    v.texCoord = freshMesh.vertices[vi].texCoord;
+                    const glm::vec3 absN = glm::abs(v.normal);
+                    float faceW, faceH;
+                    if (absN.y > absN.x && absN.y > absN.z) { faceW = sc.x; faceH = sc.z; }
+                    else if (absN.x > absN.z)               { faceW = sc.z; faceH = sc.y; }
+                    else                                    { faceW = sc.x; faceH = sc.y; }
+                    v.texCoord.x *= faceW * uScale;
+                    v.texCoord.y *= faceH * vScale;
+                }
+                target->setMeshData(vertices, target->getIndices());
+                m_modelRenderer->updateVertices(target->getBufferHandle(), vertices);
+            }
+            return true;
+        }
+        return false;
     }
 
     void loadBuildingTextures() {
