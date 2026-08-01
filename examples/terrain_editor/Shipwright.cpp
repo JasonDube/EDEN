@@ -237,6 +237,45 @@ void Shipwright::render(bool& open) {
     ImGui::SetNextWindowPos(ImVec2(80, 40), ImGuiCond_FirstUseEver);
     if (!ImGui::Begin("Shipwright -- deck plan", &open)) { ImGui::End(); return; }
 
+    // ---- the ticker: yard wisdom on an endless reel ------------------------
+    {
+        static const char* kWisdom[] = {
+            "a reactor with no fins is a bomb with a schedule -- fins with no reactor are jewellery",
+            "walls make rooms, letters make sockets",
+            "the keel stays flat: ships land on their bellies",
+            "every exhaust grid wants an engine room behind it",
+            "draw the reactor room 2x2 -- plants are big",
+            "robot stations are an investment, not a doodle: 3,500 CR the pad",
+            "nanocomposite flies lighter than alloy; exotic laminate stops what alloy cannot",
+            "one part per socket, and the pad does the aiming",
+            "short of power? kill the cargo bay to feed engine three -- the helm console remembers",
+            "bow at the top -- she flies the way you drew her",
+            "a hull you cannot enter is a sculpture, not a ship",
+            "Finalize before you pay: the survey shows her rooms by name",
+        };
+        static std::string reel;
+        if (reel.empty()) {
+            for (const char* q : kWisdom) { reel += q; reel += "      +++      "; }
+        }
+        static float scroll = 0.0f;
+        scroll += ImGui::GetIO().DeltaTime * 28.0f;
+        const float reelW = ImGui::CalcTextSize(reel.c_str()).x;
+        if (scroll > reelW) scroll -= reelW;
+        const float availW = ImGui::GetContentRegionAvail().x;
+        const ImVec2 tpos = ImGui::GetCursorScreenPos();
+        const float th = ImGui::GetTextLineHeight();
+        ImDrawList* tdl = ImGui::GetWindowDrawList();
+        tdl->AddRectFilled(tpos, ImVec2(tpos.x + availW, tpos.y + th + 6.0f),
+                           IM_COL32(20, 22, 28, 255));
+        tdl->PushClipRect(tpos, ImVec2(tpos.x + availW, tpos.y + th + 6.0f), true);
+        tdl->AddText(ImVec2(tpos.x - scroll, tpos.y + 3.0f),
+                     IM_COL32(212, 180, 96, 255), reel.c_str());
+        tdl->AddText(ImVec2(tpos.x - scroll + reelW, tpos.y + 3.0f),
+                     IM_COL32(212, 180, 96, 255), reel.c_str());
+        tdl->PopClipRect();
+        ImGui::Dummy(ImVec2(availW, th + 8.0f));
+    }
+
     // ---- tools -------------------------------------------------------------
     for (const auto& t : kTools) {
         ImGui::PushID(t.label);
