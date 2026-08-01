@@ -79,6 +79,8 @@ private:
     char m_tool = '#';
     bool m_sideView = false;        // the profile window toggle
     std::vector<float> m_loft;      // wall-top height per station (plan row)
+    bool  m_revolveOn = false;      // lathe the half-plan 180 deg over the keel
+    float m_revolveScale = 0.5f;    // dome height = radius * scale (ellipse)
     bool m_mirrorX = true;          // ships are symmetric; paint both halves
     std::string m_status;
 };

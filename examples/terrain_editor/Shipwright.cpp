@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <fstream>
 #include <sstream>
 
@@ -134,6 +135,11 @@ std::string Shipwright::serialize() const {
         }
         out.push_back('\n');
     }
+    if (m_revolveOn) {
+        char rev[32];
+        std::snprintf(rev, sizeof rev, "revolve: %.2f\n", m_revolveScale);
+        out += rev;
+    }
     return out;
 }
 
@@ -143,11 +149,16 @@ bool Shipwright::deserialize(const std::string& text) {
     std::string line;
     int y = 0;
     std::vector<float> loft(kH, kLoftDefault);
+    float revolve = 0.0f;
     while (std::getline(in, line) && y < kH) {
         if (line.empty()) continue;
         if (line.rfind("loft:", 0) == 0) {
             std::istringstream lv(line.substr(5));
             for (int i = 0; i < kH && (lv >> loft[i]); ++i) {}
+            continue;
+        }
+        if (line.rfind("revolve:", 0) == 0) {
+            revolve = std::strtof(line.c_str() + 8, nullptr);
             continue;
         }
         for (int x = 0; x < kW && x < static_cast<int>(line.size()); ++x) {
@@ -160,6 +171,8 @@ bool Shipwright::deserialize(const std::string& text) {
     if (y == 0) return false;
     m_cells = std::move(next);
     m_loft = std::move(loft);
+    m_revolveOn = revolve > 0.0f;
+    if (m_revolveOn) m_revolveScale = std::clamp(revolve, 0.2f, 1.0f);
     m_overlay.clear();
     m_overlayIdx.clear();
     return true;
@@ -237,7 +250,8 @@ void Shipwright::render(bool& open) {
         ImGui::Text("hull %.0f t", tons);
         ImGui::SameLine(0, 18);
         ImGui::TextColored(ImVec4(0.55f, 0.85f, 0.55f, 1.0f),
-                           "materials %.0f CR", vol * mat.priceU3);
+                           m_revolveOn ? "materials %.0f CR + shell" : "materials %.0f CR",
+                           vol * mat.priceU3);
         ImGui::SameLine(0, 18);
         ImGui::Text("fitted ~%.0f t", fitted);
         ImGui::SameLine(0, 18);
@@ -395,6 +409,15 @@ void Shipwright::render(bool& open) {
         if (ImGui::Button("Flatten")) std::fill(m_loft.begin(), m_loft.end(), kLoftDefault);
         ImGui::SameLine();
         ImGui::TextDisabled("LMB drag = loft the line   RMB = level a station   keel stays flat");
+        // THE REVOLVE: lathe the half-plan 180 degrees about the centreline,
+        // keel flat. The magenta curve is the dome the yard will step out of
+        // boxes; the slider squashes the circle into an ellipse.
+        ImGui::Checkbox("Revolve", &m_revolveOn);
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(140.0f);
+        ImGui::SliderFloat("##revscale", &m_revolveScale, 0.2f, 1.0f, "height x%.2f");
+        ImGui::SameLine();
+        ImGui::TextDisabled("lathe the half-plan over the keel");
 
         ImDrawList* dl = ImGui::GetWindowDrawList();
         const ImVec2 po = ImGui::GetCursorScreenPos();
@@ -448,6 +471,25 @@ void Shipwright::render(bool& open) {
             dl->AddLine(ImVec2(x0, keelY - floorPx - m_loft[y] * pxU),
                         ImVec2(x1, keelY - floorPx - m_loft[y + 1] * pxU),
                         IM_COL32(255, 220, 90, 170), 1.5f);
+        }
+        if (m_revolveOn) {
+            // Per station: radius = half-breadth + one cell, height = R * scale.
+            float prevY = -1.0f, prevX = 0.0f;
+            for (int y = 0; y < kH; ++y) {
+                float b = 0.0f;
+                for (int x = 0; x < kW; ++x) {
+                    const char c = m_cells[y * kW + x];
+                    if (c != '_') b = std::max(b, std::fabs(x + 0.5f - kW / 2.0f));
+                }
+                const float domeH = b > 0.0f ? (b * 2.0f + 2.0f) * m_revolveScale : 0.0f;
+                const float sx = po.x + (kH - 1 - y) * cell + cell * 0.5f;
+                const float sy = keelY - floorPx - std::min(domeH * pxU, stripH - 8.0f);
+                if (domeH > 0.0f && prevY >= 0.0f)
+                    dl->AddLine(ImVec2(prevX, prevY), ImVec2(sx, sy),
+                                IM_COL32(230, 90, 200, 190), 1.5f);
+                prevY = domeH > 0.0f ? sy : -1.0f;
+                prevX = sx;
+            }
         }
         dl->AddLine(ImVec2(po.x, keelY), ImVec2(po.x + kW * cell, keelY),
                     IM_COL32(255, 255, 255, 40));

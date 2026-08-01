@@ -18,7 +18,7 @@ objects, spawn set just aft of the stern.  V1 limits, stated: no hull shell or
 bow styling yet (dressing comes later), no lintels over doors, and FLIGHT of
 plan-ships needs the multi-slab manifest first -- walk it, don't fly it yet.
 """
-import json, sys, copy
+import json, sys, copy, math
 
 CELL   = 2.0    # world units per plan cell
 FLOOR_Y = 0.2   # floor slab base
@@ -71,7 +71,15 @@ rows = [r.rstrip('\n') for r in open(plan_path)]
 # sculpts the silhouette. Rows without a value, and plans without the line,
 # get the classic WALL_H.
 loft_line = None
+rev_line = None
 rows = [r for r in rows if not (r.startswith('loft:') and (loft_line := r))]
+# 'revolve: s' -- lathe the half-plan 180 degrees about the centreline, keel
+# flat, dome height = radius * s (an ellipse when s < 1).
+rows = [r for r in rows if not (r.startswith('revolve:') and (rev_line := r))]
+REVOLVE = 0.0
+if rev_line:
+    try: REVOLVE = max(0.0, min(1.0, float(rev_line.split(':', 1)[1])))
+    except ValueError: pass
 W = max(len(r) for r in rows); H = len(rows)
 LOFT = [WALL_H] * H
 if loft_line:
@@ -280,6 +288,56 @@ for i, (x, y, w, h) in enumerate(windows):
     objs.append(prim(f"{stem}_window_{i+1}", "platform_wall",
                      wx(x, w), deck_top, wz(y, h),
                      w*CELL, LOFT[y], h*CELL, (0.45, 0.70, 1.00, 0.22)))
+# ---- the REVOLVE: the half-plan lathed 180 degrees over the flat keel ------
+# Per station the radius is the hull's half-breadth plus one cell of
+# clearance; the shell is a stepped surface of axis-aligned boxes (risers and
+# annular plates), because collision is sacred and boxes are what the world
+# is made of. Steps are honest: this is a lathe drawn in the same voxel hand
+# as the rest of her.
+if REVOLVE > 0.0:
+    half = []
+    for y in range(H):
+        b = 0.0
+        for x in range(W):
+            if hull(cell(x, y)):
+                b = max(b, abs(x + 0.5 - W / 2.0))
+        half.append(b * CELL + CELL if b > 0 else 0.0)
+    # merge consecutive stations of equal radius into runs
+    runs, y0 = [], None
+    for y in range(H + 1):
+        r = half[y] if y < H else -1.0
+        if y0 is None or r != half[y0]:
+            if y0 is not None and half[y0] > 0.0:
+                runs.append((y0, y - y0, half[y0]))
+            y0 = y
+    LAYER = 2.0
+    shell_n = 0
+    for (y, h, R) in runs:
+        DH = R * REVOLVE
+        nL = max(1, int(math.ceil(DH / LAYER)))
+        for k in range(nL):
+            z0 = k * LAYER
+            z1 = min(z0 + LAYER, DH)
+            w0 = R * math.sqrt(max(0.0, 1.0 - (z0 / DH) ** 2))
+            w1 = R * math.sqrt(max(0.0, 1.0 - (z1 / DH) ** 2))
+            for side in (-1.0, 1.0):
+                shell_n += 1
+                objs.append(prim(f"{stem}_shell_{shell_n}", "platform_wall",
+                                 ORIGIN_X + side * (w0 - 0.2), deck_top + z0, wz(y, h),
+                                 0.4, z1 - z0, h * CELL, (0.52, 0.55, 0.62, 1.0)))
+                if w0 - w1 > 0.05:
+                    shell_n += 1
+                    objs.append(prim(f"{stem}_shell_{shell_n}", "platform_slab",
+                                     ORIGIN_X + side * (w1 + w0) / 2.0, deck_top + z1 - 0.4, wz(y, h),
+                                     w0 - w1, 0.4, h * CELL, (0.48, 0.51, 0.58, 1.0)))
+        # the crown: close the top over the centreline
+        wTop = R * math.sqrt(max(0.0, 1.0 - ((nL - 1) * LAYER / DH) ** 2)) if nL > 1 else R
+        shell_n += 1
+        objs.append(prim(f"{stem}_shell_{shell_n}", "platform_slab",
+                         ORIGIN_X, deck_top + DH - 0.4, wz(y, h),
+                         max(2.0 * wTop, 1.0), 0.4, h * CELL, (0.48, 0.51, 0.58, 1.0)))
+    print(f"revolve: {shell_n} shell pieces at height scale {REVOLVE:g}")
+
 counts = {}
 for (c, x, y, w, h) in sockets:
     role, color = ROLE[c]
