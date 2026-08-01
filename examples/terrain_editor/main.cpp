@@ -7764,6 +7764,16 @@ private:
                             texW = result.mesh.textureWidth;
                             texH = result.mesh.textureHeight;
                         }
+                        // THE PORT DEBT, PAID. The slot used to load geometry
+                        // only, so a placed prefab lost every port its file
+                        // authored -- the engine's exhaust, the reactor's
+                        // service point -- and nothing could ever wire to it.
+                        // Ports now ride the slot into the placed object.
+                        // (Placement-time port SNAP stays off for catalog
+                        // parts -- see the gate at the trySnap call.)
+                        slot.ports.clear();
+                        for (const auto& pp : result.mesh.ports)
+                            slot.ports.push_back({pp.name, pp.position, pp.forward, pp.up});
                         loaded = true;
                     }
                 }
@@ -9284,6 +9294,16 @@ private:
         // runs after us.
         m_vessel.update(deltaTime, m_isPlayMode,
                         ImGui::GetIO().WantTextInput || ImGui::GetIO().WantCaptureKeyboard);
+
+        // WIRES FLY WITH THE SHIP. The wire GRAPH always survived movement --
+        // edges are object pointers -- but the wire MESHES are baked in world
+        // space, so a flying vessel used to leave its cabling hanging in the
+        // sky behind her. While the vessel moves, wires rebuild from their
+        // endpoints' live positions every frame. Wire counts are small; if
+        // this ever shows in the frame report, it goes dirty-flag-per-wire.
+        if (m_vessel.isFlying() && !m_wires.empty() && m_modelRenderer) {
+            rebuildWireMeshes();
+        }
 
         // The build panel deliberately turns the character controller OFF.
         //
@@ -12539,9 +12559,14 @@ private:
                     if (blueprintAttached) {
                         // Item was consumed by blueprint, skip normal placement
                     } else {
-                    // Try port-based snap first (pipes, modular assemblies)
+                    // Try port-based snap first (pipes, modular assemblies).
+                    // NOT for catalog parts: their ports are wiring and
+                    // service points, not snap intent -- a reactor placed by
+                    // its socket must stay where the socket put it.
                     bool portSnapped = false;
-                    if (obj->hasPorts()) {
+                    const bool isCatalogPart = socketSeated ||
+                        m_toolbarSlots[i].metadata.count("role") > 0;
+                    if (obj->hasPorts() && !isCatalogPart) {
                         auto snapResult = m_portSnap.trySnap(obj.get(), m_sceneObjects, camPos, camFront);
                         if (snapResult.snapped) {
                             obj->getTransform().setPosition(snapResult.position);
@@ -13060,6 +13085,30 @@ private:
                     }
                 }
             }
+            // PORTS wire too: a reactor's service point, an engine's exhaust
+            // -- the frames the files authored are attachment points now,
+            // which is the whole reason the port debt was paid.
+            for (auto& obj : m_sceneObjects) {
+                if (!obj || !obj->isVisible() || !obj->hasPorts()) continue;
+                if (glm::length(obj->getTransform().getPosition() - camPos) > 5.0f) continue;
+                glm::mat4 modelMat = obj->getTransform().getMatrix();
+                for (const auto& port : obj->getPorts()) {
+                    glm::vec3 worldPos = glm::vec3(modelMat * glm::vec4(port.position, 1.0f));
+                    glm::vec4 clip = vp * glm::vec4(worldPos, 1.0f);
+                    if (clip.w <= 0.0f) continue;
+                    glm::vec3 ndc = glm::vec3(clip) / clip.w;
+                    float sx = (ndc.x + 1.0f) * 0.5f * windowW;
+                    float sy = (1.0f - ndc.y) * 0.5f * windowH;
+                    float dx = sx - windowW * 0.5f;
+                    float dy = sy - windowH * 0.5f;
+                    float screenDist = std::sqrt(dx * dx + dy * dy);
+                    if (screenDist < bestScreenDist) {
+                        bestScreenDist = screenDist;
+                        bestObj = obj.get();
+                        bestCPName = port.name;
+                    }
+                }
+            }
 
             if (bestObj && !bestCPName.empty()) {
                 if (!m_wiringActive) {
@@ -13443,6 +13492,20 @@ private:
                 outPos = glm::vec3(worldPos);
                 return true;
             }
+        }
+        return false;
+    }
+
+    // Get world position of a named PORT -- ports are authored frames in the
+    // part's file (free positions, not vertex-anchored like CPs), and since
+    // the port debt was paid they survive into placed objects. Wires accept
+    // either kind of endpoint.
+    bool getPortWorldPos(SceneObject* obj, const std::string& portName, glm::vec3& outPos) {
+        if (!obj || !obj->hasPorts()) return false;
+        for (const auto& p : obj->getPorts()) {
+            if (p.name != portName) continue;
+            outPos = glm::vec3(obj->getTransform().getMatrix() * glm::vec4(p.position, 1.0f));
+            return true;
         }
         return false;
     }
@@ -22802,9 +22865,11 @@ private:
 
                 glm::vec3 fromWorld, toWorld;
                 bool gotFrom = getCPWorldPos(wire.fromObj, wire.fromCP, fromWorld) ||
-                               getCPWorldPosExact(wire.fromObj, wire.fromCP, fromWorld);
+                               getCPWorldPosExact(wire.fromObj, wire.fromCP, fromWorld) ||
+                               getPortWorldPos(wire.fromObj, wire.fromCP, fromWorld);
                 bool gotTo = getCPWorldPos(wire.toObj, wire.toCP, toWorld) ||
-                             getCPWorldPosExact(wire.toObj, wire.toCP, toWorld);
+                             getCPWorldPosExact(wire.toObj, wire.toCP, toWorld) ||
+                             getPortWorldPos(wire.toObj, wire.toCP, toWorld);
                 if (!gotFrom || !gotTo) continue;
 
                 glm::vec4 clipFrom = wireVP * glm::vec4(fromWorld, 1.0f);
@@ -32816,9 +32881,11 @@ private:
 
             glm::vec3 fromWorld, toWorld;
             bool gotFrom = getCPWorldPos(wire.fromObj, wire.fromCP, fromWorld) ||
-                           getCPWorldPosExact(wire.fromObj, wire.fromCP, fromWorld);
+                           getCPWorldPosExact(wire.fromObj, wire.fromCP, fromWorld) ||
+                           getPortWorldPos(wire.fromObj, wire.fromCP, fromWorld);
             bool gotTo = getCPWorldPos(wire.toObj, wire.toCP, toWorld) ||
-                         getCPWorldPosExact(wire.toObj, wire.toCP, toWorld);
+                         getCPWorldPosExact(wire.toObj, wire.toCP, toWorld) ||
+                         getPortWorldPos(wire.toObj, wire.toCP, toWorld);
             if (!gotFrom || !gotTo) continue;
 
             // Calculate sag — only for wires spanning open air
