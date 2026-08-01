@@ -7564,18 +7564,38 @@ private:
 
         constexpr int THUMB_SIZE = 64; // small thumbnail for catalog — saves VRAM
 
+        // FOLDERS ARE THEMES: files at the root belong to the "building"
+        // page; every subfolder becomes its own page in the panel -- drop
+        // ship textures in textures/building/ships/ and a "ships" tab
+        // appears, no code per theme, ever.
+        std::vector<std::pair<std::filesystem::path, std::string>> texFiles;
         for (const auto& entry : std::filesystem::directory_iterator(dir)) {
-            if (!entry.is_regular_file()) continue;
-            std::string ext = entry.path().extension().string();
+            if (entry.is_regular_file()) {
+                texFiles.push_back({entry.path(), "building"});
+            } else if (entry.is_directory()) {
+                const std::string theme = entry.path().filename().string();
+                for (const auto& sub : std::filesystem::directory_iterator(entry.path()))
+                    if (sub.is_regular_file()) texFiles.push_back({sub.path(), theme});
+            }
+        }
+        std::sort(texFiles.begin(), texFiles.end(), [](const auto& a, const auto& b) {
+            if (a.second != b.second)
+                return a.second == "building" ? true
+                     : b.second == "building" ? false : a.second < b.second;
+            return a.first.filename() < b.first.filename();
+        });
+        for (const auto& [texPath, texTheme] : texFiles) {
+            std::string ext = texPath.extension().string();
             std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
             if (ext != ".png" && ext != ".jpg" && ext != ".jpeg") continue;
 
             int w, h, channels;
-            unsigned char* pixels = stbi_load(entry.path().c_str(), &w, &h, &channels, STBI_rgb_alpha);
+            unsigned char* pixels = stbi_load(texPath.c_str(), &w, &h, &channels, STBI_rgb_alpha);
             if (!pixels) continue;
 
             BuildingTexture tex;
-            tex.name = entry.path().stem().string();
+            tex.name = texPath.stem().string();
+            tex.category = texTheme;
             tex.width = w;
             tex.height = h;
             // Store full-res pixels in CPU memory only (for applying later)
@@ -7707,6 +7727,7 @@ private:
 
             EditorUI::BuildingTextureInfo uiTex;
             uiTex.name = tex.name;
+            uiTex.category = tex.category;
             uiTex.descriptor = tex.descriptor;
             uiTex.width = tex.width;
             uiTex.height = tex.height;
@@ -32626,6 +32647,7 @@ private:
     // Building texture swatches (loaded from textures/building/)
     struct BuildingTexture {
         std::string name;
+        std::string category = "building";   // the panel page it lives on
         std::vector<unsigned char> pixels;
         int width = 0, height = 0;
         bool hasAlpha = false;

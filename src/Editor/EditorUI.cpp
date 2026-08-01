@@ -3781,6 +3781,26 @@ void EditorUI::renderBuildingTextureWindow() {
         return;
     }
 
+    // THEME PAGES: one tab per folder under textures/building, every page
+    // sharing the same control deck below -- scale, rotate, offset, fill,
+    // import, opacity, apply. The pages differ only in which swatches show.
+    {
+        std::vector<std::string> pages;
+        for (const auto& t : m_buildingTextures)
+            if (std::find(pages.begin(), pages.end(), t.category) == pages.end())
+                pages.push_back(t.category);
+        if (pages.size() > 1 && ImGui::BeginTabBar("##texPages")) {
+            for (const auto& pg : pages) {
+                if (ImGui::BeginTabItem(pg.c_str())) {
+                    m_buildingTexPage = pg;
+                    ImGui::EndTabItem();
+                }
+            }
+            ImGui::EndTabBar();
+        } else if (!pages.empty()) {
+            m_buildingTexPage = pages.front();
+        }
+    }
     ImGui::Text("Select a texture swatch:");
     ImGui::Separator();
 
@@ -3789,8 +3809,11 @@ void EditorUI::renderBuildingTextureWindow() {
     float windowWidth = ImGui::GetContentRegionAvail().x;
     int columns = std::max(1, static_cast<int>(windowWidth / (thumbSize + 8.0f)));
 
+    int shown = 0;
     for (int i = 0; i < static_cast<int>(m_buildingTextures.size()); i++) {
-        if (i % columns != 0) ImGui::SameLine();
+        if (m_buildingTextures[i].category != m_buildingTexPage) continue;
+        if (shown % columns != 0) ImGui::SameLine();
+        ++shown;
 
         ImGui::PushID(i);
         bool selected = (m_selectedBuildingTexture == i);

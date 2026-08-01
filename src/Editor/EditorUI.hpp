@@ -516,6 +516,7 @@ public:
     // Building texture swatches
     struct BuildingTextureInfo {
         std::string name;
+        std::string category = "building";   // panel page (folder name)
         void* descriptor = nullptr;  // ImTextureID
         int width = 0, height = 0;
     };
@@ -885,6 +886,7 @@ private:
 
     // Building texture swatches
     std::vector<BuildingTextureInfo> m_buildingTextures;
+    std::string m_buildingTexPage = "building";   // active theme tab
     int m_selectedBuildingTexture = -1;
     float m_buildingTexScaleU = 1.0f;
     float m_buildingTexScaleV = 1.0f;
