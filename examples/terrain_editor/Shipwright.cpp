@@ -31,6 +31,7 @@ const ToolDef kTools[] = {
     {'E', "Engine",   IM_COL32(200,  90,  40, 255)},
     {'R', "Robots",   IM_COL32(140,  90, 190, 255)},
     {'W', "Window",   IM_COL32(120, 180, 255, 255)},
+    {'X', "Exhaust",  IM_COL32(225, 115,  45, 255)},
     {'_', "Erase",    IM_COL32( 25,  26,  30, 255)},
 };
 
@@ -121,7 +122,7 @@ float planVolume(const std::vector<char>& cells, const std::vector<float>& loft)
     for (size_t i = 0; i < cells.size(); ++i) {
         const char c = cells[i];
         const int y = static_cast<int>(i) / Shipwright::kW;
-        if (c == '#' || c == 'W') v += 2.0f * loft[y] * 2.0f + kFloorCell;
+        if (c == '#' || c == 'W' || c == 'X') v += 2.0f * loft[y] * 2.0f + kFloorCell;
         else if (c == '.' || c == 'D' || isRoom(c)) v += kFloorCell;
     }
     return v;
@@ -207,7 +208,7 @@ bool Shipwright::deserialize(const std::string& text) {
         for (int x = 0; x < kW && x < static_cast<int>(line.size()); ++x) {
             const char c = line[x];
             next[y * kW + x] =
-                (c=='#'||c=='.'||c=='D'||c=='W'||isRoom(c)) ? c : '_';
+                (c=='#'||c=='.'||c=='D'||c=='W'||c=='X'||isRoom(c)) ? c : '_';
         }
         ++y;
     }
@@ -440,12 +441,31 @@ void Shipwright::render(bool& open) {
             const ImVec2 b(a.x + cell - 1.0f, a.y + cell - 1.0f);
             const int ri = m_overlayIdx.empty() ? -1 : m_overlayIdx[y * kW + x];
             dl->AddRectFilled(a, b, ri >= 0 ? kRoomPalette[ri % kRoomPaletteN] : fillFor(c));
-            if (isRoom(c) || c == 'D' || c == 'W') {
+            if (isRoom(c) || c == 'D' || c == 'W' || c == 'X') {
                 const char label[2] = {c, 0};
                 dl->AddText(ImVec2(a.x + 3.0f, a.y), IM_COL32(0, 0, 0, 200), label);
             }
         }
     }
+    // THE EXHAUST LAW, checked live: every X must touch an E. Orphans get a
+    // red ring here and a refusal at the yard -- the drafting table warns
+    // before the money does.
+    int orphanX = 0;
+    for (int y = 0; y < kH; ++y) {
+        for (int x = 0; x < kW; ++x) {
+            if (m_cells[y * kW + x] != 'X') continue;
+            const bool fed =
+                (x + 1 < kW && m_cells[y * kW + x + 1] == 'E') ||
+                (x > 0     && m_cells[y * kW + x - 1] == 'E') ||
+                (y + 1 < kH && m_cells[(y + 1) * kW + x] == 'E') ||
+                (y > 0     && m_cells[(y - 1) * kW + x] == 'E');
+            if (fed) continue;
+            ++orphanX;
+            const ImVec2 a(origin.x + x * cell, origin.y + y * cell);
+            dl->AddRect(a, ImVec2(a.x + cell, a.y + cell), IM_COL32(255, 60, 60, 230), 0, 0, 2.0f);
+        }
+    }
+
     // Centreline, so symmetry has a spine to hang from.
     dl->AddLine(ImVec2(origin.x + (kW / 2) * cell, origin.y),
                 ImVec2(origin.x + (kW / 2) * cell, origin.y + kH * cell),
@@ -529,7 +549,7 @@ void Shipwright::render(bool& open) {
             bool hasFloor = false, hasWall = false, hasWin = false;
             for (int x = 0; x < kW; ++x) {
                 const char c = m_cells[y * kW + x];
-                if (c == '#') hasWall = true;
+                if (c == '#' || c == 'X') hasWall = true;
                 else if (c == 'W') { hasWall = true; hasWin = true; }
                 else if (c == '.' || c == 'D' || isRoom(c)) hasFloor = true;
             }
@@ -604,6 +624,12 @@ void Shipwright::render(bool& open) {
         }
     }
 
+    if (orphanX > 0) {
+        ImGui::Separator();
+        ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f),
+                           "%d exhaust cell%s without an adjacent Engine (E) cell -- the yard will refuse",
+                           orphanX, orphanX == 1 ? "" : "s");
+    }
     if (!m_status.empty()) {
         ImGui::Separator();
         ImGui::TextWrapped("%s", m_status.c_str());

@@ -22,6 +22,7 @@
 //   B  bridge              C  cargo hold
 //   E  engine room         R  robot station
 //   W  window (translucent wall -- glass to fly by)
+//   X  exhaust (ion-thruster grid in the hull; MUST touch an E cell)
 // Top of the grid is the BOW.
 
 #include <functional>

@@ -96,8 +96,28 @@ def cell(x, y):
     return '_'
 
 walk  = lambda c: c == '.' or c == 'D' or c in ROLE
-solid = lambda c: c == '#' or c == 'W'   # windows are walls that see
+solid = lambda c: c == '#' or c == 'W' or c == 'X'   # windows see, exhausts push
 hull  = lambda c: walk(c) or solid(c)
+
+# ---- validation: exhaust grids back onto engine rooms ----------------------
+# An X cell is an ion-thruster grid in the hull: machinery, not paint. The
+# law: EVERY exhaust cell must touch an engine (E) cell -- a grid with no
+# engine behind it is a drawing of a lie, and the yard refuses to build it.
+# A grid buried inland (no outside face) gets a warning; it will build, but
+# it pushes against the furniture.
+exhaust_errors = []
+for y in range(H):
+    for x in range(W):
+        if cell(x, y) != 'X': continue
+        nbrs = [cell(x+1, y), cell(x-1, y), cell(x, y+1), cell(x, y-1)]
+        if 'E' not in nbrs:
+            exhaust_errors.append((x, y))
+        if '_' not in nbrs:
+            print(f"WARNING: exhaust at ({x},{y}) has no outside face -- an inboard thruster grid")
+if exhaust_errors:
+    for (x, y) in exhaust_errors:
+        print(f"REFUSED: exhaust at ({x},{y}) has no adjacent engine (E) cell -- a grid needs an engine behind it")
+    sys.exit(1)
 
 # ---- validation: one connected walkable region, doors that go somewhere ----
 seen, start = set(), None
@@ -232,6 +252,8 @@ def run_pass(match, out):
             for i in range(h): wclaimed[y+i][x] = True
             out.append((x, y, 1, h))
 run_pass(lambda c: c == '#', walls)
+thrusters = []
+run_pass(lambda c: c == 'X', thrusters)
 
 # ---- phase-2 texture: geometry is the skin -------------------------------
 # Long wall runs split into short panel segments so the patchwork gets a
@@ -560,6 +582,13 @@ for y in range(H):
 # Shipwright's live socket bill.
 SOCKET_PRICE = {'helm': 1500.0, 'engine': 2000.0, 'robot': 3500.0, 'cargo': 800.0}
 socket_cost = 0.0
+# Exhaust grids: wall-shaped, charcoal with a hot-orange cast -- machinery
+# in the hull, lofted like any wall, welded and weighed like any hull piece.
+for i, (x, y, w, h) in enumerate(thrusters):
+    objs.append(prim(f"{stem}_thruster_grid_{i+1}", "platform_wall",
+                     wx(x, w), deck_top, wz(y, h),
+                     w*CELL, LOFT[y], h*CELL, (0.42, 0.24, 0.13, 1.0)))
+
 counts = {}
 for (c, x, y, w, h) in sockets:
     role, color = ROLE[c]
