@@ -99,6 +99,10 @@ PORTS = [
     # Where the plume comes out -- authored data waiting for the day thrust
     # gets a particle effect, so the effect will not need a hardcoded offset.
     ("exhaust",    (0.0, 0.42, 0.67), (0.0, 0.0,  1.0), (0.0, 1.0, 0.0)),
+    # THE ELECTRICAL TERMINAL. Wires arrive HERE -- the feed lug on the
+    # housing flank. deck_mount is how it bolts down; power_in is where the
+    # kilowatts arrive.
+    ("power_in",   (0.57, 0.62, -0.10), (1.0, 0.0, 0.0), (0.0, 1.0, 0.0)),
 ]
 
 META = {

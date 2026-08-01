@@ -13028,16 +13028,20 @@ private:
         // T key in play mode: toggle control point visualization
         if (m_isPlayMode && Input::isKeyPressed(Input::KEY_T) && !ImGui::GetIO().WantTextInput) {
             m_showCPsInGame = !m_showCPsInGame;
-            // BACKFILL: parts placed before the port debt was paid carry no
-            // ports. Entering wire mode reloads them from each part's .lime
-            // -- the file always knew; the object just never asked.
+            // REFRESH: entering wire mode re-reads every .lime part's ports
+            // from its file -- the file is the authority. This backfills
+            // parts placed before the port debt was paid AND picks up newly
+            // authored lugs (a reactor grown a power_out terminal) without
+            // replacing the placed object. Wires reference ports by NAME,
+            // so existing runs survive a refresh that only adds.
             if (m_showCPsInGame) {
                 for (auto& obj : m_sceneObjects) {
-                    if (!obj || obj->hasPorts()) continue;
+                    if (!obj) continue;
                     const std::string& mp = obj->getModelPath();
                     if (mp.size() < 5 || mp.substr(mp.size() - 5) != ".lime") continue;
                     auto lr = LimeLoader::load(mp);
                     if (!lr.success || lr.mesh.ports.empty()) continue;
+                    if (lr.mesh.ports.size() == obj->getPorts().size()) continue;
                     std::vector<SceneObject::StoredPort> bp;
                     for (const auto& pp : lr.mesh.ports)
                         bp.push_back({pp.name, pp.position, pp.forward, pp.up});

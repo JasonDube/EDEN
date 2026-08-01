@@ -100,6 +100,10 @@ PORTS = [
     # Where an engineer stands to service it -- authored for the day robots
     # do maintenance rounds.
     ("service",    (0.0, 0.0, 1.9),  (0.0, 0.0, -1.0), (0.0, 1.0, 0.0)),
+    # THE ELECTRICAL TERMINAL. Wires run FROM here -- the reactor's output
+    # lug on the containment flank. service is where you stand; power_out
+    # is where the kilowatts leave.
+    ("power_out",  (1.08, 1.55, 0.0), (1.0, 0.0, 0.0), (0.0, 1.0, 0.0)),
 ]
 
 META = {
