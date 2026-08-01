@@ -82,6 +82,16 @@ void PrefabCatalog::load(const std::string& dir) {
             else if (key == "mass")    entry.mass = toFloat(value, 0.0f);
             else if (key == "thrust")   entry.thrust   = toFloat(value, 0.0f);
             else if (key == "steering") entry.steering = toFloat(value, 0.0f);
+            if (key.rfind("port ", 0) == 0) {
+                PrefabCatalogEntry::SidecarPort sp;
+                sp.name = key.substr(5);
+                std::istringstream pv(value);
+                bool ok = true;
+                for (int k = 0; k < 9; ++k) if (!(pv >> sp.v[k])) { ok = false; break; }
+                if (ok) entry.ports.push_back(sp);
+            } else if (key != "prefab") {
+                entry.meta.emplace_back(key, value);
+            }
         }
 
         // A .lime in this folder that does not say it is a prefab is not one --

@@ -9,3 +9,4 @@ meta mass: 180
 meta summary: Steers a vessel. Needs an engine on the same hull.
 meta steering: 900
 meta power_in: 10
+port power_in: -0.5 0.55 0.0 -1 0 0 0 1 0

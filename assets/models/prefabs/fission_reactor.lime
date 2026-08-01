@@ -888,6 +888,7 @@ port 2: "power_out" 1.0800 1.5500 0.0000 | 1.0000 0.0000 0.0000 | 0.0000 1.0000 
 meta catalog: power
 meta mass: 1200
 meta mount: deck_mount
+meta power_off: 1
 meta power_out: 500
 meta prefab: 1
 meta price: 9000

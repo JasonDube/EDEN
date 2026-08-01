@@ -108,6 +108,7 @@ PORTS = [
 
 META = {
     "power_out": "500",          # kilowatts of supply -- the ship's budget
+    "power_off": "1",            # ships OFFLINE -- walk up and press E
     "role":    "power",          # seats on a reactor (P) socket, and only there
     "catalog": "power",          # which shelf it appears on
     "title":   "Fission Reactor",

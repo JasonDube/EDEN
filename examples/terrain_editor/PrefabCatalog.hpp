@@ -39,6 +39,14 @@ struct PrefabCatalogEntry {
     // tonnage. Zero means the file did not say -- flight applies its defaults.
     float       thrust   = 0.0f;
     float       steering = 0.0f;
+    // EVERY meta key rides to the placed object -- power_out, capacity,
+    // power_off, keys not invented yet. The named fields above are the
+    // shop's own reading; this is the rail.
+    std::vector<std::pair<std::string, std::string>> meta;
+    // Ports authored in a .meta sidecar (for .glb parts, which cannot carry
+    // ports in-file): name + position + forward + up.
+    struct SidecarPort { std::string name; float v[9]; };
+    std::vector<SidecarPort> ports;
 };
 
 struct PrefabCatalogHooks {

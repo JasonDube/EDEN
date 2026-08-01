@@ -291,7 +291,39 @@ bool VesselFlight::takeHelm(const std::string& helmName) {
         return false;
     }
 
+    // THE TRACED RUNG. A wired hull is held to a higher standard: if ANY
+    // manifest piece has a wire on it, every enabled engine -- and the helm
+    // -- must actually RECEIVE power through the graph, not merely share a
+    // deck with a reactor. The ledger above still caps total supply; this
+    // checks the plumbing. Wireless hulls keep the ledger alone.
+    if (m_deps.hasWire && m_deps.powerReaches) {
+        bool anyWire = false;
+        for (const std::string& name : m_manifest)
+            if (SceneObject* o = find(name)) if (m_deps.hasWire(o)) { anyWire = true; break; }
+        if (anyWire) {
+            for (const std::string& name : m_manifest) {
+                SceneObject* o = find(name);
+                if (!o || poweredOff(o)) continue;
+                const bool needsLine = hasRole(o, "engine") || hasRole(o, "helm");
+                if (!needsLine) continue;
+                if (!m_deps.powerReaches(o)) {
+                    char buf[160];
+                    std::snprintf(buf, sizeof buf,
+                                  "%s '%s' has no powered line -- check the run",
+                                  hasRole(o, "engine") ? "engine" : "helm",
+                                  o->getName().c_str());
+                    m_error = buf;
+                    m_lastManifest = m_manifest;
+                    m_manifest.clear();
+                    m_deckName.clear();
+                    return false;
+                }
+            }
+        }
+    }
+
     // The flight envelope, from power-to-weight and helm authority.
+    m_readyTimer = 2.5f;   // ALL SYSTEMS READY -- every rung passed
     const float pw = m_thrust / m_tonnage;
     m_flySpeed  = std::clamp(8.0f * pw, 3.0f, 16.0f);
     m_liftSpeed = 0.6f * m_flySpeed;
@@ -468,6 +500,7 @@ bool VesselFlight::tick(float dt, const glm::vec3& worldMove) {
 }
 
 void VesselFlight::update(float dt, bool isPlayMode, bool guiWantsKeys) {
+    if (m_readyTimer > 0.0f) m_readyTimer -= dt;
     m_frameDelta = glm::vec3(0.0f);
     m_frameTurn  = 0.0f;
     m_showPrompt = false;
@@ -526,6 +559,16 @@ void VesselFlight::renderUI(float screenW, float screenH) const {
         line = flyLine;
     }
     else if (m_errorTimer > 0.0f) line = m_error.c_str();
+    if (m_flying && m_readyTimer > 0.0f) {
+        char ready[96];
+        std::snprintf(ready, sizeof ready, "ALL SYSTEMS READY -- %.0f kW routed", m_powerNeed);
+        ImDrawList* rdl = ImGui::GetForegroundDrawList();
+        const ImVec2 rsz = ImGui::CalcTextSize(ready);
+        const ImVec2 rat(screenW * 0.5f - rsz.x * 0.5f, screenH - 170.0f);
+        rdl->AddRectFilled(ImVec2(rat.x - 8, rat.y - 4), ImVec2(rat.x + rsz.x + 8, rat.y + rsz.y + 4),
+                           IM_COL32(0, 0, 0, 160), 4.0f);
+        rdl->AddText(rat, IM_COL32(110, 235, 130, 255), ready);
+    }
     else if (m_showPrompt)      line = "E -- take the helm";
     if (!line) return;
 

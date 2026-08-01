@@ -496,8 +496,23 @@ protected:
                         std::snprintf(num, sizeof num, "%g", entry.steering);
                         m_toolbarSlots[i].metadata["steering"] = num;
                     }
+                    // THE FULL RAIL: every meta key the file declared rides
+                    // into the slot -- power_out reached placed reactors as
+                    // zero until this line existed.
+                    for (const auto& [mk, mv] : entry.meta)
+                        m_toolbarSlots[i].metadata[mk] = mv;
                     m_toolbarSlots[i].modelSourcePath   = entry.filePath;
                     createSlotThumbnail(i);
+                    // Sidecar ports (a .glb cannot carry ports in-file; its
+                    // .meta can): the helm's power_in arrives this way.
+                    if (!entry.ports.empty()) {
+                        m_toolbarSlots[i].ports.clear();
+                        for (const auto& sp : entry.ports)
+                            m_toolbarSlots[i].ports.push_back({sp.name,
+                                glm::vec3(sp.v[0], sp.v[1], sp.v[2]),
+                                glm::vec3(sp.v[3], sp.v[4], sp.v[5]),
+                                glm::vec3(sp.v[6], sp.v[7], sp.v[8])});
+                    }
                     return i;
                 }
                 return -1;
@@ -522,6 +537,14 @@ protected:
                     m_characterController->removeStaticBody(o->getJoltBodyId());
                     o->clearJoltBody();
                 }
+            };
+            // The wiring era's hooks: takeoff traces the runs when a hull
+            // carries wire.
+            fly.powerReaches = [this](eden::SceneObject* o) { return canPowerReach(o); };
+            fly.hasWire = [this](eden::SceneObject* o) {
+                for (const auto& w : m_wires)
+                    if (w.fromObj == o || w.toObj == o) return true;
+                return false;
             };
             m_vessel.setDeps(fly);
         }
@@ -16270,6 +16293,28 @@ private:
                     m_screenMessage = buf;
                     m_screenMessageTimer = 0.3f;
                 }
+                // Power part status -- the akelba generator mouseover, aboard
+                else if ([&]{ const auto& md = focusObj->getModelMetadata();
+                              auto it = md.find("role");
+                              return it != md.end() && it->second == "power"; }()) {
+                    const auto& md = focusObj->getModelMetadata();
+                    auto g = [&](const char* k, const char* dflt) {
+                        auto it = md.find(k); return it != md.end() ? it->second : std::string(dflt);
+                    };
+                    const bool on = g("power_off", "0") != "1";
+                    const float out = std::strtof(g("power_out", "0").c_str(), nullptr);
+                    char buf[160];
+                    if (on) {
+                        const float drawn = powerDrawThrough(focusObj);
+                        snprintf(buf, sizeof buf, "%s ONLINE | %.0f kW out | %.0f kW drawn on this run | E: offline",
+                                 g("title", "Reactor").c_str(), out, drawn);
+                    } else {
+                        snprintf(buf, sizeof buf, "%s OFFLINE | %.0f kW idle | E: online",
+                                 g("title", "Reactor").c_str(), out);
+                    }
+                    m_screenMessage = buf;
+                    m_screenMessageTimer = 0.3f;
+                }
                 // Switch status
                 else if (nameLower.find("switch") != std::string::npos) {
                     bool isOn = m_switchStates.count(focusObj) ? m_switchStates[focusObj] : false;
@@ -28691,6 +28736,26 @@ private:
                 }
             }
 
+            // Reactor interaction -- E toggles a power part online/offline.
+            // Same metadata flag the helm console flips: one truth, two
+            // switches.
+            if (eKey) {
+                const auto& pmd = closestObj->getModelMetadata();
+                auto prIt = pmd.find("role");
+                if (prIt != pmd.end() && prIt->second == "power") {
+                    auto meta = closestObj->getModelMetadata();
+                    const bool wasOff = meta.count("power_off") && meta["power_off"] == "1";
+                    meta["power_off"] = wasOff ? "0" : "1";
+                    closestObj->setModelMetadata(meta);
+                    auto tIt = meta.find("title");
+                    const std::string title = tIt != meta.end() ? tIt->second : "Reactor";
+                    m_screenMessage = title + (wasOff ? " ONLINE" : " OFFLINE");
+                    m_screenMessageTimer = 2.0f;
+                    m_wiresMeshDirty = true;   // line colours change with the juice
+                    return;
+                }
+            }
+
             // Switch interaction — toggle on/off
             if (eKey) {
                 std::string switchNameLower = closestObj->getName();
@@ -33060,6 +33125,16 @@ private:
             SceneObject* current = queue.back();
             queue.pop_back();
 
+            // An ONLINE reactor is a source -- role power, not switched off.
+            {
+                const auto& md = current->getModelMetadata();
+                auto rIt = md.find("role");
+                if (rIt != md.end() && rIt->second == "power") {
+                    auto oIt = md.find("power_off");
+                    if (oIt == md.end() || oIt->second != "1") return true;
+                }
+            }
+
             // Is this object an outlet box connected to a running generator?
             std::string cn = current->getName();
             std::transform(cn.begin(), cn.end(), cn.begin(), ::tolower);
@@ -33103,6 +33178,46 @@ private:
             }
         }
         return false;
+    }
+
+    // Sum the demand connected to this reactor through the wire graph --
+    // enabled engines (default 120 kW), the helm (10), anything with a
+    // power_in. Switches that are OFF stop the walk, same as power does.
+    float powerDrawThrough(SceneObject* source) {
+        std::unordered_set<SceneObject*> visited;
+        std::vector<SceneObject*> queue = {source};
+        visited.insert(source);
+        float drawn = 0.0f;
+        while (!queue.empty()) {
+            SceneObject* current = queue.back();
+            queue.pop_back();
+            if (current != source) {
+                const auto& md = current->getModelMetadata();
+                auto off = md.find("power_off");
+                if (off == md.end() || off->second != "1") {
+                    auto role = md.find("role");
+                    auto pin = md.find("power_in");
+                    if (pin != md.end()) drawn += std::strtof(pin->second.c_str(), nullptr);
+                    else if (role != md.end() && role->second == "engine") drawn += 120.0f;
+                    else if (role != md.end() && role->second == "helm") drawn += 10.0f;
+                }
+            }
+            for (const auto& wire : m_wires) {
+                SceneObject* next = nullptr;
+                if (wire.toObj == current && visited.count(wire.fromObj) == 0) next = wire.fromObj;
+                if (wire.fromObj == current && visited.count(wire.toObj) == 0) next = wire.toObj;
+                if (!next) continue;
+                std::string nn = next->getName();
+                std::transform(nn.begin(), nn.end(), nn.begin(), ::tolower);
+                if (nn.find("switch") != std::string::npos) {
+                    bool switchOn = m_switchStates.count(next) ? m_switchStates[next] : false;
+                    if (!switchOn) continue;
+                }
+                visited.insert(next);
+                queue.push_back(next);
+            }
+        }
+        return drawn;
     }
 
     // Check if a specific wire has power flowing through it

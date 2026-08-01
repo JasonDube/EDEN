@@ -53,6 +53,12 @@ struct VesselFlightDeps {
     // host with the API that already exists; this file never reaches into the
     // collision system itself.
     std::function<void(eden::SceneObject*)> dropStaticBody;
+
+    // The wiring era's hooks. powerReaches asks the host's wire graph
+    // whether juice arrives at this object; hasWire asks whether any wire
+    // touches it at all. When a hull is wired, takeoff traces the runs.
+    std::function<bool(eden::SceneObject*)> powerReaches;
+    std::function<bool(eden::SceneObject*)> hasWire;
 };
 
 class VesselFlight {
@@ -136,6 +142,7 @@ private:
     float m_turnRate  = 50.0f;
     float m_powerOut  = 0.0f;    // kW of enabled supply at takeoff
     float m_powerNeed = 0.0f;    // kW the enabled flight systems draw
+    float m_readyTimer = 0.0f;   // seconds the ALL SYSTEMS READY line shows
     std::string m_error;
     float m_errorTimer = 0.0f;   // seconds the HUD keeps showing a refusal
 };
