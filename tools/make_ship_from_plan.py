@@ -374,15 +374,16 @@ if REVOLVE > 0.0:
     # a plane (the z-fighting lesson, kept).
     # A is always the bow (-z) side of the boundary, B the stern (+z) side.
     # Each layer's band shifts toward whichever side is DEFICIENT AT THAT
-    # LAYER -- not per run: a door run's missing ground ring makes the empty
-    # side a per-layer fact, and shifting by run radius parked full-width
-    # bands inside intact rings, coplanar tops and all (the detector caught
-    # eight of them).
-    def bulkhead(zb, secA, secB, arch):
+    # LAYER (per-run shift parked bands inside intact rings -- the detector
+    # caught eight coplanar tops). And the rule the trapped-hallway field
+    # report taught: BELOW WALL HEIGHT A BULKHEAD MAY ONLY LIVE IN THE
+    # ANNULUS between hull wall and shell ring -- full-width bands at ground
+    # level walled a corridor straight through the rooms. Above the wall
+    # tops, where the dome is the ceiling, full width is correct. Every band
+    # splits at the wall line.
+    def bulkhead(zb, secA, secB, bHull, hWall):
         layers = sorted(set(secA) | set(secB))
         for k in layers:
-            if arch and k == 0:
-                continue
             gA = secA.get(k); gB = secB.get(k)
             z0, z1 = (gA or gB)[0], (gA or gB)[1]
             wA = gA[2] if gA else 0.0
@@ -391,13 +392,33 @@ if REVOLVE > 0.0:
                 continue
             wLo, wHi = sorted((wA, wB))
             pz = zb + (0.2 if wB < wA else -0.2)
-            if wLo < 0.3:
-                shell_box("platform_wall", ORIGIN_X, z0, z1,
-                          max(2.0 * wHi, 1.0), pz, 0.4, FILL_COL)
-            else:
-                for side in (-1.0, 1.0):
-                    shell_box("platform_wall", ORIGIN_X + side * (wLo + wHi) / 2.0,
-                              z0, z1, wHi - wLo, pz, 0.4, FILL_COL)
+            zs = max(z0, min(z1, hWall))
+            # below the wall line: annulus only, both sides
+            if zs > z0:
+                lo = max(wLo, bHull)
+                if wHi - lo > 0.05:
+                    for side in (-1.0, 1.0):
+                        shell_box("platform_wall", ORIGIN_X + side * (lo + wHi) / 2.0,
+                                  z0, zs, wHi - lo, pz, 0.4, FILL_COL)
+            # above the wall line: the full exposed face
+            if z1 > zs:
+                if wLo < 0.3:
+                    shell_box("platform_wall", ORIGIN_X, zs, z1,
+                              max(2.0 * wHi, 1.0), pz, 0.4, FILL_COL)
+                else:
+                    for side in (-1.0, 1.0):
+                        shell_box("platform_wall", ORIGIN_X + side * (wLo + wHi) / 2.0,
+                                  zs, z1, wHi - wLo, pz, 0.4, FILL_COL)
+
+    def boundary_ctx(yb):
+        # Hull half-breadth and wall height at a boundary come from the rows
+        # on either side of it -- the larger of each, so bands clear both.
+        bh, hw = 0.0, 3.0
+        for yy in (yb - 1, yb):
+            if 0 <= yy < H and half[yy] > 0.0:
+                bh = max(bh, half[yy] - CELL)
+                hw = max(hw, LOFT[yy])
+        return bh, hw
 
     for i in range(len(runs) + 1):
         prev = runs[i - 1] if i > 0 else None
@@ -406,13 +427,16 @@ if REVOLVE > 0.0:
             continue
         if prev is None:                      # bow cap of the first run
             yb = nxt[0]
-            bulkhead((yb - H / 2.0) * CELL + ORIGIN_Z, {}, secs[i], nxt[3])
+            bh, hw = boundary_ctx(yb)
+            bulkhead((yb - H / 2.0) * CELL + ORIGIN_Z, {}, secs[i], bh, hw)
         elif nxt is None:                     # stern cap of the last run
             yb = prev[0] + prev[1]
-            bulkhead((yb - H / 2.0) * CELL + ORIGIN_Z, secs[i - 1], {}, prev[3])
+            bh, hw = boundary_ctx(yb)
+            bulkhead((yb - H / 2.0) * CELL + ORIGIN_Z, secs[i - 1], {}, bh, hw)
         elif prev[0] + prev[1] == nxt[0]:     # a step between adjacent runs
             yb = nxt[0]
-            bulkhead((yb - H / 2.0) * CELL + ORIGIN_Z, secs[i - 1], secs[i], False)
+            bh, hw = boundary_ctx(yb)
+            bulkhead((yb - H / 2.0) * CELL + ORIGIN_Z, secs[i - 1], secs[i], bh, hw)
 
     print(f"revolve: {shell_n} shell pieces at height scale {REVOLVE:g}"
           + (", glass fill" if REV_GLASS else ", opaque fill")
