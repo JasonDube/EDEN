@@ -15789,6 +15789,13 @@ private:
             }
         }
 
+        // The gizmo's draw data is valid ONLY on frames its logic runs.
+        // Without this reset, walk mode (cursor hidden) and the Shipwright
+        // (Tab) skip the logic and the last frame's arms float forever --
+        // the reported ghost gizmo.
+        m_gizmoVisible = false;
+        m_buildGizmoHover = -1;
+
         // Move/rotate selected build piece — always active when a piece is selected in build mode
         if (m_selectedBuildPiece >= 0
             && m_selectedBuildPiece < static_cast<int>(m_sceneObjects.size())
@@ -15828,9 +15835,9 @@ private:
             // vertically. The old grab-anywhere drag is gone on purpose.
             if (Input::isKeyPressed(Input::KEY_G) && !ImGui::GetIO().WantCaptureKeyboard)
                 m_buildGizmoOn = !m_buildGizmoOn;
-            m_buildGizmoHover = -1;
-            m_gizmoVisible = false;
-            if (m_buildGizmoOn) {
+            // Muted while the drafting table is up -- the gizmo is a
+            // painter's tool, not a Shipwright ornament.
+            if (m_buildGizmoOn && !m_showShipwright) {
                 const glm::mat4 vpM = proj * view;
                 const AABB gb = obj->getWorldBounds();
                 const glm::vec3 gc = (gb.min + gb.max) * 0.5f;
