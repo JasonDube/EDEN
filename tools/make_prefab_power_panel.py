@@ -98,6 +98,7 @@ PORTS = [
 
 META = {
     "role":    "",
+    "surface_mount": "1",        # walls and ceilings welcome -- wires follow
     "catalog": "electrical",
     "title":   "Power Panel",
     "price":   "250",

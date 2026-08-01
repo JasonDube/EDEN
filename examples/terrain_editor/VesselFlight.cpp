@@ -142,7 +142,9 @@ bool VesselFlight::buildManifest(SceneObject* helm) {
         for (const AABB& db2 : hullBounds) {
             if (p.x < db2.min.x - 0.3f || p.x > db2.max.x + 0.3f) continue;
             if (p.z < db2.min.z - 0.3f || p.z > db2.max.z + 0.3f) continue;
-            if (ob.min.y < db2.max.y - 0.4f || ob.min.y > db2.max.y + 2.5f) continue;
+            // Up to 12 units above a plate: lofted walls carry ceiling-
+            // mounted junction boxes, and those must fly with the ship.
+            if (ob.min.y < db2.max.y - 0.4f || ob.min.y > db2.max.y + 12.0f) continue;
             m_manifest.push_back(o->getName());
             break;
         }

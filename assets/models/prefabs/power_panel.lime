@@ -461,4 +461,5 @@ meta prefab: 1
 meta price: 250
 meta role: 
 meta summary: Line in, line out, and a feed lug. Mount it near what it serves.
+meta surface_mount: 1
 meta title: Power Panel

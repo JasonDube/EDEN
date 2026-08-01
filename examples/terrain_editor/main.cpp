@@ -12188,6 +12188,59 @@ private:
                     }
                 }
 
+                // SURFACE MOUNT ("wires are in the way from walking around").
+                // A part that declares surface_mount seats flat against
+                // whatever face the crosshair touches -- wall, ceiling, or
+                // floor -- rotated so its base kisses the surface: sideways
+                // on a wall, upside down overhead. The vessel's turn already
+                // COMPOSES rotations (applyYaw does q * existing), so a
+                // mounted box rides a yawing ship for free.
+                bool surfaceSeated = false;
+                glm::vec3 surfacePos(0.0f);
+                glm::quat surfaceQ(1.0f, 0.0f, 0.0f, 0.0f);
+                if (m_toolbarSlots[i].metadata.count("surface_mount") > 0) {
+                    float bestD = 6.0f;
+                    SceneObject* face = nullptr;
+                    glm::vec3 hitP(0.0f);
+                    for (auto& so : m_sceneObjects) {
+                        if (!so || !so->isVisible()) continue;
+                        const auto& bt = so->getBuildingType();
+                        if (bt != "platform_wall" && bt != "platform_slab") continue;
+                        const float d = so->getWorldBounds().intersect(camPos, camFront);
+                        if (d >= 0.0f && d < bestD) {
+                            bestD = d;
+                            face = so.get();
+                            hitP = camPos + camFront * d;
+                        }
+                    }
+                    if (face) {
+                        // Which face: the axis where the hit grazes a bound.
+                        const AABB wb = face->getWorldBounds();
+                        glm::vec3 n(0.0f, 1.0f, 0.0f);
+                        float best = 1e9f;
+                        const struct { float d; glm::vec3 n; } faces[6] = {
+                            {std::fabs(hitP.x - wb.min.x), {-1, 0, 0}},
+                            {std::fabs(hitP.x - wb.max.x), { 1, 0, 0}},
+                            {std::fabs(hitP.y - wb.min.y), { 0,-1, 0}},
+                            {std::fabs(hitP.y - wb.max.y), { 0, 1, 0}},
+                            {std::fabs(hitP.z - wb.min.z), { 0, 0,-1}},
+                            {std::fabs(hitP.z - wb.max.z), { 0, 0, 1}},
+                        };
+                        for (const auto& f : faces)
+                            if (f.d < best) { best = f.d; n = f.n; }
+                        surfacePos = hitP + n * 0.02f;
+                        const glm::vec3 up(0.0f, 1.0f, 0.0f);
+                        const float dUp = glm::dot(up, n);
+                        if (dUp < -0.999f)
+                            surfaceQ = glm::angleAxis(glm::radians(180.0f), glm::vec3(1, 0, 0));
+                        else if (dUp < 0.999f)
+                            surfaceQ = glm::angleAxis(std::acos(glm::clamp(dUp, -1.0f, 1.0f)),
+                                                      glm::normalize(glm::cross(up, n)));
+                        surfaceSeated = true;
+                    }
+                    // No face in reach: fall through to ordinary floor placement.
+                }
+
                 bool placedInFrame = false;
                 if (ctrlHeld) {
                     // Check if a frame is selected — place into frame position
@@ -12348,6 +12401,11 @@ private:
                             foundPlace = true;
                             placeSource = "socket";
                             placeDist = glm::length(socketPos - camPos);
+                        } else if (surfaceSeated) {
+                            spawnPos = surfacePos;
+                            foundPlace = true;
+                            placeSource = "surface";
+                            placeDist = glm::length(surfacePos - camPos);
                         } else {
                         // WITHIN ARM'S REACH, not wherever the ray eventually lands.
                         //
@@ -12475,6 +12533,11 @@ private:
                 // its whole civic identity. Ordinary items stay salvage.
                 obj->setBuildingType(m_toolbarSlots[i].buildingType.empty()
                                      ? "salvage" : m_toolbarSlots[i].buildingType);
+                if (surfaceSeated) {
+                    obj->getTransform().setRotation(surfaceQ);
+                    obj->setEulerRotation(glm::degrees(glm::eulerAngles(surfaceQ)));
+                    obj->setAABBCollision(false);   // wall trim does not block boots
+                }
                 obj->setBeingType(BeingType::INTERACTION);
                 obj->setLocalBounds(m_toolbarSlots[i].modelBounds);
                 obj->setModelPath(m_toolbarSlots[i].modelSourcePath);

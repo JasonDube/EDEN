@@ -408,4 +408,5 @@ meta prefab: 1
 meta price: 150
 meta role: 
 meta summary: Branches a cable run four ways. Wiring goes through boxes.
+meta surface_mount: 1
 meta title: Junction Box
