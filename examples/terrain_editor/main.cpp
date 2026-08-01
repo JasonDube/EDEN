@@ -16314,7 +16314,7 @@ private:
                 // Power part status -- the akelba generator mouseover, aboard
                 else if ([&]{ const auto& md = focusObj->getModelMetadata();
                               auto it = md.find("role");
-                              return it != md.end() && it->second == "power"; }()) {
+                              return it != md.end() && (it->second == "power" || it->second == "robot"); }()) {
                     const auto& md = focusObj->getModelMetadata();
                     auto g = [&](const char* k, const char* dflt) {
                         auto it = md.find(k); return it != md.end() ? it->second : std::string(dflt);
@@ -16322,13 +16322,24 @@ private:
                     const bool on = g("power_off", "0") != "1";
                     const float out = std::strtof(g("power_out", "0").c_str(), nullptr);
                     char buf[160];
-                    if (on) {
-                        const float drawn = powerDrawThrough(focusObj);
-                        snprintf(buf, sizeof buf, "%s ONLINE | %.0f kW out | %.0f kW drawn on this run | E: offline",
-                                 g("title", "Reactor").c_str(), out, drawn);
+                    if (out > 0.0f) {
+                        // A supplier: the akelba generator readout, aboard.
+                        if (on) {
+                            const float drawn = powerDrawThrough(focusObj);
+                            snprintf(buf, sizeof buf, "%s ONLINE | %.0f kW out | %.0f kW drawn on this run | E: offline",
+                                     g("title", "Reactor").c_str(), out, drawn);
+                        } else {
+                            snprintf(buf, sizeof buf, "%s OFFLINE | %.0f kW idle | E: online",
+                                     g("title", "Reactor").c_str(), out);
+                        }
                     } else {
-                        snprintf(buf, sizeof buf, "%s OFFLINE | %.0f kW idle | E: online",
-                                 g("title", "Reactor").c_str(), out);
+                        // A consumer: what it draws, and whether juice arrives.
+                        const float in = std::strtof(g("power_in", "0").c_str(), nullptr);
+                        const bool fed = canPowerReach(focusObj);
+                        snprintf(buf, sizeof buf, "%s %s | draws %.0f kW | line: %s | E: %s",
+                                 g("title", "Station").c_str(), on ? "ONLINE" : "OFFLINE",
+                                 in, fed ? "POWERED" : "dead",
+                                 on ? "offline" : "online");
                     }
                     m_screenMessage = buf;
                     m_screenMessageTimer = 0.3f;
@@ -28760,7 +28771,7 @@ private:
             if (eKey) {
                 const auto& pmd = closestObj->getModelMetadata();
                 auto prIt = pmd.find("role");
-                if (prIt != pmd.end() && prIt->second == "power") {
+                if (prIt != pmd.end() && (prIt->second == "power" || prIt->second == "robot")) {
                     auto meta = closestObj->getModelMetadata();
                     const bool wasOff = meta.count("power_off") && meta["power_off"] == "1";
                     meta["power_off"] = wasOff ? "0" : "1";
@@ -33025,11 +33036,26 @@ private:
             float hDist = glm::length(glm::vec2(toWorld.x - fromWorld.x, toWorld.z - fromWorld.z));
             float vDist = std::abs(toWorld.y - fromWorld.y);
             float minY = std::min(fromWorld.y, toWorld.y);
-            // Check if wire is near the ground
-            float terrainY = m_terrain.getHeightAt(
-                (fromWorld.x + toWorld.x) * 0.5f,
-                (fromWorld.z + toWorld.z) * 0.5f);
-            bool nearGround = (minY - terrainY) < 0.5f;
+            // Check if wire is near the ground -- where "ground" means the
+            // surface it actually lies over: terrain OR the highest deck
+            // plate under the midpoint. The old check asked only the
+            // terrain, so a run lying flat on a ship's deck (0.6 up, or
+            // lofted, or flying) read as open air and swagged -- the
+            // junction-to-junction swale of the field report. Box-to-box
+            // runs now hug the deck; a drop from a reactor flank still
+            // gets its honest catenary.
+            const float midX = (fromWorld.x + toWorld.x) * 0.5f;
+            const float midZ = (fromWorld.z + toWorld.z) * 0.5f;
+            float supportY = m_terrain.getHeightAt(midX, midZ);
+            if (supportY < -1000.0f) supportY = minY - 10.0f;
+            for (auto& so : m_sceneObjects) {
+                if (!so || so->getBuildingType() != "platform_slab") continue;
+                const AABB wb2 = so->getWorldBounds();
+                if (midX < wb2.min.x || midX > wb2.max.x) continue;
+                if (midZ < wb2.min.z || midZ > wb2.max.z) continue;
+                if (wb2.max.y <= minY + 0.1f && wb2.max.y > supportY) supportY = wb2.max.y;
+            }
+            bool nearGround = (minY - supportY) < 0.5f;
             // Check if wire runs mostly vertically (along a wall)
             bool mostlyVertical = vDist > hDist * 0.8f;
             float sagAmount = 0.0f;
