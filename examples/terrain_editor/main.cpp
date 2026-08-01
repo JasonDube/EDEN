@@ -545,6 +545,14 @@ protected:
         // The yard's chandlery button -- Tab no longer passes through the old
         // build panel that held "Open Catalog", so the Shipwright carries it.
         m_shipwright.setCatalogHook([this] { m_showCatalog = true; });
+        // The Painter is nothing but the old build-mode toggle -- the same
+        // flag the Window menu flips -- which brings click-select, drag-
+        // jostle, and the Building Textures panel to ship pieces. All of
+        // that machinery predates the Shipwright; only the doorway is new.
+        m_shipwright.setPainterHook([this]() -> bool {
+            m_showSiloConfig = !m_showSiloConfig;
+            return m_showSiloConfig;
+        });
 
         // The shipyard: BUILD SHIP raises the ship IN THE WORLD YOU ARE
         // STANDING IN -- ahead of where you face, keel on the terrain. The

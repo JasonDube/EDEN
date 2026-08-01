@@ -45,6 +45,13 @@ public:
     // because Tab no longer passes through the old build panel that held it.
     void setCatalogHook(std::function<void()> h) { m_openCatalog = std::move(h); }
 
+    // THE PAINTER: toggles the old build mode (m_showSiloConfig) -- click-
+    // select pieces, drag to jostle, and the Building Textures panel that
+    // akelba's h-slabs have had all along. The whole texture system already
+    // existed; this button is the door Tab stopped opening when it became
+    // the Shipwright's. Returns the new state so the button can show it.
+    void setPainterHook(std::function<bool()> h) { m_painter = std::move(h); }
+
     // The yard's SURVEY: Finalize hands the plan to the generator's
     // segmentation (survey mode -- nothing is built) and gets back which cell
     // belongs to which named room, so the designer sees the colour-coded
@@ -75,6 +82,8 @@ private:
     std::vector<int>       m_overlayIdx; // per-cell room index, -1 = none
     int m_material = 1;             // hull material tier, 1..6
     std::function<void()> m_openCatalog;
+    std::function<bool()> m_painter;
+    bool m_painterOn = false;
     std::vector<char> m_cells;      // kW * kH, row-major
     char m_tool = '#';
     bool m_sideView = false;        // the profile window toggle

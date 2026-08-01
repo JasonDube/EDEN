@@ -353,6 +353,19 @@ void Shipwright::render(bool& open) {
             m_status = "the chandlery is open -- buy parts, Tab out, right-click to place";
         }
     }
+    if (m_painter) {
+        ImGui::SameLine();
+        if (m_painterOn) ImGui::PushStyleColor(ImGuiCol_Button, IM_COL32(140, 90, 40, 255));
+        if (ImGui::Button(m_painterOn ? "Painter [on]" : "Painter")) {
+            m_painterOn = m_painter();
+            m_status = m_painterOn
+                ? "painter on -- Tab out, click a piece for Building Textures; drag to jostle, Shift+D duplicates"
+                : "painter off -- the hull keeps what she wears";
+        }
+        if (ImGui::IsItemHovered() && !m_painterOn)
+            ImGui::SetTooltip("click-select + Building Textures, as on akelba's slabs");
+        if (m_painterOn) ImGui::PopStyleColor();
+    }
 
     // ---- the grid ----------------------------------------------------------
     const float cell = 13.0f;
