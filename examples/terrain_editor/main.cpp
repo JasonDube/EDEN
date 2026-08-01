@@ -15829,6 +15829,7 @@ private:
             if (Input::isKeyPressed(Input::KEY_G) && !ImGui::GetIO().WantCaptureKeyboard)
                 m_buildGizmoOn = !m_buildGizmoOn;
             m_buildGizmoHover = -1;
+            m_gizmoVisible = false;
             if (m_buildGizmoOn) {
                 const glm::mat4 vpM = proj * view;
                 const AABB gb = obj->getWorldBounds();
@@ -15844,18 +15845,23 @@ private:
                     return ImVec2((clip.x / clip.w * 0.5f + 0.5f) * sw,
                                   (0.5f - clip.y / clip.w * 0.5f) * sh);
                 };
+                // NO ImGui DRAW CALLS HERE: updatePlayMode runs BEFORE
+                // ImGui::NewFrame (see reference_imgui_frame_order), and
+                // GetForegroundDrawList before NewFrame is the segfault the
+                // first gizmo shipped with. Logic computes and STORES the
+                // screen geometry; the render section draws it.
                 bool okC = false;
                 const ImVec2 sc = toScreen(gc, okC);
                 static const glm::vec3 kAxes[3] = {{1,0,0},{0,1,0},{0,0,1}};
-                static const ImU32 kCols[3] = {IM_COL32(230, 80, 80, 255),
-                                               IM_COL32(90, 220, 90, 255),
-                                               IM_COL32(90, 140, 255, 255)};
-                ImDrawList* fg = ImGui::GetForegroundDrawList();
+                m_gizmoVisible = okC;
+                m_gizmoC = glm::vec2(sc.x, sc.y);
                 if (okC) {
                     for (int a = 0; a < 3; ++a) {
                         bool okT = false;
                         const ImVec2 st = toScreen(gc + kAxes[a] * arm, okT);
+                        m_gizmoTipVis[a] = okT;
                         if (!okT) continue;
+                        m_gizmoTip[a] = glm::vec2(st.x, st.y);
                         const ImVec2 mp(mouse.x, mouse.y);
                         const float dxs = st.x - sc.x, dys = st.y - sc.y;
                         const float len2 = dxs * dxs + dys * dys;
@@ -15863,13 +15869,8 @@ private:
                             ? std::clamp(((mp.x - sc.x) * dxs + (mp.y - sc.y) * dys) / len2, 0.0f, 1.0f)
                             : 0.0f;
                         const float dist = std::hypot(mp.x - (sc.x + dxs * t), mp.y - (sc.y + dys * t));
-                        const bool hov = dist < 10.0f;
-                        if (hov && m_buildGizmoHover < 0) m_buildGizmoHover = a;
-                        const bool act = (m_buildGizmoDragging && m_buildGizmoAxis == a);
-                        fg->AddLine(sc, st, kCols[a], (hov || act) ? 6.0f : 3.5f);
-                        fg->AddCircleFilled(st, (hov || act) ? 8.0f : 5.5f, kCols[a]);
+                        if (dist < 10.0f && m_buildGizmoHover < 0) m_buildGizmoHover = a;
                     }
-                    fg->AddCircleFilled(sc, 4.0f, IM_COL32(255, 255, 255, 200));
                     if (m_buildGizmoHover >= 0 && !m_buildGizmoDragging
                         && Input::isMouseButtonPressed(Input::MOUSE_LEFT)
                         && !ImGui::GetIO().WantCaptureMouse) {
@@ -22265,6 +22266,28 @@ private:
         }
         renderPlatformMapMode();
         renderPerfWindow();
+
+        // THE GIZMO'S ARMS, drawn here because this runs after NewFrame --
+        // the logic that placed them lives in updatePlayMode.
+        if (m_isPlayMode && m_showSiloConfig && m_buildGizmoOn && m_gizmoVisible
+            && m_selectedBuildPiece >= 0
+            && m_selectedBuildPiece < static_cast<int>(m_sceneObjects.size())
+            && m_sceneObjects[m_selectedBuildPiece]) {
+            static const ImU32 kGizCols[3] = {IM_COL32(230, 80, 80, 255),
+                                              IM_COL32(90, 220, 90, 255),
+                                              IM_COL32(90, 140, 255, 255)};
+            ImDrawList* fg = ImGui::GetForegroundDrawList();
+            const ImVec2 sc(m_gizmoC.x, m_gizmoC.y);
+            for (int a = 0; a < 3; ++a) {
+                if (!m_gizmoTipVis[a]) continue;
+                const ImVec2 st(m_gizmoTip[a].x, m_gizmoTip[a].y);
+                const bool hot = (m_buildGizmoHover == a) ||
+                                 (m_buildGizmoDragging && m_buildGizmoAxis == a);
+                fg->AddLine(sc, st, kGizCols[a], hot ? 6.0f : 3.5f);
+                fg->AddCircleFilled(st, hot ? 8.0f : 5.5f, kGizCols[a]);
+            }
+            fg->AddCircleFilled(sc, 4.0f, IM_COL32(255, 255, 255, 200));
+        }
 
         // THE PAINTER SIGNPOST. The painter has two states and the user
         // named them: WALK (mouse captured, roam the hull) and MOUSE (Esc
@@ -32522,6 +32545,10 @@ private:
     float m_gizmoWorldPerPixel = 0.0f;
     float m_gizmoAccum = 0.0f;
     glm::vec3 m_gizmoStartPos{0.0f};
+    bool m_gizmoVisible = false;        // draw data below is valid this frame
+    glm::vec2 m_gizmoC{0.0f};
+    glm::vec2 m_gizmoTip[3] = {};
+    bool m_gizmoTipVis[3] = {};
     glm::vec3 m_buildMoveOrigPos{0.0f};
     glm::vec3 m_buildMoveOffset{0.0f};
     float m_buildMoveLastMouseY = 0.0f;  // For vertical drag (Shift+drag)

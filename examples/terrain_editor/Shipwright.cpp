@@ -398,16 +398,21 @@ void Shipwright::render(bool& open) {
     }
     if (m_painter) {
         ImGui::SameLine();
-        if (m_painterOn) ImGui::PushStyleColor(ImGuiCol_Button, IM_COL32(140, 90, 40, 255));
-        if (ImGui::Button(m_painterOn ? "Painter [on]" : "Painter")) {
+        // Push/pop must agree even though the CLICK flips the flag between
+        // them -- pop by what was pushed, never by the current state. (The
+        // mismatch corrupted ImGui's style stack: "PopStyleColor too many
+        // times", found in the crash log.)
+        const bool wasOn = m_painterOn;
+        if (wasOn) ImGui::PushStyleColor(ImGuiCol_Button, IM_COL32(140, 90, 40, 255));
+        if (ImGui::Button(wasOn ? "Painter [on]" : "Painter")) {
             m_painterOn = m_painter();
             m_status = m_painterOn
-                ? "painter on -- Tab out, click a piece for Building Textures; drag to jostle, Shift+D duplicates"
+                ? "painter on -- Tab out, click a piece for Building Textures; G moves, Shift+D duplicates"
                 : "painter off -- the hull keeps what she wears";
         }
         if (ImGui::IsItemHovered() && !m_painterOn)
             ImGui::SetTooltip("click-select + Building Textures, as on akelba's slabs");
-        if (m_painterOn) ImGui::PopStyleColor();
+        if (wasOn) ImGui::PopStyleColor();
     }
 
     // ---- the grid ----------------------------------------------------------
