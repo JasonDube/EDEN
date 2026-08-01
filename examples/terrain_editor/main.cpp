@@ -703,6 +703,59 @@ protected:
             return done;
         });
 
+        // The breaker's yard: every shipN_-prefixed piece goes, and every
+        // fitting standing within the hull's bounds goes with it -- parts,
+        // boxes, panels (salvage or roled gear only; robots and bystanders
+        // are not the ship's to scrap). deleteObject cleans wires per piece.
+        m_shipwright.setScrapHook([this]() -> std::string {
+            if (m_vessel.isFlying())
+                return "she is FLYING -- land her before the breakers get her";
+            auto isYardPiece = [](const std::string& n) {
+                if (n.rfind("ship", 0) != 0) return false;
+                size_t i = 4;
+                while (i < n.size() && std::isdigit(static_cast<unsigned char>(n[i]))) ++i;
+                return i > 4 && i < n.size() && n[i] == '_';
+            };
+            AABB hull;
+            hull.min = glm::vec3(1e30f);
+            hull.max = glm::vec3(-1e30f);
+            std::vector<int> doomed;
+            for (int i = 0; i < static_cast<int>(m_sceneObjects.size()); ++i) {
+                auto& o = m_sceneObjects[i];
+                if (!o || !isYardPiece(o->getName())) continue;
+                const AABB wb = o->getWorldBounds();
+                hull.min = glm::min(hull.min, wb.min);
+                hull.max = glm::max(hull.max, wb.max);
+                doomed.push_back(i);
+            }
+            if (doomed.empty()) return "no yard-built ship on the pad";
+            int fittings = 0;
+            for (int i = 0; i < static_cast<int>(m_sceneObjects.size()); ++i) {
+                auto& o = m_sceneObjects[i];
+                if (!o || isYardPiece(o->getName())) continue;
+                const bool gear = o->getBuildingType() == "salvage" ||
+                                  o->getModelMetadata().count("role") > 0 ||
+                                  o->getModelMetadata().count("surface_mount") > 0;
+                if (!gear) continue;
+                const glm::vec3 pp = o->getTransform().getPosition();
+                if (pp.x < hull.min.x - 0.6f || pp.x > hull.max.x + 0.6f) continue;
+                if (pp.y < hull.min.y - 0.6f || pp.y > hull.max.y + 0.6f) continue;
+                if (pp.z < hull.min.z - 0.6f || pp.z > hull.max.z + 0.6f) continue;
+                doomed.push_back(i);
+                ++fittings;
+            }
+            std::sort(doomed.begin(), doomed.end());
+            for (int k = static_cast<int>(doomed.size()) - 1; k >= 0; --k)
+                deleteObject(doomed[k]);
+            m_vessel.releaseHelm();
+            updateSceneObjectsList();
+            char msg[128];
+            std::snprintf(msg, sizeof msg,
+                          "scrapped %d hull pieces and %d fittings -- the pad is clear",
+                          static_cast<int>(doomed.size()) - fittings, fittings);
+            return msg;
+        });
+
         // The survey: Finalize runs the SAME generator in --rooms-json mode --
         // segmentation and naming only, nothing built, nothing charged -- so
         // the drafting table's colours are the yard's own verdict.
