@@ -9600,6 +9600,23 @@ private:
                 // own ship is furniture, not an obstacle.
                 if (m_vessel.isFlying() && m_vessel.isAboard(obj->getName())) continue;
 
+                // THE LANDING LOCK (field report: "locked to the helm after u
+                // fly... keep donkeying around, you can get free"). At
+                // touchdown the flying exemption ends in one frame, but a
+                // hull that landed YAWED has inflated boxes that may already
+                // contain the pilot -- and this pass would pin them in place.
+                // A box you are already inside may not shove you: pieces of
+                // the LAST flight stay exempt while they contain the player,
+                // and turn solid again the moment they are exited.
+                if (!m_vessel.isFlying() && m_vessel.wasAboardLastFlight(obj->getName())) {
+                    const AABB rb = obj->getWorldBounds();
+                    const glm::vec3 pp = m_camera.getPosition();
+                    if (pp.x > rb.min.x - 0.4f && pp.x < rb.max.x + 0.4f &&
+                        pp.y > rb.min.y - 0.4f && pp.y < rb.max.y + 2.0f &&
+                        pp.z > rb.min.z - 0.4f && pp.z < rb.max.z + 0.4f)
+                        continue;
+                }
+
                 // Skip AABB if object has Bullet collision (Bullet takes priority)
                 if (obj->hasBulletCollision()) continue;
 

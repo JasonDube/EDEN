@@ -85,6 +85,15 @@ public:
     bool turnVessel(float deg);
     const std::vector<std::string>& manifest() const { return m_manifest; }
     float tonnage() const { return m_tonnage; }
+    // Was this piece aboard the LAST flight? The landing-lock fix asks: when
+    // the exemption switches off at touchdown, a yawed hull's inflated boxes
+    // may already CONTAIN the pilot, and a box you are inside may not shove
+    // you. Only last-flight pieces ever qualify, so worlds that never fly
+    // keep a bit-identical collision path.
+    bool wasAboardLastFlight(const std::string& name) const {
+        for (const auto& n : m_lastManifest) if (n == name) return true;
+        return false;
+    }
     // Is this object part of the flying vessel? The host's collision pass asks,
     // because what is aboard is your floor and furniture, not an obstacle.
     bool isAboard(const std::string& name) const {
@@ -109,6 +118,7 @@ private:
     // Names, not pointers -- the scene list reorders and deletes freely, and a
     // name that stops resolving is an object that left the vessel, not a crash.
     std::vector<std::string> m_manifest;
+    std::vector<std::string> m_lastManifest;   // what flew last, kept after landing
     glm::vec3 m_frameDelta{0.0f};
     float m_frameTurn = 0.0f;          // this frame's turn, camera-yaw degrees
     glm::vec3 m_framePivot{0.0f};      // about the deck's centre

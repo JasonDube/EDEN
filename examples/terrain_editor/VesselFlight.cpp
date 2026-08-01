@@ -283,6 +283,10 @@ void VesselFlight::releaseHelm() {
     m_flying = false;
     m_helmName.clear();
     m_deckName.clear();
+    // The manifest survives landing as the LAST manifest -- the collision
+    // pass needs to know what just flew, because a yawed hull's boxes may
+    // still contain the pilot at the instant the flying exemption ends.
+    m_lastManifest = std::move(m_manifest);
     m_manifest.clear();
     m_frameDelta = glm::vec3(0.0f);
 }
