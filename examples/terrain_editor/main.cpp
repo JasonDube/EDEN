@@ -13051,24 +13051,42 @@ private:
         // T key in play mode: toggle control point visualization
         if (m_isPlayMode && Input::isKeyPressed(Input::KEY_T) && !ImGui::GetIO().WantTextInput) {
             m_showCPsInGame = !m_showCPsInGame;
-            // REFRESH: entering wire mode re-reads every .lime part's ports
-            // from its file -- the file is the authority. This backfills
-            // parts placed before the port debt was paid AND picks up newly
-            // authored lugs (a reactor grown a power_out terminal) without
-            // replacing the placed object. Wires reference ports by NAME,
-            // so existing runs survive a refresh that only adds.
+            // REFRESH: entering wire mode re-reads every part's ports from
+            // its file -- the file is the authority. .lime parts carry ports
+            // in-file; .glb parts (the helm) carry them in a .meta sidecar.
+            // This backfills pre-debt parts AND picks up newly authored lugs
+            // without replacing the placed object. Wires reference ports by
+            // NAME, so existing runs survive a refresh that only adds.
             if (m_showCPsInGame) {
                 for (auto& obj : m_sceneObjects) {
                     if (!obj) continue;
                     const std::string& mp = obj->getModelPath();
-                    if (mp.size() < 5 || mp.substr(mp.size() - 5) != ".lime") continue;
-                    auto lr = LimeLoader::load(mp);
-                    if (!lr.success || lr.mesh.ports.empty()) continue;
-                    if (lr.mesh.ports.size() == obj->getPorts().size()) continue;
                     std::vector<SceneObject::StoredPort> bp;
-                    for (const auto& pp : lr.mesh.ports)
-                        bp.push_back({pp.name, pp.position, pp.forward, pp.up});
-                    obj->setPorts(bp);
+                    if (mp.size() > 5 && mp.substr(mp.size() - 5) == ".lime") {
+                        auto lr = LimeLoader::load(mp);
+                        if (lr.success)
+                            for (const auto& pp : lr.mesh.ports)
+                                bp.push_back({pp.name, pp.position, pp.forward, pp.up});
+                    } else if (mp.size() > 4 &&
+                               (mp.substr(mp.size() - 4) == ".glb" || mp.substr(mp.size() - 5) == ".gltf")) {
+                        const std::string side = mp.substr(0, mp.rfind('.')) + ".meta";
+                        std::ifstream sf(side);
+                        std::string ln;
+                        while (sf && std::getline(sf, ln)) {
+                            if (ln.rfind("port ", 0) != 0) continue;
+                            const auto colon = ln.find(':');
+                            if (colon == std::string::npos) continue;
+                            const std::string pname = ln.substr(5, colon - 5);
+                            std::istringstream pv(ln.substr(colon + 1));
+                            float v[9];
+                            bool ok = true;
+                            for (int k = 0; k < 9; ++k) if (!(pv >> v[k])) { ok = false; break; }
+                            if (ok) bp.push_back({pname, {v[0], v[1], v[2]},
+                                                  {v[3], v[4], v[5]}, {v[6], v[7], v[8]}});
+                        }
+                    }
+                    if (!bp.empty() && bp.size() != obj->getPorts().size())
+                        obj->setPorts(bp);
                 }
             }
             if (!m_showCPsInGame) {
