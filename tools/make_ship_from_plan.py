@@ -295,48 +295,63 @@ for i, (x, y, w, h) in enumerate(windows):
 # is made of. Steps are honest: this is a lathe drawn in the same voxel hand
 # as the rest of her.
 if REVOLVE > 0.0:
-    half = []
+    half, has_door = [], []
     for y in range(H):
         b = 0.0
         for x in range(W):
             if hull(cell(x, y)):
                 b = max(b, abs(x + 0.5 - W / 2.0))
         half.append(b * CELL + CELL if b > 0 else 0.0)
-    # merge consecutive stations of equal radius into runs
+        has_door.append(any(cell(x, y) == 'D' for x in range(W)))
+    # merge consecutive stations of equal (radius, doorness) into runs -- a
+    # door station must be its own run so the shell can arch over it
     runs, y0 = [], None
+    key = lambda y: (half[y], has_door[y]) if y < H else None
     for y in range(H + 1):
-        r = half[y] if y < H else -1.0
-        if y0 is None or r != half[y0]:
+        if y0 is None or key(y) != key(y0):
             if y0 is not None and half[y0] > 0.0:
-                runs.append((y0, y - y0, half[y0]))
+                runs.append((y0, y - y0, half[y0], has_door[y0]))
             y0 = y
     LAYER = 2.0
     shell_n = 0
-    for (y, h, R) in runs:
+    for (y, h, R, door) in runs:
         DH = R * REVOLVE
         nL = max(1, int(math.ceil(DH / LAYER)))
         for k in range(nL):
+            # THE DOOR ARCH: at a station whose plan row holds a door, the
+            # shell skips its ground layer -- a doorway-height opening, the
+            # upper layers arching over it. The first shell sealed the ship
+            # ("no way in" -- field report); a hull you cannot enter is a
+            # sculpture, not a ship.
+            if door and k == 0:
+                continue
             z0 = k * LAYER
             z1 = min(z0 + LAYER, DH)
             w0 = R * math.sqrt(max(0.0, 1.0 - (z0 / DH) ** 2))
             w1 = R * math.sqrt(max(0.0, 1.0 - (z1 / DH) ** 2))
+            last = (k == nL - 1)
             for side in (-1.0, 1.0):
                 shell_n += 1
                 objs.append(prim(f"{stem}_shell_{shell_n}", "platform_wall",
                                  ORIGIN_X + side * (w0 - 0.2), deck_top + z0, wz(y, h),
                                  0.4, z1 - z0, h * CELL, (0.52, 0.55, 0.62, 1.0)))
-                if w0 - w1 > 0.05:
+                # Plates stop flush at the riser's INNER face, and the final
+                # layer has no plates at all (the crown is its lid) -- both
+                # rules exist because coplanar overlapping tops z-fight.
+                if not last and (w0 - 0.4) - w1 > 0.05:
                     shell_n += 1
                     objs.append(prim(f"{stem}_shell_{shell_n}", "platform_slab",
-                                     ORIGIN_X + side * (w1 + w0) / 2.0, deck_top + z1 - 0.4, wz(y, h),
-                                     w0 - w1, 0.4, h * CELL, (0.48, 0.51, 0.58, 1.0)))
-        # the crown: close the top over the centreline
-        wTop = R * math.sqrt(max(0.0, 1.0 - ((nL - 1) * LAYER / DH) ** 2)) if nL > 1 else R
+                                     ORIGIN_X + side * (w1 + (w0 - 0.4)) / 2.0, deck_top + z1 - 0.4, wz(y, h),
+                                     (w0 - 0.4) - w1, 0.4, h * CELL, (0.48, 0.51, 0.58, 1.0)))
+        # the crown: close the top, flush inside the last risers
+        zTop = (nL - 1) * LAYER
+        wTop = R * math.sqrt(max(0.0, 1.0 - (zTop / DH) ** 2)) if nL > 1 else R
         shell_n += 1
         objs.append(prim(f"{stem}_shell_{shell_n}", "platform_slab",
                          ORIGIN_X, deck_top + DH - 0.4, wz(y, h),
-                         max(2.0 * wTop, 1.0), 0.4, h * CELL, (0.48, 0.51, 0.58, 1.0)))
-    print(f"revolve: {shell_n} shell pieces at height scale {REVOLVE:g}")
+                         max(2.0 * (wTop - 0.4), 1.0), 0.4, h * CELL, (0.48, 0.51, 0.58, 1.0)))
+    print(f"revolve: {shell_n} shell pieces at height scale {REVOLVE:g}"
+          + (", door arches cut" if any(d for (_, _, _, d) in runs) else ""))
 
 counts = {}
 for (c, x, y, w, h) in sockets:
