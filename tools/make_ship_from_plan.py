@@ -18,7 +18,7 @@ objects, spawn set just aft of the stern.  V1 limits, stated: no hull shell or
 bow styling yet (dressing comes later), no lintels over doors, and FLIGHT of
 plan-ships needs the multi-slab manifest first -- walk it, don't fly it yet.
 """
-import json, sys, copy, math
+import json, sys, copy, math, zlib
 
 CELL   = 2.0    # world units per plan cell
 FLOOR_Y = 0.2   # floor slab base
@@ -495,6 +495,23 @@ for (c, x, y, w, h) in sockets:
 # density/armor as metadata -- the helm's weighing reads density off each
 # plate -- and its tint into their colour. Sockets are painted intent and
 # take neither. The bill is volume times price, whole hull.
+# THE PANEL PATCHWORK: every plate is subtly its own -- a stable value
+# jitter seeded by the piece's NAME (crc32, never python's salted hash: the
+# same ship must wear the same skin on every build), and roughly one panel
+# in eight a distinctly darker replacement plate, the way real hulls
+# remember their repairs. Glass keeps its glaze; sockets keep their role
+# colours. The material tint multiplies on top, so a diamondoid hull
+# patchworks in diamondoid.
+def patchwork(name, c):
+    if c[3] < 0.9:
+        return c
+    h = zlib.crc32(name.encode())
+    v = 0.92 + ((h >> 8) & 0xFF) / 255.0 * 0.16
+    out = [min(1.0, c[0]*v), min(1.0, c[1]*v), min(1.0, c[2]*v), c[3]]
+    if (h & 7) == 0:
+        out = [out[0]*0.72, out[1]*0.72, out[2]*0.72, c[3]]
+    return out
+
 cost_cr = 0.0
 for o in objs:
     if o["buildingType"] in ("platform_slab", "platform_wall"):
@@ -502,7 +519,7 @@ for o in objs:
         cost_cr += sx * sy * sz * MAT_PRICE
         o["metadata"] = {"material": MAT_KEY, "density": f"{MAT_DENSITY:g}",
                          "armor": str(MAT_ARMOR)}
-        c = o["primitiveColor"]
+        c = patchwork(o["name"], o["primitiveColor"])
         o["primitiveColor"] = [min(1.0, c[0]*MAT_TINT[0]), min(1.0, c[1]*MAT_TINT[1]),
                                min(1.0, c[2]*MAT_TINT[2]), c[3]]
 cost_cr = round(cost_cr)
