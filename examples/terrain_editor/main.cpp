@@ -13028,6 +13028,22 @@ private:
         // T key in play mode: toggle control point visualization
         if (m_isPlayMode && Input::isKeyPressed(Input::KEY_T) && !ImGui::GetIO().WantTextInput) {
             m_showCPsInGame = !m_showCPsInGame;
+            // BACKFILL: parts placed before the port debt was paid carry no
+            // ports. Entering wire mode reloads them from each part's .lime
+            // -- the file always knew; the object just never asked.
+            if (m_showCPsInGame) {
+                for (auto& obj : m_sceneObjects) {
+                    if (!obj || obj->hasPorts()) continue;
+                    const std::string& mp = obj->getModelPath();
+                    if (mp.size() < 5 || mp.substr(mp.size() - 5) != ".lime") continue;
+                    auto lr = LimeLoader::load(mp);
+                    if (!lr.success || lr.mesh.ports.empty()) continue;
+                    std::vector<SceneObject::StoredPort> bp;
+                    for (const auto& pp : lr.mesh.ports)
+                        bp.push_back({pp.name, pp.position, pp.forward, pp.up});
+                    obj->setPorts(bp);
+                }
+            }
             if (!m_showCPsInGame) {
                 // Cancel any in-progress wiring when hiding CPs
                 m_wiringActive = false;
@@ -22843,6 +22859,36 @@ private:
                             ImVec2(textPos.x + textSize.x + 2, textPos.y + textSize.y + 1),
                             IM_COL32(0, 0, 0, 180), 2.0f);
                         cpDL->AddText(textPos, IM_COL32(255, 200, 255, 255), cp.name.c_str());
+                    }
+                }
+            }
+
+            // PORTS get markers too -- cyan, so a part's authored attachment
+            // frames read differently from vertex-anchored CPs. Without these
+            // the port debt was paid invisibly: attachable, unaimable.
+            for (auto& obj : m_sceneObjects) {
+                if (!obj || !obj->isVisible() || !obj->hasPorts()) continue;
+                if (glm::length(obj->getTransform().getPosition() - playerPos) > 5.0f) continue;
+                glm::mat4 modelMat = obj->getTransform().getMatrix();
+                for (const auto& port : obj->getPorts()) {
+                    glm::vec3 worldPos = glm::vec3(modelMat * glm::vec4(port.position, 1.0f));
+                    glm::vec4 clip = vp * glm::vec4(worldPos, 1.0f);
+                    if (clip.w <= 0.0f) continue;
+                    glm::vec3 ndc = glm::vec3(clip) / clip.w;
+                    if (ndc.x < -1 || ndc.x > 1 || ndc.y < -1 || ndc.y > 1) continue;
+                    float sx = (ndc.x + 1.0f) * 0.5f * windowW;
+                    float sy = (1.0f - ndc.y) * 0.5f * windowH;
+                    float sz = 6.0f;
+                    ImVec2 top(sx, sy - sz), right(sx + sz, sy), bot(sx, sy + sz), left(sx - sz, sy);
+                    cpDL->AddQuadFilled(top, right, bot, left, IM_COL32(60, 210, 255, 200));
+                    cpDL->AddQuad(top, right, bot, left, IM_COL32(0, 0, 0, 220), 2.0f);
+                    if (!port.name.empty()) {
+                        ImVec2 textSize = ImGui::CalcTextSize(port.name.c_str());
+                        ImVec2 textPos(sx - textSize.x * 0.5f, sy - sz - textSize.y - 2);
+                        cpDL->AddRectFilled(ImVec2(textPos.x - 2, textPos.y - 1),
+                            ImVec2(textPos.x + textSize.x + 2, textPos.y + textSize.y + 1),
+                            IM_COL32(0, 0, 0, 180), 2.0f);
+                        cpDL->AddText(textPos, IM_COL32(180, 235, 255, 255), port.name.c_str());
                     }
                 }
             }
