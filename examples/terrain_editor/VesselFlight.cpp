@@ -189,6 +189,48 @@ bool VesselFlight::buildManifest(SceneObject* helm) {
             }
         }
     }
+
+    // THE FITTINGS WELD -- rule five. Frames, surface-mounted boxes, and
+    // every extension bolted to the hull's OUTSIDE stand over no plate and
+    // are not structural, so rules two and three both miss them: exterior
+    // radiators would stay behind at takeoff with the wires stretching.
+    // Gear that TOUCHES a manifest member comes along, transitively --
+    // gear meaning frames, salvage, and anything with a role or a
+    // surface_mount claim. Touching, never proximity, as always.
+    {
+        std::vector<AABB> aboardBounds;
+        std::vector<std::string> aboardNames = m_manifest;
+        for (const std::string& n : m_manifest)
+            if (SceneObject* o = find(n)) aboardBounds.push_back(o->getWorldBounds());
+        auto listed = [&aboardNames](const std::string& n) {
+            for (const auto& an : aboardNames) if (an == n) return true;
+            return false;
+        };
+        auto isGear = [](SceneObject* o) {
+            const auto& bt = o->getBuildingType();
+            if (bt == "salvage" || bt == "wall_frame" || bt == "window_frame") return true;
+            const auto& md = o->getModelMetadata();
+            return md.count("role") > 0 || md.count("surface_mount") > 0;
+        };
+        bool welded = true;
+        while (welded) {
+            welded = false;
+            for (auto& o : *m_deps.sceneObjects) {
+                if (!o || listed(o->getName()) || !isGear(o.get())) continue;
+                const AABB wb = o->getWorldBounds();
+                for (const AABB& ab : aboardBounds) {
+                    if (wb.min.x > ab.max.x + 0.08f || ab.min.x > wb.max.x + 0.08f) continue;
+                    if (wb.min.y > ab.max.y + 0.08f || ab.min.y > wb.max.y + 0.08f) continue;
+                    if (wb.min.z > ab.max.z + 0.08f || ab.min.z > wb.max.z + 0.08f) continue;
+                    aboardNames.push_back(o->getName());
+                    aboardBounds.push_back(wb);
+                    m_manifest.push_back(o->getName());
+                    welded = true;
+                    break;
+                }
+            }
+        }
+    }
     return true;
 }
 

@@ -8294,6 +8294,9 @@ private:
             // (Primitive cubes are CENTRED in x/z: the deck spans 294..306,
             // so a 0.5-thick rib at z=306.25 kisses its stern face.)
             makeBox("VesselCheckShellRib", glm::vec3(300.0f, 0.0f, 306.25f), glm::vec3(6.0f, 2.0f, 0.5f), "platform_wall");
+            // An exterior fitting: salvage bolted to the deck's west FACE --
+            // over no plate, not structural. The fittings weld must claim it.
+            makeBox("VesselCheckExtFitting", glm::vec3(293.75f, 0.1f, 300.0f), glm::vec3(0.5f, 0.8f, 2.0f), "salvage");
             makeBox("VesselCheckGapDeck",  glm::vec3(315.6f, 0.0f, 300.0f), glm::vec3(4.0f, 0.5f, 4.0f), "platform_slab");
             makeBox("VesselCheckGapCrate", glm::vec3(315.6f, 0.5f, 300.0f), glm::vec3(1.0f, 1.0f, 1.0f), nullptr);
             helm->setModelMetadata({{"role", "helm"}});
@@ -8359,10 +8362,10 @@ private:
                 fail("takeHelm refused WITH an engine: " + m_vessel.lastError());
             } else {
                 // deck + deck2 (welded) + helm + cargo + engine + crate2 +
-                // shell rib + thruster grid + reactor = 9; the gap plate and
-                // its crate must be refused.
-                if (m_vessel.manifest().size() != 9)
-                    fail("manifest has " + std::to_string(m_vessel.manifest().size()) + " aboard, expected 9");
+                // shell rib + thruster grid + reactor + exterior fitting
+                // (fittings weld) = 10; the gap plate and crate refused.
+                if (m_vessel.manifest().size() != 10)
+                    fail("manifest has " + std::to_string(m_vessel.manifest().size()) + " aboard, expected 10");
                 bool gapAboard = false;
                 for (const auto& n : m_vessel.manifest())
                     if (n == "VesselCheckGapDeck" || n == "VesselCheckGapCrate") gapAboard = true;
@@ -8382,6 +8385,7 @@ private:
                     {"VesselCheckShellRib", glm::vec3(300.0f, 0.0f, 306.25f)},
                     {"VesselCheck_thruster_grid", glm::vec3(300.0f, 0.0f, 293.75f)},
                     {"VesselCheckReactor", glm::vec3(304.0f, 0.5f, 304.0f)},
+                    {"VesselCheckExtFitting", glm::vec3(293.75f, 0.1f, 300.0f)},
                 };
                 for (const auto& ab : aboard) {
                     if (glm::length(posOf(ab.n) - (ab.base + expect)) > 0.01f)
