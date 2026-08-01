@@ -16218,13 +16218,22 @@ private:
                 m_gizmoVisible = okC;
                 m_gizmoC = glm::vec2(sc.x, sc.y);
                 if (okC) {
+                    const ImVec2 mp(mouse.x, mouse.y);
                     for (int a = 0; a < 3; ++a) {
                         bool okT = false;
                         const ImVec2 st = toScreen(gc + kAxes[a] * arm, okT);
                         m_gizmoTipVis[a] = okT;
                         if (!okT) continue;
                         m_gizmoTip[a] = glm::vec2(st.x, st.y);
-                        const ImVec2 mp(mouse.x, mouse.y);
+                        // The SCALE handle: a square at the arm's midpoint.
+                        // Arrow tip moves; square stretches. Same arm, two
+                        // verbs -- checked FIRST because it sits on the arm
+                        // line and would otherwise always lose the hover.
+                        m_gizmoMid[a] = glm::vec2(sc.x + (st.x - sc.x) * 0.55f,
+                                                  sc.y + (st.y - sc.y) * 0.55f);
+                        if (std::hypot(mp.x - m_gizmoMid[a].x, mp.y - m_gizmoMid[a].y) < 9.0f
+                            && m_buildGizmoHover < 0)
+                            m_buildGizmoHover = a + 3;   // 3..5 = scale on axis a
                         const float dxs = st.x - sc.x, dys = st.y - sc.y;
                         const float len2 = dxs * dxs + dys * dys;
                         float t = len2 > 1.0f
@@ -16238,8 +16247,9 @@ private:
                         && !ImGui::GetIO().WantCaptureMouse) {
                         m_buildGizmoAxis = m_buildGizmoHover;
                         m_buildGizmoDragging = true;
+                        const int axis = m_buildGizmoAxis % 3;
                         bool okT = false;
-                        const ImVec2 tip = toScreen(gc + kAxes[m_buildGizmoAxis] * arm, okT);
+                        const ImVec2 tip = toScreen(gc + kAxes[axis] * arm, okT);
                         const glm::vec2 sd(tip.x - sc.x, tip.y - sc.y);
                         const float slen = glm::length(sd);
                         m_gizmoScreenDir = slen > 1.0f ? sd / slen : glm::vec2(0.0f);
@@ -16247,6 +16257,7 @@ private:
                         m_gizmoLastMouse = glm::vec2(mouse.x, mouse.y);
                         m_gizmoAccum = 0.0f;
                         m_gizmoStartPos = objPos;
+                        m_gizmoStartScale = obj->getTransform().getScale();
                     }
                 }
                 if (m_buildGizmoDragging) {
@@ -16260,11 +16271,25 @@ private:
                         m_gizmoLastMouse = mnow;
                         const bool fine = Input::isKeyDown(Input::KEY_LEFT_SHIFT)
                                        || Input::isKeyDown(Input::KEY_RIGHT_SHIFT);
-                        const float snap = fine ? 0.05f
-                                         : (m_buildGizmoAxis == 1 ? 0.5f : m_buildSnapAmount);
-                        glm::vec3 np = m_gizmoStartPos;
-                        np[m_buildGizmoAxis] += std::round(m_gizmoAccum / snap) * snap;
-                        obj->getTransform().setPosition(np);
+                        const int axis = m_buildGizmoAxis % 3;
+                        if (m_buildGizmoAxis < 3) {
+                            const float snap = fine ? 0.05f
+                                             : (axis == 1 ? 0.5f : m_buildSnapAmount);
+                            glm::vec3 np = m_gizmoStartPos;
+                            np[axis] += std::round(m_gizmoAccum / snap) * snap;
+                            obj->getTransform().setPosition(np);
+                        } else {
+                            // Scale: dragging out along the arm grows that
+                            // dimension, snapped to quarter units (Shift =
+                            // 0.05). Cubes are base-origin in Y and centred
+                            // in X/Z, so height grows upward and width grows
+                            // symmetrically -- no position compensation.
+                            const float snap = fine ? 0.05f : 0.25f;
+                            glm::vec3 ns = m_gizmoStartScale;
+                            ns[axis] += std::round(m_gizmoAccum / snap) * snap;
+                            ns[axis] = std::max(ns[axis], 0.05f);
+                            obj->getTransform().setScale(ns);
+                        }
                     }
                 }
             }
@@ -22681,6 +22706,15 @@ private:
                                  (m_buildGizmoDragging && m_buildGizmoAxis == a);
                 fg->AddLine(sc, st, kGizCols[a], hot ? 6.0f : 3.5f);
                 fg->AddCircleFilled(st, hot ? 8.0f : 5.5f, kGizCols[a]);
+                // Scale handle: the square at the arm's midpoint.
+                const bool hotS = (m_buildGizmoHover == a + 3) ||
+                                  (m_buildGizmoDragging && m_buildGizmoAxis == a + 3);
+                const float hs = hotS ? 7.0f : 5.0f;
+                const ImVec2 mid(m_gizmoMid[a].x, m_gizmoMid[a].y);
+                fg->AddRectFilled(ImVec2(mid.x - hs, mid.y - hs),
+                                  ImVec2(mid.x + hs, mid.y + hs), kGizCols[a]);
+                fg->AddRect(ImVec2(mid.x - hs, mid.y - hs),
+                            ImVec2(mid.x + hs, mid.y + hs), IM_COL32(0, 0, 0, 200));
             }
             fg->AddCircleFilled(sc, 4.0f, IM_COL32(255, 255, 255, 200));
         }
@@ -22693,7 +22727,7 @@ private:
         // current, in the user's own vocabulary.
         if (m_isPlayMode && m_showSiloConfig) {
             const char* sign = m_playModeCursorVisible
-                ? "PAINTER MOUSE -- click selects, G = move gizmo (Shift = fine)  |  Tab: Shipwright, Tab again: painter walk"
+                ? "PAINTER MOUSE -- click selects, G = gizmo: arrows move, squares scale (Shift = fine)  |  Tab: Shipwright, Tab again: painter walk"
                 : "PAINTER WALK -- press Esc to free the mouse (painter mouse mode)";
             ImGui::SetNextWindowPos(
                 ImVec2(getWindow().getWidth() * 0.5f, getWindow().getHeight() - 96.0f),
@@ -32997,7 +33031,9 @@ private:
     bool m_gizmoVisible = false;        // draw data below is valid this frame
     glm::vec2 m_gizmoC{0.0f};
     glm::vec2 m_gizmoTip[3] = {};
+    glm::vec2 m_gizmoMid[3] = {};       // scale handle positions (squares)
     bool m_gizmoTipVis[3] = {};
+    glm::vec3 m_gizmoStartScale{1.0f};
     glm::vec3 m_buildMoveOrigPos{0.0f};
     glm::vec3 m_buildMoveOffset{0.0f};
     float m_buildMoveLastMouseY = 0.0f;  // For vertical drag (Shift+drag)
