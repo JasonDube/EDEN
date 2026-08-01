@@ -79,6 +79,42 @@ const HullMat kHullMats[] = {
 // make_ship_from_plan.py (CELL 2.0, FLOOR_T 0.4, WALL_H 3.0, walls full-cell
 // thick) and VesselFlight.cpp (stock engine thrust 2500 / mass 400, stock
 // helm steering 900 / mass 180, turn clamp 8..80).
+// SOCKET PRICING, keep in sync with SOCKET_PRICE in make_ship_from_plan.py.
+// One socket per connected same-letter cluster ("letters make sockets").
+float planSocketBill(const std::vector<char>& cells, int& nSockets) {
+    constexpr int W = Shipwright::kW, H = Shipwright::kH;
+    auto price = [](char c) -> float {
+        switch (c) { case 'B': return 1500.0f; case 'E': return 2000.0f;
+                     case 'R': return 3500.0f; case 'C': return 800.0f; }
+        return 0.0f;
+    };
+    std::vector<char> seen(cells.size(), 0);
+    float bill = 0.0f;
+    nSockets = 0;
+    for (int y = 0; y < H; ++y) {
+        for (int x = 0; x < W; ++x) {
+            const int i = y * W + x;
+            const char c = cells[i];
+            if (seen[i] || !isRoom(c)) continue;
+            // flood this same-letter cluster
+            std::vector<int> stack{i};
+            while (!stack.empty()) {
+                const int j = stack.back(); stack.pop_back();
+                if (j < 0 || j >= W * H || seen[j] || cells[j] != c) continue;
+                seen[j] = 1;
+                const int jx = j % W, jy = j / W;
+                if (jx > 0)     stack.push_back(j - 1);
+                if (jx < W - 1) stack.push_back(j + 1);
+                if (jy > 0)     stack.push_back(j - W);
+                if (jy < H - 1) stack.push_back(j + W);
+            }
+            bill += price(c);
+            ++nSockets;
+        }
+    }
+    return bill;
+}
+
 float planVolume(const std::vector<char>& cells, const std::vector<float>& loft) {
     constexpr float kFloorCell = 2.0f * 0.4f * 2.0f;   // plate (also under walls)
     float v = 0.0f;
@@ -264,6 +300,13 @@ void Shipwright::render(bool& open) {
         ImGui::TextColored(ImVec4(0.55f, 0.85f, 0.55f, 1.0f),
                            m_revolveOn ? "materials %.0f CR + shell" : "materials %.0f CR",
                            vol * mat.priceU3);
+        int nSockets = 0;
+        const float socketBill = planSocketBill(m_cells, nSockets);
+        if (nSockets > 0) {
+            ImGui::SameLine(0, 18);
+            ImGui::TextColored(ImVec4(0.95f, 0.75f, 0.40f, 1.0f),
+                               "%d socket%s %.0f CR", nSockets, nSockets == 1 ? "" : "s", socketBill);
+        }
         ImGui::SameLine(0, 18);
         ImGui::Text("fitted ~%.0f t", fitted);
         ImGui::SameLine(0, 18);

@@ -12015,6 +12015,64 @@ private:
                 float objLift = -mb.min.y * m_toolbarSlots[i].modelScale.y;
                 if (objLift < 0.0f) objLift = 0.0f;   // origin already below the mesh
 
+                // THE SOCKET RULE. A part that IS something -- helm, engine,
+                // robot station, cargo pallet -- mounts on its socket, and
+                // only there. The pads come from the letters drawn on the
+                // plan ("letters make sockets"); right-click while looking at
+                // an open matching pad and the part seats itself, perfectly
+                // placed. No matching pad in sight: a refusal in the flight
+                // HUD's voice, and the part stays in hand. Unroled objects
+                // place exactly as they always have.
+                bool socketSeated = false;
+                glm::vec3 socketPos(0.0f);
+                {
+                    auto rIt = m_toolbarSlots[i].metadata.find("role");
+                    const std::string partRole =
+                        (rIt != m_toolbarSlots[i].metadata.end()) ? rIt->second : std::string();
+                    const bool socketed = (partRole == "helm" || partRole == "engine" ||
+                                           partRole == "robot" || partRole == "cargo");
+                    if (socketed) {
+                        const std::string tag = "Socket_" + partRole + "_";
+                        float bestAlong = 1e9f;
+                        for (auto& so : m_sceneObjects) {
+                            if (!so || so->getBuildingType() != "socket_marker") continue;
+                            if (so->getName().find(tag) == std::string::npos) continue;
+                            const AABB wb = so->getWorldBounds();
+                            const glm::vec3 c = (wb.min + wb.max) * 0.5f;
+                            const float along = glm::dot(c - camPos, camFront);
+                            if (along < 0.0f || along > 8.0f) continue;
+                            if (glm::length(camPos + camFront * along - c) > 2.5f) continue;
+                            // One part per socket: occupied means a roled
+                            // object already stands on this pad.
+                            bool occupied = false;
+                            for (auto& oo : m_sceneObjects) {
+                                if (!oo || oo.get() == so.get()) continue;
+                                const auto& md = oo->getModelMetadata();
+                                if (md.find("role") == md.end()) continue;
+                                const glm::vec3 op = oo->getTransform().getPosition();
+                                if (op.x >= wb.min.x - 0.1f && op.x <= wb.max.x + 0.1f &&
+                                    op.z >= wb.min.z - 0.1f && op.z <= wb.max.z + 0.1f &&
+                                    op.y >= wb.max.y - 0.5f && op.y <= wb.max.y + 3.0f) {
+                                    occupied = true;
+                                    break;
+                                }
+                            }
+                            if (occupied) continue;
+                            if (along < bestAlong) {
+                                bestAlong = along;
+                                socketPos = glm::vec3(c.x, wb.max.y + objLift, c.z);
+                                socketSeated = true;
+                            }
+                        }
+                        if (!socketSeated) {
+                            m_screenMessage = "a " + partRole + " mounts on a " + partRole +
+                                              " socket -- no open pad in sight";
+                            m_screenMessageTimer = 3.0f;
+                            continue;
+                        }
+                    }
+                }
+
                 bool placedInFrame = false;
                 if (ctrlHeld) {
                     // Check if a frame is selected — place into frame position
@@ -12169,6 +12227,13 @@ private:
                         const char* placeSource = "none";
                         float placeDist = -1.0f;
 
+                        if (socketSeated) {
+                            // The pad did the aiming; nothing else gets a vote.
+                            spawnPos = socketPos;
+                            foundPlace = true;
+                            placeSource = "socket";
+                            placeDist = glm::length(socketPos - camPos);
+                        } else {
                         // WITHIN ARM'S REACH, not wherever the ray eventually lands.
                         //
                         // The reach used to be 20 units, and on akelba that felt
@@ -12249,6 +12314,7 @@ private:
                             placeSource = "ahead2.5";
                             placeDist = 2.5f;
                         }
+                        }   // socketSeated else
 
                         // Everything needed to tell where it went WRONG rather than
                         // only that it did. `ahead` is the giveaway: it is the dot

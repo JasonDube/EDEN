@@ -555,13 +555,20 @@ for y in range(H):
         greeble("vent", ORIGIN_X + (x + 0.5 - W / 2.0) * CELL + sign * (CELL / 2.0 + 0.09),
                 deck_top + 0.7, wz(y, 1), 0.18, 1.2, 1.5, (0.18, 0.19, 0.22, 1.0))
 
+# SOCKETS ARE PRICED ("you're paying for each one of the sockets"): a
+# robot station is an investment, not a doodle. KEEP IN SYNC with the
+# Shipwright's live socket bill.
+SOCKET_PRICE = {'helm': 1500.0, 'engine': 2000.0, 'robot': 3500.0, 'cargo': 800.0}
+socket_cost = 0.0
 counts = {}
 for (c, x, y, w, h) in sockets:
     role, color = ROLE[c]
     counts[role] = counts.get(role, 0) + 1
+    socket_cost += SOCKET_PRICE.get(role, 500.0)
     objs.append(prim(f"Socket_{role}_{counts[role]}", "socket_marker",
                      wx(x, w), deck_top, wz(y, h),
                      w*CELL, 0.06, h*CELL, color, collide=False))
+    objs[-1]["metadata"] = {"socket": role}
 
 # ---- the material is applied and the bill is drawn up ----------------------
 # Structural pieces (plates, frames, walls, windows) take the material's
@@ -597,12 +604,12 @@ for o in objs:
         c = patchwork(o["name"], o["primitiveColor"])
         o["primitiveColor"] = [min(1.0, c[0]*MAT_TINT[0]), min(1.0, c[1]*MAT_TINT[1]),
                                min(1.0, c[2]*MAT_TINT[2]), c[3]]
-cost_cr = round(cost_cr)
+cost_cr = round(cost_cr + socket_cost)
 
 if OBJ_JSON:
     json.dump({"objects": objs, "cost_cr": cost_cr, "material": MAT_NAME},
               open(OBJ_JSON, 'w'))
-    print(f"materials: {MAT_NAME} -- {cost_cr} CR")
+    print(f"materials: {MAT_NAME} -- {cost_cr} CR (incl. {round(socket_cost)} CR of sockets)")
     print("rooms:")
     for r in rooms:
         print(f"  {r['name']:16s} {len(r['cells']):3d} cells   "
