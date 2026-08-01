@@ -448,6 +448,28 @@ void Shipwright::render(bool& open) {
             ImGui::SetTooltip("click-select + Building Textures, as on akelba's slabs");
         if (wasOn) ImGui::PopStyleColor();
     }
+    if (m_scrap) {
+        ImGui::SameLine();
+        ImGui::PushStyleColor(ImGuiCol_Button, IM_COL32(150, 45, 40, 255));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, IM_COL32(185, 55, 48, 255));
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive, IM_COL32(120, 35, 32, 255));
+        if (ImGui::Button("Scrap")) ImGui::OpenPopup("Scrap the ship?");
+        ImGui::PopStyleColor(3);
+        if (ImGui::BeginPopupModal("Scrap the ship?", nullptr,
+                                   ImGuiWindowFlags_AlwaysAutoResize)) {
+            ImGui::TextWrapped("Every yard-built piece and everything fitted aboard "
+                               "goes to the breakers. The plan on this table survives; "
+                               "the credits do not come back.");
+            ImGui::Separator();
+            if (ImGui::Button("Scrap her", ImVec2(130, 0))) {
+                m_status = m_scrap();
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Keep her", ImVec2(130, 0))) ImGui::CloseCurrentPopup();
+            ImGui::EndPopup();
+        }
+    }
 
     // ---- the grid ----------------------------------------------------------
     const float cell = 13.0f;
