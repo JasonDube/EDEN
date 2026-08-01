@@ -365,21 +365,9 @@ void Shipwright::render(bool& open) {
     }
 
     // ---- actions -----------------------------------------------------------
-    if (ImGui::Button("Copy as text")) {
-        ImGui::SetClipboardText(serialize().c_str());
-        m_status = "plan copied to clipboard";
-    }
-    ImGui::SameLine();
-    if (ImGui::Button("Print to console")) {
-        // The prompt channel: this lands in editor_console.log where the
-        // generator's author reads it. Deliberately NOT behind g_diagnostics --
-        // it is an export the user asked for by pressing the button.
-        std::printf("[Shipwright] plan %dx%d\n%s[Shipwright] end\n",
-                    kW, kH, serialize().c_str());
-        std::fflush(stdout);
-        m_status = "plan printed to the console/log";
-    }
-    ImGui::SameLine();
+    // ("Copy as text" and "Print to console" retired 2026-08-02: they were
+    // the prompt-era channels for arguing plans into the generator before
+    // BUILD SHIP existed. The clipboard still lives in Save/Load's file.)
     if (ImGui::Button("Save")) {
         std::ofstream f(kPlanFile);
         f << serialize();
