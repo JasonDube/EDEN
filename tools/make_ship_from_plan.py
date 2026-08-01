@@ -83,6 +83,7 @@ if rev_line:
     except (ValueError, IndexError): pass
     REV_GLASS = 'glass' in toks   # bulkhead fill: glass instead of opaque hull
     REV_360   = '360' in toks     # full revolution -- space hulls, no flat keel
+    REV_RIBS  = 'ribs' in toks    # thick cross-rings at boundaries, gap armour
 W = max(len(r) for r in rows); H = len(rows)
 LOFT = [WALL_H] * H
 if loft_line:
@@ -340,7 +341,10 @@ if REVOLVE > 0.0:
             z0 = k * LAYER
             z1 = min(z0 + LAYER, DH)
             w0 = R * math.sqrt(max(0.0, 1.0 - (z0 / DH) ** 2))
-            sec[k] = (z0, z1, 0.0 if (door and k == 0) else w0)
+            w1 = R * math.sqrt(max(0.0, 1.0 - (z1 / DH) ** 2))
+            if door and k == 0:
+                w0 = w1 = 0.0
+            sec[k] = (z0, z1, w0, w1)
         return sec
 
     secs = [section(R, d) for (_, _, R, d) in runs]
@@ -351,7 +355,7 @@ if REVOLVE > 0.0:
         for k in range(nL):
             if door and k == 0:
                 continue
-            z0, z1, w0 = secs[i][k]
+            z0, z1, w0, _ = secs[i][k]
             w1 = R * math.sqrt(max(0.0, 1.0 - (z1 / DH) ** 2))
             last = (k == nL - 1)
             for side in (-1.0, 1.0):
@@ -388,6 +392,40 @@ if REVOLVE > 0.0:
             z0, z1 = (gA or gB)[0], (gA or gB)[1]
             wA = gA[2] if gA else 0.0
             wB = gB[2] if gB else 0.0
+            if REV_RIBS:
+                # THE RIB ("maybe a thicker ring will cover the gaps" -- it
+                # does): one generous 1.2-thick cross-ring per layer, spanning
+                # from just inside the layer's INNER rim to its outer, inset
+                # 3cm from every ring face so nothing is coplanar, shifted
+                # into the fuller side so door passages keep their width.
+                # The hallway rule still holds: annulus only below the walls.
+                # Insets depend on shift direction: two ribs meeting inside
+                # a one-cell run arrive from OPPOSITE directions, and equal
+                # insets gave them the same planes (the detector's last find).
+                fwd = wB > wA
+                ins = 0.03 if fwd else 0.06
+                wOut = max(wA, wB) - ins
+                wIn = max(0.0, min(gA[3] if gA else 1e9, gB[3] if gB else 1e9) - 0.4)
+                if wOut < 0.1 or (abs(wA - wB) <= 0.05 and wIn > 0.3 and k != 0):
+                    continue
+                zr0, zr1 = z0 + ins, z1 - ins
+                zc = zb + (0.57 if fwd else -0.57)
+                zs = max(zr0, min(zr1, hWall))
+                if zs > zr0:
+                    lo = max(wIn, bHull)
+                    if wOut - lo > 0.05:
+                        for side in (-1.0, 1.0):
+                            shell_box("platform_wall", ORIGIN_X + side * (lo + wOut) / 2.0,
+                                      zr0, zs, wOut - lo, zc, 1.2, FILL_COL)
+                if zr1 > zs:
+                    if wIn < 0.3:
+                        shell_box("platform_wall", ORIGIN_X, zs, zr1,
+                                  max(2.0 * wOut, 1.0), zc, 1.2, FILL_COL)
+                    else:
+                        for side in (-1.0, 1.0):
+                            shell_box("platform_wall", ORIGIN_X + side * (wIn + wOut) / 2.0,
+                                      zs, zr1, wOut - wIn, zc, 1.2, FILL_COL)
+                continue
             if abs(wA - wB) <= 0.05:
                 continue
             wLo, wHi = sorted((wA, wB))
@@ -440,6 +478,7 @@ if REVOLVE > 0.0:
 
     print(f"revolve: {shell_n} shell pieces at height scale {REVOLVE:g}"
           + (", glass fill" if REV_GLASS else ", opaque fill")
+          + (", ribbed" if REV_RIBS else "")
           + (", full 360" if REV_360 else "")
           + (", door arches cut" if any(d for (_, _, _, d) in runs) else ""))
 

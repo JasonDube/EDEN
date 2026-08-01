@@ -141,6 +141,46 @@ bool VesselFlight::buildManifest(SceneObject* helm) {
             break;
         }
     }
+
+    // THE SUPERSTRUCTURE WELD. A revolve shell lives OUTSIDE the deck's
+    // footprint -- rings beyond the plates, bulkheads beside the walls -- so
+    // containment never captured it and the hull flew out of her own shell
+    // (field report). Structure that TOUCHES structure is one ship: any
+    // platform piece whose box meets a manifest member's box within the weld
+    // tolerance joins, transitively, until nothing new does. Structural
+    // pieces only -- a crate parked against the hull is cargo with opinions,
+    // not superstructure, and the gap rule (touching, not proximity) stands.
+    {
+        std::vector<AABB> aboardBounds;
+        std::vector<std::string> aboardNames = m_manifest;
+        for (const std::string& n : m_manifest)
+            if (SceneObject* o = find(n)) aboardBounds.push_back(o->getWorldBounds());
+        auto listed = [&aboardNames](const std::string& n) {
+            for (const auto& an : aboardNames) if (an == n) return true;
+            return false;
+        };
+        bool welded = true;
+        while (welded) {
+            welded = false;
+            for (auto& o : *m_deps.sceneObjects) {
+                if (!o) continue;
+                const auto& bt = o->getBuildingType();
+                if (bt != "platform_slab" && bt != "platform_wall") continue;
+                if (listed(o->getName())) continue;
+                const AABB wb = o->getWorldBounds();
+                for (const AABB& ab : aboardBounds) {
+                    if (wb.min.x > ab.max.x + kWeldEps || ab.min.x > wb.max.x + kWeldEps) continue;
+                    if (wb.min.y > ab.max.y + kWeldEps || ab.min.y > wb.max.y + kWeldEps) continue;
+                    if (wb.min.z > ab.max.z + kWeldEps || ab.min.z > wb.max.z + kWeldEps) continue;
+                    aboardNames.push_back(o->getName());
+                    aboardBounds.push_back(wb);
+                    m_manifest.push_back(o->getName());
+                    welded = true;
+                    break;
+                }
+            }
+        }
+    }
     return true;
 }
 

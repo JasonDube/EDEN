@@ -8117,6 +8117,11 @@ private:
             // must NOT. The flood fill welds touching, refuses near.
             makeBox("VesselCheckDeck2",    glm::vec3(309.0f, 0.0f, 300.0f), glm::vec3(6.0f, 0.5f, 12.0f), "platform_slab");
             makeBox("VesselCheckCrate2",   glm::vec3(308.0f, 0.5f, 300.0f), glm::vec3(1.0f, 1.0f, 1.0f), nullptr);
+            // A shell rib: structural, OUTSIDE the deck footprint, touching
+            // the deck's side face -- the superstructure weld must annex it.
+            // (Primitive cubes are CENTRED in x/z: the deck spans 294..306,
+            // so a 0.5-thick rib at z=306.25 kisses its stern face.)
+            makeBox("VesselCheckShellRib", glm::vec3(300.0f, 0.0f, 306.25f), glm::vec3(6.0f, 2.0f, 0.5f), "platform_wall");
             makeBox("VesselCheckGapDeck",  glm::vec3(315.6f, 0.0f, 300.0f), glm::vec3(4.0f, 0.5f, 4.0f), "platform_slab");
             makeBox("VesselCheckGapCrate", glm::vec3(315.6f, 0.5f, 300.0f), glm::vec3(1.0f, 1.0f, 1.0f), nullptr);
             helm->setModelMetadata({{"role", "helm"}});
@@ -8160,10 +8165,11 @@ private:
             if (!m_vessel.takeHelm("VesselCheckHelm")) {
                 fail("takeHelm refused WITH an engine: " + m_vessel.lastError());
             } else {
-                // deck + deck2 (welded) + helm + cargo + engine + crate2 = 6;
-                // the gap plate and its crate must be refused.
-                if (m_vessel.manifest().size() != 6)
-                    fail("manifest has " + std::to_string(m_vessel.manifest().size()) + " aboard, expected 6");
+                // deck + deck2 (welded) + helm + cargo + engine + crate2 +
+                // shell rib (superstructure weld) = 7; the gap plate and its
+                // crate must be refused.
+                if (m_vessel.manifest().size() != 7)
+                    fail("manifest has " + std::to_string(m_vessel.manifest().size()) + " aboard, expected 7");
                 bool gapAboard = false;
                 for (const auto& n : m_vessel.manifest())
                     if (n == "VesselCheckGapDeck" || n == "VesselCheckGapCrate") gapAboard = true;
@@ -8180,6 +8186,7 @@ private:
                     {"VesselCheckCargo",  glm::vec3(298.0f, 0.5f, 302.0f)},
                     {"VesselCheckCrate2", glm::vec3(308.0f, 0.5f, 300.0f)},
                     {"VesselCheckEngine", glm::vec3(297.0f, 0.5f, 299.0f)},
+                    {"VesselCheckShellRib", glm::vec3(300.0f, 0.0f, 306.25f)},
                 };
                 for (const auto& ab : aboard) {
                     if (glm::length(posOf(ab.n) - (ab.base + expect)) > 0.01f)

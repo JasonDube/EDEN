@@ -137,9 +137,10 @@ std::string Shipwright::serialize() const {
     }
     if (m_revolveOn) {
         char rev[48];
-        std::snprintf(rev, sizeof rev, "revolve: %.2f%s%s\n", m_revolveScale,
+        std::snprintf(rev, sizeof rev, "revolve: %.2f%s%s%s\n", m_revolveScale,
                       m_revolveFill == 1 ? " glass" : "",
-                      m_revolve360 ? " 360" : "");
+                      m_revolve360 ? " 360" : "",
+                      m_revolveRibs ? " ribs" : "");
         out += rev;
     }
     return out;
@@ -152,7 +153,7 @@ bool Shipwright::deserialize(const std::string& text) {
     int y = 0;
     std::vector<float> loft(kH, kLoftDefault);
     float revolve = 0.0f;
-    bool revGlass = false, rev360 = false;
+    bool revGlass = false, rev360 = false, revRibs = false;
     while (std::getline(in, line) && y < kH) {
         if (line.empty()) continue;
         if (line.rfind("loft:", 0) == 0) {
@@ -164,6 +165,7 @@ bool Shipwright::deserialize(const std::string& text) {
             revolve = std::strtof(line.c_str() + 8, nullptr);
             revGlass = line.find(" glass") != std::string::npos;
             rev360   = line.find(" 360")   != std::string::npos;
+            revRibs  = line.find(" ribs")  != std::string::npos;
             continue;
         }
         for (int x = 0; x < kW && x < static_cast<int>(line.size()); ++x) {
@@ -181,6 +183,7 @@ bool Shipwright::deserialize(const std::string& text) {
         m_revolveScale = std::clamp(revolve, 0.2f, 1.0f);
         m_revolveFill = revGlass ? 1 : 0;
         m_revolve360 = rev360;
+        m_revolveRibs = revRibs;
     }
     m_overlay.clear();
     m_overlayIdx.clear();
@@ -433,6 +436,8 @@ void Shipwright::render(bool& open) {
             ImGui::RadioButton("opaque", &m_revolveFill, 0);
             ImGui::SameLine();
             ImGui::RadioButton("glass", &m_revolveFill, 1);
+            ImGui::SameLine(0, 24);
+            ImGui::Checkbox("ribs", &m_revolveRibs);
             ImGui::SameLine(0, 24);
             ImGui::Checkbox("360", &m_revolve360);
             ImGui::SameLine();

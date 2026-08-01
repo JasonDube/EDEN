@@ -83,6 +83,7 @@ private:
     float m_revolveScale = 0.5f;    // dome height = radius * scale (ellipse)
     int   m_revolveFill = 0;        // bulkhead fill: 0 opaque, 1 glass
     bool  m_revolve360 = false;     // full revolution -- space hull, no keel
+    bool  m_revolveRibs = false;    // thick cross-rings at boundaries
     bool m_mirrorX = true;          // ships are symmetric; paint both halves
     std::string m_status;
 };
