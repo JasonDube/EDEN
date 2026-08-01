@@ -252,6 +252,7 @@ void Shipwright::render(bool& open) {
             "bow at the top -- she flies the way you drew her",
             "a hull you cannot enter is a sculpture, not a ship",
             "Finalize before you pay: the survey shows her rooms by name",
+            "service is where you stand, power_out is where the kilowatts leave -- never plug a toaster into a doormat",
         };
         static std::string reel;
         if (reel.empty()) {
