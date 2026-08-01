@@ -15694,7 +15694,7 @@ private:
 
         // Click to select build pieces (and move them by dragging)
         bool buildSelectClick = false;
-        bool buildMoveSelect = !m_buildMoveDragging;
+        bool buildMoveSelect = !m_buildGizmoDragging && m_buildGizmoHover < 0;
         if (m_isPlayMode && m_showSiloConfig && !m_hSlabBrushMode && !m_wallBrushMode && !m_roomBrushMode && !m_framePlacementMode
             && buildMoveSelect
             && !m_filesystemBrowser.isActive() && !ImGui::GetIO().WantCaptureMouse
@@ -15819,70 +15819,99 @@ private:
             glm::vec3 rayO = glm::vec3(nearPt);
             glm::vec3 rayD = glm::normalize(glm::vec3(farPt - nearPt));
 
-            // The drag plane sits where the piece was GRABBED, not at its base.
-            // A wall's base is at your feet, and looking level at a wall gives a
-            // ray that never meets a plane down there (t < 0) -- which is why
-            // v-slabs would select but silently refuse to drag while h-slabs
-            // (looked at from above) moved fine. Grab height fixes both.
-            float planeY = m_buildMoveDragging ? m_buildMovePlaneY : objPos.y;
-            if (!m_buildMoveDragging) {
-                float grabT = obj->getWorldBounds().intersect(rayO, rayD);
-                if (grabT >= 0.0f) planeY = (rayO + rayD * grabT).y;
-                m_buildMovePlaneY = planeY;
-            }
-            glm::vec3 objScl = obj->getTransform().getScale();
-            // Determine edge-aligned snap grid: if dimension is odd, center is at .5
-            float snapOffX = (static_cast<int>(objScl.x) % 2 == 1) ? 0.5f : 0.0f;
-            float snapOffZ = (static_cast<int>(objScl.z) % 2 == 1) ? 0.5f : 0.0f;
-
-            bool shiftHeld = Input::isKeyDown(Input::KEY_LEFT_SHIFT) || Input::isKeyDown(Input::KEY_RIGHT_SHIFT);
-
-            if (shiftHeld) {
-                // Shift+drag: move vertically (Y axis)
-                // Use screen Y motion mapped to world Y
-                if (Input::isMouseButtonPressed(Input::MOUSE_LEFT) && !ImGui::GetIO().WantCaptureMouse) {
-                    m_buildMoveDragging = true;
-                    m_buildMoveLastMouseY = mouse.y;
-                }
-                if (m_buildMoveDragging) {
-                    float dy = (m_buildMoveLastMouseY - mouse.y) * 0.02f; // Screen pixels to world units
-                    glm::vec3 newPos = objPos;
-                    newPos.y += dy;
-                    newPos.y = std::round(newPos.y * 2.0f) / 2.0f; // Snap to 0.5m grid
-                    obj->getTransform().setPosition(newPos);
-                    m_buildMoveLastMouseY = mouse.y;
-                }
-            } else if (std::abs(rayD.y) > 0.001f) {
-                // Normal drag: move on XZ plane
-                float t = (planeY - rayO.y) / rayD.y;
-                if (t > 0 && t < 500.0f) {
-                    glm::vec3 hp = rayO + rayD * t;
-
-                    if (Input::isMouseButtonPressed(Input::MOUSE_LEFT) && !ImGui::GetIO().WantCaptureMouse) {
-                        m_buildMoveDragging = true;
-                        m_buildMoveOffset = objPos - hp;
+            // THE GIZMO (field report: pieces "move slightly sometimes even
+            // when we are just selecting them"). Clicking now only SELECTS;
+            // deliberate movement goes through a three-axis gizmo summoned
+            // with G on the selected piece. Drag an arm to move along that
+            // axis alone -- snapped to the build grid, Shift for fine 0.05
+            // jostling (the z-fight repair move). Up/Down arrows still step
+            // vertically. The old grab-anywhere drag is gone on purpose.
+            if (Input::isKeyPressed(Input::KEY_G) && !ImGui::GetIO().WantCaptureKeyboard)
+                m_buildGizmoOn = !m_buildGizmoOn;
+            m_buildGizmoHover = -1;
+            if (m_buildGizmoOn) {
+                const glm::mat4 vpM = proj * view;
+                const AABB gb = obj->getWorldBounds();
+                const glm::vec3 gc = (gb.min + gb.max) * 0.5f;
+                const float gExt = glm::length(gb.max - gb.min);
+                const float arm = std::clamp(gExt * 0.6f, 1.2f, 6.0f);
+                const float sw = static_cast<float>(getWindow().getWidth());
+                const float sh = static_cast<float>(getWindow().getHeight());
+                auto toScreen = [&](const glm::vec3& wp, bool& ok) -> ImVec2 {
+                    const glm::vec4 clip = vpM * glm::vec4(wp, 1.0f);
+                    ok = clip.w > 0.05f;
+                    if (!ok) return ImVec2(0, 0);
+                    return ImVec2((clip.x / clip.w * 0.5f + 0.5f) * sw,
+                                  (0.5f - clip.y / clip.w * 0.5f) * sh);
+                };
+                bool okC = false;
+                const ImVec2 sc = toScreen(gc, okC);
+                static const glm::vec3 kAxes[3] = {{1,0,0},{0,1,0},{0,0,1}};
+                static const ImU32 kCols[3] = {IM_COL32(230, 80, 80, 255),
+                                               IM_COL32(90, 220, 90, 255),
+                                               IM_COL32(90, 140, 255, 255)};
+                ImDrawList* fg = ImGui::GetForegroundDrawList();
+                if (okC) {
+                    for (int a = 0; a < 3; ++a) {
+                        bool okT = false;
+                        const ImVec2 st = toScreen(gc + kAxes[a] * arm, okT);
+                        if (!okT) continue;
+                        const ImVec2 mp(mouse.x, mouse.y);
+                        const float dxs = st.x - sc.x, dys = st.y - sc.y;
+                        const float len2 = dxs * dxs + dys * dys;
+                        float t = len2 > 1.0f
+                            ? std::clamp(((mp.x - sc.x) * dxs + (mp.y - sc.y) * dys) / len2, 0.0f, 1.0f)
+                            : 0.0f;
+                        const float dist = std::hypot(mp.x - (sc.x + dxs * t), mp.y - (sc.y + dys * t));
+                        const bool hov = dist < 10.0f;
+                        if (hov && m_buildGizmoHover < 0) m_buildGizmoHover = a;
+                        const bool act = (m_buildGizmoDragging && m_buildGizmoAxis == a);
+                        fg->AddLine(sc, st, kCols[a], (hov || act) ? 6.0f : 3.5f);
+                        fg->AddCircleFilled(st, (hov || act) ? 8.0f : 5.5f, kCols[a]);
                     }
-                    if (m_buildMoveDragging) {
-                        glm::vec3 newPos = hp + m_buildMoveOffset;
-                        float snap = m_buildSnapAmount;
-                        newPos.x = std::round((newPos.x - snapOffX) / snap) * snap + snapOffX;
-                        newPos.z = std::round((newPos.z - snapOffZ) / snap) * snap + snapOffZ;
-                        newPos.y = objPos.y;   // the drag plane is for the RAY;
-                                               // the piece itself never changes height
-
-                        obj->getTransform().setPosition(newPos);
+                    fg->AddCircleFilled(sc, 4.0f, IM_COL32(255, 255, 255, 200));
+                    if (m_buildGizmoHover >= 0 && !m_buildGizmoDragging
+                        && Input::isMouseButtonPressed(Input::MOUSE_LEFT)
+                        && !ImGui::GetIO().WantCaptureMouse) {
+                        m_buildGizmoAxis = m_buildGizmoHover;
+                        m_buildGizmoDragging = true;
+                        bool okT = false;
+                        const ImVec2 tip = toScreen(gc + kAxes[m_buildGizmoAxis] * arm, okT);
+                        const glm::vec2 sd(tip.x - sc.x, tip.y - sc.y);
+                        const float slen = glm::length(sd);
+                        m_gizmoScreenDir = slen > 1.0f ? sd / slen : glm::vec2(0.0f);
+                        m_gizmoWorldPerPixel = slen > 1.0f ? arm / slen : 0.0f;
+                        m_gizmoLastMouse = glm::vec2(mouse.x, mouse.y);
+                        m_gizmoAccum = 0.0f;
+                        m_gizmoStartPos = objPos;
                     }
                 }
-            }
-            if (!Input::isMouseButtonDown(Input::MOUSE_LEFT)) {
-                m_buildMoveDragging = false;
+                if (m_buildGizmoDragging) {
+                    if (!Input::isMouseButtonDown(Input::MOUSE_LEFT)) {
+                        m_buildGizmoDragging = false;
+                        m_buildGizmoAxis = -1;
+                    } else {
+                        const glm::vec2 mnow(mouse.x, mouse.y);
+                        m_gizmoAccum += glm::dot(mnow - m_gizmoLastMouse, m_gizmoScreenDir)
+                                        * m_gizmoWorldPerPixel;
+                        m_gizmoLastMouse = mnow;
+                        const bool fine = Input::isKeyDown(Input::KEY_LEFT_SHIFT)
+                                       || Input::isKeyDown(Input::KEY_RIGHT_SHIFT);
+                        const float snap = fine ? 0.05f
+                                         : (m_buildGizmoAxis == 1 ? 0.5f : m_buildSnapAmount);
+                        glm::vec3 np = m_gizmoStartPos;
+                        np[m_buildGizmoAxis] += std::round(m_gizmoAccum / snap) * snap;
+                        obj->getTransform().setPosition(np);
+                    }
+                }
             }
         }
 
-        // G key: cycle selected WinFrame through wall holes (snap + orient)
+        // N key: cycle selected WinFrame through wall holes (snap + orient).
+        // Was G, which now belongs to the move gizmo.
         if (m_selectedBuildPiece >= 0 && m_selectedBuildPiece < static_cast<int>(m_sceneObjects.size())
             && m_sceneObjects[m_selectedBuildPiece] && m_showSiloConfig
-            && Input::isKeyPressed(Input::KEY_G) && !ImGui::GetIO().WantCaptureKeyboard) {
+            && Input::isKeyPressed(Input::KEY_N) && !ImGui::GetIO().WantCaptureKeyboard) {
             auto* snapObj = m_sceneObjects[m_selectedBuildPiece].get();
             if (snapObj->getName().find("WinFrame_") == 0 || snapObj->getBuildingType() == "platform_wall") {
                 // Collect all holes with their parent wall
@@ -22245,7 +22274,7 @@ private:
         // current, in the user's own vocabulary.
         if (m_isPlayMode && m_showSiloConfig) {
             const char* sign = m_playModeCursorVisible
-                ? "PAINTER MOUSE -- click a plate, paint away  |  Tab: Shipwright, then Tab again: painter walk"
+                ? "PAINTER MOUSE -- click selects, G = move gizmo (Shift = fine)  |  Tab: Shipwright, Tab again: painter walk"
                 : "PAINTER WALK -- press Esc to free the mouse (painter mouse mode)";
             ImGui::SetNextWindowPos(
                 ImVec2(getWindow().getWidth() * 0.5f, getWindow().getHeight() - 96.0f),
@@ -32483,7 +32512,16 @@ private:
     bool m_frameAligned = false;              // True if last placement used frame port alignment
     float m_buildRotateSnap = 45.0f;  // Rotation snap in degrees
     float m_buildMovePlaneY = 0.0f;  // horizontal plane the current drag rides on
-    bool m_buildMoveDragging = false;
+    bool m_buildMoveDragging = false;   // legacy flag, drag itself replaced by the gizmo
+    bool m_buildGizmoOn = false;        // G toggles the move gizmo on the selection
+    bool m_buildGizmoDragging = false;
+    int  m_buildGizmoAxis = -1;
+    int  m_buildGizmoHover = -1;
+    glm::vec2 m_gizmoScreenDir{0.0f};
+    glm::vec2 m_gizmoLastMouse{0.0f};
+    float m_gizmoWorldPerPixel = 0.0f;
+    float m_gizmoAccum = 0.0f;
+    glm::vec3 m_gizmoStartPos{0.0f};
     glm::vec3 m_buildMoveOrigPos{0.0f};
     glm::vec3 m_buildMoveOffset{0.0f};
     float m_buildMoveLastMouseY = 0.0f;  // For vertical drag (Shift+drag)
