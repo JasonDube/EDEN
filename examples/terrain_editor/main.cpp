@@ -8166,18 +8166,28 @@ private:
                 fail("underpowered refusal did not mention lift: " + m_vessel.lastError());
 
             // No thrust key at all -> the default applies (engines authored
-            // before thrust existed keep flying) and the ship lifts.
+            // before thrust existed keep flying) -- but she still cannot
+            // lift, because there is NO EXHAUST GRID in the hull yet.
             engine->setModelMetadata({{"role", "engine"}});
+            updateSceneObjectsList();
+            if (m_vessel.takeHelm("VesselCheckHelm"))
+                fail("takeHelm accepted a hull with no exhaust grid");
+            else if (m_vessel.lastError().find("exhaust") == std::string::npos)
+                fail("gridless refusal did not mention exhaust: " + m_vessel.lastError());
+
+            // A thruster grid welded to the bow face -- now she may fly.
+            makeBox("VesselCheck_thruster_grid", glm::vec3(300.0f, 0.0f, 293.75f),
+                    glm::vec3(6.0f, 2.0f, 0.5f), "platform_wall");
             updateSceneObjectsList();
 
             if (!m_vessel.takeHelm("VesselCheckHelm")) {
                 fail("takeHelm refused WITH an engine: " + m_vessel.lastError());
             } else {
                 // deck + deck2 (welded) + helm + cargo + engine + crate2 +
-                // shell rib (superstructure weld) = 7; the gap plate and its
-                // crate must be refused.
-                if (m_vessel.manifest().size() != 7)
-                    fail("manifest has " + std::to_string(m_vessel.manifest().size()) + " aboard, expected 7");
+                // shell rib + thruster grid (both by superstructure weld)
+                // = 8; the gap plate and its crate must be refused.
+                if (m_vessel.manifest().size() != 8)
+                    fail("manifest has " + std::to_string(m_vessel.manifest().size()) + " aboard, expected 8");
                 bool gapAboard = false;
                 for (const auto& n : m_vessel.manifest())
                     if (n == "VesselCheckGapDeck" || n == "VesselCheckGapCrate") gapAboard = true;
@@ -8195,6 +8205,7 @@ private:
                     {"VesselCheckCrate2", glm::vec3(308.0f, 0.5f, 300.0f)},
                     {"VesselCheckEngine", glm::vec3(297.0f, 0.5f, 299.0f)},
                     {"VesselCheckShellRib", glm::vec3(300.0f, 0.0f, 306.25f)},
+                    {"VesselCheck_thruster_grid", glm::vec3(300.0f, 0.0f, 293.75f)},
                 };
                 for (const auto& ab : aboard) {
                     if (glm::length(posOf(ab.n) - (ab.base + expect)) > 0.01f)

@@ -197,6 +197,7 @@ bool VesselFlight::takeHelm(const std::string& helmName) {
     m_thrust = 0.0f;
     m_steering = 0.0f;
     bool engineAboard = false;
+    bool gridAboard = false;
     for (const std::string& name : m_manifest) {
         SceneObject* o = find(name);
         if (!o) continue;
@@ -218,6 +219,7 @@ bool VesselFlight::takeHelm(const std::string& helmName) {
             engineAboard = true;
             m_thrust += metaFloat(o, "thrust", kDefaultThrust);
         }
+        if (o->getName().find("thruster_grid") != std::string::npos) gridAboard = true;
         if (hasRole(o, "helm")) {
             m_steering = std::max(m_steering, metaFloat(o, "steering", kDefaultSteer));
         }
@@ -240,6 +242,18 @@ bool VesselFlight::takeHelm(const std::string& helmName) {
                       "engines cannot lift her -- %.0f t of ship, %.0f t of thrust",
                       m_tonnage, m_thrust);
         m_error = buf;
+        m_manifest.clear();
+        m_deckName.clear();
+        return false;
+    }
+
+    // NOWHERE TO PUSH, NO LIFT. Thrust is a grid in the hull, not a wish:
+    // the plan's X cells (each backed by an engine room, the drafting
+    // table's law) become thruster_grid pieces, and an engine without one
+    // is furniture. The old grid-less fleet was retired by decree -- "just
+    // forget about those previous ones."
+    if (!gridAboard) {
+        m_error = "no exhaust grid in the hull -- the engines have nowhere to push";
         m_manifest.clear();
         m_deckName.clear();
         return false;
