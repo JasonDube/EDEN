@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Emit assets/models/prefabs/engine.lime -- the first developer-authored prefab.
+"""Emit assets/models/prefabs/fission_reactor.lime -- the first developer-authored prefab.
 
 WHY A GENERATOR AND NOT C++
 The ship in TESSARA:AXIOM is 1324 lines of C++ that have to RUN for the thing to
@@ -67,28 +67,29 @@ def box(centre, half, colour, yaw=0.0, pitch=0.0):
         FACES.append([base, base + 1, base + 2, base + 3])
 
 # ---------------------------------------------------------------------------
-# The thruster. A squat block you bolt to the deck: mount plate, housing,
-# nozzle stepping down toward the stern (+Z), and a lit exhaust face -- the one
-# part that should read from across the shipyard. Sized against the helm: lower
-# and wider, machinery rather than furniture.
+# The fission reactor. Big on purpose -- the size is the price you pay for
+# early-game power, and the reason fusion will someday be worth the credits.
+# Containment block on a plinth, dome cap, warning chevrons, coolant piping
+# to the corners. Nearly two cells of footprint: draw your P room 2x2.
 # ---------------------------------------------------------------------------
-HULL  = (0.36, 0.38, 0.42, 1.0)   # dark plating
-TRIM  = (0.62, 0.55, 0.30, 1.0)   # brass edging, same family as the helm
-DARK  = (0.18, 0.19, 0.22, 1.0)
-GLOW  = (0.95, 0.55, 0.16, 1.0)   # exhaust -- hot orange
-PIPE  = (0.30, 0.32, 0.36, 1.0)
+HULL  = (0.44, 0.46, 0.50, 1.0)
+DARK  = (0.20, 0.21, 0.24, 1.0)
+WARN  = (0.93, 0.79, 0.22, 1.0)   # radiation yellow
+GLOW  = (0.55, 0.85, 0.55, 1.0)   # cherenkov green
+PIPE  = (0.33, 0.35, 0.39, 1.0)
 
-box((0.0, 0.05, 0.0),  (0.62, 0.05, 0.72), DARK)            # mount plate
-box((0.0, 0.42, -0.12), (0.46, 0.32, 0.44), HULL)           # main housing
-box((0.0, 0.42, 0.34),  (0.38, 0.26, 0.16), HULL)           # taper step one
-box((0.0, 0.42, 0.52),  (0.30, 0.20, 0.10), DARK)           # taper step two
-box((0.0, 0.42, 0.63),  (0.24, 0.16, 0.04), TRIM)           # nozzle lip
-box((0.0, 0.42, 0.66),  (0.19, 0.12, 0.01), GLOW)           # exhaust face
-box((0.0, 0.80, -0.16), (0.34, 0.06, 0.30), TRIM)           # spine band
-box((0.0, 0.92, -0.20), (0.10, 0.10, 0.22), HULL)           # top fin
-for side in (-1.0, 1.0):                                    # flank tanks
-    box((side * 0.54, 0.38, -0.10), (0.08, 0.22, 0.34), PIPE)
-    box((side * 0.54, 0.62, -0.10), (0.05, 0.04, 0.28), TRIM)
+box((0.0, 0.09, 0.0), (1.55, 0.09, 1.55), DARK)              # plinth
+box((0.0, 0.22, 0.0), (1.30, 0.06, 1.30), WARN)              # chevron ring
+box((0.0, 1.05, 0.0), (1.05, 0.80, 1.05), HULL)              # containment block
+box((0.0, 1.98, 0.0), (0.72, 0.14, 0.72), DARK)              # collar
+box((0.0, 2.24, 0.0), (0.50, 0.16, 0.50), HULL)              # dome step
+box((0.0, 2.46, 0.0), (0.28, 0.09, 0.28), GLOW)              # crown glow
+for side in (-1.0, 1.0):                                     # inspection slits
+    box((side * 1.06, 1.10, 0.0), (0.02, 0.30, 0.55), GLOW)
+for cx in (-1.15, 1.15):                                     # coolant pipes
+    for cz in (-1.15, 1.15):
+        box((cx, 0.85, cz), (0.10, 0.75, 0.10), PIPE)
+        box((cx, 1.66, cz), (0.13, 0.07, 0.13), WARN)
 
 # ---------------------------------------------------------------------------
 # Ports: how it attaches, and where a body goes to use it.
@@ -96,20 +97,19 @@ for side in (-1.0, 1.0):                                    # flank tanks
 PORTS = [
     # Out of the bottom, so it seats on a deck the way the helm does.
     ("deck_mount", (0.0, 0.0, 0.0),  (0.0, 0.0, -1.0), (0.0, 1.0, 0.0)),
-    # Where the plume comes out -- authored data waiting for the day thrust
-    # gets a particle effect, so the effect will not need a hardcoded offset.
-    ("exhaust",    (0.0, 0.42, 0.67), (0.0, 0.0,  1.0), (0.0, 1.0, 0.0)),
+    # Where an engineer stands to service it -- authored for the day robots
+    # do maintenance rounds.
+    ("service",    (0.0, 0.0, 1.9),  (0.0, 0.0, -1.0), (0.0, 1.0, 0.0)),
 ]
 
 META = {
-    "thrust": "2500",  # tons of ship this engine can push -- the lift rule
-    "power_in": "120", # kilowatts it draws -- no power, no push
-    "role":    "engine",         # what the game does with it
-    "catalog": "propulsion",     # which shelf it appears on
-    "title":   "Ion Thruster",
-    "price":   "4000",
-    "mass":    "400",
-    "summary": "Pushes a hull. A vessel flies only with an engine aboard.",
+    "power_out": "500",          # kilowatts of supply -- the ship's budget
+    "role":    "power",          # seats on a reactor (P) socket, and only there
+    "catalog": "power",          # which shelf it appears on
+    "title":   "Fission Reactor",
+    "price":   "9000",
+    "mass":    "1200",
+    "summary": "500 kW of fission supply. Wants a 2x2 reactor room and radiator fins.",
     "mount":   "deck_mount",
     "prefab":  "1",
 }
@@ -235,7 +235,7 @@ for index, he in enumerate(half_edges):
     if twin != UINT32_MAX:
         assert half_edges[twin][4] == index, f"half-edge {index}: twin is not mutual"
 
-path = "assets/models/prefabs/engine.lime"
+path = "assets/models/prefabs/fission_reactor.lime"
 with open(path, "w") as fh:
     fh.write("\n".join(out))
 print(f"{path}: {len(VERTS)} vertices, {len(FACES)} faces, "

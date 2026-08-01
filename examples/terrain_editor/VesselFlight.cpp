@@ -37,6 +37,12 @@ constexpr float kDefaultThrust  = 3000.0f; // an engine authored before thrust e
 constexpr float kDefaultSteer   = 700.0f;  // a helm authored before steering existed
 constexpr float kReach          = 3.0f;    // how close "at the helm" is
 
+bool poweredOff(SceneObject* o) {
+    const auto& meta = o->getModelMetadata();
+    auto it = meta.find("power_off");
+    return it != meta.end() && it->second == "1";
+}
+
 float metaFloat(SceneObject* o, const char* key, float fallback) {
     const auto& meta = o->getModelMetadata();
     auto it = meta.find(key);
@@ -198,6 +204,8 @@ bool VesselFlight::takeHelm(const std::string& helmName) {
     m_steering = 0.0f;
     bool engineAboard = false;
     bool gridAboard = false;
+    m_powerOut = 0.0f;
+    m_powerNeed = 0.0f;
     for (const std::string& name : m_manifest) {
         SceneObject* o = find(name);
         if (!o) continue;
@@ -215,13 +223,21 @@ bool VesselFlight::takeHelm(const std::string& helmName) {
         } else {
             m_tonnage += metaFloat(o, "mass", kDefaultMass);
         }
+        const bool off = poweredOff(o);
         if (hasRole(o, "engine")) {
-            engineAboard = true;
-            m_thrust += metaFloat(o, "thrust", kDefaultThrust);
+            engineAboard = true;             // aboard even when shut down
+            if (!off) {
+                m_thrust += metaFloat(o, "thrust", kDefaultThrust);
+                m_powerNeed += metaFloat(o, "power_in", 120.0f);
+            }
         }
         if (o->getName().find("thruster_grid") != std::string::npos) gridAboard = true;
         if (hasRole(o, "helm")) {
             m_steering = std::max(m_steering, metaFloat(o, "steering", kDefaultSteer));
+            if (!off) m_powerNeed += metaFloat(o, "power_in", 10.0f);
+        }
+        if (hasRole(o, "power") && !off) {
+            m_powerOut += metaFloat(o, "power_out", 0.0f);
         }
     }
     if (m_steering <= 0.0f) m_steering = kDefaultSteer;
@@ -254,6 +270,22 @@ bool VesselFlight::takeHelm(const std::string& helmName) {
     // forget about those previous ones."
     if (!gridAboard) {
         m_error = "no exhaust grid in the hull -- the engines have nowhere to push";
+        m_lastManifest = m_manifest;   // the console still needs the roster
+        m_manifest.clear();
+        m_deckName.clear();
+        return false;
+    }
+
+    // UNPOWERED, NO LIFT -- rung four, the Scotty rung. Supply is the sum of
+    // enabled reactors; demand is what the enabled flight systems draw. Kill
+    // a system at the helm console to free the kilowatts, then press E again.
+    if (m_powerOut < m_powerNeed) {
+        char buf[128];
+        std::snprintf(buf, sizeof buf,
+                      "engines unpowered -- divert power (need %.0f kW, have %.0f)",
+                      m_powerNeed, m_powerOut);
+        m_error = buf;
+        m_lastManifest = m_manifest;
         m_manifest.clear();
         m_deckName.clear();
         return false;
@@ -303,6 +335,61 @@ void VesselFlight::releaseHelm() {
     m_lastManifest = std::move(m_manifest);
     m_manifest.clear();
     m_frameDelta = glm::vec3(0.0f);
+}
+
+void VesselFlight::renderPowerConsole() {
+    if (!m_flying && !m_showPrompt && m_errorTimer <= 0.0f) return;
+    const std::vector<std::string>& roster = m_flying ? m_manifest : m_lastManifest;
+    if (roster.empty()) return;
+
+    // Only rows that mean something: suppliers and consumers.
+    struct Row { SceneObject* o; float out, in; };
+    std::vector<Row> rows;
+    float supply = 0.0f, demand = 0.0f;
+    for (const std::string& n : roster) {
+        SceneObject* o = find(n);
+        if (!o) continue;
+        float out = 0.0f, in = 0.0f;
+        if (hasRole(o, "power"))  out = metaFloat(o, "power_out", 0.0f);
+        if (hasRole(o, "engine")) in = metaFloat(o, "power_in", 120.0f);
+        if (hasRole(o, "helm"))   in = metaFloat(o, "power_in", 10.0f);
+        if (in <= 0.0f && out <= 0.0f) in = metaFloat(o, "power_in", 0.0f);
+        if (out <= 0.0f && in <= 0.0f) continue;
+        rows.push_back({o, out, in});
+        if (!poweredOff(o)) { supply += out; demand += in; }
+    }
+    if (rows.empty()) return;
+
+    ImGui::SetNextWindowSize(ImVec2(340, 0), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowPos(ImVec2(30, 220), ImGuiCond_FirstUseEver);
+    if (ImGui::Begin("Ship Power -- helm console")) {
+        const bool deficit = supply < demand;
+        ImGui::TextColored(deficit ? ImVec4(1.0f, 0.45f, 0.35f, 1.0f)
+                                   : ImVec4(0.55f, 0.9f, 0.6f, 1.0f),
+                           "POWER  %.0f kW drawn of %.0f kW supplied", demand, supply);
+        ImGui::Separator();
+        for (auto& r : rows) {
+            bool on = !poweredOff(r.o);
+            ImGui::PushID(r.o);
+            if (ImGui::Checkbox("##on", &on)) {
+                auto meta = r.o->getModelMetadata();
+                meta["power_off"] = on ? "0" : "1";
+                r.o->setModelMetadata(meta);
+            }
+            ImGui::SameLine();
+            const auto& meta = r.o->getModelMetadata();
+            auto t = meta.find("title");
+            ImGui::TextUnformatted(t != meta.end() ? t->second.c_str()
+                                                   : r.o->getName().c_str());
+            ImGui::SameLine(230);
+            if (r.out > 0.0f) ImGui::TextColored(ImVec4(0.55f, 0.9f, 0.6f, 1.0f), "+%.0f kW", r.out);
+            else              ImGui::TextDisabled("-%.0f kW", r.in);
+            ImGui::PopID();
+        }
+        ImGui::Separator();
+        ImGui::TextDisabled("toggles apply at the next takeoff (E)");
+    }
+    ImGui::End();
 }
 
 void VesselFlight::applyMove(const glm::vec3& delta) {
@@ -434,8 +521,8 @@ void VesselFlight::renderUI(float screenW, float screenH) const {
     const char* line = nullptr;
     if (m_flying) {
         std::snprintf(flyLine, sizeof flyLine,
-                      "FLYING  %.0f t  |  spd %.0f  turn %.0f deg/s  |  W/S A/D Space/Shift, E to set down",
-                      m_tonnage, m_flySpeed, m_turnRate);
+                      "FLYING  %.0f t  |  PWR %.0f/%.0f kW  |  spd %.0f  turn %.0f deg/s  |  E to set down",
+                      m_tonnage, m_powerNeed, m_powerOut, m_flySpeed, m_turnRate);
         line = flyLine;
     }
     else if (m_errorTimer > 0.0f) line = m_error.c_str();

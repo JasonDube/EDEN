@@ -26,12 +26,14 @@ const ToolDef kTools[] = {
     {'#', "Wall",     IM_COL32(150, 155, 165, 255)},
     {'.', "Floor",    IM_COL32( 70,  72,  80, 255)},
     {'D', "Door",     IM_COL32(220, 170,  60, 255)},
-    {'B', "Bridge",   IM_COL32( 40, 160, 150, 255)},
+    {'B', "Helm",     IM_COL32( 40, 160, 150, 255)},
     {'C', "Cargo",    IM_COL32(160, 110,  50, 255)},
     {'E', "Engine",   IM_COL32(200,  90,  40, 255)},
     {'R', "Robots",   IM_COL32(140,  90, 190, 255)},
     {'W', "Window",   IM_COL32(120, 180, 255, 255)},
     {'X', "Exhaust",  IM_COL32(225, 115,  45, 255)},
+    {'P', "Reactor",  IM_COL32(238, 202,  58, 255)},
+    {'F', "Radiator", IM_COL32(168, 180, 190, 255)},
     {'_', "Erase",    IM_COL32( 25,  26,  30, 255)},
 };
 
@@ -51,7 +53,7 @@ ImU32 fillFor(char c) {
     return IM_COL32(25, 26, 30, 255);
 }
 
-bool isRoom(char c) { return c=='B' || c=='C' || c=='E' || c=='R'; }
+bool isRoom(char c) { return c=='B' || c=='C' || c=='E' || c=='R' || c=='P'; }
 
 // THE HULL MATERIALS LADDER, tier 1 -> 6. KEEP IN SYNC with MATERIALS in
 // make_ship_from_plan.py -- the yard is the authority; this copy prices the
@@ -86,7 +88,8 @@ float planSocketBill(const std::vector<char>& cells, int& nSockets) {
     constexpr int W = Shipwright::kW, H = Shipwright::kH;
     auto price = [](char c) -> float {
         switch (c) { case 'B': return 1500.0f; case 'E': return 2000.0f;
-                     case 'R': return 3500.0f; case 'C': return 800.0f; }
+                     case 'R': return 3500.0f; case 'C': return 800.0f;
+                     case 'P': return 2500.0f; }
         return 0.0f;
     };
     std::vector<char> seen(cells.size(), 0);
@@ -122,7 +125,7 @@ float planVolume(const std::vector<char>& cells, const std::vector<float>& loft)
     for (size_t i = 0; i < cells.size(); ++i) {
         const char c = cells[i];
         const int y = static_cast<int>(i) / Shipwright::kW;
-        if (c == '#' || c == 'W' || c == 'X') v += 2.0f * loft[y] * 2.0f + kFloorCell;
+        if (c == '#' || c == 'W' || c == 'X' || c == 'F') v += 2.0f * loft[y] * 2.0f + kFloorCell;
         else if (c == '.' || c == 'D' || isRoom(c)) v += kFloorCell;
     }
     return v;
@@ -208,7 +211,7 @@ bool Shipwright::deserialize(const std::string& text) {
         for (int x = 0; x < kW && x < static_cast<int>(line.size()); ++x) {
             const char c = line[x];
             next[y * kW + x] =
-                (c=='#'||c=='.'||c=='D'||c=='W'||c=='X'||isRoom(c)) ? c : '_';
+                (c=='#'||c=='.'||c=='D'||c=='W'||c=='X'||c=='F'||isRoom(c)) ? c : '_';
         }
         ++y;
     }
@@ -441,7 +444,7 @@ void Shipwright::render(bool& open) {
             const ImVec2 b(a.x + cell - 1.0f, a.y + cell - 1.0f);
             const int ri = m_overlayIdx.empty() ? -1 : m_overlayIdx[y * kW + x];
             dl->AddRectFilled(a, b, ri >= 0 ? kRoomPalette[ri % kRoomPaletteN] : fillFor(c));
-            if (isRoom(c) || c == 'D' || c == 'W' || c == 'X') {
+            if (isRoom(c) || c == 'D' || c == 'W' || c == 'X' || c == 'F') {
                 const char label[2] = {c, 0};
                 dl->AddText(ImVec2(a.x + 3.0f, a.y), IM_COL32(0, 0, 0, 200), label);
             }
@@ -450,19 +453,43 @@ void Shipwright::render(bool& open) {
     // THE EXHAUST LAW, checked live: every X must touch an E. Orphans get a
     // red ring here and a refusal at the yard -- the drafting table warns
     // before the money does.
-    int orphanX = 0;
+    int orphanX = 0, orphanF = 0, coldP = 0;
+    auto neighbourIs = [this](int x, int y, char want) {
+        return (x + 1 < kW && m_cells[y * kW + x + 1] == want) ||
+               (x > 0     && m_cells[y * kW + x - 1] == want) ||
+               (y + 1 < kH && m_cells[(y + 1) * kW + x] == want) ||
+               (y > 0     && m_cells[(y - 1) * kW + x] == want);
+    };
     for (int y = 0; y < kH; ++y) {
         for (int x = 0; x < kW; ++x) {
-            if (m_cells[y * kW + x] != 'X') continue;
-            const bool fed =
-                (x + 1 < kW && m_cells[y * kW + x + 1] == 'E') ||
-                (x > 0     && m_cells[y * kW + x - 1] == 'E') ||
-                (y + 1 < kH && m_cells[(y + 1) * kW + x] == 'E') ||
-                (y > 0     && m_cells[(y - 1) * kW + x] == 'E');
-            if (fed) continue;
-            ++orphanX;
+            const char c = m_cells[y * kW + x];
+            const bool badX = (c == 'X' && !neighbourIs(x, y, 'E'));
+            const bool badF = (c == 'F' && !neighbourIs(x, y, 'P'));
+            if (!badX && !badF) continue;
+            if (badX) ++orphanX; else ++orphanF;
             const ImVec2 a(origin.x + x * cell, origin.y + y * cell);
             dl->AddRect(a, ImVec2(a.x + cell, a.y + cell), IM_COL32(255, 60, 60, 230), 0, 0, 2.0f);
+        }
+    }
+    // Reactor clusters that reach no fin: flood each P blob once.
+    {
+        std::vector<char> pseen(kW * kH, 0);
+        for (int i = 0; i < kW * kH; ++i) {
+            if (m_cells[i] != 'P' || pseen[i]) continue;
+            bool finned = false;
+            std::vector<int> stack{i};
+            while (!stack.empty()) {
+                const int j = stack.back(); stack.pop_back();
+                if (j < 0 || j >= kW * kH || pseen[j] || m_cells[j] != 'P') continue;
+                pseen[j] = 1;
+                const int jx = j % kW, jy = j / kW;
+                if (neighbourIs(jx, jy, 'F')) finned = true;
+                if (jx > 0)      stack.push_back(j - 1);
+                if (jx < kW - 1) stack.push_back(j + 1);
+                if (jy > 0)      stack.push_back(j - kW);
+                if (jy < kH - 1) stack.push_back(j + kW);
+            }
+            if (!finned) ++coldP;
         }
     }
 
@@ -549,7 +576,7 @@ void Shipwright::render(bool& open) {
             bool hasFloor = false, hasWall = false, hasWin = false;
             for (int x = 0; x < kW; ++x) {
                 const char c = m_cells[y * kW + x];
-                if (c == '#' || c == 'X') hasWall = true;
+                if (c == '#' || c == 'X' || c == 'F') hasWall = true;
                 else if (c == 'W') { hasWall = true; hasWin = true; }
                 else if (c == '.' || c == 'D' || isRoom(c)) hasFloor = true;
             }
@@ -624,11 +651,20 @@ void Shipwright::render(bool& open) {
         }
     }
 
-    if (orphanX > 0) {
+    if (orphanX > 0 || orphanF > 0 || coldP > 0) {
         ImGui::Separator();
-        ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f),
-                           "%d exhaust cell%s without an adjacent Engine (E) cell -- the yard will refuse",
-                           orphanX, orphanX == 1 ? "" : "s");
+        if (orphanX > 0)
+            ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f),
+                               "%d exhaust cell%s without an adjacent Engine (E) -- the yard will refuse",
+                               orphanX, orphanX == 1 ? "" : "s");
+        if (orphanF > 0)
+            ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f),
+                               "%d radiator fin%s without an adjacent Reactor (P) -- the yard will refuse",
+                               orphanF, orphanF == 1 ? "" : "s");
+        if (coldP > 0)
+            ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f),
+                               "%d reactor room%s with no radiator fin (F) on their walls -- the yard will refuse",
+                               coldP, coldP == 1 ? "" : "s");
     }
     if (!m_status.empty()) {
         ImGui::Separator();

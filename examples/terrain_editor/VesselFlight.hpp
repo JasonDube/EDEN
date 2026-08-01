@@ -74,6 +74,10 @@ public:
 
     // The prompt / flight HUD line.
     void renderUI(float screenW, float screenH) const;
+    // The helm console: the ship's power ledger with a toggle per system --
+    // the Scotty panel. Shown at the helm, in flight, and while a refusal
+    // is on screen (so a deficit can be triaged and E pressed again).
+    void renderPowerConsole();
 
     // Programmatic controls -- the self-test flies without a keyboard, and a
     // script could too. takeHelm skips the proximity requirement.
@@ -130,6 +134,8 @@ private:
     float m_flySpeed  = 8.0f;
     float m_liftSpeed = 5.0f;
     float m_turnRate  = 50.0f;
+    float m_powerOut  = 0.0f;    // kW of enabled supply at takeoff
+    float m_powerNeed = 0.0f;    // kW the enabled flight systems draw
     std::string m_error;
     float m_errorTimer = 0.0f;   // seconds the HUD keeps showing a refusal
 };

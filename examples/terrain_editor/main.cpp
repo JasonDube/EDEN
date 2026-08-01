@@ -8223,19 +8223,30 @@ private:
             else if (m_vessel.lastError().find("exhaust") == std::string::npos)
                 fail("gridless refusal did not mention exhaust: " + m_vessel.lastError());
 
-            // A thruster grid welded to the bow face -- now she may fly.
+            // A thruster grid welded to the bow face -- but STILL no lift:
+            // the engines draw kilowatts nobody is supplying (rung four).
             makeBox("VesselCheck_thruster_grid", glm::vec3(300.0f, 0.0f, 293.75f),
                     glm::vec3(6.0f, 2.0f, 0.5f), "platform_wall");
+            updateSceneObjectsList();
+            if (m_vessel.takeHelm("VesselCheckHelm"))
+                fail("takeHelm accepted an unpowered ship");
+            else if (m_vessel.lastError().find("power") == std::string::npos)
+                fail("unpowered refusal did not mention power: " + m_vessel.lastError());
+
+            // A reactor aboard -- now she may fly.
+            auto* reactor = makeBox("VesselCheckReactor", glm::vec3(304.0f, 0.5f, 304.0f),
+                                    glm::vec3(2.0f, 2.0f, 2.0f), nullptr);
+            reactor->setModelMetadata({{"role", "power"}, {"power_out", "999"}});
             updateSceneObjectsList();
 
             if (!m_vessel.takeHelm("VesselCheckHelm")) {
                 fail("takeHelm refused WITH an engine: " + m_vessel.lastError());
             } else {
                 // deck + deck2 (welded) + helm + cargo + engine + crate2 +
-                // shell rib + thruster grid (both by superstructure weld)
-                // = 8; the gap plate and its crate must be refused.
-                if (m_vessel.manifest().size() != 8)
-                    fail("manifest has " + std::to_string(m_vessel.manifest().size()) + " aboard, expected 8");
+                // shell rib + thruster grid + reactor = 9; the gap plate and
+                // its crate must be refused.
+                if (m_vessel.manifest().size() != 9)
+                    fail("manifest has " + std::to_string(m_vessel.manifest().size()) + " aboard, expected 9");
                 bool gapAboard = false;
                 for (const auto& n : m_vessel.manifest())
                     if (n == "VesselCheckGapDeck" || n == "VesselCheckGapCrate") gapAboard = true;
@@ -8254,6 +8265,7 @@ private:
                     {"VesselCheckEngine", glm::vec3(297.0f, 0.5f, 299.0f)},
                     {"VesselCheckShellRib", glm::vec3(300.0f, 0.0f, 306.25f)},
                     {"VesselCheck_thruster_grid", glm::vec3(300.0f, 0.0f, 293.75f)},
+                    {"VesselCheckReactor", glm::vec3(304.0f, 0.5f, 304.0f)},
                 };
                 for (const auto& ab : aboard) {
                     if (glm::length(posOf(ab.n) - (ab.base + expect)) > 0.01f)
@@ -12089,7 +12101,8 @@ private:
                     const std::string partRole =
                         (rIt != m_toolbarSlots[i].metadata.end()) ? rIt->second : std::string();
                     const bool socketed = (partRole == "helm" || partRole == "engine" ||
-                                           partRole == "robot" || partRole == "cargo");
+                                           partRole == "robot" || partRole == "cargo" ||
+                                           partRole == "power");
                     if (socketed) {
                         const std::string tag = "Socket_" + partRole + "_";
                         float bestAlong = 1e9f;
@@ -22329,6 +22342,7 @@ private:
         if (m_isPlayMode) {
             m_vessel.renderUI(static_cast<float>(getWindow().getWidth()),
                               static_cast<float>(getWindow().getHeight()));
+            m_vessel.renderPowerConsole();
         }
         renderPlatformMapMode();
         renderPerfWindow();

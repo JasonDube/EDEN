@@ -671,6 +671,7 @@ port 1: "exhaust" 0.0000 0.4200 0.6700 | 0.0000 0.0000 1.0000 | 0.0000 1.0000 0.
 meta catalog: propulsion
 meta mass: 400
 meta mount: deck_mount
+meta power_in: 120
 meta prefab: 1
 meta price: 4000
 meta role: engine

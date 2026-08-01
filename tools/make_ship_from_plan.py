@@ -28,8 +28,9 @@ ORIGIN_X, ORIGIN_Z = 170.0, 130.0   # empty ground in shipyard, clear of the use
 
 ROLE = {'E': ('engine', (0.78, 0.35, 0.16, 1.0)),
         'R': ('robot',  (0.55, 0.35, 0.75, 1.0)),
-        'B': ('helm',   (0.16, 0.63, 0.59, 1.0)),
-        'C': ('cargo',  (0.63, 0.43, 0.20, 1.0))}
+        'B': ('helm',   (0.16, 0.63, 0.59, 1.0)),   # the helm SOCKET -- the room around it is the bridge
+        'C': ('cargo',  (0.63, 0.43, 0.20, 1.0)),
+        'P': ('power',  (0.93, 0.79, 0.22, 1.0))}   # reactor -- draw it 2x2, plants are big
 
 plan_path = sys.argv[1] if len(sys.argv) > 1 else 'tools/plans/midship_01.plan'
 
@@ -96,7 +97,7 @@ def cell(x, y):
     return '_'
 
 walk  = lambda c: c == '.' or c == 'D' or c in ROLE
-solid = lambda c: c == '#' or c == 'W' or c == 'X'   # windows see, exhausts push
+solid = lambda c: c == '#' or c == 'W' or c == 'X' or c == 'F'   # windows see, exhausts push, fins shed heat
 hull  = lambda c: walk(c) or solid(c)
 
 # ---- validation: exhaust grids back onto engine rooms ----------------------
@@ -114,9 +115,39 @@ for y in range(H):
             exhaust_errors.append((x, y))
         if '_' not in nbrs:
             print(f"WARNING: exhaust at ({x},{y}) has no outside face -- an inboard thruster grid")
-if exhaust_errors:
+# The radiator laws, mirror of the exhaust law: every fin (F) must back onto
+# a reactor room (P), and every reactor CLUSTER must reach at least one fin
+# -- a reactor with no fins is a bomb with a schedule, fins with no reactor
+# are jewellery.
+radiator_errors = []
+for y in range(H):
+    for x in range(W):
+        if cell(x, y) != 'F': continue
+        if 'P' not in [cell(x+1, y), cell(x-1, y), cell(x, y+1), cell(x, y-1)]:
+            radiator_errors.append(('F', x, y))
+pseen = set()
+for y in range(H):
+    for x in range(W):
+        if cell(x, y) != 'P' or (x, y) in pseen: continue
+        blob, stack, finned = [], [(x, y)], False
+        while stack:
+            px, py = stack.pop()
+            if (px, py) in pseen or cell(px, py) != 'P': continue
+            pseen.add((px, py)); blob.append((px, py))
+            for nx, ny in ((px+1,py),(px-1,py),(px,py+1),(px,py-1)):
+                if cell(nx, ny) == 'F': finned = True
+                stack.append((nx, ny))
+        if not finned:
+            radiator_errors.append(('P', blob[0][0], blob[0][1]))
+
+if exhaust_errors or radiator_errors:
     for (x, y) in exhaust_errors:
         print(f"REFUSED: exhaust at ({x},{y}) has no adjacent engine (E) cell -- a grid needs an engine behind it")
+    for (kind, x, y) in radiator_errors:
+        if kind == 'F':
+            print(f"REFUSED: radiator fin at ({x},{y}) has no adjacent reactor (P) cell -- fins with no reactor are jewellery")
+        else:
+            print(f"REFUSED: reactor room at ({x},{y}) reaches no radiator fin (F) on its walls -- a reactor with no fins is a bomb with a schedule")
     sys.exit(1)
 
 # ---- validation: one connected walkable region, doors that go somewhere ----
@@ -187,6 +218,7 @@ for y in range(H):
 # side rooms are port/starboard bays, the rest are holds.
 for r in rooms:
     if   'E' in r['letters']: r['name'] = 'engine_room'
+    elif 'P' in r['letters']: r['name'] = 'reactor_room'
     elif 'R' in r['letters']: r['name'] = 'robot_hall'
     elif 'C' in r['letters']: r['name'] = 'cargo_hold'
     elif 'B' in r['letters']: r['name'] = 'bridge'
@@ -254,6 +286,8 @@ def run_pass(match, out):
 run_pass(lambda c: c == '#', walls)
 thrusters = []
 run_pass(lambda c: c == 'X', thrusters)
+radiators = []
+run_pass(lambda c: c == 'F', radiators)
 
 # ---- phase-2 texture: geometry is the skin -------------------------------
 # Long wall runs split into short panel segments so the patchwork gets a
@@ -580,7 +614,8 @@ for y in range(H):
 # SOCKETS ARE PRICED ("you're paying for each one of the sockets"): a
 # robot station is an investment, not a doodle. KEEP IN SYNC with the
 # Shipwright's live socket bill.
-SOCKET_PRICE = {'helm': 1500.0, 'engine': 2000.0, 'robot': 3500.0, 'cargo': 800.0}
+SOCKET_PRICE = {'helm': 1500.0, 'engine': 2000.0, 'robot': 3500.0, 'cargo': 800.0,
+                'power': 2500.0}
 socket_cost = 0.0
 # Exhaust grids: wall-shaped, charcoal with a hot-orange cast -- machinery
 # in the hull, lofted like any wall, welded and weighed like any hull piece.
@@ -588,6 +623,12 @@ for i, (x, y, w, h) in enumerate(thrusters):
     objs.append(prim(f"{stem}_thruster_grid_{i+1}", "platform_wall",
                      wx(x, w), deck_top, wz(y, h),
                      w*CELL, LOFT[y], h*CELL, (0.42, 0.24, 0.13, 1.0)))
+
+# Radiator fins: pale heat-shedding panels in the hull, lofted like walls.
+for i, (x, y, w, h) in enumerate(radiators):
+    objs.append(prim(f"{stem}_radiator_{i+1}", "platform_wall",
+                     wx(x, w), deck_top, wz(y, h),
+                     w*CELL, LOFT[y], h*CELL, (0.66, 0.71, 0.76, 1.0)))
 
 counts = {}
 for (c, x, y, w, h) in sockets:
