@@ -232,6 +232,25 @@ def run_pass(match, out):
             for i in range(h): wclaimed[y+i][x] = True
             out.append((x, y, 1, h))
 run_pass(lambda c: c == '#', walls)
+
+# ---- phase-2 texture: geometry is the skin -------------------------------
+# Long wall runs split into short panel segments so the patchwork gets a
+# plate rhythm -- each segment its own shade, seams as panel lines.
+def split_panels(runs, seg=2):
+    out = []
+    for (x, y, w, h) in runs:
+        if w >= h:
+            xx = x
+            while xx < x + w:
+                sw = min(seg, x + w - xx)
+                out.append((xx, y, sw, h)); xx += sw
+        else:
+            yy = y
+            while yy < y + h:
+                sh = min(seg, y + h - yy)
+                out.append((x, yy, w, sh)); yy += sh
+    return out
+walls = split_panels(walls)
 run_pass(lambda c: c == 'W', windows)
 
 # ---- sockets: flood connected same-letter cells ----------------------------
@@ -254,7 +273,7 @@ for y in range(H):
 def wx(x, w): return ORIGIN_X + (x + w/2.0 - W/2.0) * CELL
 def wz(y, h): return ORIGIN_Z + (y + h/2.0 - H/2.0) * CELL
 
-def prim(name, bt, px, py, pz, sx, sy, sz, color, collide=True):
+def prim(name, bt, px, py, pz, sx, sy, sz, color, collide=True, bright=1.0):
     return {"name": name, "buildingType": bt, "modelPath": "",
             "position": [px, py, pz], "rotation": [0.0, 0.0, 0.0],
             "scale": [sx, sy, sz], "primitiveType": 1, "primitiveSize": 1.0,
@@ -263,7 +282,7 @@ def prim(name, bt, px, py, pz, sx, sy, sz, color, collide=True):
             "aabbCollision": collide, "polygonCollision": False,
             "bulletCollisionType": 0, "beingType": 0, "visible": True,
             "isSkinned": False, "kinematicPlatform": False, "behaviors": [],
-            "brightness": 1.0, "hueShift": 0.0, "saturation": 1.0,
+            "brightness": bright, "hueShift": 0.0, "saturation": 1.0,
             "dailySchedule": False, "patrolSpeed": 5.0}
 
 import os
@@ -370,6 +389,9 @@ if REVOLVE > 0.0:
         shell_box("platform_slab", ORIGIN_X, DH - 0.4, DH,
                   max(2.0 * (wTop - 0.4), 1.0), wz(y, h), h * CELL,
                   (0.48, 0.51, 0.58, 1.0))
+        # the spine: a dorsal ridge along each crown, the ship's backbone
+        shell_box("platform_wall", ORIGIN_X, DH, DH + 0.14,
+                  0.5, wz(y, h), h * CELL, (0.44, 0.47, 0.54, 1.0))
 
     # THE BULKHEADS ("could u fill those?"): at every step boundary and both
     # ends, the exposed ring-difference is walled, layer by layer -- opaque
@@ -389,7 +411,12 @@ if REVOLVE > 0.0:
         layers = sorted(set(secA) | set(secB))
         for k in layers:
             gA = secA.get(k); gB = secB.get(k)
-            z0, z1 = (gA or gB)[0], (gA or gB)[1]
+            # The layer's vertical extent is the UNION of both sides' -- a
+            # short section's stub layer (say 2.0..2.5) beside a tall one's
+            # full layer (2.0..4.0) must not shrink the rib to the stub: the
+            # 1.5 left open was the final hole the seam detector found.
+            z0 = min(g[0] for g in (gA, gB) if g)
+            z1 = max(g[1] for g in (gA, gB) if g)
             wA = gA[2] if gA else 0.0
             wB = gB[2] if gB else 0.0
             if REV_RIBS:
@@ -406,11 +433,25 @@ if REVOLVE > 0.0:
                 ins = 0.03 if fwd else 0.06
                 wOut = max(wA, wB) - ins
                 wIn = max(0.0, min(gA[3] if gA else 1e9, gB[3] if gB else 1e9) - 0.4)
-                if wOut < 0.1 or (abs(wA - wB) <= 0.05 and wIn > 0.3 and k != 0):
+                # No near-match skip: two runs' width curves can CROSS --
+                # nearly equal at one layer, wildly different around it --
+                # and the skipped layer was exactly where the last thin gaps
+                # lived (the seam detector found 4). A rib is gap armour; it
+                # pours at every layer.
+                if wOut < 0.1:
                     continue
-                zr0, zr1 = z0 + ins, z1 - ins
+                # Segments of one rib column ABUT: each reaches down to meet
+                # the one below, and only the column top keeps its anti-fight
+                # inset. The per-layer top-and-bottom insets opened 6-12cm
+                # sky slits at every size change (field report: thin purple
+                # gaps in the ceiling -- the sky through my own seams).
+                zr0, zr1 = max(0.0, z0 - ins), z1 - ins
                 zc = zb + (0.57 if fwd else -0.57)
-                zs = max(zr0, min(zr1, hWall))
+                # The wall-line split is direction-inset too: two ribs
+                # entering a one-cell run from opposite ends both topped
+                # their annulus segment at exactly hWall -- one plane, one
+                # fight, twice.
+                zs = max(zr0, min(zr1, hWall - (0.0 if fwd else 0.04)))
                 if zs > zr0:
                     lo = max(wIn, bHull)
                     if wOut - lo > 0.05:
@@ -482,6 +523,38 @@ if REVOLVE > 0.0:
           + (", full 360" if REV_360 else "")
           + (", door arches cut" if any(d for (_, _, _, d) in runs) else ""))
 
+# GREEBLES -- the details that catch light. All structural (they weld and
+# fly), none colliding (trim does not block boots), lamps and vents exempt
+# from the patchwork by name.
+greeble_n = 0
+def greeble(kind, px, py, pz, sx, sy, sz, color, bright=1.0):
+    global greeble_n
+    greeble_n += 1
+    objs.append(prim(f"{stem}_{kind}_{greeble_n}", "platform_wall",
+                     px, py, pz, sx, sy, sz, color, collide=False, bright=bright))
+
+# Bow running lights: a row of near-white blocks on the foremost wall's top.
+bow_walls = [r for r in walls if r[3] == 1]
+if bow_walls:
+    bx, by, bw, bh = min(bow_walls, key=lambda r: r[1])
+    n_lamp = max(2, min(5, bw))
+    for i in range(n_lamp):
+        fx = bx + (i + 0.5) * bw / n_lamp
+        greeble("lamp", ORIGIN_X + (fx - W / 2.0) * CELL, deck_top + LOFT[by], wz(by, bh),
+                0.3, 0.22, 0.3, (1.0, 0.98, 0.88, 1.0), bright=1.6)
+
+# Engine-room vents: dark louvre blocks proud of the outermost hull walls on
+# every row the plan marks E.
+for y in range(H):
+    if not any(cell(x, y) == 'E' for x in range(W)):
+        continue
+    xs = [x for x in range(W) if solid(cell(x, y))]
+    if not xs:
+        continue
+    for x, sign in ((min(xs), -1.0), (max(xs), 1.0)):
+        greeble("vent", ORIGIN_X + (x + 0.5 - W / 2.0) * CELL + sign * (CELL / 2.0 + 0.09),
+                deck_top + 0.7, wz(y, 1), 0.18, 1.2, 1.5, (0.18, 0.19, 0.22, 1.0))
+
 counts = {}
 for (c, x, y, w, h) in sockets:
     role, color = ROLE[c]
@@ -504,6 +577,8 @@ for (c, x, y, w, h) in sockets:
 # patchworks in diamondoid.
 def patchwork(name, c):
     if c[3] < 0.9:
+        return c
+    if "_lamp_" in name or "_vent_" in name:
         return c
     h = zlib.crc32(name.encode())
     v = 0.92 + ((h >> 8) & 0xFF) / 255.0 * 0.16
