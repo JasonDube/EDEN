@@ -55,6 +55,11 @@ public:
     // the Shipwright's. Returns the new state so the button can show it.
     void setPainterHook(std::function<bool()> h) { m_painter = std::move(h); }
 
+    // The breaker's yard: deletes every yard-built piece and everything
+    // fitted aboard, so a fresh keel can be laid without loading a level.
+    // Returns the report line for the status bar.
+    void setScrapHook(std::function<std::string()> h) { m_scrap = std::move(h); }
+
     // The yard's SURVEY: Finalize hands the plan to the generator's
     // segmentation (survey mode -- nothing is built) and gets back which cell
     // belongs to which named room, so the designer sees the colour-coded
@@ -86,6 +91,7 @@ private:
     int m_material = 1;             // hull material tier, 1..6
     std::function<void()> m_openCatalog;
     std::function<bool()> m_painter;
+    std::function<std::string()> m_scrap;
     bool m_painterOn = false;
     std::vector<char> m_cells;      // kW * kH, row-major
     char m_tool = '#';
