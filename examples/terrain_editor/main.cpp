@@ -22154,6 +22154,30 @@ private:
         renderPlatformMapMode();
         renderPerfWindow();
 
+        // THE PAINTER SIGNPOST. The painter has two states and the user
+        // named them: WALK (mouse captured, roam the hull) and MOUSE (Esc
+        // freed the cursor for the texture panel). Getting between them --
+        // and back out through the Shipwright -- is a dance worth a standing
+        // reminder on screen ("I really need to remember"). One line, always
+        // current, in the user's own vocabulary.
+        if (m_isPlayMode && m_showSiloConfig) {
+            const char* sign = m_playModeCursorVisible
+                ? "PAINTER MOUSE -- click a plate, paint away  |  Tab: Shipwright, then Tab again: painter walk"
+                : "PAINTER WALK -- press Esc to free the mouse (painter mouse mode)";
+            ImGui::SetNextWindowPos(
+                ImVec2(getWindow().getWidth() * 0.5f, getWindow().getHeight() - 96.0f),
+                ImGuiCond_Always, ImVec2(0.5f, 1.0f));
+            ImGui::SetNextWindowBgAlpha(0.55f);
+            if (ImGui::Begin("##painterSign", nullptr,
+                             ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+                             ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoMove |
+                             ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing |
+                             ImGuiWindowFlags_NoInputs)) {
+                ImGui::TextColored(ImVec4(1.0f, 0.85f, 0.45f, 1.0f), "%s", sign);
+            }
+            ImGui::End();
+        }
+
         // Show Building Textures window when a game-mode building piece is selected
         if (m_selectedBuildPiece >= 0 && m_selectedBuildPiece < static_cast<int>(m_sceneObjects.size())
             && m_sceneObjects[m_selectedBuildPiece]) {
