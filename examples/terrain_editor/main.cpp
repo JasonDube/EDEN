@@ -12798,10 +12798,17 @@ private:
                             obj->getTransform().setRotation(m_frameAlignRot);
                             obj->setEulerRotation(glm::degrees(glm::eulerAngles(m_frameAlignRot)));
                             obj->getTransform().setRotation(m_frameAlignRot);
-                        } else {
+                        } else if (!surfaceSeated) {
+                            // The default finisher: anything unsnapped stands
+                            // upright. It was ALSO flattening surface-mounted
+                            // gear -- this line ran after the mount rotation
+                            // and zeroed it, wall and ceiling both, which is
+                            // why the boxes stood to attention no matter what
+                            // the mount math said. Mounted gear keeps its
+                            // pose and its collision-off.
                             obj->setEulerRotation(glm::vec3(0.0f));
                         }
-                        obj->setAABBCollision(true);
+                        obj->setAABBCollision(!surfaceSeated);
                     }
                     // [Place] logging removed
                     } // end else (non-blueprint path)
