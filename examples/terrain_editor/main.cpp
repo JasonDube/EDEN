@@ -9483,6 +9483,11 @@ private:
 
             // Check AABB objects we can stand on
             for (const auto& obj : m_sceneObjects) {
+                // PAINTER GHOST, floor half: while painting, no object is a
+                // floor -- terrain alone holds the shipwright, so she flies
+                // and walks THROUGH her geometry. Play mode keeps every
+                // surface solid: the dome walks and jumps like ground.
+                if (m_showSiloConfig && m_playModeCursorVisible) break;
                 if (!obj || !obj->isVisible() || !obj->hasCollision()) continue;
                 if (obj->hasBulletCollision()) continue;  // Handle separately with raycast
 
