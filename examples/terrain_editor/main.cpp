@@ -9099,7 +9099,13 @@ private:
                 if (mp.x < band)            yawPush = -(band - mp.x) / band;
                 else if (mp.x > sw - band)  yawPush =  (mp.x - (sw - band)) / band;
                 if (mp.y < band)            pitchPush =  (band - mp.y) / band;
-                else if (mp.y > sh - band)  pitchPush = -(mp.y - (sh - band)) / band;
+                // The DOWN band sits a quarter above the true bottom: the
+                // user's desktop parks an auto-reveal dock on the bottom
+                // edge, and reaching for it kept pitching the camera. The
+                // strip saturates over the same 42px and everything below
+                // it counts as full push.
+                else if (mp.y > sh * 0.75f)
+                    pitchPush = -std::min(1.0f, (mp.y - sh * 0.75f) / band);
                 if (yawPush != 0.0f || pitchPush != 0.0f) {
                     const float rate = 140.0f * deltaTime;
                     m_camera.setYaw(m_camera.getYaw() + yawPush * rate);

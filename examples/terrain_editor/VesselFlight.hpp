@@ -99,6 +99,13 @@ public:
     // manifest, weigh her, and put the manifest back -- no helm taken, no
     // state kept. Returns false when no ship is near enough to weigh.
     bool surveyNearestShip(const glm::vec3& nearPos, float range, float& tonnageOut);
+
+private:
+    // The manifest rules (hull flood, cargo, superstructure + fittings
+    // welds) from a seed deck -- shared by takeHelm and the live survey.
+    void assembleManifestFrom(eden::SceneObject* deck);
+
+public:
     // Was this piece aboard the LAST flight? The landing-lock fix asks: when
     // the exemption switches off at touchdown, a yawed hull's inflated boxes
     // may already CONTAIN the pilot, and a box you are inside may not shove

@@ -92,6 +92,15 @@ bool VesselFlight::buildManifest(SceneObject* helm) {
         return false;
     }
 
+    assembleManifestFrom(deck);
+    return true;
+}
+
+// Everything a ship IS, from a seed deck plate: the hull flood fill, the
+// standing cargo, the superstructure weld, the fittings weld. Split out of
+// buildManifest so the painter's live survey can weigh a hull that has no
+// helm yet -- the deck is the ship's identity; the helm is furniture.
+void VesselFlight::assembleManifestFrom(SceneObject* deck) {
     m_deckName = deck->getName();
     m_manifest.clear();
 
@@ -231,8 +240,8 @@ bool VesselFlight::buildManifest(SceneObject* helm) {
             }
         }
     }
-    return true;
 }
+
 
 bool VesselFlight::takeHelm(const std::string& helmName) {
     SceneObject* helm = find(helmName);
@@ -415,20 +424,19 @@ void VesselFlight::releaseHelm() {
 
 bool VesselFlight::surveyNearestShip(const glm::vec3& nearPos, float range, float& tonnageOut) {
     if (m_flying) { tonnageOut = m_tonnage; return true; }
-    SceneObject* helm = nullptr;
+    // Seed from the nearest DECK PLATE -- a helmless hull mid-build is
+    // still a ship, and the painter weighs her while she grows.
+    SceneObject* deck = nullptr;
     float best = range * range;
     for (auto& o : *m_deps.sceneObjects) {
-        if (!o || !hasRole(o.get(), "helm")) continue;
+        if (!o || o->getBuildingType() != "platform_slab") continue;
         const glm::vec3 d = o->getTransform().getPosition() - nearPos;
         const float d2 = glm::dot(d, d);
-        if (d2 < best) { best = d2; helm = o.get(); }
+        if (d2 < best) { best = d2; deck = o.get(); }
     }
-    if (!helm) return false;
-    if (!buildManifest(helm)) {
-        m_manifest.clear();
-        m_deckName.clear();
-        return false;
-    }
+    if (!deck) return false;
+    m_manifest.clear();
+    assembleManifestFrom(deck);
     float t = 0.0f;
     for (const std::string& name : m_manifest) {
         SceneObject* o = find(name);
