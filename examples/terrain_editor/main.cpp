@@ -10825,8 +10825,17 @@ private:
                 // build panel still exists in edit mode via Window > Build; its
                 // machinery is untouched, only this key moved.
                 m_showShipwright = !m_showShipwright;
-                m_playModeCursorVisible = m_showShipwright;
-                Input::setMouseCaptured(!m_showShipwright);
+                if (m_showShipwright) {
+                    m_playModeCursorVisible = true;
+                    Input::setMouseCaptured(false);
+                } else if (!m_showSiloConfig) {
+                    // Plain play re-captures on Tab-out; the PAINTER does
+                    // not -- it lives with the cursor free (edge-look +
+                    // ungated WASD), and this line was the stomp that kept
+                    // dropping the user back into captured walk mode.
+                    m_playModeCursorVisible = false;
+                    Input::setMouseCaptured(true);
+                }
             } else if (!m_isPlayMode) {
                 m_showWorldChatHistory = !m_showWorldChatHistory;
             }
