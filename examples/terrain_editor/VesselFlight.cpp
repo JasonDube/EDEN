@@ -413,6 +413,41 @@ void VesselFlight::releaseHelm() {
     m_frameDelta = glm::vec3(0.0f);
 }
 
+bool VesselFlight::surveyNearestShip(const glm::vec3& nearPos, float range, float& tonnageOut) {
+    if (m_flying) { tonnageOut = m_tonnage; return true; }
+    SceneObject* helm = nullptr;
+    float best = range * range;
+    for (auto& o : *m_deps.sceneObjects) {
+        if (!o || !hasRole(o.get(), "helm")) continue;
+        const glm::vec3 d = o->getTransform().getPosition() - nearPos;
+        const float d2 = glm::dot(d, d);
+        if (d2 < best) { best = d2; helm = o.get(); }
+    }
+    if (!helm) return false;
+    if (!buildManifest(helm)) {
+        m_manifest.clear();
+        m_deckName.clear();
+        return false;
+    }
+    float t = 0.0f;
+    for (const std::string& name : m_manifest) {
+        SceneObject* o = find(name);
+        if (!o) continue;
+        const auto& bt = o->getBuildingType();
+        if (bt == "socket_marker") continue;
+        if (bt == "platform_slab" || bt == "platform_wall") {
+            const glm::vec3 sc = o->getTransform().getScale();
+            t += sc.x * sc.y * sc.z * metaFloat(o, "density", kPlateDensity);
+        } else {
+            t += metaFloat(o, "mass", kDefaultMass);
+        }
+    }
+    tonnageOut = t;
+    m_manifest.clear();
+    m_deckName.clear();
+    return true;
+}
+
 void VesselFlight::renderPowerConsole() {
     if (!m_flying && !m_showPrompt && m_errorTimer <= 0.0f) return;
     const std::vector<std::string>& roster = m_flying ? m_manifest : m_lastManifest;

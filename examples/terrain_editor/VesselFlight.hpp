@@ -95,6 +95,10 @@ public:
     bool turnVessel(float deg);
     const std::vector<std::string>& manifest() const { return m_manifest; }
     float tonnage() const { return m_tonnage; }
+    // Live weighing for the painter's HUD: find the nearest helm, build the
+    // manifest, weigh her, and put the manifest back -- no helm taken, no
+    // state kept. Returns false when no ship is near enough to weigh.
+    bool surveyNearestShip(const glm::vec3& nearPos, float range, float& tonnageOut);
     // Was this piece aboard the LAST flight? The landing-lock fix asks: when
     // the exemption switches off at touchdown, a yawed hull's inflated boxes
     // may already CONTAIN the pilot, and a box you are inside may not shove

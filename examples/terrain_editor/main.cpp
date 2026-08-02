@@ -23102,6 +23102,21 @@ private:
                 ImGui::TextColored(ImVec4(0.3f, 1.0f, 0.5f, 1.0f), "%s", creditsStr);
                 ImGui::SameLine(0, 20.0f);
                 ImGui::TextColored(ImVec4(1.0f, 1.0f, 0.5f, 1.0f), "%s", timeStr.c_str());
+                // THE PAINTER'S SCALE: live tonnage of the nearest ship while
+                // painting, re-weighed twice a second -- add a plate, watch
+                // her gain; scrap a fitting, watch her lose. The same number
+                // the helm will compute at the next takeoff.
+                if (m_isPlayMode && m_showSiloConfig) {
+                    m_paintWeighTimer -= ImGui::GetIO().DeltaTime;
+                    if (m_paintWeighTimer <= 0.0f) {
+                        m_paintWeighTimer = 0.5f;
+                        m_paintTonnageValid = m_vessel.surveyNearestShip(
+                            m_camera.getPosition(), 250.0f, m_paintTonnage);
+                    }
+                    if (m_paintTonnageValid)
+                        ImGui::TextColored(ImVec4(0.95f, 0.75f, 0.40f, 1.0f),
+                                           "%.0f t", m_paintTonnage);
+                }
             }
             ImGui::End();
         }
@@ -33142,6 +33157,9 @@ private:
     float m_gizmoWorldPerPixel = 0.0f;
     float m_gizmoAccum = 0.0f;
     glm::vec3 m_gizmoStartPos{0.0f};
+    float m_paintWeighTimer = 0.0f;    // live-tonnage refresh cadence
+    float m_paintTonnage = 0.0f;
+    bool  m_paintTonnageValid = false;
     float m_painterExitProbe = 0.0f;   // seconds of witness left
     float m_painterExitTick = 0.0f;
     bool m_gizmoVisible = false;        // draw data below is valid this frame
