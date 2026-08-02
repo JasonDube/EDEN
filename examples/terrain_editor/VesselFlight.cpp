@@ -189,6 +189,13 @@ void VesselFlight::assembleManifestFrom(SceneObject* deck) {
                     if (wb.min.x > ab.max.x + kWeldEps || ab.min.x > wb.max.x + kWeldEps) continue;
                     if (wb.min.y > ab.max.y + kWeldEps || ab.min.y > wb.max.y + kWeldEps) continue;
                     if (wb.min.z > ab.max.z + kWeldEps || ab.min.z > wb.max.z + kWeldEps) continue;
+                    // YOU DO NOT OWN WHAT YOU STAND ON. If the candidate's
+                    // top is the surface our member rests upon, that is a
+                    // FLOOR beneath us, not our structure -- a shuttle's
+                    // weld must never walk down into the carrier's deck and
+                    // claim the mothership. (The carrier still annexes her
+                    // riders: that direction is the cargo rule's business.)
+                    if (ab.min.y >= wb.max.y - 0.1f) continue;
                     aboardNames.push_back(o->getName());
                     aboardBounds.push_back(wb);
                     m_manifest.push_back(o->getName());
@@ -231,6 +238,13 @@ void VesselFlight::assembleManifestFrom(SceneObject* deck) {
                     if (wb.min.x > ab.max.x + 0.08f || ab.min.x > wb.max.x + 0.08f) continue;
                     if (wb.min.y > ab.max.y + 0.08f || ab.min.y > wb.max.y + 0.08f) continue;
                     if (wb.min.z > ab.max.z + 0.08f || ab.min.z > wb.max.z + 0.08f) continue;
+                    // YOU DO NOT OWN WHAT YOU STAND ON. If the candidate's
+                    // top is the surface our member rests upon, that is a
+                    // FLOOR beneath us, not our structure -- a shuttle's
+                    // weld must never walk down into the carrier's deck and
+                    // claim the mothership. (The carrier still annexes her
+                    // riders: that direction is the cargo rule's business.)
+                    if (ab.min.y >= wb.max.y - 0.1f) continue;
                     aboardNames.push_back(o->getName());
                     aboardBounds.push_back(wb);
                     m_manifest.push_back(o->getName());
