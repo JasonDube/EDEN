@@ -675,6 +675,17 @@ protected:
             glm::vec3 drop = eye + fwd * (halfSpan + 8.0f);
             float gy = m_terrain.getHeightAt(drop.x, drop.z);
             if (gy < -1000.0f) gy = 0.0f;
+            // DECKS ARE GROUND TOO: building while standing on a capital's
+            // deck lays the new keel ON the deck, not at the dirt inside
+            // her hull -- the carrier scenario's first requirement. Highest
+            // plate top under the drop point, at or below the builder's eye.
+            for (auto& so : m_sceneObjects) {
+                if (!so || so->getBuildingType() != "platform_slab") continue;
+                const AABB wb = so->getWorldBounds();
+                if (drop.x < wb.min.x || drop.x > wb.max.x) continue;
+                if (drop.z < wb.min.z || drop.z > wb.max.z) continue;
+                if (wb.max.y <= eye.y && wb.max.y > gy) gy = wb.max.y;
+            }
             // A FULL-REVOLVE HULL HOVERS. Her belly mirrors below deck
             // level, and dropping the deck at terrain height buried half
             // the ship ("i think half of it is under the terrain"). If the
