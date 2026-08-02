@@ -9792,6 +9792,23 @@ private:
             float terrainHeight = heightQuery(m_characterController->getPosition().x,
                                                m_characterController->getPosition().z);
 
+            // THE HOMEGROWN JUMP. Jolt grants jumps only from ground IT
+            // knows -- bodies registered by F5. On AABB-only floors (fresh
+            // builds, ship decks before the F5 cycle) the feet-clamp below
+            // holds the capsule up while Jolt reads airborne, and Space is
+            // silently eaten ("I press space and just stay right there").
+            // If we are standing on the heightQuery floor, jump by hand:
+            // upward velocity now; the clamp only re-grabs on the way down.
+            if (jump && !m_characterController->isOnGround()) {
+                const glm::vec3 cp0 = m_characterController->getPosition();
+                if (std::fabs((cp0.y - 0.5f) - terrainHeight) < 0.15f) {
+                    glm::vec3 v = m_characterController->getLinearVelocity();
+                    v.y = jumpVelocity;
+                    m_characterController->setLinearVelocity(v);
+                    jump = false;   // applied by hand; Jolt need not repeat it
+                }
+            }
+
             glm::vec3 charPos = m_characterController->extendedUpdate(
                 deltaTime, desiredVelocity, jump, jumpVelocity
             );
