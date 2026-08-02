@@ -393,17 +393,24 @@ if REVOLVE > 0.0:
     shell_n = 0
     FILL_COL = (0.45, 0.70, 1.00, 0.22) if REV_GLASS else (0.52, 0.55, 0.62, 1.0)
 
-    def shell_box(bt, px, zlo, zhi, sx, pz, szlen, color):
+    def shell_box(bt, px, zlo, zhi, sx, pz, szlen, color, collide=True):
         # One piece of shell, and its mirror below the deck when the revolve
         # is full: 360 hulls have no flat keel -- they live in space.
+        # collide=False marks the FULL-WIDTH pieces (crowns, wide bands):
+        # their boxes span the hollow interior, and box collision turned the
+        # inside of every tube into a haunted house -- heightQuery snapping
+        # the player onto invisible "floors" at torso height, the shove pass
+        # pinning them between. Hollow-spanning armour is visual.
         global shell_n
         shell_n += 1
         objs.append(prim(f"{stem}_shell_{shell_n}", bt,
-                         px, deck_top + zlo, pz, sx, zhi - zlo, szlen, color))
+                         px, deck_top + zlo, pz, sx, zhi - zlo, szlen, color,
+                         collide=collide))
         if REV_360:
             shell_n += 1
             objs.append(prim(f"{stem}_shell_{shell_n}", bt,
-                             px, deck_top - zhi, pz, sx, zhi - zlo, szlen, color))
+                             px, deck_top - zhi, pz, sx, zhi - zlo, szlen, color,
+                             collide=collide))
 
     # Each run's stepped cross-section: layer k -> (z0, z1, outer half-width).
     # Door runs record width 0 at the ground layer -- the arch is an absence
@@ -444,7 +451,7 @@ if REVOLVE > 0.0:
         wTop = R * math.sqrt(max(0.0, 1.0 - (zTop / DH) ** 2)) if nL > 1 else R
         shell_box("platform_slab", ORIGIN_X, DH - 0.4, DH,
                   max(2.0 * (wTop - 0.4), 1.0), wz(y, h), h * CELL,
-                  (0.48, 0.51, 0.58, 1.0))
+                  (0.48, 0.51, 0.58, 1.0), collide=False)
         # the spine: a dorsal ridge along each crown, the ship's backbone
         shell_box("platform_wall", ORIGIN_X, DH, DH + 0.14,
                   0.5, wz(y, h), h * CELL, (0.44, 0.47, 0.54, 1.0))
@@ -517,7 +524,7 @@ if REVOLVE > 0.0:
                 if zr1 > zs:
                     if wIn < 0.3:
                         shell_box("platform_wall", ORIGIN_X, zs, zr1,
-                                  max(2.0 * wOut, 1.0), zc, 1.2, FILL_COL)
+                                  max(2.0 * wOut, 1.0), zc, 1.2, FILL_COL, collide=False)
                     else:
                         for side in (-1.0, 1.0):
                             shell_box("platform_wall", ORIGIN_X + side * (wIn + wOut) / 2.0,
@@ -539,7 +546,7 @@ if REVOLVE > 0.0:
             if z1 > zs:
                 if wLo < 0.3:
                     shell_box("platform_wall", ORIGIN_X, zs, z1,
-                              max(2.0 * wHi, 1.0), pz, 0.4, FILL_COL)
+                              max(2.0 * wHi, 1.0), pz, 0.4, FILL_COL, collide=False)
                 else:
                     for side in (-1.0, 1.0):
                         shell_box("platform_wall", ORIGIN_X + side * (wLo + wHi) / 2.0,
