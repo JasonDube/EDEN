@@ -10091,6 +10091,30 @@ private:
                     // the two collision worlds agree about what a step is.
                     if (bounds.max.y <= (newPos.y - playerHeight) + 0.65f) continue;
 
+                    // CEILINGS ARE NOT WALLS. A box that begins above the
+                    // torso is overhead, and sliding sideways cannot escape
+                    // something that spans the whole compartment -- the old
+                    // code wedged the player rigid ("your head gets caught
+                    // on the ceiling and you can't move"). If there is room
+                    // to duck, the head tucks under (camera clamps just
+                    // below the box) and movement stays free; if the gap is
+                    // too tight to fit a body, it blocks as a wall, as
+                    // always.
+                    if (bounds.min.y >= (newPos.y - playerHeight) + 0.7f) {
+                        const bool overXZ =
+                            newPos.x + playerRadius > bounds.min.x &&
+                            newPos.x - playerRadius < bounds.max.x &&
+                            newPos.z + playerRadius > bounds.min.z &&
+                            newPos.z - playerRadius < bounds.max.z;
+                        if (!overXZ || newPos.y + 0.1f <= bounds.min.y) continue;
+                        const float ducked = bounds.min.y - 0.12f;
+                        if (ducked >= oldCameraPos.y - 0.35f) {
+                            newPos.y = std::min(newPos.y, ducked);
+                            continue;
+                        }
+                        // no room to duck: fall through and block as a wall
+                    }
+
                     // Check if player feet to head intersects object bounds
                     glm::vec3 playerMin(newPos.x - playerRadius, newPos.y - playerHeight, newPos.z - playerRadius);
                     glm::vec3 playerMax(newPos.x + playerRadius, newPos.y + 0.1f, newPos.z + playerRadius);
