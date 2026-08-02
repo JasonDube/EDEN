@@ -606,7 +606,16 @@ protected:
                             glm::vec3(cam.x, cam.y - (1.65f - 0.5f), cam.z));
                     }
                 }
-                // Arm the exit probe: the ten-second freeze needs a name.
+                // LEGS BACK. Painter flight leaves the camera in Fly mode,
+                // and with Fly active the character controller refuses duty
+                // while the painter's own fly-path is already gone -- NO
+                // movement path owns the player. The probe caught it in one
+                // column: mode=0 frozen, mode=1 free, and the user's magic
+                // double-space was just the fly-toggle. Walking is the
+                // painter's parting gift now.
+                m_camera.setMovementMode(MovementMode::Walk);
+                m_camera.setNoClip(false);
+                // Probe stays armed until the field confirms the cure.
                 m_painterExitProbe = 15.0f;
                 m_painterExitTick = 0.0f;
             }
