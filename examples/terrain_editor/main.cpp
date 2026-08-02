@@ -10081,6 +10081,16 @@ private:
                     bounds.min -= glm::vec3(playerRadius, 0, playerRadius);
                     bounds.max += glm::vec3(playerRadius, 0, playerRadius);
 
+                    // STAIRS ARE FLOORS, in both directions. A box whose top
+                    // sits within step height of the feet is something to
+                    // stand on, not a wall to slide against. Without this,
+                    // walking DOWN a terrace pinned the player at every rim:
+                    // the lower step's box shoved back the moment the feet
+                    // dipped past its top ("you stall, and you have to
+                    // jump"). 0.65 matches Jolt's own stair allowance, so
+                    // the two collision worlds agree about what a step is.
+                    if (bounds.max.y <= (newPos.y - playerHeight) + 0.65f) continue;
+
                     // Check if player feet to head intersects object bounds
                     glm::vec3 playerMin(newPos.x - playerRadius, newPos.y - playerHeight, newPos.z - playerRadius);
                     glm::vec3 playerMax(newPos.x + playerRadius, newPos.y + 0.1f, newPos.z + playerRadius);
