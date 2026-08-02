@@ -9999,6 +9999,14 @@ private:
             for (const auto& obj : m_sceneObjects) {
                 if (!obj || !obj->isVisible()) continue;
 
+                // PAINTER GHOST: while painting, walls do not block. The
+                // shipwright walks through her own hull -- inspection is
+                // the job, and doors are for crew. Floors still hold
+                // (heightQuery is untouched), and this gate is EXACTLY the
+                // painter state, so akelba and plain play keep the golden
+                // collision loop bit for bit.
+                if (m_showSiloConfig && m_playModeCursorVisible) break;
+
                 // While FLYING, everything aboard is exempt. Collision boxes are
                 // axis-aligned and INFLATE when the hull yaws -- past roughly 30
                 // degrees the ship's own swollen boxes reach the pilot's spot and
