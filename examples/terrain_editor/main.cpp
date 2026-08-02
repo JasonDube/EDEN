@@ -71,6 +71,7 @@
 // The 2D deck-plan grid -- Tab in play mode. First descendant of the real
 // player build system; see the design decision in Shipwright.hpp.
 #include "Shipwright.hpp"
+#include "ShipFile.hpp"
 
 // OS / Filesystem
 #include "OS/FilesystemBrowser.hpp"
@@ -700,8 +701,7 @@ protected:
 
             // Each build gets a serial prefix so two ships' plates never share
             // a name -- the flight manifest finds objects BY name.
-            static int s_shipSerial = 0;
-            const std::string prefix = "ship" + std::to_string(++s_shipSerial) + "_";
+            const std::string prefix = "ship" + std::to_string(++m_shipSerial) + "_";
             int made = 0;
             for (auto& o : j["objects"]) {
                 const glm::vec4 col(o["primitiveColor"][0], o["primitiveColor"][1],
@@ -808,6 +808,112 @@ protected:
                           static_cast<int>(doomed.size()) - fittings, fittings);
             return msg;
         });
+
+        // THE SHIP FILE: the nearest ship -- hull, fittings, wiring, someday
+        // crew -- saved as one artifact in assets/ships/, and launched back
+        // from the fleet library. The format lives in ShipFile.{hpp,cpp};
+        // this is only the plumbing between it and the world.
+        {
+            auto makeHost = [this]() {
+                shipfile::Host h;
+                h.sceneObjects = &m_sceneObjects;
+                h.surveyShip = [this](const glm::vec3& p) {
+                    return m_vessel.surveyManifest(p, 250.0f);
+                };
+                h.createModel = [this](const std::vector<ModelVertex>& v,
+                                       const std::vector<uint32_t>& i) {
+                    return m_modelRenderer->createModel(v, i);
+                };
+                h.uploadTexture = [this](uint32_t handle, const unsigned char* px, int w, int ht) {
+                    m_modelRenderer->updateTexture(handle, px, w, ht);
+                };
+                h.loadModelFile = [this](const std::string& path,
+                                         shipfile::Host::LoadedModel& lm) {
+                    std::string ext;
+                    const auto dot = path.rfind('.');
+                    if (dot != std::string::npos) ext = path.substr(dot);
+                    std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+                    if (ext == ".lime") {
+                        auto r = LimeLoader::load(path);
+                        if (!r.success) return false;
+                        lm.verts = std::move(r.mesh.vertices);
+                        lm.indices = std::move(r.mesh.indices);
+                        if (r.mesh.hasTexture && r.mesh.textureWidth > 0) {
+                            lm.texture = std::move(r.mesh.textureData);
+                            lm.texW = r.mesh.textureWidth;
+                            lm.texH = r.mesh.textureHeight;
+                        }
+                        for (const auto& pp : r.mesh.ports)
+                            lm.ports.push_back({pp.name, pp.position, pp.forward, pp.up});
+                        return !lm.verts.empty();
+                    }
+                    if (ext == ".glb" || ext == ".gltf") {
+                        auto r = GLBLoader::load(path);
+                        if (!r.success) return false;
+                        for (auto& mesh : r.meshes) {
+                            const uint32_t base = static_cast<uint32_t>(lm.verts.size());
+                            lm.verts.insert(lm.verts.end(), mesh.vertices.begin(), mesh.vertices.end());
+                            for (auto idx : mesh.indices) lm.indices.push_back(base + idx);
+                            if (lm.texture.empty() && mesh.hasTexture && mesh.texture.width > 0) {
+                                lm.texture = std::move(mesh.texture.data);
+                                lm.texW = mesh.texture.width;
+                                lm.texH = mesh.texture.height;
+                            }
+                        }
+                        return !lm.verts.empty();
+                    }
+                    return false;
+                };
+                h.addWire = [this](SceneObject* a, const std::string& ap,
+                                   SceneObject* b, const std::string& bp) {
+                    m_wires.push_back({a, ap, b, bp, 0});
+                    m_wiresMeshDirty = true;
+                };
+                h.wiresAmong = [this](const std::vector<SceneObject*>& mem) {
+                    std::vector<shipfile::Host::WireRec> out;
+                    auto aboard = [&mem](SceneObject* o) {
+                        for (auto* m : mem) if (m == o) return true;
+                        return false;
+                    };
+                    for (const auto& w : m_wires)
+                        if (aboard(w.fromObj) && aboard(w.toObj))
+                            out.push_back({w.fromObj, w.fromCP, w.toObj, w.toCP});
+                    return out;
+                };
+                h.nextPrefix = [this]() {
+                    return "ship" + std::to_string(++m_shipSerial) + "_";
+                };
+                h.objectsChanged = [this] { updateSceneObjectsList(); };
+                return h;
+            };
+            m_shipwright.setShipyardHooks(
+                [this, makeHost](const std::string& name) -> std::string {
+                    auto h = makeHost();
+                    return shipfile::save(h, m_camera.getPosition(),
+                        std::string(CMAKE_SOURCE_DIR) + "/assets/ships/" + name + ".ship");
+                },
+                []() {
+                    return shipfile::list(std::string(CMAKE_SOURCE_DIR) + "/assets/ships");
+                },
+                [this, makeHost](const std::string& name) -> std::string {
+                    auto h = makeHost();
+                    const float yawR = glm::radians(m_camera.getYaw());
+                    const glm::vec3 fwd(std::cos(yawR), 0.0f, std::sin(yawR));
+                    const glm::vec3 eye = m_camera.getPosition();
+                    const glm::vec3 drop = eye + fwd * 25.0f;
+                    float gy = m_terrain.getHeightAt(drop.x, drop.z);
+                    if (gy < -1000.0f) gy = 0.0f;
+                    for (auto& so : m_sceneObjects) {
+                        if (!so || so->getBuildingType() != "platform_slab") continue;
+                        const AABB wb = so->getWorldBounds();
+                        if (drop.x < wb.min.x || drop.x > wb.max.x) continue;
+                        if (drop.z < wb.min.z || drop.z > wb.max.z) continue;
+                        if (wb.max.y <= eye.y && wb.max.y > gy) gy = wb.max.y;
+                    }
+                    return shipfile::spawn(h, glm::vec3(drop.x, gy + 0.05f, drop.z),
+                        std::string(CMAKE_SOURCE_DIR) + "/assets/ships/" + name + ".ship");
+                });
+        }
 
         // The survey: Finalize runs the SAME generator in --rooms-json mode --
         // segmentation and naming only, nothing built, nothing charged -- so
@@ -33072,6 +33178,7 @@ private:
     // The Shipwright: Tab in play mode opens the 2D deck-plan grid.
     Shipwright m_shipwright;
     bool m_showShipwright = false;
+    int m_shipSerial = 0;   // shared by BUILD SHIP and fleet launches
 
     enum class PlayerZone { Silo, Basement, Outside, Void };
     PlayerZone m_playerZone = PlayerZone::Outside;

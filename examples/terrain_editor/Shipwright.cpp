@@ -475,6 +475,40 @@ void Shipwright::render(bool& open) {
             ImGui::EndPopup();
         }
     }
+    if (m_saveShip) {
+        ImGui::SameLine();
+        if (ImGui::Button("Save Ship")) ImGui::OpenPopup("Save ship as");
+        if (ImGui::BeginPopupModal("Save ship as", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+            ImGui::TextDisabled("the ship nearest you: hull, fittings, wiring -- one file");
+            const bool enter = ImGui::InputText("name", m_shipNameBuf, sizeof m_shipNameBuf,
+                                                ImGuiInputTextFlags_EnterReturnsTrue);
+            if (ImGui::Button("Save", ImVec2(120, 0)) || enter) {
+                m_status = m_saveShip(m_shipNameBuf);
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Cancel", ImVec2(120, 0))) ImGui::CloseCurrentPopup();
+            ImGui::EndPopup();
+        }
+    }
+    if (m_launchShip && m_listShips) {
+        ImGui::SameLine();
+        if (ImGui::Button("Fleet")) ImGui::OpenPopup("Fleet library");
+        if (ImGui::BeginPopupModal("Fleet library", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+            const auto ships = m_listShips();
+            if (ships.empty())
+                ImGui::TextDisabled("no ships in assets/ships yet -- Save Ship makes one");
+            for (const auto& sn : ships) {
+                if (ImGui::Button(sn.c_str(), ImVec2(240, 0))) {
+                    m_status = m_launchShip(sn);
+                    ImGui::CloseCurrentPopup();
+                }
+            }
+            ImGui::Separator();
+            if (ImGui::Button("Close", ImVec2(240, 0))) ImGui::CloseCurrentPopup();
+            ImGui::EndPopup();
+        }
+    }
 
     // ---- the grid ----------------------------------------------------------
     const float cell = 13.0f;

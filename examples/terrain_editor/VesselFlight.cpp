@@ -470,6 +470,26 @@ bool VesselFlight::surveyNearestShip(const glm::vec3& nearPos, float range, floa
     return true;
 }
 
+std::vector<std::string> VesselFlight::surveyManifest(const glm::vec3& nearPos, float range) {
+    std::vector<std::string> out;
+    if (m_flying) { out = m_manifest; return out; }
+    SceneObject* deck = nullptr;
+    float best = range * range;
+    for (auto& o : *m_deps.sceneObjects) {
+        if (!o || o->getBuildingType() != "platform_slab") continue;
+        const glm::vec3 d = o->getTransform().getPosition() - nearPos;
+        const float d2 = glm::dot(d, d);
+        if (d2 < best) { best = d2; deck = o.get(); }
+    }
+    if (!deck) return out;
+    m_manifest.clear();
+    assembleManifestFrom(deck);
+    out = m_manifest;
+    m_manifest.clear();
+    m_deckName.clear();
+    return out;
+}
+
 void VesselFlight::renderPowerConsole() {
     if (!m_flying && !m_showPrompt && m_errorTimer <= 0.0f) return;
     const std::vector<std::string>& roster = m_flying ? m_manifest : m_lastManifest;

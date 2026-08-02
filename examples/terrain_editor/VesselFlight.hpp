@@ -99,6 +99,8 @@ public:
     // manifest, weigh her, and put the manifest back -- no helm taken, no
     // state kept. Returns false when no ship is near enough to weigh.
     bool surveyNearestShip(const glm::vec3& nearPos, float range, float& tonnageOut);
+    // The same survey, returning the member names -- the ship file's census.
+    std::vector<std::string> surveyManifest(const glm::vec3& nearPos, float range);
 
 private:
     // The manifest rules (hull flood, cargo, superstructure + fittings

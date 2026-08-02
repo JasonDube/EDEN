@@ -60,6 +60,16 @@ public:
     // Returns the report line for the status bar.
     void setScrapHook(std::function<std::string()> h) { m_scrap = std::move(h); }
 
+    // The ship file: save the nearest vessel as assets/ships/<name>.ship,
+    // list the fleet library, launch a saved ship ahead of the player.
+    void setShipyardHooks(std::function<std::string(const std::string&)> save,
+                          std::function<std::vector<std::string>()> list,
+                          std::function<std::string(const std::string&)> launch) {
+        m_saveShip = std::move(save);
+        m_listShips = std::move(list);
+        m_launchShip = std::move(launch);
+    }
+
     // The yard's SURVEY: Finalize hands the plan to the generator's
     // segmentation (survey mode -- nothing is built) and gets back which cell
     // belongs to which named room, so the designer sees the colour-coded
@@ -92,6 +102,10 @@ private:
     std::function<void()> m_openCatalog;
     std::function<bool()> m_painter;
     std::function<std::string()> m_scrap;
+    std::function<std::string(const std::string&)> m_saveShip;
+    std::function<std::vector<std::string>()> m_listShips;
+    std::function<std::string(const std::string&)> m_launchShip;
+    char m_shipNameBuf[64] = "capital";
     bool m_painterOn = false;
     std::vector<char> m_cells;      // kW * kH, row-major
     char m_tool = '#';
