@@ -9085,7 +9085,22 @@ private:
             if (!m_playModeCursorVisible) {
                 glm::vec2 mouseDelta = Input::getMouseDelta();
                 m_camera.processMouse(mouseDelta.x, -mouseDelta.y);
-            } else if (m_showSiloConfig && !ImGui::GetIO().WantCaptureMouse) {
+            } else if (m_showSiloConfig) {
+                // THE DOCK TRUCE: while painting, the cursor simply may not
+                // enter the bottom 50 pixels -- the user's desktop parks an
+                // auto-reveal dock on that edge, and every trip toward the
+                // hotbar risked waking it. The OS cannot fight over
+                // territory the cursor never reaches.
+                {
+                    const float shClamp = static_cast<float>(getWindow().getHeight());
+                    const glm::vec2 mpClamp = Input::getMousePosition();
+                    if (mpClamp.y > shClamp - 50.0f)
+                        glfwSetCursorPos(getWindow().getHandle(),
+                                         static_cast<double>(mpClamp.x),
+                                         static_cast<double>(shClamp - 50.0f));
+                }
+                if (ImGui::GetIO().WantCaptureMouse) { /* panels own the mouse */ }
+                else {
                 // PAINTER EDGE-LOOK. One mode now: the cursor stays free for
                 // the texture panels and the gizmo, WASD keeps walking (it
                 // never had a cursor gate), and pushing the cursor into the
@@ -9104,13 +9119,14 @@ private:
                 // edge, and reaching for it kept pitching the camera. The
                 // strip saturates over the same 42px and everything below
                 // it counts as full push.
-                else if (mp.y > sh * 0.75f)
-                    pitchPush = -std::min(1.0f, (mp.y - sh * 0.75f) / band);
+                else if (mp.y > sh - 50.0f - band)
+                    pitchPush = -std::min(1.0f, (mp.y - (sh - 50.0f - band)) / band);
                 if (yawPush != 0.0f || pitchPush != 0.0f) {
                     const float rate = 140.0f * deltaTime;
                     m_camera.setYaw(m_camera.getYaw() + yawPush * rate);
                     m_camera.setPitch(std::clamp(m_camera.getPitch() + pitchPush * rate,
                                                  -89.0f, 89.0f));
+                }
                 }
             }
         } else {
