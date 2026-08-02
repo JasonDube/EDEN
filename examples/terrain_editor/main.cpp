@@ -615,9 +615,6 @@ protected:
                 // painter's parting gift now.
                 m_camera.setMovementMode(MovementMode::Walk);
                 m_camera.setNoClip(false);
-                // Probe stays armed until the field confirms the cure.
-                m_painterExitProbe = 15.0f;
-                m_painterExitTick = 0.0f;
             }
             return m_showSiloConfig;
         });
@@ -9508,37 +9505,7 @@ private:
                                 !m_inPanelFocusMode &&
                                 !(m_playModeCursorVisible && m_showSiloConfig);
 
-        // [PainterExit] probe -- self-expiring witness for the ten-second
-        // freeze after leaving the painter. Prints once a second; names the
-        // gate that is holding movement shut. Remove when the jailer hangs.
-        if (m_painterExitProbe > 0.0f) {
-            m_painterExitProbe -= deltaTime;
-            m_painterExitTick -= deltaTime;
-            if (m_painterExitTick <= 0.0f) {
-                m_painterExitTick = 1.0f;
-                const glm::vec3 cp = m_characterController ? m_characterController->getPosition()
-                                                           : glm::vec3(0.0f);
-                const glm::vec3 cm = m_camera.getPosition();
-                std::printf("[PainterExit] t=%.0fs cam=(%.1f,%.2f,%.1f) ctrl=(%.1f,%.2f,%.1f) "
-                            "useCC=%d mode=%d noclip=%d guiKbd=%d text=%d panel=%d cursor=%d "
-                            "captured=%d silo=%d rts=%d freecam=%d convo=%d\n",
-                            15.0f - m_painterExitProbe,
-                            cm.x, cm.y, cm.z, cp.x, cp.y, cp.z,
-                            useCharacterController ? 1 : 0,
-                            static_cast<int>(m_camera.getMovementMode()),
-                            m_camera.isNoClip() ? 1 : 0,
-                            ImGui::GetIO().WantCaptureKeyboard ? 1 : 0,
-                            ImGui::GetIO().WantTextInput ? 1 : 0,
-                            m_inPanelFocusMode ? 1 : 0,
-                            m_playModeCursorVisible ? 1 : 0,
-                            Input::isMouseCaptured() ? 1 : 0,
-                            m_showSiloConfig ? 1 : 0,
-                            m_playRTSCamera ? 1 : 0,
-                            m_freeCamMode ? 1 : 0,
-                            m_inConversation ? 1 : 0);
-                std::fflush(stdout);
-            }
-        }
+
 
         // Double-tap space toggles fly/walk mode; spacebar on selected spinning model toggles spin
         // Skip when character controller handles jump — prevents accidental fly mode toggle
@@ -33160,8 +33127,6 @@ private:
     float m_paintWeighTimer = 0.0f;    // live-tonnage refresh cadence
     float m_paintTonnage = 0.0f;
     bool  m_paintTonnageValid = false;
-    float m_painterExitProbe = 0.0f;   // seconds of witness left
-    float m_painterExitTick = 0.0f;
     bool m_gizmoVisible = false;        // draw data below is valid this frame
     glm::vec2 m_gizmoC{0.0f};
     glm::vec2 m_gizmoTip[3] = {};
