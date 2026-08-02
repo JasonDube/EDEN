@@ -574,6 +574,13 @@ protected:
         // that machinery predates the Shipwright; only the doorway is new.
         m_shipwright.setPainterHook([this]() -> bool {
             m_showSiloConfig = !m_showSiloConfig;
+            if (m_showSiloConfig) {
+                // Straight into the working state: cursor free for the
+                // panels, WASD still walks, screen edges turn the head.
+                // The old two-mode dance (walk vs Esc-mouse) is retired.
+                m_playModeCursorVisible = true;
+                Input::setMouseCaptured(false);
+            }
             return m_showSiloConfig;
         });
 
@@ -8923,8 +8930,11 @@ private:
                 }
             }
 
-            // Building mode camera: orbit/pan/zoom (same as editor/LIME controls)
-            if (m_playModeCursorVisible && m_showSiloConfig) {
+            // Building mode camera: orbit/pan/zoom -- RETIRED for the
+            // painter (2026-08-02). It was the "flying" of the old mouse
+            // mode: an inspection rig, not a person, and it could not walk
+            // a door. Edge-look plus ungated WASD replaced it.
+            if (false && m_playModeCursorVisible && m_showSiloConfig) {
 
                 // Scroll wheel zoom (dolly toward/away from orbit target) — skip if mouse over ImGui
                 float scroll = Input::getScrollDelta();
@@ -9040,6 +9050,27 @@ private:
             if (!m_playModeCursorVisible) {
                 glm::vec2 mouseDelta = Input::getMouseDelta();
                 m_camera.processMouse(mouseDelta.x, -mouseDelta.y);
+            } else if (m_showSiloConfig && !ImGui::GetIO().WantCaptureMouse) {
+                // PAINTER EDGE-LOOK. One mode now: the cursor stays free for
+                // the texture panels and the gizmo, WASD keeps walking (it
+                // never had a cursor gate), and pushing the cursor into the
+                // screen's outer band turns the head -- the missing look
+                // control that forced the old Tab-out-Tab-in dance.
+                const glm::vec2 mp = Input::getMousePosition();
+                const float sw = static_cast<float>(getWindow().getWidth());
+                const float sh = static_cast<float>(getWindow().getHeight());
+                const float band = 42.0f;
+                float yawPush = 0.0f, pitchPush = 0.0f;
+                if (mp.x < band)            yawPush = -(band - mp.x) / band;
+                else if (mp.x > sw - band)  yawPush =  (mp.x - (sw - band)) / band;
+                if (mp.y < band)            pitchPush =  (band - mp.y) / band;
+                else if (mp.y > sh - band)  pitchPush = -(mp.y - (sh - band)) / band;
+                if (yawPush != 0.0f || pitchPush != 0.0f) {
+                    const float rate = 140.0f * deltaTime;
+                    m_camera.setYaw(m_camera.getYaw() + yawPush * rate);
+                    m_camera.setPitch(std::clamp(m_camera.getPitch() + pitchPush * rate,
+                                                 -89.0f, 89.0f));
+                }
             }
         } else {
             // Editor mode: LIME-style orbit/pan/zoom navigation
@@ -22731,8 +22762,8 @@ private:
         // current, in the user's own vocabulary.
         if (m_isPlayMode && m_showSiloConfig) {
             const char* sign = m_playModeCursorVisible
-                ? "PAINTER MOUSE -- click selects, G = gizmo: arrows move, squares scale (Shift = fine)  |  Tab: Shipwright, Tab again: painter walk"
-                : "PAINTER WALK -- press Esc to free the mouse (painter mouse mode)";
+                ? "PAINTER -- WASD walks, screen edges turn  |  click selects, G gizmo (arrows move, squares scale), T wires  |  Tab: Shipwright"
+                : "PAINTER -- press Esc to free the mouse";
             ImGui::SetNextWindowPos(
                 ImVec2(getWindow().getWidth() * 0.5f, getWindow().getHeight() - 96.0f),
                 ImGuiCond_Always, ImVec2(0.5f, 1.0f));
