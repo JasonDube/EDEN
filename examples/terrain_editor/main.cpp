@@ -580,6 +580,32 @@ protected:
                 // The old two-mode dance (walk vs Esc-mouse) is retired.
                 m_playModeCursorVisible = true;
                 Input::setMouseCaptured(false);
+            } else {
+                // LEAVING THE PAINTER GROUNDS YOU. Painter movement can end
+                // midair; regular play cannot start there or the player
+                // hangs stuck ("you'll get stuck up in midair"). Drop to
+                // the surface under the camera -- terrain, or the highest
+                // deck plate at or below the feet -- and stand there.
+                glm::vec3 cam = m_camera.getPosition();
+                float gy = m_terrain.getHeightAt(cam.x, cam.z);
+                if (gy < -1000.0f) gy = 0.0f;
+                for (auto& so : m_sceneObjects) {
+                    if (!so || so->getBuildingType() != "platform_slab") continue;
+                    const AABB wb = so->getWorldBounds();
+                    if (cam.x < wb.min.x || cam.x > wb.max.x) continue;
+                    if (cam.z < wb.min.z || cam.z > wb.max.z) continue;
+                    if (wb.max.y <= cam.y + 0.1f && wb.max.y > gy) gy = wb.max.y;
+                }
+                const float eyeY = gy + 1.65f;
+                if (cam.y > eyeY + 0.05f || cam.y < eyeY - 0.05f) {
+                    cam.y = eyeY;
+                    m_camera.setPosition(cam);
+                    if (m_characterController) {
+                        // camera = controller centre + (eyeHeight - halfHeight)
+                        m_characterController->setPosition(
+                            glm::vec3(cam.x, cam.y - (1.65f - 0.5f), cam.z));
+                    }
+                }
             }
             return m_showSiloConfig;
         });

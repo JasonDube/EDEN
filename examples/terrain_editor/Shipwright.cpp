@@ -440,8 +440,13 @@ void Shipwright::render(bool& open) {
         if (wasOn) ImGui::PushStyleColor(ImGuiCol_Button, IM_COL32(140, 90, 40, 255));
         if (ImGui::Button(wasOn ? "Painter [on]" : "Painter")) {
             m_painterOn = m_painter();
+            if (m_painterOn) {
+                // Straight into the 3D: the drafting table folds away the
+                // moment the painter picks up the brush. Tab brings it back.
+                open = false;
+            }
             m_status = m_painterOn
-                ? "painter on -- Tab out, click a piece for Building Textures; G moves, Shift+D duplicates"
+                ? "painter on -- click pieces, G gizmo, T wires; Tab returns to the table"
                 : "painter off -- the hull keeps what she wears";
         }
         if (ImGui::IsItemHovered() && !m_painterOn)
