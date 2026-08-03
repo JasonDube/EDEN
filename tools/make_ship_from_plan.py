@@ -448,14 +448,17 @@ if REVOLVE > 0.0:
                 continue
             z0, z1, w0, _ = secs[i][k]
             w1 = R * math.sqrt(max(0.0, 1.0 - (z1 / DH) ** 2))
-            last = (k == nL - 1)
+            # SOLID RING BLOCKS, not riser-plus-shingle. The old thin plates
+            # (0.4) covered each layer's top but left see-through seams
+            # wherever adjacent runs' rims differed ("longitudinally the
+            # steps reveal gaps"). Each layer is now ONE solid block per
+            # side: full layer height, inner rim to outer -- the staircase
+            # is stacked stone, and there is nothing to see between. Costs
+            # honest tonnage; buys honest armour.
+            lo = min(w1, w0 - 0.35)
             for side in (-1.0, 1.0):
-                shell_box("platform_wall", ORIGIN_X + side * (w0 - 0.2), z0, z1,
-                          0.4, wz(y, h), h * CELL, (0.52, 0.55, 0.62, 1.0))
-                if not last and (w0 - 0.4) - w1 > 0.05:
-                    shell_box("platform_slab", ORIGIN_X + side * (w1 + (w0 - 0.4)) / 2.0,
-                              z1 - 0.4, z1, (w0 - 0.4) - w1, wz(y, h), h * CELL,
-                              (0.48, 0.51, 0.58, 1.0))
+                shell_box("platform_wall", ORIGIN_X + side * (lo + w0) / 2.0, z0, z1,
+                          w0 - lo, wz(y, h), h * CELL, (0.52, 0.55, 0.62, 1.0))
         zTop = (nL - 1) * LAYER
         wTop = R * math.sqrt(max(0.0, 1.0 - (zTop / DH) ** 2)) if nL > 1 else R
         shell_box("platform_slab", ORIGIN_X, DH - 0.4, DH,
