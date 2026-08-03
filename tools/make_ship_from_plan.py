@@ -393,7 +393,17 @@ if REVOLVE > 0.0:
     shell_n = 0
     FILL_COL = (0.45, 0.70, 1.00, 0.22) if REV_GLASS else (0.52, 0.55, 0.62, 1.0)
 
-    def shell_box(bt, px, zlo, zhi, sx, pz, szlen, color, collide=True):
+    def belly_box(bt, px, zlo, zhi, sx, pz, szlen, color):
+        # A piece of the BELLY only -- used where the mirrored copy must
+        # differ from the upper one (the cap bands: annulus above the deck
+        # to spare the rooms, full width below because the belly has no
+        # rooms to spare).
+        global shell_n
+        shell_n += 1
+        objs.append(prim(f"{stem}_shell_{shell_n}", bt,
+                         px, deck_top - zhi, pz, sx, zhi - zlo, szlen, color))
+
+    def shell_box(bt, px, zlo, zhi, sx, pz, szlen, color, collide=True, mirror=True):
         # One piece of shell, and its mirror below the deck when the revolve
         # is full: 360 hulls have no flat keel -- they live in space.
         # (collide=False briefly marked full-width pieces visual-only to
@@ -405,7 +415,7 @@ if REVOLVE > 0.0:
         objs.append(prim(f"{stem}_shell_{shell_n}", bt,
                          px, deck_top + zlo, pz, sx, zhi - zlo, szlen, color,
                          collide=collide))
-        if REV_360:
+        if REV_360 and mirror:
             shell_n += 1
             objs.append(prim(f"{stem}_shell_{shell_n}", bt,
                              px, deck_top - zhi, pz, sx, zhi - zlo, szlen, color,
@@ -519,7 +529,13 @@ if REVOLVE > 0.0:
                     if wOut - lo > 0.05:
                         for side in (-1.0, 1.0):
                             shell_box("platform_wall", ORIGIN_X + side * (lo + wOut) / 2.0,
-                                      zr0, zs, wOut - lo, zc, 1.2, FILL_COL)
+                                      zr0, zs, wOut - lo, zc, 1.2, FILL_COL, mirror=False)
+                    if REV_360:
+                        # The belly cap: full width -- no rooms below deck.
+                        # (The open half-moon of the field report: "top half
+                        # of the end covered, bottom half open".)
+                        belly_box("platform_wall", ORIGIN_X, zr0 + ins, zs - ins,
+                                  max(2.0 * (wOut - ins), 1.0), zc, 1.2, FILL_COL)
                 if zr1 > zs:
                     if wIn < 0.3:
                         shell_box("platform_wall", ORIGIN_X, zs, zr1,
@@ -534,13 +550,18 @@ if REVOLVE > 0.0:
             wLo, wHi = sorted((wA, wB))
             pz = zb + (0.2 if wB < wA else -0.2)
             zs = max(z0, min(z1, hWall))
-            # below the wall line: annulus only, both sides
+            # below the wall line: annulus only ABOVE deck (the hallway rule
+            # protects rooms); the belly has no rooms, so its cap is full.
             if zs > z0:
                 lo = max(wLo, bHull)
                 if wHi - lo > 0.05:
                     for side in (-1.0, 1.0):
                         shell_box("platform_wall", ORIGIN_X + side * (lo + wHi) / 2.0,
-                                  z0, zs, wHi - lo, pz, 0.4, FILL_COL)
+                                  z0, zs, wHi - lo, pz, 0.4, FILL_COL, mirror=False)
+                if REV_360:
+                    insB = 0.04 if wB < wA else 0.07
+                    belly_box("platform_wall", ORIGIN_X, z0 + insB, zs - insB,
+                              max(2.0 * (wHi - insB), 1.0), pz, 0.4, FILL_COL)
             # above the wall line: the full exposed face
             if z1 > zs:
                 if wLo < 0.3:
