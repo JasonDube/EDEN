@@ -459,11 +459,10 @@ if REVOLVE > 0.0:
             for side in (-1.0, 1.0):
                 shell_box("platform_wall", ORIGIN_X + side * (lo + w0) / 2.0, z0, z1,
                           w0 - lo, wz(y, h), h * CELL, (0.52, 0.55, 0.62, 1.0))
-        zTop = (nL - 1) * LAYER
-        wTop = R * math.sqrt(max(0.0, 1.0 - (zTop / DH) ** 2)) if nL > 1 else R
-        shell_box("platform_slab", ORIGIN_X, DH - 0.4, DH,
-                  max(2.0 * (wTop - 0.4), 1.0), wz(y, h), h * CELL,
-                  (0.48, 0.51, 0.58, 1.0))
+        # (The crown plate retired with the solid-block change: the top
+        # layer's blocks reach the centreline themselves -- w1 goes to zero
+        # at the apex -- so the dome closes without a lid, and the lid was
+        # lying coplanar on the blocks, fighting them.)
         # the spine: a dorsal ridge along each crown, the ship's backbone
         shell_box("platform_wall", ORIGIN_X, DH, DH + 0.14,
                   0.5, wz(y, h), h * CELL, (0.44, 0.47, 0.54, 1.0))
