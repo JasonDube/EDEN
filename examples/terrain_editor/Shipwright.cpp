@@ -25,6 +25,8 @@ struct ToolDef {
 const ToolDef kTools[] = {
     {'#', "Wall",     IM_COL32(150, 155, 165, 255)},
     {'.', "Floor",    IM_COL32( 70,  72,  80, 255)},
+    {'~', "Fill",     IM_COL32( 95, 150,  95, 255)},   // bucket: flood an enclosed area with floor
+
     {'D', "Door",     IM_COL32(220, 170,  60, 255)},
     {'B', "Helm",     IM_COL32( 40, 160, 150, 255)},
     {'C', "Cargo",    IM_COL32(160, 110,  50, 255)},
@@ -34,6 +36,7 @@ const ToolDef kTools[] = {
     {'X', "Exhaust",  IM_COL32(225, 115,  45, 255)},
     {'P', "Reactor",  IM_COL32(238, 202,  58, 255)},
     {'F', "Radiator", IM_COL32(168, 180, 190, 255)},
+    {'A', "Mast",     IM_COL32(235, 170,  60, 255)},
     {'_', "Erase",    IM_COL32( 25,  26,  30, 255)},
 };
 
@@ -119,6 +122,35 @@ float planSocketBill(const std::vector<char>& cells, int& nSockets) {
     return bill;
 }
 
+// MAST PRICING, keep in sync with MAST_PRICE_BASE / MAST_PRICE_CELL in
+// make_ship_from_plan.py. One mast per connected A cluster; extra cells make
+// the array heavier, not more numerous.
+float planMastBill(const std::vector<char>& topside, int& nMasts) {
+    constexpr int W = Shipwright::kW, H = Shipwright::kH;
+    std::vector<char> seen(topside.size(), 0);
+    float bill = 0.0f;
+    nMasts = 0;
+    for (int i = 0; i < W * H; ++i) {
+        if (topside[i] != 'A' || seen[i]) continue;
+        int cells = 0;
+        std::vector<int> stack{i};
+        while (!stack.empty()) {
+            const int j = stack.back(); stack.pop_back();
+            if (j < 0 || j >= W * H || seen[j] || topside[j] != 'A') continue;
+            seen[j] = 1;
+            ++cells;
+            const int jx = j % W, jy = j / W;
+            if (jx > 0)     stack.push_back(j - 1);
+            if (jx < W - 1) stack.push_back(j + 1);
+            if (jy > 0)     stack.push_back(j - W);
+            if (jy < H - 1) stack.push_back(j + W);
+        }
+        bill += 1200.0f + 400.0f * (cells - 1);
+        ++nMasts;
+    }
+    return bill;
+}
+
 float planVolume(const std::vector<char>& cells, const std::vector<float>& loft) {
     constexpr float kFloorCell = 2.0f * 0.4f * 2.0f;   // plate (also under walls)
     float v = 0.0f;
@@ -137,10 +169,12 @@ constexpr float kLoftDefault = 3.0f;   // classic WALL_H
 constexpr float kLoftMin = 2.0f;       // low enough to duck through, no lower
 constexpr float kLoftMax = 9.0f;       // three storeys of superstructure
 
-Shipwright::Shipwright() : m_cells(kW * kH, '_'), m_loft(kH, kLoftDefault) {}
+Shipwright::Shipwright()
+    : m_cells(kW * kH, '_'), m_topside(kW * kH, '_'), m_loft(kH, kLoftDefault) {}
 
 void Shipwright::clear() {
     std::fill(m_cells.begin(), m_cells.end(), '_');
+    std::fill(m_topside.begin(), m_topside.end(), '_');
     std::fill(m_loft.begin(), m_loft.end(), kLoftDefault);
     m_overlay.clear();
     m_overlayIdx.clear();
@@ -154,6 +188,54 @@ void Shipwright::paint(int x, int y, char c) {
     // An edit voids the survey -- the colours must never lie.
     m_overlay.clear();
     m_overlayIdx.clear();
+}
+
+void Shipwright::fillFloor(int x, int y) {
+    // THE BUCKET: flood the clicked empty region with floor tiles -- but
+    // only if it is truly enclosed. A flood that reaches the grid edge has
+    // found a hole in the hull, and pouring floor into open space is how
+    // you tile a star system, so it refuses and says where it stands.
+    if (x < 0 || x >= kW || y < 0 || y >= kH) return;
+    if (m_cells[y * kW + x] != '_') {
+        m_status = "the bucket wants an empty cell inside closed walls";
+        return;
+    }
+    std::vector<char> seen(kW * kH, 0);
+    std::vector<int> region, stack{y * kW + x};
+    bool leaks = false;
+    while (!stack.empty()) {
+        const int j = stack.back(); stack.pop_back();
+        if (j < 0 || j >= kW * kH || seen[j] || m_cells[j] != '_') continue;
+        seen[j] = 1;
+        region.push_back(j);
+        const int jx = j % kW, jy = j / kW;
+        if (jx == 0 || jx == kW - 1 || jy == 0 || jy == kH - 1) leaks = true;
+        if (jx > 0)      stack.push_back(j - 1);
+        if (jx < kW - 1) stack.push_back(j + 1);
+        if (jy > 0)      stack.push_back(j - kW);
+        if (jy < kH - 1) stack.push_back(j + kW);
+    }
+    if (leaks) {
+        m_status = "not enclosed -- the flood reached the grid edge; close her walls first";
+        return;
+    }
+    for (const int j : region) m_cells[j] = '.';
+    m_status = std::to_string(region.size()) + " cells floored";
+    // An edit voids the survey, same as any brush stroke.
+    m_overlay.clear();
+    m_overlayIdx.clear();
+}
+
+void Shipwright::paintTop(int x, int y, bool on) {
+    if (x < 0 || x >= kW || y < 0 || y >= kH) return;
+    // The mast law, enforced at the brush: a mast must stand over hull. The
+    // topside view only lets you plant where the roof is real.
+    auto set = [this](int i, bool o) {
+        if (o && m_cells[i] == '_') return;
+        m_topside[i] = o ? 'A' : '_';
+    };
+    set(y * kW + x, on);
+    if (m_mirrorX) set(y * kW + (kW - 1 - x), on);
 }
 
 std::string Shipwright::serialize() const {
@@ -183,18 +265,30 @@ std::string Shipwright::serialize() const {
                       m_revolveRibs ? " ribs" : "");
         out += rev;
     }
+    // The topside layer travels only when something stands up there.
+    bool masted = false;
+    for (char c : m_topside) if (c == 'A') { masted = true; break; }
+    if (masted) {
+        out += "topside:\n";
+        for (int y = 0; y < kH; ++y) {
+            out.append(&m_topside[y * kW], kW);
+            out.push_back('\n');
+        }
+    }
     return out;
 }
 
 bool Shipwright::deserialize(const std::string& text) {
     std::vector<char> next(kW * kH, '_');
+    std::vector<char> top(kW * kH, '_');
     std::istringstream in(text);
     std::string line;
-    int y = 0;
+    int y = 0, yt = 0;
+    bool inTopside = false;
     std::vector<float> loft(kH, kLoftDefault);
     float revolve = 0.0f;
     bool revGlass = false, rev360 = false, revRibs = false;
-    while (std::getline(in, line) && y < kH) {
+    while (std::getline(in, line)) {
         if (line.empty()) continue;
         if (line.rfind("loft:", 0) == 0) {
             std::istringstream lv(line.substr(5));
@@ -208,6 +302,15 @@ bool Shipwright::deserialize(const std::string& text) {
             revRibs  = line.find(" ribs")  != std::string::npos;
             continue;
         }
+        if (line.rfind("topside:", 0) == 0) { inTopside = true; continue; }
+        if (inTopside) {
+            if (yt >= kH) continue;
+            for (int x = 0; x < kW && x < static_cast<int>(line.size()); ++x)
+                top[yt * kW + x] = (line[x] == 'A') ? 'A' : '_';
+            ++yt;
+            continue;
+        }
+        if (y >= kH) continue;
         for (int x = 0; x < kW && x < static_cast<int>(line.size()); ++x) {
             const char c = line[x];
             next[y * kW + x] =
@@ -217,6 +320,7 @@ bool Shipwright::deserialize(const std::string& text) {
     }
     if (y == 0) return false;
     m_cells = std::move(next);
+    m_topside = std::move(top);
     m_loft = std::move(loft);
     m_revolveOn = revolve > 0.0f;
     if (m_revolveOn) {
@@ -255,6 +359,9 @@ void Shipwright::render(bool& open) {
             "service is where you stand, power_out is where the kilowatts leave -- never plug a toaster into a doormat",
             "wrong connections have consequences -- blown transformers and friends",
             "the floor is for boots, the wall is for wire -- the void carries no workers' comp",
+            "a floor plan cannot hold a mast -- the Mast brush closes the roof and stands her voice topside",
+            "no comms mast, no hails: she flies mute",
+            "an antenna rooted in vacuum hails nobody",
         };
         static std::string reel;
         if (reel.empty()) {
@@ -280,14 +387,26 @@ void Shipwright::render(bool& open) {
     }
 
     // ---- tools -------------------------------------------------------------
+    // In roof mode only Mast and Erase are live -- the deck brushes grey out
+    // and wait below. Picking the Mast brush from deck view walks you up to
+    // the roof by itself.
     for (const auto& t : kTools) {
         ImGui::PushID(t.label);
         const bool active = (m_tool == t.c);
+        const bool waits = m_roofView && t.c != 'A' && t.c != '_';
+        if (waits) ImGui::PushStyleVar(ImGuiStyleVar_Alpha, 0.35f);
         ImGui::PushStyleColor(ImGuiCol_Button, t.fill);
         ImGui::PushStyleColor(ImGuiCol_ButtonHovered, t.fill);
         ImGui::PushStyleColor(ImGuiCol_ButtonActive, t.fill);
-        if (ImGui::Button(active ? "##sel" : "##tool", ImVec2(22, 22))) m_tool = t.c;
+        if (ImGui::Button(active ? "##sel" : "##tool", ImVec2(22, 22)) && !waits) {
+            m_tool = t.c;
+            if (t.c == 'A' && !m_roofView) {
+                m_roofView = true;
+                m_status = "the roof closes over -- LMB stands a mast on the hull, Erase or RMB strikes it";
+            }
+        }
         ImGui::PopStyleColor(3);
+        if (waits) ImGui::PopStyleVar();
         if (active) {
             ImVec2 a = ImGui::GetItemRectMin(), b = ImGui::GetItemRectMax();
             ImGui::GetWindowDrawList()->AddRect(a, b, IM_COL32(255, 255, 120, 255), 0, 0, 2.5f);
@@ -300,7 +419,15 @@ void Shipwright::render(bool& open) {
     ImGui::NewLine();
     ImGui::Checkbox("Mirror (ships are symmetric)", &m_mirrorX);
     ImGui::SameLine(0, 20);
-    ImGui::TextDisabled("LMB paint   RMB erase   top of grid = BOW");
+    // ROOF is a hard mode (the user's chosen shape): the grid shows the
+    // hull closed over, only Mast and Erase work up there, and the deck
+    // waits below until the roof lifts.
+    const bool topsideMode = m_roofView;
+    if (topsideMode)
+        ImGui::TextColored(ImVec4(0.92f, 0.67f, 0.24f, 1.0f),
+                           "ROOF -- Mast stands a mast on the hull, Erase or RMB strikes it; the decks wait below");
+    else
+        ImGui::TextDisabled("LMB paint   RMB erase   top of grid = BOW");
 
     // The material shelf: pick what she is made of. Locked tiers stay on
     // display -- a ladder you can see is a reason to get rich.
@@ -352,6 +479,13 @@ void Shipwright::render(bool& open) {
             ImGui::SameLine(0, 18);
             ImGui::TextColored(ImVec4(0.95f, 0.75f, 0.40f, 1.0f),
                                "%d socket%s %.0f CR", nSockets, nSockets == 1 ? "" : "s", socketBill);
+        }
+        int nMasts = 0;
+        const float mastBill = planMastBill(m_topside, nMasts);
+        if (nMasts > 0) {
+            ImGui::SameLine(0, 18);
+            ImGui::TextColored(ImVec4(0.92f, 0.62f, 0.25f, 1.0f),
+                               "%d mast%s %.0f CR", nMasts, nMasts == 1 ? "" : "s", mastBill);
         }
         ImGui::SameLine(0, 18);
         ImGui::Text("fitted ~%.0f t", fitted);
@@ -446,7 +580,7 @@ void Shipwright::render(bool& open) {
                 open = false;
             }
             m_status = m_painterOn
-                ? "painter on -- click pieces, G gizmo, T wires; Tab returns to the table"
+                ? "painter on -- RMB toggles mouse-look, WASD moves (double-space flies); click pieces, G gizmo, T wires; Tab returns"
                 : "painter off -- the hull keeps what she wears";
         }
         if (ImGui::IsItemHovered() && !m_painterOn)
@@ -518,14 +652,51 @@ void Shipwright::render(bool& open) {
     ImGui::InvisibleButton("plan_grid", ImVec2(kW * cell, kH * cell));
     const bool hovered = ImGui::IsItemHovered();
     ImGui::SameLine();
+    ImGui::BeginGroup();
     if (ImGui::Button(m_sideView ? "Side\nview\n[on]" : "Side\nview")) m_sideView = !m_sideView;
+    // THE ROOF BUTTON -- restored by decree ("you took away the button that
+    // makes us see the roof"). The toggle is the door in and out of roof
+    // mode; the Mast brush is merely a second way in.
+    ImGui::PushStyleColor(ImGuiCol_Button,
+                          m_roofView ? IM_COL32(150, 105, 40, 255) : IM_COL32(60, 62, 72, 255));
+    if (ImGui::Button(m_roofView ? "Roof\n[on]" : "Roof")) {
+        m_roofView = !m_roofView;
+        if (m_roofView) {
+            if (m_tool != 'A' && m_tool != '_') m_tool = 'A';
+            m_status = "the roof closes over -- LMB stands a mast on the hull, Erase or RMB strikes it";
+        } else {
+            if (m_tool == 'A') m_tool = '#';
+            m_status = "the roof lifts away -- the deck plan is yours again";
+        }
+    }
+    ImGui::PopStyleColor();
+    if (ImGui::IsItemHovered() && !m_roofView)
+        ImGui::SetTooltip("close the roof over the decks and stand masts on the crown");
+    ImGui::EndGroup();
     const ImVec2 mouse = ImGui::GetIO().MousePos;
     const int hx = static_cast<int>((mouse.x - origin.x) / cell);
     const int hy = static_cast<int>((mouse.y - origin.y) / cell);
 
     if (hovered && hx >= 0 && hx < kW && hy >= 0 && hy < kH) {
-        if (ImGui::IsMouseDown(ImGuiMouseButton_Left))  paint(hx, hy, m_tool);
-        if (ImGui::IsMouseDown(ImGuiMouseButton_Right)) paint(hx, hy, '_');
+        if (topsideMode) {
+            if (ImGui::IsMouseDown(ImGuiMouseButton_Left))
+                paintTop(hx, hy, m_tool != '_');
+            if (ImGui::IsMouseDown(ImGuiMouseButton_Right)) paintTop(hx, hy, false);
+        } else if (m_tool == '~') {
+            // The bucket fills on the CLICK, not the drag -- one pour per
+            // click. With mirror on, the mirrored bay gets its own pour if
+            // it is a separate pool (a symmetric region fills once).
+            if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+                fillFloor(hx, hy);
+                const int mx = kW - 1 - hx;
+                if (m_mirrorX && mx != hx && m_cells[hy * kW + mx] == '_')
+                    fillFloor(mx, hy);
+            }
+            if (ImGui::IsMouseDown(ImGuiMouseButton_Right)) paint(hx, hy, '_');
+        } else {
+            if (ImGui::IsMouseDown(ImGuiMouseButton_Left))  paint(hx, hy, m_tool);
+            if (ImGui::IsMouseDown(ImGuiMouseButton_Right)) paint(hx, hy, '_');
+        }
     }
 
     for (int y = 0; y < kH; ++y) {
@@ -533,6 +704,19 @@ void Shipwright::render(bool& open) {
             const char c = m_cells[y * kW + x];
             const ImVec2 a(origin.x + x * cell, origin.y + y * cell);
             const ImVec2 b(a.x + cell - 1.0f, a.y + cell - 1.0f);
+            if (topsideMode) {
+                // The closed hull: structure reads a shade prouder than the
+                // roofed rooms, the void stays void, masts burn amber.
+                const char t = m_topside[y * kW + x];
+                ImU32 fill = c == '_' ? IM_COL32(25, 26, 30, 255)
+                           : (c=='#'||c=='W'||c=='X'||c=='F') ? IM_COL32(118, 122, 132, 255)
+                                                              : IM_COL32(92, 96, 106, 255);
+                if (t == 'A') fill = IM_COL32(235, 170, 60, 255);
+                dl->AddRectFilled(a, b, fill);
+                if (t == 'A')
+                    dl->AddText(ImVec2(a.x + 3.0f, a.y), IM_COL32(0, 0, 0, 200), "A");
+                continue;
+            }
             const int ri = m_overlayIdx.empty() ? -1 : m_overlayIdx[y * kW + x];
             dl->AddRectFilled(a, b, ri >= 0 ? kRoomPalette[ri % kRoomPaletteN] : fillFor(c));
             if (isRoom(c) || c == 'D' || c == 'W' || c == 'X' || c == 'F') {
@@ -560,6 +744,21 @@ void Shipwright::render(bool& open) {
             if (badX) ++orphanX; else ++orphanF;
             const ImVec2 a(origin.x + x * cell, origin.y + y * cell);
             dl->AddRect(a, ImVec2(a.x + cell, a.y + cell), IM_COL32(255, 60, 60, 230), 0, 0, 2.0f);
+        }
+    }
+    // THE MAST LAW, checked live: a deck edit can pull the hull out from
+    // under a standing mast -- the orphan gets a red ring topside and a
+    // refusal at the yard.
+    int orphanA = 0;
+    for (int y = 0; y < kH; ++y) {
+        for (int x = 0; x < kW; ++x) {
+            if (m_topside[y * kW + x] != 'A' || m_cells[y * kW + x] != '_') continue;
+            ++orphanA;
+            if (topsideMode) {
+                const ImVec2 a(origin.x + x * cell, origin.y + y * cell);
+                dl->AddRect(a, ImVec2(a.x + cell, a.y + cell),
+                            IM_COL32(255, 60, 60, 230), 0, 0, 2.0f);
+            }
         }
     }
     // Reactor clusters that reach no fin: flood each P blob once.
@@ -742,8 +941,12 @@ void Shipwright::render(bool& open) {
         }
     }
 
-    if (orphanX > 0 || orphanF > 0 || coldP > 0) {
+    if (orphanX > 0 || orphanF > 0 || coldP > 0 || orphanA > 0) {
         ImGui::Separator();
+        if (orphanA > 0)
+            ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f),
+                               "%d mast%s standing over no hull -- an antenna rooted in vacuum hails nobody; the yard will refuse",
+                               orphanA, orphanA == 1 ? "" : "s");
         if (orphanX > 0)
             ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f),
                                "%d exhaust cell%s without an adjacent Engine (E) -- the yard will refuse",
