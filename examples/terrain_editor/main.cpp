@@ -577,8 +577,8 @@ protected:
             m_showSiloConfig = !m_showSiloConfig;
             if (m_showSiloConfig) {
                 // Straight into the working state: cursor free for the
-                // panels, WASD still walks, screen edges turn the head.
-                // The old two-mode dance (walk vs Esc-mouse) is retired.
+                // panels, WASD walks, RMB toggles captured mouse-look
+                // (Minecraft hands -- the user's design; edge-look retired).
                 m_playModeCursorVisible = true;
                 Input::setMouseCaptured(false);
             } else {
@@ -702,6 +702,15 @@ protected:
             // Each build gets a serial prefix so two ships' plates never share
             // a name -- the flight manifest finds objects BY name.
             const std::string prefix = "ship" + std::to_string(++m_shipSerial) + "_";
+            // THE RANDOM SKIN EXPERIMENT (2026-08-03): every structural
+            // piece draws a texture from the ships/ships_2 pages at
+            // build time. The draw is hashed from the piece's name, so a
+            // ship keeps the same patchwork every rebuild -- random once,
+            // stable forever, same law as the colour jitter.
+            std::vector<std::string> skinPool;
+            for (const auto& t : m_buildingTextures)
+                if (t.category == "ships" || t.category == "ships_2")
+                    skinPool.push_back(t.name);
             int made = 0;
             for (auto& o : j["objects"]) {
                 const glm::vec4 col(o["primitiveColor"][0], o["primitiveColor"][1],
@@ -743,6 +752,17 @@ protected:
                 if (obj->getName().find("thruster_grid") != std::string::npos) {
                     if (!applyBuildingTextureByName(obj.get(), "ion_exhaust_grid", 0.5f, 0.5f))
                         std::printf("[Yard] texture 'ion_exhaust_grid' not in the library -- grids ship unpainted%c", 10);
+                } else if (!skinPool.empty() && col.a >= 0.999f &&
+                           (obj->getBuildingType() == "platform_wall" ||
+                            obj->getBuildingType() == "platform_slab") &&
+                           obj->getName().find("_lamp") == std::string::npos &&
+                           obj->getName().find("_collar") == std::string::npos &&
+                           obj->getName().find("_pane") == std::string::npos) {
+                    // Glass keeps its glaze, lamps and glow trim keep their
+                    // light; everything else gets a plate from the pool.
+                    const size_t pick =
+                        std::hash<std::string>{}(obj->getName()) % skinPool.size();
+                    applyBuildingTextureByName(obj.get(), skinPool[pick], 0.5f, 0.5f);
                 }
                 m_sceneObjects.push_back(std::move(obj));
                 ++made;
@@ -3049,6 +3069,62 @@ protected:
         }
     }
 
+    // F10 FIELD TAG: with hitboxes on, the block under the cursor (or under
+    // the crosshair when the cursor is captive) shows its NAME. The names
+    // are the yard's loop-stamped addresses ("apprentice_01_shell_213",
+    // "engine_room_deck_2") -- and a name the user can read is a bug he can
+    // report: "shell_213 sticks out" traces straight back to the loop
+    // iteration that made it. One tag, mouse-over only: all 700 at once
+    // would be a blizzard.
+    void renderHitboxNameTag() {
+        if (!m_showHitboxes) return;
+        float w = static_cast<float>(getWindow().getWidth());
+        float h = static_cast<float>(getWindow().getHeight());
+        if (w <= 0.0f || h <= 0.0f) return;
+        // Cursor when it is free, screen centre when it is captive -- the
+        // reticle's rule, reused.
+        const bool cursorFree = !m_isPlayMode || m_playModeCursorVisible;
+        if (cursorFree && ImGui::GetIO().WantCaptureMouse) return;  // over a panel
+        glm::vec2 mp = cursorFree ? Input::getMousePosition()
+                                  : glm::vec2(w * 0.5f, h * 0.5f);
+        const float nx = (mp.x / w) * 2.0f - 1.0f;
+        const float ny = 1.0f - (mp.y / h) * 2.0f;
+        glm::mat4 invVP = glm::inverse(
+            m_camera.getProjectionMatrix(w / h, 0.1f, 5000.0f) * m_camera.getViewMatrix());
+        glm::vec4 nearP = invVP * glm::vec4(nx, ny, -1.0f, 1.0f);
+        glm::vec4 farP  = invVP * glm::vec4(nx, ny,  1.0f, 1.0f);
+        nearP /= nearP.w;
+        farP  /= farP.w;
+        const glm::vec3 rayO = glm::vec3(nearP);
+        const glm::vec3 rayD = glm::normalize(glm::vec3(farP - nearP));
+
+        SceneObject* best = nullptr;
+        float bestD = std::numeric_limits<float>::max();
+        for (auto& obj : m_sceneObjects) {
+            if (!obj || !obj->isVisible()) continue;
+            AABB wb = obj->getWorldBounds();
+            if (wb.getSize().x < 0.001f && wb.getSize().y < 0.001f) continue;
+            const float d = wb.intersect(rayO, rayD);
+            if (d >= 0.0f && d < bestD) { bestD = d; best = obj.get(); }
+        }
+        if (!best) return;
+
+        std::string label = best->getName();
+        if (!best->getBuildingType().empty())
+            label += "  [" + best->getBuildingType() + "]";
+        auto* dl = ImGui::GetForegroundDrawList();
+        const ImVec2 ts = ImGui::CalcTextSize(label.c_str());
+        const float padX = 7.0f, padY = 3.0f;
+        // Beside the point, never under it -- the block stays visible.
+        ImVec2 p0(mp.x + 14.0f, mp.y + 12.0f);
+        if (p0.x + ts.x + padX * 2.0f > w) p0.x = mp.x - ts.x - padX * 2.0f - 14.0f;
+        ImVec2 p1(p0.x + ts.x + padX * 2.0f, p0.y + ts.y + padY * 2.0f);
+        dl->AddRectFilled(p0, p1, IM_COL32(0, 0, 0, 185), 4.0f);
+        dl->AddRect(p0, p1, IM_COL32(255, 0, 255, 220), 4.0f);   // hitbox magenta
+        dl->AddText(ImVec2(p0.x + padX, p0.y + padY),
+                    IM_COL32(240, 240, 245, 255), label.c_str());
+    }
+
     // Parse the ServerManager slot a server-rack object controls from its
     // targetLevel ("server://N"). Returns -1 if it isn't a tagged server.
     int serverIndexOf(const SceneObject* o) const {
@@ -3245,6 +3321,7 @@ protected:
 
         renderNewLevelDialog();   // available in both edit and play mode
         renderEditBuildPanel();   // edit-mode Build tools panel
+        renderHitboxNameTag();    // F10: name the block under the cursor
 
         if (m_isPlayMode) {
             renderPlayModeUI();
@@ -9176,6 +9253,20 @@ private:
                 m_wasTumbling = m_isTumbling;
             }
         } else if (m_isPlayMode && !m_inConversation) {
+            // THE PAINTER'S RMB TOGGLE (user's design, 2026-08-03): Minecraft
+            // controls. RMB flips between cursor-out (panels, click-select,
+            // gizmo) and captured mouse-look; WASD and the double-space
+            // creative-fly work in both. Edge-look is retired -- it never
+            // fired reliably and nobody's hands know it.
+            if (m_showSiloConfig) {
+                static bool wasPaintRmb = false;
+                const bool rmb = Input::isMouseButtonDown(Input::MOUSE_RIGHT);
+                if (rmb && !wasPaintRmb && !ImGui::GetIO().WantCaptureMouse) {
+                    m_playModeCursorVisible = !m_playModeCursorVisible;
+                    Input::setMouseCaptured(!m_playModeCursorVisible);
+                }
+                wasPaintRmb = rmb;
+            }
             // FIRST-PERSON PLAY: automatic mouse-look — no button held, like any
             // FPS. Movement is the character controller further below; the
             // editor's orbit/pan (RMB) nav in the final else is skipped so the
@@ -9643,11 +9734,16 @@ private:
         // So building with the controller off is not an oversight -- it is the
         // path that understands holes. Falling through a new slab is a real
         // problem, but it is heightQuery's floor rule to answer, not this.
+        // The painter turns the controller off in BOTH its cursor states now
+        // (2026-08-03: RMB toggles cursor/mouse-look in the painter, so the
+        // captured state is still painting, not play). Previously the gate
+        // keyed on cursor-visible because the painter only HAD the visible
+        // state; outside the painter nothing changes.
         bool useCharacterController = m_isPlayMode && m_characterController &&
                                 m_camera.getMovementMode() == MovementMode::Walk &&
                                 !m_filesystemBrowser.isActive() &&
                                 !m_inPanelFocusMode &&
-                                !(m_playModeCursorVisible && m_showSiloConfig);
+                                !m_showSiloConfig;
 
 
 
@@ -9886,7 +9982,11 @@ private:
             // turns up-and-right at whatever blend the cursor position says.
             // Quiet while the mouse is over a panel; a docked window's edge is
             // for its widgets, not for spinning the world.
-            if (m_isPlayMode && m_playModeCursorVisible && m_showSiloConfig &&
+            // RETIRED 2026-08-03 ("mouse-to-edge camera movement is not
+            // working... why don't we try minecraft controls"): the painter
+            // looks with the MOUSE now, toggled by RMB. Kept for one release
+            // in case the hands miss it; delete on the next cleanup pass.
+            if (false && m_isPlayMode && m_playModeCursorVisible && m_showSiloConfig &&
                 !m_filesystemBrowser.isActive() && !m_vessel.isFlying() &&
                 !ImGui::GetIO().WantCaptureMouse && !m_playRTSCamera &&
                 (m_camera.getMovementMode() == MovementMode::Walk ||
@@ -9925,11 +10025,13 @@ private:
             // own fly handles keys), not while flying (the ship owns WASD),
             // Walk mode only.
             if (m_isPlayMode && !useCharacterController && !m_inPanelFocusMode &&
-                m_playModeCursorVisible && m_showSiloConfig &&
+                m_showSiloConfig &&
                 !m_filesystemBrowser.isActive() && !m_vessel.isFlying() &&
                 !m_playRTSCamera &&
                 (m_camera.getMovementMode() == MovementMode::Walk ||
                  m_camera.getMovementMode() == MovementMode::Fly)) {
+                // Cursor-visibility gate removed 2026-08-03: with the RMB
+                // toggle, captured-look painting still needs its legs.
                 // Fly is here ON PURPOSE: double-tap space is the camera's own
                 // creative-fly toggle, and it fires in build mode -- the first
                 // field test double-tapped, toggled to Fly, and froze mid-air
@@ -23262,7 +23364,18 @@ private:
             snprintf(creditsStr, sizeof(creditsStr), "%d CR", static_cast<int>(m_playerCredits));
             ImVec2 timeSize = ImGui::CalcTextSize(timeStr.c_str());
             ImVec2 creditsSize = ImGui::CalcTextSize(creditsStr);
-            float hudWindowWidth = creditsSize.x + 20.0f + timeSize.x + 20.0f;
+            // THE NAME LINE: the click-selected piece (yellow outline)
+            // announces its yard address under the clock -- so a wrong block
+            // can be reported by name and traced to the loop that made it.
+            // No F10 needed; the hitbox view keeps its own hover tag.
+            const SceneObject* selPiece =
+                (m_isPlayMode && m_selectedBuildPiece >= 0
+                 && m_selectedBuildPiece < static_cast<int>(m_sceneObjects.size()))
+                    ? m_sceneObjects[m_selectedBuildPiece].get() : nullptr;
+            float nameW = selPiece
+                ? ImGui::CalcTextSize(selPiece->getName().c_str()).x : 0.0f;
+            float hudWindowWidth =
+                std::max(creditsSize.x + 20.0f + timeSize.x + 20.0f, nameW + 20.0f);
             ImGui::SetNextWindowPos(ImVec2(getWindow().getWidth() - hudWindowWidth - 10, 25));
             ImGui::SetNextWindowBgAlpha(0.5f);
             if (ImGui::Begin("##GameHUD", nullptr,
@@ -23287,6 +23400,9 @@ private:
                         ImGui::TextColored(ImVec4(0.95f, 0.75f, 0.40f, 1.0f),
                                            "%.0f t", m_paintTonnage);
                 }
+                if (selPiece)
+                    ImGui::TextColored(ImVec4(1.0f, 1.0f, 0.4f, 1.0f), "%s",
+                                       selPiece->getName().c_str());
             }
             ImGui::End();
         }
