@@ -66,17 +66,27 @@ ROOMS_JSON = None
 if '--rooms-json' in sys.argv:
     ROOMS_JSON = sys.argv[sys.argv.index('--rooms-json') + 1]
     ORIGIN_X = ORIGIN_Z = 0.0
-rows = [r.rstrip('\n') for r in open(plan_path)]
-# The LOFT LINE: an optional trailer 'loft: h h h ...' -- wall-top height per
-# station (plan row), bow first. The keel stays flat (ships land); the loft
-# sculpts the silhouette. Rows without a value, and plans without the line,
-# get the classic WALL_H.
+# The plan can carry TWO layers now. The deck grid first; then, after a
+# 'topside:' marker line, the TOPSIDE layer at the same coordinates -- what
+# stands on the closed hull's crown. Only 'A' (comms mast) lives up there
+# so far. Trailers (loft:/revolve:) are recognised wherever they appear.
 loft_line = None
 rev_line = None
-rows = [r for r in rows if not (r.startswith('loft:') and (loft_line := r))]
-# 'revolve: s' -- lathe the half-plan 180 degrees about the centreline, keel
-# flat, dome height = radius * s (an ellipse when s < 1).
-rows = [r for r in rows if not (r.startswith('revolve:') and (rev_line := r))]
+rows, top_rows = [], []
+_target = rows
+for _r in [r.rstrip('\n') for r in open(plan_path)]:
+    if _r.startswith('loft:'):
+        # The LOFT LINE: wall-top height per station (plan row), bow first.
+        # The keel stays flat (ships land); the loft sculpts the silhouette.
+        loft_line = _r
+    elif _r.startswith('revolve:'):
+        # 'revolve: s' -- lathe the half-plan 180 degrees about the
+        # centreline, keel flat, dome height = radius * s.
+        rev_line = _r
+    elif _r.startswith('topside:'):
+        _target = top_rows
+    else:
+        _target.append(_r)
 REVOLVE, REV_GLASS, REV_360 = 0.0, False, False
 if rev_line:
     toks = rev_line.split(':', 1)[1].split()
@@ -140,7 +150,22 @@ for y in range(H):
         if not finned:
             radiator_errors.append(('P', blob[0][0], blob[0][1]))
 
-if exhaust_errors or radiator_errors:
+# ---- the mast law: masts stand over hull -----------------------------------
+# The topside layer's A cells are comms masts on the crown. The law: every
+# mast must stand OVER the hull footprint -- an antenna rooted in vacuum
+# hails nobody, and the yard refuses to plant one.
+def tcell(x, y):
+    if 0 <= y < len(top_rows) and 0 <= x < len(top_rows[y]) and top_rows[y][x] == 'A':
+        return 'A'
+    return '_'
+
+mast_errors = []
+for y in range(H):
+    for x in range(W):
+        if tcell(x, y) == 'A' and not hull(cell(x, y)):
+            mast_errors.append((x, y))
+
+if exhaust_errors or radiator_errors or mast_errors:
     for (x, y) in exhaust_errors:
         print(f"REFUSED: exhaust at ({x},{y}) has no adjacent engine (E) cell -- a grid needs an engine behind it")
     for (kind, x, y) in radiator_errors:
@@ -148,6 +173,8 @@ if exhaust_errors or radiator_errors:
             print(f"REFUSED: radiator fin at ({x},{y}) has no adjacent reactor (P) cell -- fins with no reactor are jewellery")
         else:
             print(f"REFUSED: reactor room at ({x},{y}) reaches no radiator fin (F) on its walls -- a reactor with no fins is a bomb with a schedule")
+    for (x, y) in mast_errors:
+        print(f"REFUSED: mast at ({x},{y}) stands over no hull -- an antenna rooted in vacuum hails nobody")
     sys.exit(1)
 
 # ---- validation: one connected walkable region, doors that go somewhere ----
@@ -393,32 +420,60 @@ if REVOLVE > 0.0:
     shell_n = 0
     FILL_COL = (0.45, 0.70, 1.00, 0.22) if REV_GLASS else (0.52, 0.55, 0.62, 1.0)
 
-    def belly_box(bt, px, zlo, zhi, sx, pz, szlen, color):
+    # REAL NAMES ("rename the shell blocks with real names"): every shell
+    # piece signs what it is and where -- ring_r3_L2_port, rib_row14_L1_lo,
+    # spine_r5, cap_bow_L1 -- because the user reports bad blocks BY NAME
+    # off the HUD, and shell_213 told nobody anything. The uniquifier keeps
+    # names stable build-to-build (scan order) and collision-free; the
+    # patchwork crc rides the name, so this re-rolls the skin exactly once.
+    shell_names = {}
+    def shell_name(base):
+        n = shell_names.get(base, 0) + 1
+        shell_names[base] = n
+        return f"{stem}_{base}" if n == 1 else f"{stem}_{base}_{n}"
+
+    def belly_box(name, bt, px, zlo, zhi, sx, pz, szlen, color):
         # A piece of the BELLY only -- used where the mirrored copy must
         # differ from the upper one (the cap bands: annulus above the deck
         # to spare the rooms, full width below because the belly has no
         # rooms to spare).
         global shell_n
         shell_n += 1
-        objs.append(prim(f"{stem}_shell_{shell_n}", bt,
+        objs.append(prim(shell_name(name), bt,
                          px, deck_top - zhi, pz, sx, zhi - zlo, szlen, color))
 
-    def shell_box(bt, px, zlo, zhi, sx, pz, szlen, color, collide=True, mirror=True):
+    def shell_box(name, bt, px, zlo, zhi, sx, pz, szlen, color, collide=True, mirror=True):
         # One piece of shell, and its mirror below the deck when the revolve
-        # is full: 360 hulls have no flat keel -- they live in space.
+        # is full: 360 hulls have no flat keel -- they live in space. The
+        # mirror signs itself "_belly".
         # (collide=False briefly marked full-width pieces visual-only to
         # cure interior hauntings; superseded same day by MODE ghosts: play
         # is solid everywhere -- walk and jump the dome -- and the painter
         # flies through everything. The parameter stays for future use.)
         global shell_n
+        # No shell piece touches the deck plane: pieces that start at 0 are
+        # lifted (and their belly mirrors stop short of it) -- ring L1 sat
+        # exactly on y=deck and shimmered against every frame top and wall
+        # bottom along the waterline (fightcheck). The belt is radially
+        # backed by deck plates inboard and unthreadable by any straight
+        # ray outboard; leakcheck referees.
+        # THE PLANE LEDGER -- every family owns a distinct offset, or the
+        # lifts just relocate the shimmer (0.03 here collided with the
+        # bands' SH and the ribs' ins, both also 0.03):
+        #   bands/caps ride SH = 0.03 and recess 0.02 in pz;
+        #   ribs keep their directional ins 0.03/0.06;
+        #   rings and all other shell pieces lift 0.045.
+        zl = max(zlo, 0.045)
+        if zhi - zl <= 0.0:
+            return
         shell_n += 1
-        objs.append(prim(f"{stem}_shell_{shell_n}", bt,
-                         px, deck_top + zlo, pz, sx, zhi - zlo, szlen, color,
+        objs.append(prim(shell_name(name), bt,
+                         px, deck_top + zl, pz, sx, zhi - zl, szlen, color,
                          collide=collide))
         if REV_360 and mirror:
             shell_n += 1
-            objs.append(prim(f"{stem}_shell_{shell_n}", bt,
-                             px, deck_top - zhi, pz, sx, zhi - zlo, szlen, color,
+            objs.append(prim(shell_name(name + "_belly"), bt,
+                             px, deck_top - zhi, pz, sx, zhi - zl, szlen, color,
                              collide=collide))
 
     # Each run's stepped cross-section: layer k -> (z0, z1, outer half-width).
@@ -457,14 +512,16 @@ if REVOLVE > 0.0:
             # honest tonnage; buys honest armour.
             lo = min(w1, w0 - 0.35)
             for side in (-1.0, 1.0):
-                shell_box("platform_wall", ORIGIN_X + side * (lo + w0) / 2.0, z0, z1,
+                ps = "port" if side < 0 else "stbd"
+                shell_box(f"ring_r{i+1}_L{k+1}_{ps}", "platform_wall",
+                          ORIGIN_X + side * (lo + w0) / 2.0, z0, z1,
                           w0 - lo, wz(y, h), h * CELL, (0.52, 0.55, 0.62, 1.0))
         # (The crown plate retired with the solid-block change: the top
         # layer's blocks reach the centreline themselves -- w1 goes to zero
         # at the apex -- so the dome closes without a lid, and the lid was
         # lying coplanar on the blocks, fighting them.)
         # the spine: a dorsal ridge along each crown, the ship's backbone
-        shell_box("platform_wall", ORIGIN_X, DH, DH + 0.14,
+        shell_box(f"spine_r{i+1}", "platform_wall", ORIGIN_X, DH, DH + 0.14,
                   0.5, wz(y, h), h * CELL, (0.44, 0.47, 0.54, 1.0))
 
     # THE BULKHEADS ("could u fill those?"): at every step boundary and both
@@ -481,7 +538,9 @@ if REVOLVE > 0.0:
     # level walled a corridor straight through the rooms. Above the wall
     # tops, where the dome is the ceiling, full width is correct. Every band
     # splits at the wall line.
-    def bulkhead(zb, secA, secB, bHull, hWall):
+    def bulkhead(zb, secA, secB, bHull, hWall, tag):
+        # `tag` names the boundary in every piece it pours: bow, stern, or
+        # row<N> -- the plan row the step lives at, readable off the HUD.
         layers = sorted(set(secA) | set(secB))
         for k in layers:
             gA = secA.get(k); gB = secB.get(k)
@@ -506,7 +565,10 @@ if REVOLVE > 0.0:
                 fwd = wB > wA
                 ins = 0.03 if fwd else 0.06
                 wOut = max(wA, wB) - ins
-                wIn = max(0.0, min(gA[3] if gA else 1e9, gB[3] if gB else 1e9) - 0.4)
+                # Missing side counts as rim zero -- end caps pour full, not
+                # as rings with open centres (the leakcheck lesson, applied
+                # to the rib path's same line).
+                wIn = max(0.0, min(gA[3] if gA else 0.0, gB[3] if gB else 0.0) - 0.4)
                 # No near-match skip: two runs' width curves can CROSS --
                 # nearly equal at one layer, wildly different around it --
                 # and the skipped layer was exactly where the last thin gaps
@@ -519,7 +581,13 @@ if REVOLVE > 0.0:
                 # inset. The per-layer top-and-bottom insets opened 6-12cm
                 # sky slits at every size change (field report: thin purple
                 # gaps in the ceiling -- the sky through my own seams).
-                zr0, zr1 = max(0.0, z0 - ins), z1 - ins
+                # An L1 rib clamped to zero sat ON the deck plane (220
+                # fights); a 0.03 floor then landed under shell_box's 0.045
+                # ring lift and shimmered against ring bottoms instead. The
+                # floor rides ABOVE the ring plane and stays directional,
+                # so opposed ribs never share it either (the plane ledger:
+                # rings 0.045, ribs 0.075/0.105).
+                zr0, zr1 = max(0.045 + ins, z0 - ins), z1 - ins
                 zc = zb + (0.57 if fwd else -0.57)
                 # The wall-line split is direction-inset too: two ribs
                 # entering a one-cell run from opposite ends both topped
@@ -530,27 +598,70 @@ if REVOLVE > 0.0:
                     lo = max(wIn, bHull)
                     if wOut - lo > 0.05:
                         for side in (-1.0, 1.0):
-                            shell_box("platform_wall", ORIGIN_X + side * (lo + wOut) / 2.0,
+                            ps = "port" if side < 0 else "stbd"
+                            shell_box(f"rib_{tag}_L{k+1}_lo_{ps}", "platform_wall",
+                                      ORIGIN_X + side * (lo + wOut) / 2.0,
                                       zr0, zs, wOut - lo, zc, 1.2, FILL_COL, mirror=False)
                     if REV_360:
                         # The belly cap: full width -- no rooms below deck.
-                        # (The open half-moon of the field report: "top half
-                        # of the end covered, bottom half open".)
-                        belly_box("platform_wall", ORIGIN_X, zr0 + ins, zs - ins,
-                                  max(2.0 * (wOut - ins), 1.0), zc, 1.2, FILL_COL)
+                        # Column abuts (leakcheck), rides 3cm off the layer
+                        # grid (fightcheck: L1 cap tops sat exactly on the
+                        # deck plane and shimmered against every floor),
+                        # and is half-a-cell thick so opposite caps abut at
+                        # a one-cell run's midline instead of overlapping.
+                        belly_box(f"cap_{tag}_L{k+1}", "platform_wall",
+                                  ORIGIN_X, z0 + 0.03, zs + 0.03,
+                                  max(2.0 * (wOut - ins), 1.0),
+                                  zb + (0.52 if fwd else -0.52), 1.0, FILL_COL)
                 if zr1 > zs:
                     if wIn < 0.3:
-                        shell_box("platform_wall", ORIGIN_X, zs, zr1,
+                        shell_box(f"rib_{tag}_L{k+1}_hi", "platform_wall",
+                                  ORIGIN_X, zs, zr1,
                                   max(2.0 * wOut, 1.0), zc, 1.2, FILL_COL)
                     else:
                         for side in (-1.0, 1.0):
-                            shell_box("platform_wall", ORIGIN_X + side * (wIn + wOut) / 2.0,
+                            ps = "port" if side < 0 else "stbd"
+                            shell_box(f"rib_{tag}_L{k+1}_hi_{ps}", "platform_wall",
+                                      ORIGIN_X + side * (wIn + wOut) / 2.0,
                                       zs, zr1, wOut - wIn, zc, 1.2, FILL_COL)
                 continue
             if abs(wA - wB) <= 0.05:
                 continue
             wLo, wHi = sorted((wA, wB))
-            pz = zb + (0.2 if wB < wA else -0.2)
+            # THE INNER LIP (leakcheck conviction, 2026-08-03): a stepped
+            # dome has TWO rims at every boundary -- the outer lip between
+            # the runs' outer edges, and the inner lip where the ceiling
+            # inside jumps curves. These bands covered only [wLo..wHi], the
+            # outer lip; the ribs always covered rim to rim (their wIn).
+            # Gentle curves keep the lips close and hid this; a full-height
+            # revolve pulled them apart and every gradation leaked sky.
+            # A MISSING side (bow/stern end cap) counts as rim ZERO -- the
+            # leak detector convicted the first draft of this line (1e9 for
+            # the empty side turned the nose cap into a ring with an open
+            # centre, and escapes went UP).
+            wIn = max(0.0, min(gA[3] if gA else 0.0, gB[3] if gB else 0.0) - 0.4)
+            # BAND THICKNESS: 1.0, not the old 0.4 foil (field report: "half
+            # as thick as it should be", holes in un-ribbed hulls) and not
+            # 1.2 either -- exactly HALF A CELL, so two bands entering a
+            # one-cell run from opposite boundaries ABUT at its midline
+            # instead of overlapping (overlap = coplanar tops = shimmer,
+            # fightcheck conviction). One face still lands on the boundary.
+            BAND_T = 1.0
+            # THE GRID SHIFT: bands and caps ride 3cm high of the LAYER
+            # grid. Rings, decks and bands all lived on the same y-planes,
+            # and every shared plane with overlap was a z-fight (576 pairs,
+            # counted). All boundary pieces shift TOGETHER, so every
+            # abutment inside the column survives; the belly mirrors shift
+            # down with their originals. leakcheck stays the referee that
+            # no slit reopened.
+            SH = 0.03
+            # ...and 2cm off the boundary plane in z (the ribs' old trick,
+            # their 0.03/0.06 insets): the band front shared its plane with
+            # ring END faces and deck-plate edges, and shimmered wherever
+            # the larger run's solid did not hide it. Recessed 2cm, the
+            # seam reads as a panel line; a straight ray cannot turn into
+            # a 2cm groove, and leakcheck confirms.
+            pz = zb + (BAND_T / 2.0 + 0.02 if wB < wA else -(BAND_T / 2.0 + 0.02))
             zs = max(z0, min(z1, hWall))
             # below the wall line: annulus only ABOVE deck (the hallway rule
             # protects rooms); the belly has no rooms, so its cap is full.
@@ -558,21 +669,47 @@ if REVOLVE > 0.0:
                 lo = max(wLo, bHull)
                 if wHi - lo > 0.05:
                     for side in (-1.0, 1.0):
-                        shell_box("platform_wall", ORIGIN_X + side * (lo + wHi) / 2.0,
-                                  z0, zs, wHi - lo, pz, 0.4, FILL_COL, mirror=False)
+                        ps = "port" if side < 0 else "stbd"
+                        shell_box(f"bulk_{tag}_L{k+1}_lo_{ps}", "platform_wall",
+                                  ORIGIN_X + side * (lo + wHi) / 2.0,
+                                  z0 + SH, zs + SH, wHi - lo, pz, BAND_T, FILL_COL,
+                                  mirror=False)
                 if REV_360:
                     insB = 0.04 if wB < wA else 0.07
-                    belly_box("platform_wall", ORIGIN_X, z0 + insB, zs - insB,
-                              max(2.0 * (wHi - insB), 1.0), pz, 0.4, FILL_COL)
+                    # The column abuts: cap bottom meets the cap below, cap
+                    # top meets the hi band -- all riding the same shift.
+                    belly_box(f"cap_{tag}_L{k+1}", "platform_wall",
+                              ORIGIN_X, z0 + SH, zs + SH,
+                              max(2.0 * (wHi - insB), 1.0), pz, BAND_T, FILL_COL)
             # above the wall line: the full exposed face
             if z1 > zs:
-                if wLo < 0.3:
-                    shell_box("platform_wall", ORIGIN_X, zs, z1,
-                              max(2.0 * wHi, 1.0), pz, 0.4, FILL_COL)
+                # THE APEX SLIVER, reported by name off the HUD (row15_L5,
+                # row21_L4, row30_L4, all _hi_belly, all keel-line): the
+                # dome height rarely divides evenly into layers, so the last
+                # layer is a remainder -- 0.5 of band sealing the boundary
+                # exactly where the belly runs deepest. A keel band is
+                # armour, not foil: short bands grow DOWN into the layer
+                # below to the rib gauge, nudged off the shared boundary
+                # plane so they cannot z-fight the band they now overlap.
+                # Only when the wall-line split is not in play (zs == z0) --
+                # a full-width band must never dig below the wall tops (the
+                # hallway rule), and the slivers all live near the apex,
+                # far above the rooms.
+                zlo, poff = zs, 0.0
+                if z1 - zs < 1.2 and zs <= z0 + 1e-6 and z1 - 1.2 >= hWall:
+                    zlo = z1 - 1.2
+                    poff = 0.04 if wB < wA else -0.04
+                if wIn < 0.3:
+                    shell_box(f"bulk_{tag}_L{k+1}_hi", "platform_wall",
+                              ORIGIN_X, zlo + SH, z1 + SH,
+                              max(2.0 * wHi, 1.0), pz + poff, BAND_T, FILL_COL)
                 else:
                     for side in (-1.0, 1.0):
-                        shell_box("platform_wall", ORIGIN_X + side * (wLo + wHi) / 2.0,
-                                  zs, z1, wHi - wLo, pz, 0.4, FILL_COL)
+                        ps = "port" if side < 0 else "stbd"
+                        shell_box(f"bulk_{tag}_L{k+1}_hi_{ps}", "platform_wall",
+                                  ORIGIN_X + side * (wIn + wHi) / 2.0,
+                                  zlo + SH, z1 + SH, wHi - wIn, pz + poff, BAND_T,
+                                  FILL_COL)
 
     def boundary_ctx(yb):
         # Hull half-breadth and wall height at a boundary come from the rows
@@ -592,15 +729,16 @@ if REVOLVE > 0.0:
         if prev is None:                      # bow cap of the first run
             yb = nxt[0]
             bh, hw = boundary_ctx(yb)
-            bulkhead((yb - H / 2.0) * CELL + ORIGIN_Z, {}, secs[i], bh, hw)
+            bulkhead((yb - H / 2.0) * CELL + ORIGIN_Z, {}, secs[i], bh, hw, "bow")
         elif nxt is None:                     # stern cap of the last run
             yb = prev[0] + prev[1]
             bh, hw = boundary_ctx(yb)
-            bulkhead((yb - H / 2.0) * CELL + ORIGIN_Z, secs[i - 1], {}, bh, hw)
+            bulkhead((yb - H / 2.0) * CELL + ORIGIN_Z, secs[i - 1], {}, bh, hw, "stern")
         elif prev[0] + prev[1] == nxt[0]:     # a step between adjacent runs
             yb = nxt[0]
             bh, hw = boundary_ctx(yb)
-            bulkhead((yb - H / 2.0) * CELL + ORIGIN_Z, secs[i - 1], secs[i], bh, hw)
+            bulkhead((yb - H / 2.0) * CELL + ORIGIN_Z, secs[i - 1], secs[i], bh, hw,
+                     f"row{yb}")
 
     print(f"revolve: {shell_n} shell pieces at height scale {REVOLVE:g}"
           + (", glass fill" if REV_GLASS else ", opaque fill")
@@ -659,6 +797,75 @@ for i, (x, y, w, h) in enumerate(radiators):
                      wx(x, w), deck_top, wz(y, h),
                      w*CELL, LOFT[y], h*CELL, (0.66, 0.71, 0.76, 1.0)))
 
+# ---- MASTS: the comms era begins topside ------------------------------------
+# Connected A cells cluster into ONE mast ("letters make sockets" holds above
+# deck too) -- a bigger cluster is a heavier array: taller pole, a crossarm.
+# The mast roots on whatever the hull raises at its cell: the wall top, or
+# the revolve's dome at that station. The pole carries comms metadata on the
+# rail -- the day hails and remote robot orders are gated by hardware, this
+# is the piece that carries the voice. Priced like the investment it is.
+MAST_PRICE_BASE, MAST_PRICE_CELL = 1200.0, 400.0
+mast_cost = 0.0
+tseen = set()
+mast_blobs = []
+for y in range(H):
+    for x in range(W):
+        if tcell(x, y) != 'A' or (x, y) in tseen:
+            continue
+        blob, stack = [], [(x, y)]
+        while stack:
+            px, py = stack.pop()
+            if (px, py) in tseen or tcell(px, py) != 'A':
+                continue
+            tseen.add((px, py)); blob.append((px, py))
+            stack += [(px+1, py), (px-1, py), (px, py+1), (px, py-1)]
+        mast_blobs.append(blob)
+
+def crown_height(x, y):
+    """Where the hull's top is at plan cell (x,y) -- wall top, or the dome."""
+    h = deck_top
+    if solid(cell(x, y)):
+        h += LOFT[y]
+    if REVOLVE > 0.0:
+        b = 0.0
+        for xx in range(W):
+            if hull(cell(xx, y)):
+                b = max(b, abs(xx + 0.5 - W / 2.0))
+        R = b * CELL + CELL if b > 0 else 0.0
+        if R > 0.0:
+            woff = abs(x + 0.5 - W / 2.0) * CELL
+            if woff < R:
+                h = max(h, deck_top + R * REVOLVE *
+                        math.sqrt(1.0 - (woff / R) ** 2))
+    return h
+
+MAST_STEEL = (0.30, 0.31, 0.36, 1.0)
+MAST_AMBER = (0.95, 0.62, 0.18, 1.0)
+for mi, blob in enumerate(mast_blobs):
+    ncells = len(blob)
+    mast_cost += MAST_PRICE_BASE + MAST_PRICE_CELL * (ncells - 1)
+    cx = sum(p[0] for p in blob) / ncells
+    cy = sum(p[1] for p in blob) / ncells
+    px = ORIGIN_X + (cx + 0.5 - W / 2.0) * CELL
+    pz = ORIGIN_Z + (cy + 0.5 - H / 2.0) * CELL
+    base = crown_height(int(round(cx)), int(round(cy))) - 0.3
+    pole_h = 3.5 + 1.5 * math.sqrt(ncells)
+    objs.append(prim(f"{stem}_mast_comms_{mi+1}", "platform_wall",
+                     px, base, pz, 0.35, pole_h, 0.35, MAST_STEEL))
+    objs[-1]["metadata"] = {"mast": "comms", "comms": "1"}
+    if ncells >= 2:                       # a heavier array earns a crossarm
+        objs.append(prim(f"{stem}_mast_comms_{mi+1}_arm", "platform_wall",
+                         px, base + pole_h * 0.78, pz, 2.4, 0.18, 0.18,
+                         MAST_STEEL, collide=False))
+    for j, frac in enumerate((0.55, 0.9)):
+        objs.append(prim(f"{stem}_mast_comms_{mi+1}_collar_{j+1}",
+                         "platform_wall", px, base + pole_h * frac, pz,
+                         0.8, 0.22, 0.8, MAST_AMBER, collide=False,
+                         bright=1.8))
+    objs.append(prim(f"{stem}_mast_comms_{mi+1}_lamp", "platform_wall",
+                     px, base + pole_h + 0.25, pz, 0.26, 0.26, 0.26,
+                     (1.0, 0.95, 0.8, 1.0), collide=False, bright=2.3))
+
 counts = {}
 for (c, x, y, w, h) in sockets:
     role, color = ROLE[c]
@@ -684,7 +891,7 @@ for (c, x, y, w, h) in sockets:
 def patchwork(name, c):
     if c[3] < 0.9:
         return c
-    if "_lamp_" in name or "_vent_" in name:
+    if "_lamp" in name or "_vent_" in name or "_mast_" in name:
         return c
     h = zlib.crc32(name.encode())
     v = 0.92 + ((h >> 8) & 0xFF) / 255.0 * 0.16
@@ -698,12 +905,23 @@ for o in objs:
     if o["buildingType"] in ("platform_slab", "platform_wall"):
         sx, sy, sz = o["scale"]
         cost_cr += sx * sy * sz * MAT_PRICE
-        o["metadata"] = {"material": MAT_KEY, "density": f"{MAT_DENSITY:g}",
-                         "armor": str(MAT_ARMOR)}
+        # MERGE, never replace -- the mast pole already carries its comms
+        # metadata, and the material joins it on the rail.
+        md = o.get("metadata", {})
+        md.update({"material": MAT_KEY, "density": f"{MAT_DENSITY:g}",
+                   "armor": str(MAT_ARMOR)})
+        o["metadata"] = md
         c = patchwork(o["name"], o["primitiveColor"])
         o["primitiveColor"] = [min(1.0, c[0]*MAT_TINT[0]), min(1.0, c[1]*MAT_TINT[1]),
                                min(1.0, c[2]*MAT_TINT[2]), c[3]]
-cost_cr = round(cost_cr + socket_cost)
+cost_cr = round(cost_cr + socket_cost + mast_cost)
+
+# Every piece answers to exactly one name -- the HUD reads them, the
+# patchwork seeds from them, the damage model will address them. A
+# duplicate is a lie waiting to be reported.
+_names = [o["name"] for o in objs]
+assert len(_names) == len(set(_names)), \
+    f"duplicate piece names: {sorted(n for n in set(_names) if _names.count(n) > 1)}"
 
 if OBJ_JSON:
     json.dump({"objects": objs, "cost_cr": cost_cr, "material": MAT_NAME},
@@ -734,6 +952,8 @@ for r in rooms:
 print(f"{dst}: {len(floors)} room plates + {len(frames)} frame plates, {len(walls)} wall runs, "
       f"{sum(1 for y in range(H) for x in range(W) if cell(x,y)=='D')} door cells, "
       f"{len(sockets)} sockets {[(ROLE[c][0], w, h) for (c,x,y,w,h) in sockets]}")
+if mast_blobs:
+    print(f"masts: {len(mast_blobs)} comms ({round(mast_cost)} CR) -- her voice stands topside")
 if not any(c == 'B' for (c, *_ ) in sockets):
     print("note: no B cells drawn -- the forward compartment is presumably the "
           "bridge; draw B where the helm should stand, or place one from the catalog.")
