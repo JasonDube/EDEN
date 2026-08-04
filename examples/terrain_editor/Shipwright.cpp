@@ -756,10 +756,12 @@ void Shipwright::render(bool& open) {
             const char c = m_cells[y * kW + x];
             const ImVec2 a(origin.x + x * cell, origin.y + y * cell);
             const ImVec2 b(a.x + cell - 1.0f, a.y + cell - 1.0f);
-            if (upperMode) {
-                // The roof below reads as slate (structure a shade prouder
-                // than roofed rooms, void stays void); this storey's own
-                // cells paint over it in their brush colours.
+            // Read the level FRESH: the Down button mutates m_level midway
+            // through this very frame, and drawing with the stale upperMode
+            // indexed m_upper[-2] -- the "stepping down to the bottom
+            // floor" crash. Same disease as the ImGui frame-order lesson:
+            // never act on a flag captured before its mutator ran.
+            if (m_level > 0) {
                 const std::vector<char>& below =
                     (m_level == 1) ? m_cells : m_upper[m_level - 2];
                 const char bc = below[y * kW + x];
@@ -790,7 +792,9 @@ void Shipwright::render(bool& open) {
     // red ring here and a refusal at the yard -- the drafting table warns
     // before the money does.
     int orphanX = 0, orphanF = 0, coldP = 0;
-    const std::vector<char>& lawLayer = m_level == 0 ? m_cells : m_upper[m_level - 1];
+    const std::vector<char>& lawLayer =
+        (m_level > 0 && m_level <= static_cast<int>(m_upper.size()))
+            ? m_upper[m_level - 1] : m_cells;
     auto neighbourIs = [&lawLayer](int x, int y, char want) {
         return (x + 1 < kW && lawLayer[y * kW + x + 1] == want) ||
                (x > 0     && lawLayer[y * kW + x - 1] == want) ||
@@ -815,7 +819,7 @@ void Shipwright::render(bool& open) {
     // connected piece of a storey must touch the storey below somewhere.
     // Unanchored islands ring red, whole.
     int orphanA = 0;
-    if (upperMode) {
+    if (m_level > 0) {   // fresh read -- see the mid-frame mutation note above
         const std::vector<char>& below =
             (m_level == 1) ? m_cells : m_upper[m_level - 2];
         const auto& L = m_upper[m_level - 1];
