@@ -25,16 +25,19 @@
 //   X  exhaust (ion-thruster grid in the hull; MUST touch an E cell)
 //   P  reactor room (draw 2x2 -- plants are big; cluster MUST reach an F)
 //   F  radiator fin (hull wall; MUST touch a P cell)
+//   L  lift (elevator: serves every open floor in its column; the yard
+//      cuts the shaft through the roofs between floors, never the top lid)
 // Top of the grid is the BOW.
 //
-// THE TOPSIDE LAYER (2026-08-03): the deck plan is a floor -- masts do not
-// stand on floors, they stand on the CROWN. The ROOF button (beside Side
-// view) is a HARD MODE, the user's chosen shape: it closes the hull over
-// and only Mast and Erase work up there -- deck brushes grey out and wait
-// until the roof lifts. Picking the Mast brush enters the roof by itself.
-//   A  comms mast (MUST stand over hull -- an antenna rooted in vacuum
-//      hails nobody; connected A cells cluster into ONE heavier mast)
-// The plan file carries it as a second grid after a 'topside:' line.
+// THE STOREYS (2026-08-04): the Roof button is a STAIRCASE. Draw a deck,
+// press Roof -- the hull closes over and the same grid becomes the next
+// storey's drawing surface, EVERY brush live up there: walls make rooms
+// one floor up, letters make sockets, A stands masts on the roof below
+// it. Roof again and again, however many storeys -- the price is that a
+// stacked ship may not loft or revolve. Every storey must stand on the
+// one below (no floating walls; the brush refuses, the yard refuses).
+// The plan file carries each storey as a grid after a 'deckN:' line
+// ('topside:' survives as the legacy alias for the first mast layer).
 
 #include <functional>
 #include <string>
@@ -102,8 +105,9 @@ public:
 private:
     void clear();
     void paint(int x, int y, char c);
-    void paintTop(int x, int y, bool on);
     void fillFloor(int x, int y);   // the bucket: flood an enclosed area with '.'
+    std::vector<char>& activeLayer();
+    bool supportedBelow(int i) const;   // may level's cell i bear weight?
 
     std::function<std::string(const std::string&, int)> m_buildShip;
     std::function<bool(const std::string&, std::vector<RoomPatch>&)> m_finalize;
@@ -118,11 +122,11 @@ private:
     std::function<std::string(const std::string&)> m_launchShip;
     char m_shipNameBuf[64] = "capital";
     bool m_painterOn = false;
-    std::vector<char> m_cells;      // kW * kH, row-major
-    std::vector<char> m_topside;    // kW * kH -- the crown layer ('A' masts)
+    std::vector<char> m_cells;      // kW * kH, row-major -- deck 1
+    std::vector<std::vector<char>> m_upper;  // storeys above: deck 2, 3...
+    int m_level = 0;                // 0 = deck 1; k = m_upper[k-1]
     char m_tool = '#';
     bool m_sideView = false;        // the profile window toggle
-    bool m_roofView = false;        // hard mode: roof closed, masts only
     std::vector<float> m_loft;      // wall-top height per station (plan row)
     bool  m_revolveOn = false;      // lathe the half-plan 180 deg over the keel
     float m_revolveScale = 0.5f;    // dome height = radius * scale (ellipse)

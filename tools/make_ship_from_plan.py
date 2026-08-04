@@ -66,14 +66,18 @@ ROOMS_JSON = None
 if '--rooms-json' in sys.argv:
     ROOMS_JSON = sys.argv[sys.argv.index('--rooms-json') + 1]
     ORIGIN_X = ORIGIN_Z = 0.0
-# The plan can carry TWO layers now. The deck grid first; then, after a
-# 'topside:' marker line, the TOPSIDE layer at the same coordinates -- what
-# stands on the closed hull's crown. Only 'A' (comms mast) lives up there
-# so far. Trailers (loft:/revolve:) are recognised wherever they appear.
+# The plan is a STACK OF LAYERS now. The first grid is deck 1. A 'deckN:'
+# marker starts the grid for storey N at the same coordinates -- what stands
+# on the roof of the storey below; every letter of the language lives up
+# there, walls and rooms and sockets AND masts. 'topside:' survives as the
+# legacy alias for layer 2 (it only ever carried A masts, and that meaning
+# is unchanged: A = a mast rooted on the roof below it).
+# Trailers (loft:/revolve:) are recognised wherever they appear -- but a
+# stacked ship may not loft or revolve; that is the price of storeys.
 loft_line = None
 rev_line = None
-rows, top_rows = [], []
-_target = rows
+layers = [[]]
+_target = layers[0]
 for _r in [r.rstrip('\n') for r in open(plan_path)]:
     if _r.startswith('loft:'):
         # The LOFT LINE: wall-top height per station (plan row), bow first.
@@ -83,10 +87,26 @@ for _r in [r.rstrip('\n') for r in open(plan_path)]:
         # 'revolve: s' -- lathe the half-plan 180 degrees about the
         # centreline, keel flat, dome height = radius * s.
         rev_line = _r
-    elif _r.startswith('topside:'):
-        _target = top_rows
+    elif _r.startswith('topside:') or _r.startswith('deck'):
+        if _r.startswith('topside:'):
+            k = 1
+        else:
+            try:
+                k = int(_r[4:].rstrip(':')) - 1
+            except ValueError:
+                _target.append(_r)
+                continue
+        while len(layers) <= k:
+            layers.append([])
+        _target = layers[k]
     else:
         _target.append(_r)
+rows = layers[0]
+# A REAL upper deck has structure; a layer of nothing but masts is the old
+# topside and stays revolve-friendly.
+def _layer_has_structure(g):
+    return any(c not in '_A' and not c.isspace() for r in g for c in r)
+MULTI_DECK = any(_layer_has_structure(g) for g in layers[1:])
 REVOLVE, REV_GLASS, REV_360 = 0.0, False, False
 if rev_line:
     toks = rev_line.split(':', 1)[1].split()
@@ -106,7 +126,7 @@ def cell(x, y):
     if 0 <= y < H and 0 <= x < len(rows[y]): return rows[y][x]
     return '_'
 
-walk  = lambda c: c == '.' or c == 'D' or c in ROLE
+walk  = lambda c: c == '.' or c == 'D' or c == 'L' or c in ROLE
 solid = lambda c: c == '#' or c == 'W' or c == 'X' or c == 'F'   # windows see, exhausts push, fins shed heat
 hull  = lambda c: walk(c) or solid(c)
 
@@ -150,22 +170,150 @@ for y in range(H):
         if not finned:
             radiator_errors.append(('P', blob[0][0], blob[0][1]))
 
-# ---- the mast law: masts stand over hull -----------------------------------
-# The topside layer's A cells are comms masts on the crown. The law: every
-# mast must stand OVER the hull footprint -- an antenna rooted in vacuum
-# hails nobody, and the yard refuses to plant one.
-def tcell(x, y):
-    if 0 <= y < len(top_rows) and 0 <= x < len(top_rows[y]) and top_rows[y][x] == 'A':
-        return 'A'
+# ---- the stacking laws ------------------------------------------------------
+# Layer access for every storey above the first. A is a mast wherever it
+# appears in an upper layer; everything else up there is deck structure.
+def lcell(k, x, y):
+    g = layers[k] if k < len(layers) else []
+    if 0 <= y < len(g) and 0 <= x < len(g[y]):
+        c = g[y][x]
+        if c == 'A' or c == '#' or c == '.' or c == 'D' or c == 'W' \
+           or c == 'X' or c == 'F' or c == 'L' or c in ROLE:
+            return c
     return '_'
 
+def lhull(k, x, y):
+    # The load-bearing footprint of a storey (masts are not floors).
+    if k == 0:
+        return hull(cell(x, y))
+    c = lcell(k, x, y)
+    return c != '_' and c != 'A'
+
+stack_errors = []
+if MULTI_DECK and (loft_line or rev_line):
+    stack_errors.append("a stacked ship may not loft or revolve -- storeys are "
+                        "the flat-built method's own reward")
+# THE ANCHOR LAW (user's correction: "a larger floor CAN go on top of a
+# smaller one -- the roof below is also the floor above"): a storey need
+# not stand cell-for-cell on the one below. It may CANTILEVER -- the roof
+# plate pours to the union of both footprints -- but every connected piece
+# of a storey must touch the storey below in at least one cell. An island
+# with no anchor is not an overhang, it is a drawing of a crash.
+for k in range(1, len(layers)):
+    seen_k = set()
+    for y in range(H):
+        for x in range(W):
+            if lcell(k, x, y) in ('_', 'A') or (x, y) in seen_k:
+                continue
+            comp, stack, anchored = [], [(x, y)], False
+            while stack:
+                px, py = stack.pop()
+                if (px, py) in seen_k or lcell(k, px, py) in ('_', 'A'):
+                    continue
+                seen_k.add((px, py)); comp.append((px, py))
+                if lhull(k - 1, px, py):
+                    anchored = True
+                stack += [(px+1,py),(px-1,py),(px,py+1),(px,py-1)]
+            if not anchored:
+                stack_errors.append(f"deck {k+1} section at ({comp[0][0]},{comp[0][1]}) "
+                                    f"touches nothing below -- an overhang needs an anchor")
+# The machinery laws hold on every storey: exhaust wants its engine, fins
+# want their reactor, reactors want their fins -- per deck, same words.
+for k in range(1, len(layers)):
+    for y in range(H):
+        for x in range(W):
+            c = lcell(k, x, y)
+            nbrs = [lcell(k, x+1, y), lcell(k, x-1, y), lcell(k, x, y+1), lcell(k, x, y-1)]
+            if c == 'X' and 'E' not in nbrs:
+                exhaust_errors.append((x, y))
+            if c == 'F' and 'P' not in nbrs:
+                radiator_errors.append(('F', x, y))
+    pseen_k = set()
+    for y in range(H):
+        for x in range(W):
+            if lcell(k, x, y) != 'P' or (x, y) in pseen_k: continue
+            blob, stk, finned = [], [(x, y)], False
+            while stk:
+                px, py = stk.pop()
+                if (px, py) in pseen_k or lcell(k, px, py) != 'P': continue
+                pseen_k.add((px, py)); blob.append((px, py))
+                for nx, ny in ((px+1,py),(px-1,py),(px,py+1),(px,py-1)):
+                    if lcell(k, nx, ny) == 'F': finned = True
+                    stk.append((nx, ny))
+            if not finned:
+                radiator_errors.append(('P', blob[0][0], blob[0][1]))
+
+# ---- the mast law: masts stand over hull -----------------------------------
+# A mast (an 'A' in any upper layer) roots on the roof of the storey below
+# it. The law: it must stand OVER that storey's structure -- an antenna
+# rooted in vacuum hails nobody, and the yard refuses to plant one.
 mast_errors = []
+for k in range(1, len(layers)):
+    for y in range(H):
+        for x in range(W):
+            if lcell(k, x, y) != 'A':
+                continue
+            beside = any(lcell(k, nx, ny) not in ('_', 'A')
+                         for nx, ny in ((x+1,y),(x-1,y),(x,y+1),(x,y-1)))
+            if not lhull(k - 1, x, y) and not beside:
+                mast_errors.append((x, y))
+
+# ---- THE LIFT LAW -----------------------------------------------------------
+# An L cell is an elevator. Drawn on ANY floor of a column, it serves every
+# deck that is open at that column -- all the way down, all the way up --
+# and the yard cuts its shaft through every roof between served floors (the
+# TOP roof stays closed; the lift is not a chimney). Adjacent L cells make
+# one wider car. A shaft with a blocked middle deck is refused.
+STOREY = WALL_H + FLOOR_T
+
+def deck_walk(d, x, y):
+    if d == 0:
+        return walk(cell(x, y))
+    c = lcell(d, x, y)
+    return c == '.' or c == 'D' or c == 'L' or c in ROLE
+
+n_decks = 1 + sum(1 for k in range(1, len(layers)) if _layer_has_structure(layers[k]))
+lift_cells = set()
 for y in range(H):
     for x in range(W):
-        if tcell(x, y) == 'A' and not hull(cell(x, y)):
-            mast_errors.append((x, y))
+        if cell(x, y) == 'L':
+            lift_cells.add((x, y))
+for k in range(1, len(layers)):
+    for y in range(H):
+        for x in range(W):
+            if lcell(k, x, y) == 'L':
+                lift_cells.add((x, y))
+lifts = []            # (cells, served deck indices, stops)
+SHAFT_HOLES = {}      # deck index -> set of cells whose roof stays open
+_ls = set()
+for (sx0, sy0) in sorted(lift_cells):
+    if (sx0, sy0) in _ls:
+        continue
+    blob, stk = [], [(sx0, sy0)]
+    while stk:
+        px, py = stk.pop()
+        if (px, py) in _ls or (px, py) not in lift_cells:
+            continue
+        _ls.add((px, py)); blob.append((px, py))
+        stk += [(px+1,py),(px-1,py),(px,py+1),(px,py-1)]
+    served = [d for d in range(n_decks)
+              if all(deck_walk(d, x, y) for (x, y) in blob)]
+    if len(served) < 2:
+        print(f"WARNING: lift at ({blob[0][0]},{blob[0][1]}) serves "
+              f"{len(served)} floor(s) -- a very expensive tile; no car built")
+        continue
+    if served != list(range(served[0], served[-1] + 1)):
+        stack_errors.append(f"lift shaft at ({blob[0][0]},{blob[0][1]}) is blocked "
+                            f"between floors -- clear the column or move the car")
+        continue
+    stops = [FLOOR_Y + d * STOREY + FLOOR_T for d in served]
+    lifts.append((blob, served, stops))
+    for d in served[:-1]:
+        SHAFT_HOLES.setdefault(d, set()).update(blob)
 
-if exhaust_errors or radiator_errors or mast_errors:
+if exhaust_errors or radiator_errors or mast_errors or stack_errors:
+    for e in stack_errors:
+        print(f"REFUSED: {e}")
     for (x, y) in exhaust_errors:
         print(f"REFUSED: exhaust at ({x},{y}) has no adjacent engine (E) cell -- a grid needs an engine behind it")
     for (kind, x, y) in radiator_errors:
@@ -394,6 +542,48 @@ for i, (x, y, w, h) in enumerate(windows):
     objs.append(prim(f"{stem}_window_{i+1}", "platform_wall",
                      wx(x, w), deck_top, wz(y, h),
                      w*CELL, LOFT[y], h*CELL, (0.45, 0.70, 1.00, 0.22)))
+
+# ---- ROOFS: the honest lid --------------------------------------------------
+# Flat-built ships were open to the sky -- floors, walls, and then nothing.
+# Every room and every wall-top now gets a roof plate at its loft height,
+# named like the decks are named (an address is an address on both faces).
+# A revolve hull skips this: the dome already closes her, and a roof inside
+# a dome is wasted tonnage. The roof of one storey is the floor of the next.
+ROOF_COL = (0.40, 0.42, 0.47, 1.0)
+
+def pour_roof_rects(cells):
+    # Rectangles may not span rows of different loft -- a roof cannot be
+    # one plate at two heights. Group by loft first, rect within.
+    by_loft = {}
+    for (x, y) in cells:
+        by_loft.setdefault(LOFT[y], []).append((x, y))
+    for lv in sorted(by_loft):
+        for (x, y, w, h) in rects_over(by_loft[lv]):
+            yield (x, y, w, h, lv)
+
+if REVOLVE <= 0.0:
+    roof_counts = {}
+    hole0 = SHAFT_HOLES.get(0, set())
+    for r in rooms:
+        for (x, y, w, h, lv) in pour_roof_rects([c for c in r['cells'] if c not in hole0]):
+            roof_counts[r['name']] = roof_counts.get(r['name'], 0) + 1
+            objs.append(prim(f"{stem}_{r['name']}_roof_{roof_counts[r['name']]}",
+                             "platform_slab", wx(x, w), deck_top + lv, wz(y, h),
+                             w*CELL, FLOOR_T, h*CELL, ROOF_COL))
+    for i, (x, y, w, h, lv) in enumerate(pour_roof_rects(frame_cells)):
+        objs.append(prim(f"{stem}_frame_roof_{i+1}", "platform_slab",
+                         wx(x, w), deck_top + lv, wz(y, h),
+                         w*CELL, FLOOR_T, h*CELL, ROOF_COL))
+    # THE CANTILEVER POUR: where the storey above reaches past this hull,
+    # its floor still has to exist -- the roof below is also the floor
+    # above (the user's law), so the plate extends to the union.
+    if len(layers) > 1:
+        over0 = [(x, y) for y in range(H) for x in range(W)
+                 if lcell(1, x, y) != '_' and not hull(cell(x, y))]
+        for i, (x, y, w, h) in enumerate(rects_over(over0)):
+            objs.append(prim(f"{stem}_overhang_d2_{i+1}", "platform_slab",
+                             wx(x, w), deck_top + WALL_H, wz(y, h),
+                             w*CELL, FLOOR_T, h*CELL, ROOF_COL))
 # ---- the REVOLVE: the half-plan lathed 180 degrees over the flat keel ------
 # Per station the radius is the hull's half-breadth plus one cell of
 # clearance; the shell is a stepped surface of axis-aligned boxes (risers and
@@ -761,9 +951,14 @@ bow_walls = [r for r in walls if r[3] == 1]
 if bow_walls:
     bx, by, bw, bh = min(bow_walls, key=lambda r: r[1])
     n_lamp = max(2, min(5, bw))
+    # Lamps stand on the ROOF now, not the bare wall top -- flat ships have
+    # lids (the roof plate claimed the wall-top plane and the lamps fought
+    # its underside, fightcheck's smallest-ever conviction: 0.09 u^2).
+    # ...and 2cm proud of the roof plane, where storey walls also stand.
+    lamp_y = deck_top + LOFT[by] + (FLOOR_T + 0.02 if REVOLVE <= 0.0 else 0.0)
     for i in range(n_lamp):
         fx = bx + (i + 0.5) * bw / n_lamp
-        greeble("lamp", ORIGIN_X + (fx - W / 2.0) * CELL, deck_top + LOFT[by], wz(by, bh),
+        greeble("lamp", ORIGIN_X + (fx - W / 2.0) * CELL, lamp_y, wz(by, bh),
                 0.3, 0.22, 0.3, (1.0, 0.98, 0.88, 1.0), bright=1.6)
 
 # Engine-room vents: dark louvre blocks proud of the outermost hull walls on
@@ -797,6 +992,25 @@ for i, (x, y, w, h) in enumerate(radiators):
                      wx(x, w), deck_top, wz(y, h),
                      w*CELL, LOFT[y], h*CELL, (0.66, 0.71, 0.76, 1.0)))
 
+# ---- LIFT CARS --------------------------------------------------------------
+# The car rides 2cm proud of its floor (no plane shared with the deck) and
+# a hair inside its shaft, and carries its stop list on the metadata rail.
+# In play, E sends it to the next floor up; the top wraps back to the
+# bottom. The walk path's ground-follow does the actual carrying.
+for li, (blob, served, stops) in enumerate(lifts):
+    xs = [p[0] for p in blob]; ys = [p[1] for p in blob]
+    lx, ly = min(xs), min(ys)
+    lw, lh = max(xs) - lx + 1, max(ys) - ly + 1
+    o = prim(f"{stem}_lift_{li+1}", "platform_slab",
+             wx(lx, lw), stops[0] + 0.02, wz(ly, lh),
+             lw * CELL - 0.3, 0.12, lh * CELL - 0.3, (0.55, 0.85, 0.35, 1.0))
+    o["metadata"] = {"lift": "1",
+                     "lift_stops": ",".join(f"{s + 0.02:.2f}" for s in stops)}
+    objs.append(o)
+if lifts:
+    print(f"lifts: {len(lifts)} car(s), serving "
+          f"{'/'.join(str(len(s[1])) + ' floors' for s in lifts)}")
+
 # ---- MASTS: the comms era begins topside ------------------------------------
 # Connected A cells cluster into ONE mast ("letters make sockets" holds above
 # deck too) -- a bigger cluster is a heavier array: taller pole, a crossarm.
@@ -805,21 +1019,23 @@ for i, (x, y, w, h) in enumerate(radiators):
 # rail -- the day hails and remote robot orders are gated by hardware, this
 # is the piece that carries the voice. Priced like the investment it is.
 MAST_PRICE_BASE, MAST_PRICE_CELL = 1200.0, 400.0
+STOREY = WALL_H + FLOOR_T
 mast_cost = 0.0
-tseen = set()
-mast_blobs = []
-for y in range(H):
-    for x in range(W):
-        if tcell(x, y) != 'A' or (x, y) in tseen:
-            continue
-        blob, stack = [], [(x, y)]
-        while stack:
-            px, py = stack.pop()
-            if (px, py) in tseen or tcell(px, py) != 'A':
+mast_blobs = []          # (layer k, [cells])
+for _k in range(1, len(layers)):
+    tseen = set()
+    for y in range(H):
+        for x in range(W):
+            if lcell(_k, x, y) != 'A' or (x, y) in tseen:
                 continue
-            tseen.add((px, py)); blob.append((px, py))
-            stack += [(px+1, py), (px-1, py), (px, py+1), (px, py-1)]
-        mast_blobs.append(blob)
+            blob, stack = [], [(x, y)]
+            while stack:
+                px, py = stack.pop()
+                if (px, py) in tseen or lcell(_k, px, py) != 'A':
+                    continue
+                tseen.add((px, py)); blob.append((px, py))
+                stack += [(px+1, py), (px-1, py), (px, py+1), (px, py-1)]
+            mast_blobs.append((_k, blob))
 
 def crown_height(x, y):
     """Where the hull's top is at plan cell (x,y) -- wall top, or the dome."""
@@ -841,14 +1057,22 @@ def crown_height(x, y):
 
 MAST_STEEL = (0.30, 0.31, 0.36, 1.0)
 MAST_AMBER = (0.95, 0.62, 0.18, 1.0)
-for mi, blob in enumerate(mast_blobs):
+for mi, (mk, blob) in enumerate(mast_blobs):
     ncells = len(blob)
     mast_cost += MAST_PRICE_BASE + MAST_PRICE_CELL * (ncells - 1)
     cx = sum(p[0] for p in blob) / ncells
     cy = sum(p[1] for p in blob) / ncells
     px = ORIGIN_X + (cx + 0.5 - W / 2.0) * CELL
     pz = ORIGIN_Z + (cy + 0.5 - H / 2.0) * CELL
-    base = crown_height(int(round(cx)), int(round(cy))) - 0.3
+    # The root: a dome's crown on a revolve hull; otherwise the roof-top of
+    # the storey below the mast's layer (roofs exist now -- a mast on a
+    # flat ship stands on the lid, not inside the room).
+    if REVOLVE > 0.0:
+        base = crown_height(int(round(cx)), int(round(cy))) - 0.3
+    elif mk == 1:
+        base = deck_top + LOFT[int(round(cy))] + FLOOR_T - 0.3
+    else:
+        base = FLOOR_Y + mk * STOREY + FLOOR_T - 0.3
     pole_h = 3.5 + 1.5 * math.sqrt(ncells)
     objs.append(prim(f"{stem}_mast_comms_{mi+1}", "platform_wall",
                      px, base, pz, 0.35, pole_h, 0.35, MAST_STEEL))
@@ -875,6 +1099,148 @@ for (c, x, y, w, h) in sockets:
                      wx(x, w), deck_top, wz(y, h),
                      w*CELL, 0.06, h*CELL, color, collide=False))
     objs[-1]["metadata"] = {"socket": role}
+
+# ---- THE STOREYS: build on the roof, roof it, build again -------------------
+# Each real upper layer is a full deck plan standing on the roof below it
+# (the support law already swore to that). No loft, no revolve up here --
+# storeys are the flat method's own reward -- so walls are the classic
+# height and every storey pours its own roof, which is the next one's
+# floor. Rooms get named with their storey (_d2, _d3...), sockets keep
+# counting in the same ledger, and the top roof is where the masts stand.
+n_storeys = 0
+for dk in range(1, len(layers)):
+    if not _layer_has_structure(layers[dk]):
+        continue
+    n_storeys += 1
+    d_floor_top = FLOOR_Y + dk * STOREY + FLOOR_T   # roof-top of the storey below
+    d_wall_top = d_floor_top + WALL_H
+    sfx = f"_d{dk+1}"
+    cD = lambda x, y, _k=dk: lcell(_k, x, y)
+    walkD = lambda c: c == '.' or c == 'D' or c == 'L' or c in ROLE
+    solidD = lambda c: c == '#' or c == 'W' or c == 'X' or c == 'F'
+
+    # rooms, the same flood as below decks
+    room_of_d, rooms_d = {}, []
+    for y in range(H):
+        for x in range(W):
+            c = cD(x, y)
+            if not walkD(c) or c == 'D' or (x, y) in room_of_d: continue
+            rid = len(rooms_d)
+            blob, letters, stack = [], {}, [(x, y)]
+            while stack:
+                px, py = stack.pop()
+                pc = cD(px, py)
+                if (px, py) in room_of_d or not walkD(pc) or pc == 'D': continue
+                room_of_d[(px, py)] = rid
+                blob.append((px, py))
+                if pc in ROLE: letters[pc] = letters.get(pc, 0) + 1
+                stack += [(px+1,py),(px-1,py),(px,py+1),(px,py-1)]
+            rooms_d.append({'cells': blob, 'letters': letters})
+    for y in range(H):
+        for x in range(W):
+            if cD(x, y) != 'D': continue
+            for nx, ny in ((x, y-1), (x-1, y), (x+1, y), (x, y+1)):
+                if (nx, ny) in room_of_d:
+                    rooms_d[room_of_d[(nx, ny)]]['cells'].append((x, y))
+                    room_of_d[(x, y)] = room_of_d[(nx, ny)]
+                    break
+    for r in rooms_d:
+        if   'E' in r['letters']: r['name'] = 'engine_room'
+        elif 'P' in r['letters']: r['name'] = 'reactor_room'
+        elif 'R' in r['letters']: r['name'] = 'robot_hall'
+        elif 'C' in r['letters']: r['name'] = 'cargo_hold'
+        elif 'B' in r['letters']: r['name'] = 'bridge'
+        else: r['name'] = 'hold'
+    seen_d = {}
+    for r in rooms_d:
+        nn = seen_d.get(r['name'], 0) + 1
+        seen_d[r['name']] = nn
+        r['name'] += (f"_{nn}" if nn > 1 else "") + sfx
+
+    # walls, windows, grids, fins: greedy runs at the storey's height
+    claimed_d = [[False]*W for _ in range(H)]
+    def runs_d(match):
+        out = []
+        for y in range(H):
+            for x in range(W):
+                if claimed_d[y][x] or not match(cD(x, y)): continue
+                w = 0
+                while x+w < W and not claimed_d[y][x+w] and match(cD(x+w, y)): w += 1
+                if w >= 2:
+                    for i in range(w): claimed_d[y][x+i] = True
+                    out.append((x, y, w, 1)); continue
+                h = 1
+                while y+h < H and not claimed_d[y+h][x] and match(cD(x, y+h)): h += 1
+                for i in range(h): claimed_d[y+i][x] = True
+                out.append((x, y, 1, h))
+        return out
+    walls_d = split_panels(runs_d(lambda c: c == '#'))
+    thrusters_d = runs_d(lambda c: c == 'X')
+    radiators_d = runs_d(lambda c: c == 'F')
+    windows_d = runs_d(lambda c: c == 'W')
+    for i, (x, y, w, h) in enumerate(walls_d):
+        objs.append(prim(f"{stem}_wall{sfx}_{i+1}", "platform_wall",
+                         wx(x, w), d_floor_top, wz(y, h),
+                         w*CELL, WALL_H, h*CELL, (0.58, 0.60, 0.66, 1.0)))
+    for i, (x, y, w, h) in enumerate(windows_d):
+        objs.append(prim(f"{stem}_window{sfx}_{i+1}", "platform_wall",
+                         wx(x, w), d_floor_top, wz(y, h),
+                         w*CELL, WALL_H, h*CELL, (0.45, 0.70, 1.00, 0.22)))
+    for i, (x, y, w, h) in enumerate(thrusters_d):
+        objs.append(prim(f"{stem}_thruster_grid{sfx}_{i+1}", "platform_wall",
+                         wx(x, w), d_floor_top, wz(y, h),
+                         w*CELL, WALL_H, h*CELL, (0.42, 0.24, 0.13, 1.0)))
+    for i, (x, y, w, h) in enumerate(radiators_d):
+        objs.append(prim(f"{stem}_radiator{sfx}_{i+1}", "platform_wall",
+                         wx(x, w), d_floor_top, wz(y, h),
+                         w*CELL, WALL_H, h*CELL, (0.66, 0.71, 0.76, 1.0)))
+
+    # sockets: same ledger, same prices, one storey up
+    sclaimed_d = set()
+    for y in range(H):
+        for x in range(W):
+            c = cD(x, y)
+            if c not in ROLE or (x, y) in sclaimed_d: continue
+            blob, stack = [], [(x, y)]
+            while stack:
+                px, py = stack.pop()
+                if (px, py) in sclaimed_d or cD(px, py) != c: continue
+                sclaimed_d.add((px, py)); blob.append((px, py))
+                stack += [(px+1,py),(px-1,py),(px,py+1),(px,py-1)]
+            xs = [p[0] for p in blob]; ys = [p[1] for p in blob]
+            sx0, sy0 = min(xs), min(ys)
+            sw, sh = max(xs)-sx0+1, max(ys)-sy0+1
+            role, color = ROLE[c]
+            counts[role] = counts.get(role, 0) + 1
+            socket_cost += SOCKET_PRICE.get(role, 500.0)
+            objs.append(prim(f"Socket_{role}_{counts[role]}", "socket_marker",
+                             wx(sx0, sw), d_floor_top, wz(sy0, sh),
+                             sw*CELL, 0.06, sh*CELL, color, collide=False))
+            objs[-1]["metadata"] = {"socket": role}
+
+    # this storey's roof -- the next storey's floor
+    roof_counts_d = {}
+    hole_d = SHAFT_HOLES.get(dk, set())
+    for r in rooms_d:
+        for (x, y, w, h) in rects_over([c for c in r['cells'] if c not in hole_d]):
+            roof_counts_d[r['name']] = roof_counts_d.get(r['name'], 0) + 1
+            objs.append(prim(f"{stem}_{r['name']}_roof_{roof_counts_d[r['name']]}",
+                             "platform_slab", wx(x, w), d_wall_top, wz(y, h),
+                             w*CELL, FLOOR_T, h*CELL, ROOF_COL))
+    solid_cells_d = [(x, y) for y in range(H) for x in range(W) if solidD(cD(x, y))]
+    for i, (x, y, w, h) in enumerate(rects_over(solid_cells_d)):
+        objs.append(prim(f"{stem}_frame_roof{sfx}_{i+1}", "platform_slab",
+                         wx(x, w), d_wall_top, wz(y, h),
+                         w*CELL, FLOOR_T, h*CELL, ROOF_COL))
+    if dk + 1 < len(layers):
+        over_d = [(x, y) for y in range(H) for x in range(W)
+                  if lcell(dk + 1, x, y) != '_' and not lhull(dk, x, y)]
+        for i, (x, y, w, h) in enumerate(rects_over(over_d)):
+            objs.append(prim(f"{stem}_overhang_d{dk+2}_{i+1}", "platform_slab",
+                             wx(x, w), d_wall_top, wz(y, h),
+                             w*CELL, FLOOR_T, h*CELL, ROOF_COL))
+    print(f"storey {dk+1}: {len(rooms_d)} room(s) "
+          f"{[r['name'] for r in rooms_d]}, {len(walls_d)} wall runs")
 
 # ---- the material is applied and the bill is drawn up ----------------------
 # Structural pieces (plates, frames, walls, windows) take the material's

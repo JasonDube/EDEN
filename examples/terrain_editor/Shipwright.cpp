@@ -36,6 +36,7 @@ const ToolDef kTools[] = {
     {'X', "Exhaust",  IM_COL32(225, 115,  45, 255)},
     {'P', "Reactor",  IM_COL32(238, 202,  58, 255)},
     {'F', "Radiator", IM_COL32(168, 180, 190, 255)},
+    {'L', "Lift",     IM_COL32(170, 220,  90, 255)},   // elevator: serves every open floor in its column
     {'A', "Mast",     IM_COL32(235, 170,  60, 255)},
     {'_', "Erase",    IM_COL32( 25,  26,  30, 255)},
 };
@@ -158,7 +159,7 @@ float planVolume(const std::vector<char>& cells, const std::vector<float>& loft)
         const char c = cells[i];
         const int y = static_cast<int>(i) / Shipwright::kW;
         if (c == '#' || c == 'W' || c == 'X' || c == 'F') v += 2.0f * loft[y] * 2.0f + kFloorCell;
-        else if (c == '.' || c == 'D' || isRoom(c)) v += kFloorCell;
+        else if (c == '.' || c == 'D' || c == 'L' || isRoom(c)) v += kFloorCell;
     }
     return v;
 }
@@ -170,21 +171,43 @@ constexpr float kLoftMin = 2.0f;       // low enough to duck through, no lower
 constexpr float kLoftMax = 9.0f;       // three storeys of superstructure
 
 Shipwright::Shipwright()
-    : m_cells(kW * kH, '_'), m_topside(kW * kH, '_'), m_loft(kH, kLoftDefault) {}
+    : m_cells(kW * kH, '_'), m_loft(kH, kLoftDefault) {}
 
 void Shipwright::clear() {
     std::fill(m_cells.begin(), m_cells.end(), '_');
-    std::fill(m_topside.begin(), m_topside.end(), '_');
+    m_upper.clear();
+    m_level = 0;
     std::fill(m_loft.begin(), m_loft.end(), kLoftDefault);
     m_overlay.clear();
     m_overlayIdx.clear();
     m_status = "cleared";
 }
 
+std::vector<char>& Shipwright::activeLayer() {
+    return m_level == 0 ? m_cells : m_upper[m_level - 1];
+}
+
+bool Shipwright::supportedBelow(int i) const {
+    // A storey cell bears weight only if the storey below has structure
+    // there (a mast is not a floor).
+    if (m_level <= 0) return true;
+    const std::vector<char>& below = (m_level == 1) ? m_cells : m_upper[m_level - 2];
+    return below[i] != '_' && below[i] != 'A';
+}
+
 void Shipwright::paint(int x, int y, char c) {
     if (x < 0 || x >= kW || y < 0 || y >= kH) return;
-    m_cells[y * kW + x] = c;
-    if (m_mirrorX) m_cells[y * kW + (kW - 1 - x)] = c;
+    // THE STROKE LANDS ON THE LEVEL YOU ARE STANDING ON. (The first storey
+    // build shipped with this function still writing deck 1 directly -- a
+    // patch that silently failed to apply -- so every "upstairs" wall fell
+    // through the floor. The field prints below are its parole officer.)
+    // Overhangs are legal (the roof below pours out to be this floor) --
+    // the anchor law is enforced by the live red rings and the yard, not
+    // the brush.
+    auto& L = activeLayer();
+    auto set = [&](int i) { L[i] = c; };
+    set(y * kW + x);
+    if (m_mirrorX) set(y * kW + (kW - 1 - x));
     // An edit voids the survey -- the colours must never lie.
     m_overlay.clear();
     m_overlayIdx.clear();
@@ -193,10 +216,11 @@ void Shipwright::paint(int x, int y, char c) {
 void Shipwright::fillFloor(int x, int y) {
     // THE BUCKET: flood the clicked empty region with floor tiles -- but
     // only if it is truly enclosed. A flood that reaches the grid edge has
-    // found a hole in the hull, and pouring floor into open space is how
-    // you tile a star system, so it refuses and says where it stands.
+    // found a hole in the hull; on a storey, spilling onto unsupported air
+    // is falling off the roof. Either way it refuses and says so.
     if (x < 0 || x >= kW || y < 0 || y >= kH) return;
-    if (m_cells[y * kW + x] != '_') {
+    auto& L = activeLayer();
+    if (L[y * kW + x] != '_') {
         m_status = "the bucket wants an empty cell inside closed walls";
         return;
     }
@@ -205,7 +229,7 @@ void Shipwright::fillFloor(int x, int y) {
     bool leaks = false;
     while (!stack.empty()) {
         const int j = stack.back(); stack.pop_back();
-        if (j < 0 || j >= kW * kH || seen[j] || m_cells[j] != '_') continue;
+        if (j < 0 || j >= kW * kH || seen[j] || L[j] != '_') continue;
         seen[j] = 1;
         region.push_back(j);
         const int jx = j % kW, jy = j / kW;
@@ -219,24 +243,13 @@ void Shipwright::fillFloor(int x, int y) {
         m_status = "not enclosed -- the flood reached the grid edge; close her walls first";
         return;
     }
-    for (const int j : region) m_cells[j] = '.';
+    for (const int j : region) L[j] = '.';
     m_status = std::to_string(region.size()) + " cells floored";
     // An edit voids the survey, same as any brush stroke.
     m_overlay.clear();
     m_overlayIdx.clear();
 }
 
-void Shipwright::paintTop(int x, int y, bool on) {
-    if (x < 0 || x >= kW || y < 0 || y >= kH) return;
-    // The mast law, enforced at the brush: a mast must stand over hull. The
-    // topside view only lets you plant where the roof is real.
-    auto set = [this](int i, bool o) {
-        if (o && m_cells[i] == '_') return;
-        m_topside[i] = o ? 'A' : '_';
-    };
-    set(y * kW + x, on);
-    if (m_mirrorX) set(y * kW + (kW - 1 - x), on);
-}
 
 std::string Shipwright::serialize() const {
     std::string out;
@@ -265,13 +278,14 @@ std::string Shipwright::serialize() const {
                       m_revolveRibs ? " ribs" : "");
         out += rev;
     }
-    // The topside layer travels only when something stands up there.
-    bool masted = false;
-    for (char c : m_topside) if (c == 'A') { masted = true; break; }
-    if (masted) {
-        out += "topside:\n";
+    // Storeys travel only when something stands on them.
+    for (size_t k = 0; k < m_upper.size(); ++k) {
+        bool any = false;
+        for (char c : m_upper[k]) if (c != '_') { any = true; break; }
+        if (!any) continue;
+        out += "deck" + std::to_string(k + 2) + ":\n";
         for (int y = 0; y < kH; ++y) {
-            out.append(&m_topside[y * kW], kW);
+            out.append(&m_upper[k][y * kW], kW);
             out.push_back('\n');
         }
     }
@@ -280,14 +294,17 @@ std::string Shipwright::serialize() const {
 
 bool Shipwright::deserialize(const std::string& text) {
     std::vector<char> next(kW * kH, '_');
-    std::vector<char> top(kW * kH, '_');
+    std::vector<std::vector<char>> upper;
     std::istringstream in(text);
     std::string line;
     int y = 0, yt = 0;
-    bool inTopside = false;
+    int layer = 0;                      // 0 = deck 1; k = upper[k-1]
     std::vector<float> loft(kH, kLoftDefault);
     float revolve = 0.0f;
     bool revGlass = false, rev360 = false, revRibs = false;
+    auto legalLower = [](char c) {
+        return c=='#'||c=='.'||c=='D'||c=='W'||c=='X'||c=='F'||c=='L'||isRoom(c);
+    };
     while (std::getline(in, line)) {
         if (line.empty()) continue;
         if (line.rfind("loft:", 0) == 0) {
@@ -302,25 +319,40 @@ bool Shipwright::deserialize(const std::string& text) {
             revRibs  = line.find(" ribs")  != std::string::npos;
             continue;
         }
-        if (line.rfind("topside:", 0) == 0) { inTopside = true; continue; }
-        if (inTopside) {
+        // 'deckN:' opens storey N's grid; 'topside:' is the legacy alias
+        // for deck 2 (it only ever carried masts).
+        int wantLayer = -1;
+        if (line.rfind("topside:", 0) == 0) wantLayer = 1;
+        else if (line.rfind("deck", 0) == 0 && line.find(':') != std::string::npos)
+            wantLayer = std::atoi(line.c_str() + 4) - 1;
+        if (wantLayer >= 1) {
+            layer = wantLayer;
+            while (static_cast<int>(upper.size()) < layer)
+                upper.emplace_back(kW * kH, '_');
+            yt = 0;
+            continue;
+        }
+        if (layer > 0) {
             if (yt >= kH) continue;
-            for (int x = 0; x < kW && x < static_cast<int>(line.size()); ++x)
-                top[yt * kW + x] = (line[x] == 'A') ? 'A' : '_';
+            auto& g = upper[layer - 1];
+            for (int x = 0; x < kW && x < static_cast<int>(line.size()); ++x) {
+                const char c = line[x];
+                g[yt * kW + x] = (c == 'A' || legalLower(c)) ? c : '_';
+            }
             ++yt;
             continue;
         }
         if (y >= kH) continue;
         for (int x = 0; x < kW && x < static_cast<int>(line.size()); ++x) {
             const char c = line[x];
-            next[y * kW + x] =
-                (c=='#'||c=='.'||c=='D'||c=='W'||c=='X'||c=='F'||isRoom(c)) ? c : '_';
+            next[y * kW + x] = legalLower(c) ? c : '_';
         }
         ++y;
     }
     if (y == 0) return false;
     m_cells = std::move(next);
-    m_topside = std::move(top);
+    m_upper = std::move(upper);
+    m_level = 0;
     m_loft = std::move(loft);
     m_revolveOn = revolve > 0.0f;
     if (m_revolveOn) {
@@ -387,26 +419,23 @@ void Shipwright::render(bool& open) {
     }
 
     // ---- tools -------------------------------------------------------------
-    // In roof mode only Mast and Erase are live -- the deck brushes grey out
-    // and wait below. Picking the Mast brush from deck view walks you up to
-    // the roof by itself.
+    // Every brush lives on every storey. Picking Mast at ground level climbs
+    // to the first roof by itself -- masts do not stand in rooms.
     for (const auto& t : kTools) {
         ImGui::PushID(t.label);
         const bool active = (m_tool == t.c);
-        const bool waits = m_roofView && t.c != 'A' && t.c != '_';
-        if (waits) ImGui::PushStyleVar(ImGuiStyleVar_Alpha, 0.35f);
         ImGui::PushStyleColor(ImGuiCol_Button, t.fill);
         ImGui::PushStyleColor(ImGuiCol_ButtonHovered, t.fill);
         ImGui::PushStyleColor(ImGuiCol_ButtonActive, t.fill);
-        if (ImGui::Button(active ? "##sel" : "##tool", ImVec2(22, 22)) && !waits) {
+        if (ImGui::Button(active ? "##sel" : "##tool", ImVec2(22, 22))) {
             m_tool = t.c;
-            if (t.c == 'A' && !m_roofView) {
-                m_roofView = true;
-                m_status = "the roof closes over -- LMB stands a mast on the hull, Erase or RMB strikes it";
+            if (t.c == 'A' && m_level == 0) {
+                if (m_upper.empty()) m_upper.emplace_back(kW * kH, '_');
+                m_level = 1;
+                m_status = "up to the roof -- masts stand on lids; every other brush draws deck 2 here";
             }
         }
         ImGui::PopStyleColor(3);
-        if (waits) ImGui::PopStyleVar();
         if (active) {
             ImVec2 a = ImGui::GetItemRectMin(), b = ImGui::GetItemRectMax();
             ImGui::GetWindowDrawList()->AddRect(a, b, IM_COL32(255, 255, 120, 255), 0, 0, 2.5f);
@@ -419,13 +448,13 @@ void Shipwright::render(bool& open) {
     ImGui::NewLine();
     ImGui::Checkbox("Mirror (ships are symmetric)", &m_mirrorX);
     ImGui::SameLine(0, 20);
-    // ROOF is a hard mode (the user's chosen shape): the grid shows the
-    // hull closed over, only Mast and Erase work up there, and the deck
-    // waits below until the roof lifts.
-    const bool topsideMode = m_roofView;
-    if (topsideMode)
+    // Storeys: level 0 is deck 1; above it, the slate is the roof of the
+    // storey below and every brush draws the next deck on it.
+    const bool upperMode = (m_level > 0);
+    if (upperMode)
         ImGui::TextColored(ImVec4(0.92f, 0.67f, 0.24f, 1.0f),
-                           "ROOF -- Mast stands a mast on the hull, Erase or RMB strikes it; the decks wait below");
+                           "DECK %d -- drawing on the roof below; walls make rooms up here too, A stands a mast",
+                           m_level + 1);
     else
         ImGui::TextDisabled("LMB paint   RMB erase   top of grid = BOW");
 
@@ -455,7 +484,14 @@ void Shipwright::render(bool& open) {
 
     // The displacement line: hull weight as drawn, the materials bill, how
     // many stock engines she will demand, and how she answers a stock helm.
-    const float vol = planVolume(m_cells, m_loft);
+    float volAll = planVolume(m_cells, m_loft);
+    {
+        // Storeys weigh too: classic wall height everywhere above deck 1,
+        // plus each storey's roof riding as its floor plate contribution.
+        std::vector<float> flat(kH, kLoftDefault);
+        for (const auto& L : m_upper) volAll += planVolume(L, flat);
+    }
+    const float vol = volAll;
     const HullMat& mat = kHullMats[m_material - 1];
     const float tons = vol * mat.density;
     if (tons > 0.0f) {
@@ -474,14 +510,24 @@ void Shipwright::render(bool& open) {
                            m_revolveOn ? "materials %.0f CR + shell" : "materials %.0f CR",
                            vol * mat.priceU3);
         int nSockets = 0;
-        const float socketBill = planSocketBill(m_cells, nSockets);
+        float socketBill = planSocketBill(m_cells, nSockets);
+        for (const auto& L : m_upper) {
+            int nUp = 0;
+            socketBill += planSocketBill(L, nUp);
+            nSockets += nUp;
+        }
         if (nSockets > 0) {
             ImGui::SameLine(0, 18);
             ImGui::TextColored(ImVec4(0.95f, 0.75f, 0.40f, 1.0f),
                                "%d socket%s %.0f CR", nSockets, nSockets == 1 ? "" : "s", socketBill);
         }
         int nMasts = 0;
-        const float mastBill = planMastBill(m_topside, nMasts);
+        float mastBill = 0.0f;
+        for (const auto& L : m_upper) {
+            int nUp = 0;
+            mastBill += planMastBill(L, nUp);
+            nMasts += nUp;
+        }
         if (nMasts > 0) {
             ImGui::SameLine(0, 18);
             ImGui::TextColored(ImVec4(0.92f, 0.62f, 0.25f, 1.0f),
@@ -654,34 +700,40 @@ void Shipwright::render(bool& open) {
     ImGui::SameLine();
     ImGui::BeginGroup();
     if (ImGui::Button(m_sideView ? "Side\nview\n[on]" : "Side\nview")) m_sideView = !m_sideView;
-    // THE ROOF BUTTON -- restored by decree ("you took away the button that
-    // makes us see the roof"). The toggle is the door in and out of roof
-    // mode; the Mast brush is merely a second way in.
-    ImGui::PushStyleColor(ImGuiCol_Button,
-                          m_roofView ? IM_COL32(150, 105, 40, 255) : IM_COL32(60, 62, 72, 255));
-    if (ImGui::Button(m_roofView ? "Roof\n[on]" : "Roof")) {
-        m_roofView = !m_roofView;
-        if (m_roofView) {
-            if (m_tool != 'A' && m_tool != '_') m_tool = 'A';
-            m_status = "the roof closes over -- LMB stands a mast on the hull, Erase or RMB strikes it";
-        } else {
-            if (m_tool == 'A') m_tool = '#';
-            m_status = "the roof lifts away -- the deck plan is yours again";
+    // THE STAIRCASE: Roof goes up a storey (creating it if it is new),
+    // Down comes back. Each level is a full deck plan standing on the
+    // roof of the one below.
+    {
+        bool hasStructure = false;
+        {
+            auto& L = m_level == 0 ? m_cells : m_upper[m_level - 1];
+            for (char c : L) if (c != '_') { hasStructure = true; break; }
+        }
+        ImGui::PushStyleColor(ImGuiCol_Button, IM_COL32(150, 105, 40, 255));
+        if (ImGui::Button("Roof\n^") && hasStructure) {
+            if (static_cast<int>(m_upper.size()) < m_level + 1)
+                m_upper.emplace_back(kW * kH, '_');
+            ++m_level;
+            m_status = "roofed -- deck " + std::to_string(m_level + 1) +
+                       " draws on this lid; Roof again to keep climbing, Down to descend";
+        }
+        ImGui::PopStyleColor();
+        if (ImGui::IsItemHovered() && !hasStructure)
+            ImGui::SetTooltip("draw something on this deck before roofing it");
+        ImGui::Text("d.%d", m_level + 1);
+        if (m_level > 0 && ImGui::Button("Down\nv")) {
+            --m_level;
+            m_status = "down to deck " + std::to_string(m_level + 1);
         }
     }
-    ImGui::PopStyleColor();
-    if (ImGui::IsItemHovered() && !m_roofView)
-        ImGui::SetTooltip("close the roof over the decks and stand masts on the crown");
     ImGui::EndGroup();
     const ImVec2 mouse = ImGui::GetIO().MousePos;
     const int hx = static_cast<int>((mouse.x - origin.x) / cell);
     const int hy = static_cast<int>((mouse.y - origin.y) / cell);
 
     if (hovered && hx >= 0 && hx < kW && hy >= 0 && hy < kH) {
-        if (topsideMode) {
-            if (ImGui::IsMouseDown(ImGuiMouseButton_Left))
-                paintTop(hx, hy, m_tool != '_');
-            if (ImGui::IsMouseDown(ImGuiMouseButton_Right)) paintTop(hx, hy, false);
+        if (m_tool == 'A' && m_level == 0) {
+            // never paints; the palette click already climbed. Belt and braces.
         } else if (m_tool == '~') {
             // The bucket fills on the CLICK, not the drag -- one pour per
             // click. With mirror on, the mirrored bay gets its own pour if
@@ -704,17 +756,26 @@ void Shipwright::render(bool& open) {
             const char c = m_cells[y * kW + x];
             const ImVec2 a(origin.x + x * cell, origin.y + y * cell);
             const ImVec2 b(a.x + cell - 1.0f, a.y + cell - 1.0f);
-            if (topsideMode) {
-                // The closed hull: structure reads a shade prouder than the
-                // roofed rooms, the void stays void, masts burn amber.
-                const char t = m_topside[y * kW + x];
-                ImU32 fill = c == '_' ? IM_COL32(25, 26, 30, 255)
-                           : (c=='#'||c=='W'||c=='X'||c=='F') ? IM_COL32(118, 122, 132, 255)
-                                                              : IM_COL32(92, 96, 106, 255);
-                if (t == 'A') fill = IM_COL32(235, 170, 60, 255);
+            if (upperMode) {
+                // The roof below reads as slate (structure a shade prouder
+                // than roofed rooms, void stays void); this storey's own
+                // cells paint over it in their brush colours.
+                const std::vector<char>& below =
+                    (m_level == 1) ? m_cells : m_upper[m_level - 2];
+                const char bc = below[y * kW + x];
+                const char uc = m_upper[m_level - 1][y * kW + x];
+                // The lid stays DARK so this storey's strokes stay bright
+                // -- the first slate wash made fresh walls look "greyed
+                // out" and read as a bug, not a level.
+                ImU32 fill = (bc == '_' || bc == 'A') ? IM_COL32(25, 26, 30, 255)
+                           : (bc=='#'||bc=='W'||bc=='X'||bc=='F') ? IM_COL32(66, 70, 80, 255)
+                                                                  : IM_COL32(48, 51, 60, 255);
+                if (uc != '_') fill = fillFor(uc);
                 dl->AddRectFilled(a, b, fill);
-                if (t == 'A')
-                    dl->AddText(ImVec2(a.x + 3.0f, a.y), IM_COL32(0, 0, 0, 200), "A");
+                if (uc != '_' && uc != '#' && uc != '.') {
+                    const char label[2] = {uc, 0};
+                    dl->AddText(ImVec2(a.x + 3.0f, a.y), IM_COL32(0, 0, 0, 200), label);
+                }
                 continue;
             }
             const int ri = m_overlayIdx.empty() ? -1 : m_overlayIdx[y * kW + x];
@@ -729,15 +790,16 @@ void Shipwright::render(bool& open) {
     // red ring here and a refusal at the yard -- the drafting table warns
     // before the money does.
     int orphanX = 0, orphanF = 0, coldP = 0;
-    auto neighbourIs = [this](int x, int y, char want) {
-        return (x + 1 < kW && m_cells[y * kW + x + 1] == want) ||
-               (x > 0     && m_cells[y * kW + x - 1] == want) ||
-               (y + 1 < kH && m_cells[(y + 1) * kW + x] == want) ||
-               (y > 0     && m_cells[(y - 1) * kW + x] == want);
+    const std::vector<char>& lawLayer = m_level == 0 ? m_cells : m_upper[m_level - 1];
+    auto neighbourIs = [&lawLayer](int x, int y, char want) {
+        return (x + 1 < kW && lawLayer[y * kW + x + 1] == want) ||
+               (x > 0     && lawLayer[y * kW + x - 1] == want) ||
+               (y + 1 < kH && lawLayer[(y + 1) * kW + x] == want) ||
+               (y > 0     && lawLayer[(y - 1) * kW + x] == want);
     };
     for (int y = 0; y < kH; ++y) {
         for (int x = 0; x < kW; ++x) {
-            const char c = m_cells[y * kW + x];
+            const char c = lawLayer[y * kW + x];
             const bool badX = (c == 'X' && !neighbourIs(x, y, 'E'));
             const bool badF = (c == 'F' && !neighbourIs(x, y, 'P'));
             if (!badX && !badF) continue;
@@ -746,16 +808,37 @@ void Shipwright::render(bool& open) {
             dl->AddRect(a, ImVec2(a.x + cell, a.y + cell), IM_COL32(255, 60, 60, 230), 0, 0, 2.0f);
         }
     }
-    // THE MAST LAW, checked live: a deck edit can pull the hull out from
-    // under a standing mast -- the orphan gets a red ring topside and a
-    // refusal at the yard.
+    // THE SUPPORT LAW, checked live: an edit below can pull the floor out
+    // from under a storey -- every unsupported cell up here gets a red
+    // ring and a refusal at the yard.
+    // THE ANCHOR LAW, checked live: overhangs are welcome, but every
+    // connected piece of a storey must touch the storey below somewhere.
+    // Unanchored islands ring red, whole.
     int orphanA = 0;
-    for (int y = 0; y < kH; ++y) {
-        for (int x = 0; x < kW; ++x) {
-            if (m_topside[y * kW + x] != 'A' || m_cells[y * kW + x] != '_') continue;
-            ++orphanA;
-            if (topsideMode) {
-                const ImVec2 a(origin.x + x * cell, origin.y + y * cell);
+    if (upperMode) {
+        const std::vector<char>& below =
+            (m_level == 1) ? m_cells : m_upper[m_level - 2];
+        const auto& L = m_upper[m_level - 1];
+        std::vector<char> seenC(kW * kH, 0);
+        for (int i0 = 0; i0 < kW * kH; ++i0) {
+            if (seenC[i0] || L[i0] == '_' || L[i0] == 'A') continue;
+            std::vector<int> comp, stk{i0};
+            bool anchored = false;
+            while (!stk.empty()) {
+                const int j = stk.back(); stk.pop_back();
+                if (j < 0 || j >= kW * kH || seenC[j] || L[j] == '_' || L[j] == 'A') continue;
+                seenC[j] = 1; comp.push_back(j);
+                if (below[j] != '_' && below[j] != 'A') anchored = true;
+                const int jx = j % kW, jy = j / kW;
+                if (jx > 0)      stk.push_back(j - 1);
+                if (jx < kW - 1) stk.push_back(j + 1);
+                if (jy > 0)      stk.push_back(j - kW);
+                if (jy < kH - 1) stk.push_back(j + kW);
+            }
+            if (anchored) continue;
+            orphanA += static_cast<int>(comp.size());
+            for (const int j : comp) {
+                const ImVec2 a(origin.x + (j % kW) * cell, origin.y + (j / kW) * cell);
                 dl->AddRect(a, ImVec2(a.x + cell, a.y + cell),
                             IM_COL32(255, 60, 60, 230), 0, 0, 2.0f);
             }
@@ -945,7 +1028,7 @@ void Shipwright::render(bool& open) {
         ImGui::Separator();
         if (orphanA > 0)
             ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f),
-                               "%d mast%s standing over no hull -- an antenna rooted in vacuum hails nobody; the yard will refuse",
+                               "%d cell%s float with no anchor -- an overhang must touch the storey below somewhere; the yard will refuse",
                                orphanA, orphanA == 1 ? "" : "s");
         if (orphanX > 0)
             ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f),
