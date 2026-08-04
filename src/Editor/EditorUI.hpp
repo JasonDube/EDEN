@@ -53,6 +53,7 @@ using WaterChangedCallback = std::function<void(float level, float amplitude, fl
 // you knew. Everything that grows on the ground gets settings here from now on.
 using FoliageChangedCallback = std::function<void(bool grassEnabled, float spacingFeet, float height)>;
 using ApplyBuildingTextureCallback = std::function<void(SceneObject* target, int textureIndex, float uScale, float vScale, int rotationDeg)>;
+using FloodShipTextureCallback = std::function<std::string(int textureIndex, float uScale, float vScale, int rotationDeg)>;
 using ApplyFaceTextureCallback = std::function<void(int textureIndex, float uScale, float vScale, int rotationDeg)>;
 using FileNewCallback = std::function<void()>;
 using NewTestLevelCallback = std::function<void()>;
@@ -535,6 +536,7 @@ public:
     void clearApplyOpacity() { m_wantApplyOpacity = false; }
     float getBlockOpacity() const { return m_blockOpacity; }
     void setApplyBuildingTextureCallback(ApplyBuildingTextureCallback cb) { m_onApplyBuildingTexture = std::move(cb); }
+    void setFloodShipTextureCallback(FloodShipTextureCallback cb) { m_onFloodShipTexture = std::move(cb); }
     void setApplyFaceTextureCallback(ApplyFaceTextureCallback cb) { m_onApplyFaceTexture = std::move(cb); }
     void setFaceSelectedIndices(const std::vector<int>& indices) { m_faceSelectedIndices = indices; }
     // Zone system
@@ -898,6 +900,8 @@ private:
     float m_blockOpacity = 1.0f;
     bool m_wantApplyOpacity = false;
     ApplyBuildingTextureCallback m_onApplyBuildingTexture;
+    FloodShipTextureCallback m_onFloodShipTexture;
+    std::string m_floodNote;
     ApplyFaceTextureCallback m_onApplyFaceTexture;
     std::vector<int> m_faceSelectedIndices;  // Object indices from Alt+click face selection
 };

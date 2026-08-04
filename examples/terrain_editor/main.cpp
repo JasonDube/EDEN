@@ -5286,6 +5286,56 @@ private:
         });
 
         m_editorUI.setApplyBuildingTextureCallback([this](SceneObject* target, int textureIndex, float uScale, float vScale, int rotationDeg) {
+            applyBuildingTextureToObject(target, textureIndex, uScale, vScale, rotationDeg);
+        });
+
+        // THE SHIP FLOOD ("i find a texture then click flood fill and every
+        // block on the ship gets that texture"): one press paints every
+        // opaque plate of one ship -- the selected piece's ship if one is
+        // selected, else the nearest hull. Glass keeps its glaze; sockets
+        // are painted intent, not plates.
+        m_editorUI.setFloodShipTextureCallback([this](int texIndex, float uScale, float vScale, int rotationDeg) -> std::string {
+            if (texIndex < 0 || texIndex >= static_cast<int>(m_buildingTextures.size()))
+                return "pick a texture swatch first";
+            auto shipPrefix = [](const std::string& n) -> std::string {
+                if (n.rfind("ship", 0) != 0) return {};
+                size_t i = 4;
+                while (i < n.size() && std::isdigit(static_cast<unsigned char>(n[i]))) ++i;
+                if (i == 4 || i >= n.size() || n[i] != '_') return {};
+                return n.substr(0, i + 1);
+            };
+            std::string prefix;
+            if (m_selectedBuildPiece >= 0 &&
+                m_selectedBuildPiece < static_cast<int>(m_sceneObjects.size()) &&
+                m_sceneObjects[m_selectedBuildPiece])
+                prefix = shipPrefix(m_sceneObjects[m_selectedBuildPiece]->getName());
+            if (prefix.empty()) {
+                float best = std::numeric_limits<float>::max();
+                const glm::vec3 cam = m_camera.getPosition();
+                for (auto& so : m_sceneObjects) {
+                    if (!so) continue;
+                    const std::string p = shipPrefix(so->getName());
+                    if (p.empty()) continue;
+                    const float d = glm::length(so->getTransform().getPosition() - cam);
+                    if (d < best) { best = d; prefix = p; }
+                }
+            }
+            if (prefix.empty()) return "no ship in the world -- BUILD one first";
+            int painted = 0;
+            for (auto& so : m_sceneObjects) {
+                if (!so || so->getName().rfind(prefix, 0) != 0) continue;
+                const std::string& bt = so->getBuildingType();
+                if (bt != "platform_wall" && bt != "platform_slab") continue;
+                if (so->isTransparent()) continue;   // the glaze survives the flood
+                applyBuildingTextureToObject(so.get(), texIndex, uScale, vScale, rotationDeg);
+                ++painted;
+            }
+            return "flooded " + std::to_string(painted) + " plates of " +
+                   prefix.substr(0, prefix.size() - 1) + " with " +
+                   m_buildingTextures[texIndex].name;
+        });
+
+        m_applyBuildingTextureImpl = [this](SceneObject* target, int textureIndex, float uScale, float vScale, int rotationDeg) {
             if (!target || textureIndex < 0 || textureIndex >= static_cast<int>(m_buildingTextures.size())) return;
             auto& tex = m_buildingTextures[textureIndex];
             // For alpha textures, boost transparency toward frosted glass (min 40% opaque)
@@ -5379,7 +5429,7 @@ private:
                 target->setMeshData(vertices, target->getIndices());
                 m_modelRenderer->updateVertices(target->getBufferHandle(), vertices);
             }
-        });
+        };
 
         // Face-aware texture application (Alt+click face selection → apply to all selected blocks)
         m_editorUI.setApplyFaceTextureCallback([this](int textureIndex, float uScale, float vScale, int rotationDeg) {
@@ -7805,6 +7855,16 @@ private:
     // recipe as the Building Textures panel's apply (whiten vertex colours,
     // per-face-dimension UV tiling), callable by code. The yard uses it to
     // paint exhaust grids at birth.
+    // One apply routine, two doors: the panel's Apply button and the ship
+    // flood both go through here. Stored as a std::function because the
+    // body was born a lambda and keeps its capture of the UI's UV offsets.
+    std::function<void(SceneObject*, int, float, float, int)> m_applyBuildingTextureImpl;
+    void applyBuildingTextureToObject(SceneObject* target, int textureIndex,
+                                      float uScale, float vScale, int rotationDeg) {
+        if (m_applyBuildingTextureImpl)
+            m_applyBuildingTextureImpl(target, textureIndex, uScale, vScale, rotationDeg);
+    }
+
     bool applyBuildingTextureByName(SceneObject* target, const std::string& texName,
                                     float uScale, float vScale) {
         for (auto& tex : m_buildingTextures) {
@@ -9258,7 +9318,14 @@ private:
             // gizmo) and captured mouse-look; WASD and the double-space
             // creative-fly work in both. Edge-look is retired -- it never
             // fired reliably and nobody's hands know it.
-            if (m_showSiloConfig) {
+            // WHOEVER HOLDS THE BRUSH OWNS RMB: while an H/V/room/frame
+            // brush is in hand, right-click keeps its brush meaning
+            // (delete-under-cursor, the akelba build loop) and must NOT
+            // also flip the mouse -- the double duty was deleting selected
+            // pieces mid-paint ("sometimes if i rmb... it will delete it").
+            // No brush, pure painting: RMB is only the look toggle.
+            if (m_showSiloConfig && !m_hSlabBrushMode && !m_wallBrushMode &&
+                !m_roomBrushMode && !m_framePlacementMode) {
                 static bool wasPaintRmb = false;
                 const bool rmb = Input::isMouseButtonDown(Input::MOUSE_RIGHT);
                 if (rmb && !wasPaintRmb && !ImGui::GetIO().WantCaptureMouse) {
@@ -23368,10 +23435,23 @@ private:
             // announces its yard address under the clock -- so a wrong block
             // can be reported by name and traced to the loop that made it.
             // No F10 needed; the hitbox view keeps its own hover tag.
-            const SceneObject* selPiece =
-                (m_isPlayMode && m_selectedBuildPiece >= 0
-                 && m_selectedBuildPiece < static_cast<int>(m_sceneObjects.size()))
-                    ? m_sceneObjects[m_selectedBuildPiece].get() : nullptr;
+            // TWO selection systems wear the yellow box: the painter's
+            // m_selectedBuildPiece AND regular play's salvage/interaction
+            // select (which reaches building pieces at 20m). The first
+            // version read only the painter's, so names vanished the moment
+            // the painter closed -- the user caught it.
+            const SceneObject* selPiece = nullptr;
+            if (m_isPlayMode) {
+                if (m_selectedBuildPiece >= 0 &&
+                    m_selectedBuildPiece < static_cast<int>(m_sceneObjects.size()) &&
+                    m_sceneObjects[m_selectedBuildPiece])
+                    selPiece = m_sceneObjects[m_selectedBuildPiece].get();
+                else if (m_selectedSalvageIndex >= 0 &&
+                         m_selectedSalvageIndex < static_cast<int>(m_sceneObjects.size()) &&
+                         m_sceneObjects[m_selectedSalvageIndex] &&
+                         m_sceneObjects[m_selectedSalvageIndex]->isSelected())
+                    selPiece = m_sceneObjects[m_selectedSalvageIndex].get();
+            }
             float nameW = selPiece
                 ? ImGui::CalcTextSize(selPiece->getName().c_str()).x : 0.0f;
             float hudWindowWidth =

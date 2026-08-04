@@ -3950,6 +3950,25 @@ void EditorUI::renderBuildingTextureWindow() {
         ImGui::TextDisabled("Select a building part to apply");
     }
 
+    // THE SHIP FLOOD: one press, every plate of one ship wears the lit
+    // swatch. No selection needed -- the nearest hull takes it (or the
+    // selected piece's ship, if one is selected). Glass keeps its glaze.
+    if (hasTexture && m_onFloodShipTexture) {
+        ImGui::Separator();
+        ImGui::PushStyleColor(ImGuiCol_Button, IM_COL32(45, 110, 140, 255));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, IM_COL32(55, 135, 170, 255));
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive, IM_COL32(40, 95, 120, 255));
+        if (ImGui::Button("Flood the whole ship", ImVec2(-1, 0))) {
+            m_floodNote = m_onFloodShipTexture(m_selectedBuildingTexture,
+                                               m_buildingTexScaleU, m_buildingTexScaleV,
+                                               m_buildingTexRotation);
+        }
+        ImGui::PopStyleColor(3);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("every opaque plate of the nearest ship takes this texture\n(uses the scale/rotation set above; windows keep their glass)");
+        if (!m_floodNote.empty()) ImGui::TextWrapped("%s", m_floodNote.c_str());
+    }
+
     ImGui::End();
 }
 
