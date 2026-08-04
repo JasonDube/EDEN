@@ -652,14 +652,38 @@ protected:
             // spawning keeps a failed purchase side-effect free.
             const float cost = j.value("cost_cr", 0.0f);
             const std::string matName = j.value("material", std::string("hull material"));
-            if (cost > m_playerCredits) {
+            // RE-LAY: if this table already built a ship, the new build
+            // REPLACES her in place -- old hull refunded, new hull charged,
+            // so iterating costs the delta, not double. The loop the user
+            // asked for: draw, build, walk, come back, draw more, build.
+            bool reLay = false;
+            if (!m_lastBuildPrefix.empty()) {
+                for (auto& so : m_sceneObjects) {
+                    if (so && so->getName().rfind(m_lastBuildPrefix, 0) == 0) {
+                        reLay = true;
+                        break;
+                    }
+                }
+            }
+            const float effCost = cost - (reLay ? m_lastBuildCost : 0.0f);
+            if (effCost > m_playerCredits) {
                 char msg[160];
                 std::snprintf(msg, sizeof msg,
                               "the yard wants %.0f CR of %s -- you hold %.0f",
-                              cost, matName.c_str(), m_playerCredits);
+                              effCost, matName.c_str(), m_playerCredits);
                 return msg;
             }
-            m_playerCredits -= cost;
+            m_playerCredits -= effCost;
+            if (reLay) {
+                // The old hull goes to the breakers before the new one
+                // rises -- highest index first so the erases do not shift
+                // the survivors under our feet.
+                for (int i = static_cast<int>(m_sceneObjects.size()) - 1; i >= 0; --i) {
+                    if (m_sceneObjects[i] &&
+                        m_sceneObjects[i]->getName().rfind(m_lastBuildPrefix, 0) == 0)
+                        deleteObject(i);
+                }
+            }
 
             // Footprint of the ship, to drop her centred ahead of the player.
             glm::vec3 mn(1e9f), mx(-1e9f);
@@ -674,6 +698,7 @@ protected:
             const float halfSpan = std::max(mx.x - mn.x, mx.z - mn.z) * 0.5f;
             const glm::vec3 eye = m_camera.getPosition();
             glm::vec3 drop = eye + fwd * (halfSpan + 8.0f);
+            if (reLay) { drop.x = m_lastBuildDrop.x; drop.z = m_lastBuildDrop.z; }
             float gy = m_terrain.getHeightAt(drop.x, drop.z);
             if (gy < -1000.0f) gy = 0.0f;
             // DECKS ARE GROUND TOO: building while standing on a capital's
@@ -768,11 +793,20 @@ protected:
                 ++made;
             }
             updateSceneObjectsList();
-            char done[200];
-            std::snprintf(done, sizeof done,
-                          "raised %d pieces of %s for %.0f CR (%.0f CR left) -- "
-                          "F5 out and in gives her collision, then walk aboard",
-                          made, matName.c_str(), cost, m_playerCredits);
+            m_lastBuildPrefix = prefix;
+            m_lastBuildDrop = drop;
+            m_lastBuildCost = cost;
+            char done[220];
+            if (reLay)
+                std::snprintf(done, sizeof done,
+                              "re-laid in place: %d pieces of %s (%+.0f CR delta, %.0f CR left) -- "
+                              "F5 out and in refreshes her collision",
+                              made, matName.c_str(), -effCost, m_playerCredits);
+            else
+                std::snprintf(done, sizeof done,
+                              "raised %d pieces of %s for %.0f CR (%.0f CR left) -- "
+                              "F5 out and in gives her collision, then walk aboard",
+                              made, matName.c_str(), cost, m_playerCredits);
             return done;
         });
 
@@ -783,6 +817,8 @@ protected:
         m_shipwright.setScrapHook([this]() -> std::string {
             if (m_vessel.isFlying())
                 return "she is FLYING -- land her before the breakers get her";
+            m_lastBuildPrefix.clear();
+            m_lastBuildCost = 0.0f;   // scrapped hulls refund nothing; fresh keel next
             auto isYardPiece = [](const std::string& n) {
                 if (n.rfind("ship", 0) != 0) return false;
                 size_t i = 4;
@@ -9707,9 +9743,13 @@ private:
         // Free-cam toggle (C in play mode). Detached from player, noclip, smooth slow motion.
         {
             bool cKeyDown = Input::isKeyDown(Input::KEY_C);
+            // C yields to block surgery: with a block selected, C is the
+            // roll key -- deselect (click empty space) to get the free-cam
+            // toggle back.
             bool canToggle = m_isPlayMode && !imguiWantsKeyboard &&
                              !m_inConversation && !m_quickChatMode &&
-                             !m_inPanelFocusMode;
+                             !m_inPanelFocusMode &&
+                             selectedBlockForSurgery() == nullptr;
             if (canToggle && cKeyDown && !m_wasFreeCamCKeyDown) {
                 m_freeCamMode = !m_freeCamMode;
                 if (m_freeCamMode) {
@@ -16594,6 +16634,135 @@ private:
                 deleteObject(m_selectedBuildPiece);
                 m_selectedBuildPiece = -1;
                 m_editorUI.setSelectedObjectIndex(-1);
+            }
+        }
+
+        // BLOCK SURGERY (user's key map): with a block selected -- either
+        // selection system, same pair the name line reads -- the arrows
+        // move it. Plain Up/Down: rise and sink. Ctrl+arrows: the other
+        // four ways, world X and Z. Quarter-unit taps; hold and it walks
+        // after a beat. Z/X/C tap one-way rotation (yaw/pitch/roll) at the
+        // build snap angle. Hands off while typing, conversing, or flying
+        // (the manifest is frozen). The wall brush (V) keeps its OWN arrow
+        // meanings from the akelba days, so it owns the arrows while in
+        // hand; the painter's cursor-out rotate scheme owns X/Z there.
+        if (m_isPlayMode && !ImGui::GetIO().WantCaptureKeyboard &&
+            !m_wallBrushMode &&
+            !m_inConversation && !m_quickChatMode && !m_vessel.isFlying()) {
+            SceneObject* nudgeObj = selectedBlockForSurgery();
+            if (nudgeObj) {
+                const bool ctrl = Input::isKeyDown(Input::KEY_LEFT_CONTROL) ||
+                                  Input::isKeyDown(Input::KEY_RIGHT_CONTROL);
+                const bool up = Input::isKeyDown(Input::KEY_UP);
+                const bool dn = Input::isKeyDown(Input::KEY_DOWN);
+                const bool lf = ctrl && Input::isKeyDown(Input::KEY_LEFT);
+                const bool rt = ctrl && Input::isKeyDown(Input::KEY_RIGHT);
+                static float nudgeHeld = 0.0f;
+                static float nudgeRepeat = 0.0f;
+                float step = 0.0f;
+                if (up || dn || lf || rt) {
+                    if (nudgeHeld == 0.0f) {
+                        step = 0.25f;              // the tap
+                        nudgeRepeat = 0.35f;       // grace before the walk
+                    } else {
+                        nudgeRepeat -= deltaTime;
+                        if (nudgeRepeat <= 0.0f) {
+                            step = 0.25f;          // the walk: ~10 steps/s
+                            nudgeRepeat = 0.1f;
+                        }
+                    }
+                    nudgeHeld += deltaTime;
+                } else {
+                    nudgeHeld = 0.0f;
+                }
+                if (step > 0.0f) {
+                    glm::vec3 p = nudgeObj->getTransform().getPosition();
+                    if (ctrl) {
+                        if (up) p.z -= step;
+                        if (dn) p.z += step;
+                        if (lf) p.x -= step;
+                        if (rt) p.x += step;
+                    } else {
+                        if (up) p.y += step;
+                        if (dn) p.y -= step;
+                    }
+                    nudgeObj->getTransform().setPosition(p);
+                }
+                // Z/X/C: one-way rotation taps -- one direction is enough,
+                // the circle comes around. Stand down while the painter's
+                // own cursor-out rotate scheme is live (it owns X/Z there).
+                if (!(m_showSiloConfig && m_playModeCursorVisible)) {
+                    glm::vec3 e = nudgeObj->getEulerRotation();
+                    bool rot = false;
+                    if (Input::isKeyPressed(Input::KEY_Z)) { e.y += m_buildRotateSnap; rot = true; }
+                    if (Input::isKeyPressed(Input::KEY_X)) { e.x += m_buildRotateSnap; rot = true; }
+                    if (Input::isKeyPressed(Input::KEY_C)) { e.z += m_buildRotateSnap; rot = true; }
+                    if (rot) {
+                        e.x = std::fmod(e.x, 360.0f);
+                        e.y = std::fmod(e.y, 360.0f);
+                        e.z = std::fmod(e.z, 360.0f);
+                        nudgeObj->setEulerRotation(e);
+                    }
+                }
+            }
+        }
+
+        // THE LIFT ("press E to operate it when in proximity"): E beside a
+        // lift car sends it to the next stop up its shaft; from the top it
+        // returns to the bottom. The car glides; the walk path's ground-
+        // follow keeps the rider's boots on it both directions.
+        if (m_isPlayMode && !ImGui::GetIO().WantCaptureKeyboard &&
+            !m_inConversation && !m_quickChatMode && !m_vessel.isFlying() &&
+            Input::isKeyPressed(Input::KEY_E)) {
+            const glm::vec3 eye = m_camera.getPosition();
+            for (auto& so : m_sceneObjects) {
+                if (!so) continue;
+                const auto& md = so->getModelMetadata();
+                auto it = md.find("lift_stops");
+                if (it == md.end()) continue;
+                const AABB wb = so->getWorldBounds();
+                const glm::vec3 c = (wb.min + wb.max) * 0.5f;
+                if (std::abs(eye.x - c.x) > (wb.max.x - wb.min.x) * 0.5f + 2.0f) continue;
+                if (std::abs(eye.z - c.z) > (wb.max.z - wb.min.z) * 0.5f + 2.0f) continue;
+                if (eye.y < wb.min.y - 1.0f || eye.y > wb.max.y + 3.0f) continue;
+                std::vector<float> stops;
+                std::stringstream ss(it->second);
+                std::string tok;
+                while (std::getline(ss, tok, ',')) stops.push_back(std::strtof(tok.c_str(), nullptr));
+                if (stops.size() < 2) continue;
+                const float cur = so->getTransform().getPosition().y;
+                size_t next = 0;
+                for (size_t si = 0; si < stops.size(); ++si)
+                    if (cur < stops[si] - 0.05f) { next = si; break; }
+                    else next = (si + 1) % stops.size();
+                m_liftTarget[so->getName()] = stops[next];
+                char lm[80];
+                std::snprintf(lm, sizeof lm, "lift: floor %d of %d",
+                              (int)next + 1, (int)stops.size());
+                m_screenMessage = lm;
+                m_screenMessageTimer = 2.0f;
+                break;
+            }
+        }
+        // Cars in motion glide toward their called floor.
+        if (!m_liftTarget.empty()) {
+            for (auto it = m_liftTarget.begin(); it != m_liftTarget.end();) {
+                SceneObject* car = nullptr;
+                for (auto& so : m_sceneObjects)
+                    if (so && so->getName() == it->first) { car = so.get(); break; }
+                if (!car) { it = m_liftTarget.erase(it); continue; }
+                glm::vec3 p = car->getTransform().getPosition();
+                const float dy = it->second - p.y;
+                const float step = 2.6f * deltaTime;
+                if (std::abs(dy) <= step) {
+                    p.y = it->second;
+                    car->getTransform().setPosition(p);
+                    it = m_liftTarget.erase(it);
+                } else {
+                    p.y += (dy > 0 ? step : -step);
+                    car->getTransform().setPosition(p);
+                    ++it;
+                }
             }
         }
 
@@ -32815,6 +32984,22 @@ private:
         m_editorUI.setFaceSelectedIndices(std::vector<int>(uniqueIndices.begin(), uniqueIndices.end()));
     }
 
+    // The block under surgery: whichever selection system holds one -- the
+    // painter's build piece, or regular play's salvage select. The arrow
+    // nudge, Z/X/C rotation, and the free-cam's C-yield all read this.
+    SceneObject* selectedBlockForSurgery() {
+        if (m_selectedBuildPiece >= 0 &&
+            m_selectedBuildPiece < static_cast<int>(m_sceneObjects.size()) &&
+            m_sceneObjects[m_selectedBuildPiece])
+            return m_sceneObjects[m_selectedBuildPiece].get();
+        if (m_selectedSalvageIndex >= 0 &&
+            m_selectedSalvageIndex < static_cast<int>(m_sceneObjects.size()) &&
+            m_sceneObjects[m_selectedSalvageIndex] &&
+            m_sceneObjects[m_selectedSalvageIndex]->isSelected())
+            return m_sceneObjects[m_selectedSalvageIndex].get();
+        return nullptr;
+    }
+
     void pickObjectAtMouse() {
         m_selectedFaces.clear();
         syncFaceSelectionToUI();
@@ -33439,6 +33624,13 @@ private:
     Shipwright m_shipwright;
     bool m_showShipwright = false;
     int m_shipSerial = 0;   // shared by BUILD SHIP and fleet launches
+    // THE ITERATION LOOP ("create a few levels, play, come back, more
+    // levels..."): BUILD re-lays its own last ship in place instead of
+    // parking a new hull beside it every round. Scrap clears the anchor.
+    std::string m_lastBuildPrefix;      // "shipN_" of the table's last build
+    glm::vec3   m_lastBuildDrop{0.0f};  // where she stands; rebuilds land here
+    float       m_lastBuildCost = 0.0f; // refunded when she is re-laid
+    std::unordered_map<std::string, float> m_liftTarget;  // car name -> called floor y
 
     enum class PlayerZone { Silo, Basement, Outside, Void };
     PlayerZone m_playerZone = PlayerZone::Outside;
