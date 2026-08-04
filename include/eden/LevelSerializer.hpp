@@ -1,6 +1,7 @@
 #pragma once
 
 #include <string>
+#include <map>
 #include <vector>
 #include <memory>
 #include <glm/glm.hpp>
@@ -102,6 +103,11 @@ struct LevelData {
         float patrolSpeed = 5.0f;    // Movement speed for FOLLOW_PATH
         std::string description;     // Description visible to AI perception
         std::string buildingType;    // Building catalog type (e.g. "farm")
+        // The metadata rail: material/density/armor, socket roles, lift
+        // stops, mast comms -- whatever a piece declares about itself.
+        // Yard-built ships carry their systems here; a level that drops
+        // it strands every lift and socket aboard (the Journeyman lesson).
+        std::map<std::string, std::string> metadata;
         std::vector<std::pair<glm::vec3, glm::vec3>> wallHoles; // (min, max) pairs for collision skip
         std::vector<BehaviorData> behaviors;  // Behaviors for this object
 

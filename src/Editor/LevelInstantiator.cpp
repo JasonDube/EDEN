@@ -337,6 +337,11 @@ void LevelInstantiator::spawnObjects(const LevelData& data, const SpawnContext& 
         if (!objData.description.empty()) {
             obj->setDescription(objData.description);
         }
+        if (!objData.metadata.empty()) {
+            std::unordered_map<std::string, std::string> md(objData.metadata.begin(),
+                                                            objData.metadata.end());
+            obj->setModelMetadata(md);
+        }
         if (!objData.buildingType.empty()) {
             obj->setBuildingType(objData.buildingType);
         }

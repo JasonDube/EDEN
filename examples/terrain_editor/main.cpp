@@ -16737,38 +16737,50 @@ private:
                 const auto& md = so->getModelMetadata();
                 auto it = md.find("lift_stops");
                 const AABB wb = so->getWorldBounds();
+                // STOPS ARE SPACINGS, NOT ADDRESSES. The metadata's stop
+                // list is absolute at build time, but the ship flies --
+                // "frozen up in the sky where you let go of the helm" the
+                // absolute numbers point at dirt far below. Everything here
+                // is relative to where the CAR is right now, plus a tracked
+                // notion of which floor the car occupies (fresh builds park
+                // at the bottom). Altitude-blind by construction; a MOVING
+                // ship mid-ride is the space-travel era's problem.
                 std::vector<float> stops;
                 std::stringstream ss(it->second);
                 std::string tok;
                 while (std::getline(ss, tok, ',')) stops.push_back(std::strtof(tok.c_str(), nullptr));
-                // The rider's floor: the stop nearest the feet (eye - 1.65).
+                if (stops.size() >= 2) {
+                std::vector<float> rel(stops.size());
+                for (size_t si = 0; si < stops.size(); ++si) rel[si] = stops[si] - stops[0];
+                int& carFloorRef = m_liftCarFloor[so->getName()];
+                const int carFloor = std::clamp(carFloorRef, 0, (int)stops.size() - 1);
+                const float carY = so->getTransform().getPosition().y;
+                // The rider's floor, judged by height RELATIVE to the car.
                 const float feetY = eye.y - 1.65f;
+                const float feetRel = (feetY - carY) + rel[carFloor];
                 size_t myFloor = 0;
-                for (size_t si = 1; si < stops.size(); ++si)
-                    if (std::abs(stops[si] - feetY) < std::abs(stops[myFloor] - feetY))
+                for (size_t si = 1; si < rel.size(); ++si)
+                    if (std::abs(rel[si] - feetRel) < std::abs(rel[myFloor] - feetRel))
                         myFloor = si;
-                const bool atServedFloor =
-                    stops.size() >= 2 && std::abs(stops[myFloor] - feetY) <= 2.5f;
-                if (atServedFloor) {
-                const float cur = so->getTransform().getPosition().y;
-                const bool aboard = std::abs(cur - stops[myFloor]) < 0.6f &&
-                                    eye.y > wb.max.y - 0.5f;
+                if (std::abs(rel[myFloor] - feetRel) <= 2.5f) {
                 char lm[96];
-                if (!aboard && std::abs(cur - stops[myFloor]) > 0.6f) {
-                    // CALL: the car is elsewhere -- bring it to this floor.
-                    m_liftTarget[so->getName()] = stops[myFloor];
+                if ((int)myFloor != carFloor) {
+                    // CALL: the car is on another floor -- bring it here.
+                    m_liftTarget[so->getName()] = carY + (rel[myFloor] - rel[carFloor]);
+                    carFloorRef = (int)myFloor;
                     std::snprintf(lm, sizeof lm, "lift called to floor %d of %d",
                                   (int)myFloor + 1, (int)stops.size());
                 } else {
-                    // RIDE: aboard (or beside the waiting car) -- next floor
-                    // up; the top wraps back to the bottom.
-                    size_t next = (myFloor + 1) % stops.size();
-                    m_liftTarget[so->getName()] = stops[next];
+                    // RIDE: next floor up; the top wraps back to the bottom.
+                    const size_t next = (myFloor + 1) % stops.size();
+                    m_liftTarget[so->getName()] = carY + (rel[next] - rel[carFloor]);
+                    carFloorRef = (int)next;
                     std::snprintf(lm, sizeof lm, "lift: floor %d of %d",
                                   (int)next + 1, (int)stops.size());
                 }
                 m_screenMessage = lm;
                 m_screenMessageTimer = 2.0f;
+                }
                 }
             }
         }
@@ -28687,6 +28699,17 @@ private:
         m_isPlayMode = true;
         m_playModeDebug = false;          // Debug visuals off by default
         m_selectedFaces.clear();
+        // LEGS ON ENTRY. If the camera arrives in Fly mode (left over from
+        // the editor or a painter session), play mode has NO mover: the
+        // controller refuses non-Walk, and the painter's fly path is off --
+        // "I could look around with the mouse, but I couldn't move",
+        // hovering over the Journeyman's disc. Same ghost the painter-exit
+        // fix buried once; this is the other door it haunted. Walk mode,
+        // and the ground-snap below will find a floor.
+        if (!m_showSiloConfig && m_camera.getMovementMode() == MovementMode::Fly) {
+            m_camera.setMovementMode(MovementMode::Walk);
+            m_camera.setNoClip(false);
+        }
         if (m_playRTSCamera) {
             m_playModeCursorVisible = true;   // RTS: cursor always visible
             Input::setMouseCaptured(false);   // RTS: never capture the mouse
@@ -33659,6 +33682,7 @@ private:
     glm::vec3   m_lastBuildDrop{0.0f};  // where she stands; rebuilds land here
     float       m_lastBuildCost = 0.0f; // refunded when she is re-laid
     std::unordered_map<std::string, float> m_liftTarget;  // car name -> called floor y
+    std::unordered_map<std::string, int> m_liftCarFloor;  // car name -> floor it occupies
 
     enum class PlayerZone { Silo, Basement, Outside, Void };
     PlayerZone m_playerZone = PlayerZone::Outside;

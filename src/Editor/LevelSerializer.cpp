@@ -521,6 +521,11 @@ bool LevelSerializer::save(const std::string& filepath,
             }
             if (!obj->getBuildingType().empty()) {
                 objJson["buildingType"] = obj->getBuildingType();
+                if (!obj->getModelMetadata().empty()) {
+                    json md = json::object();
+                    for (const auto& [k, v] : obj->getModelMetadata()) md[k] = v;
+                    objJson["metadata"] = md;
+                }
             }
 
             // Wall holes (for collision skip and frame snapping)
@@ -961,6 +966,9 @@ bool LevelSerializer::load(const std::string& filepath, LevelData& outData) {
                 obj.patrolSpeed = objJson.value("patrolSpeed", 5.0f);
                 obj.description = objJson.value("description", std::string(""));
                 obj.buildingType = objJson.value("buildingType", std::string(""));
+                if (objJson.contains("metadata") && objJson["metadata"].is_object())
+                    for (auto& [k, v] : objJson["metadata"].items())
+                        obj.metadata[k] = v.is_string() ? v.get<std::string>() : v.dump();
 
                 // Primitive object support
                 obj.primitiveType = objJson.value("primitiveType", 0);
