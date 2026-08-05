@@ -3177,11 +3177,14 @@ protected:
         // The fan shows what scrolling will actually reach: the favourites
         // ring when the held swatch lives on it, the library otherwise.
         std::vector<int> ring;
-        const bool heldIsFav = m_texInHand >= 0 &&
-            m_texFavs.count(infos[m_texInHand].name) > 0;
+        auto infoKey = [&](int ti) { return infos[ti].category + "/" + infos[ti].name; };
+        auto infoFav = [&](int ti) {
+            return m_texFavs.count(infoKey(ti)) || m_texFavs.count(infos[ti].name);
+        };
+        const bool heldIsFav = m_texInHand >= 0 && infoFav(m_texInHand);
         const bool fanFavs = !m_texRingAll && m_texFavs.size() >= 2 && heldIsFav;
         for (int ti = 0; ti < static_cast<int>(infos.size()); ++ti)
-            if (!fanFavs || m_texFavs.count(infos[ti].name))
+            if (!fanFavs || infoFav(ti))
                 ring.push_back(ti);
         int held = 0;
         for (int ri = 0; ri < static_cast<int>(ring.size()); ++ri)
@@ -3199,10 +3202,10 @@ protected:
             dl->AddRect(p0, p1, off == 0 ? IM_COL32(255, 235, 90, 255)
                                          : IM_COL32(160, 160, 170, 120),
                         3.0f, 0, off == 0 ? 2.5f : 1.0f);
-            if (m_texFavs.count(infos[ti].name))
+            if (infoFav(ti))
                 dl->AddText(ImVec2(p1.x - 11, p0.y - 3), IM_COL32(255, 120, 140, 255), "*");
         }
-        const std::string& nm = infos[m_texInHand].name;
+        const std::string nm = infoKey(m_texInHand);
         const ImVec2 ts = ImGui::CalcTextSize(nm.c_str());
         dl->AddRectFilled(ImVec2(cx - ts.x * 0.5f - 6, cy + 32),
                           ImVec2(cx + ts.x * 0.5f + 6, cy + 32 + ts.y + 6),
@@ -5444,7 +5447,7 @@ private:
             // share the rail.
             {
                 auto md = target->getModelMetadata();
-                md["tex"] = tex.name;
+                md["tex"] = tex.category + "/" + tex.name;
                 target->setModelMetadata(md);
             }
             // For alpha textures, boost transparency toward frosted glass (min 40% opaque)
@@ -7978,6 +7981,11 @@ private:
                                     float uScale, float vScale) {
         for (auto& tex : m_buildingTextures) {
             if (tex.name != texName) continue;
+            {   // paint has memory on this path too -- the eyedropper reads it
+                auto md = target->getModelMetadata();
+                md["tex"] = tex.category + "/" + tex.name;
+                target->setModelMetadata(md);
+            }
             auto pixels = tex.pixels;
             if (tex.hasAlpha) {
                 for (size_t pi = 3; pi < pixels.size(); pi += 4)
@@ -9822,6 +9830,7 @@ private:
             bool canToggle = m_isPlayMode && !imguiWantsKeyboard &&
                              !m_inConversation && !m_quickChatMode &&
                              !m_inPanelFocusMode &&
+                             m_devFly >= 0.5f &&
                              selectedBlockForSurgery() == nullptr;
             if (canToggle && cKeyDown && !m_wasFreeCamCKeyDown) {
                 m_freeCamMode = !m_freeCamMode;
@@ -9943,7 +9952,9 @@ private:
                         }
                     }
                 }
-                if (!handledSpin) {
+                if (!handledSpin && (m_showSiloConfig || m_devFly >= 0.5f)) {
+                    // The painter keeps its creative fly; plain play only
+                    // flies when the tilde says dev_fly = 1.
                     float groundHeight = heightQuery(m_camera.getPosition().x, m_camera.getPosition().z);
                     m_camera.onSpacePressed(groundHeight);
                 }
@@ -16911,7 +16922,7 @@ private:
                 const bool favMode = !m_texRingAll && m_texFavs.size() >= 2;
                 std::vector<int> ring;
                 for (int ti = 0; ti < static_cast<int>(m_buildingTextures.size()); ++ti)
-                    if (!favMode || m_texFavs.count(m_buildingTextures[ti].name))
+                    if (!favMode || texIsFav(ti))
                         ring.push_back(ti);
                 if (!ring.empty()) {
                     int pos = 0;
@@ -16927,9 +16938,10 @@ private:
             }
             // H hearts the held texture -- curate as you browse.
             if (Input::isKeyPressed(Input::KEY_H) && m_texInHand >= 0) {
-                const std::string& nm = m_buildingTextures[m_texInHand].name;
-                if (m_texFavs.count(nm)) {
+                const std::string nm = texKey(m_texInHand);
+                if (texIsFav(m_texInHand)) {
                     m_texFavs.erase(nm);
+                    m_texFavs.erase(m_buildingTextures[m_texInHand].name);  // legacy twin
                     m_screenMessage = nm + " struck from the favourites";
                 } else {
                     m_texFavs.insert(nm);
@@ -16962,19 +16974,38 @@ private:
                     int found = -1;
                     if (t != md.end())
                         for (int ti = 0; ti < static_cast<int>(m_buildingTextures.size()); ++ti)
-                            if (m_buildingTextures[ti].name == t->second) { found = ti; break; }
+                            if (texKey(ti) == t->second ||
+                                m_buildingTextures[ti].name == t->second) { found = ti; break; }
+                    if (found < 0 && hit->hasTextureData()) {
+                        // No tag (painted before paint had memory: random
+                        // skins, old panel work) -- identify the texture by
+                        // its own pixels. RGB only: alpha gets boosted on
+                        // apply and would never match the shelf copy.
+                        const auto& px = hit->getTextureData();
+                        for (int ti = 0; ti < static_cast<int>(m_buildingTextures.size()); ++ti) {
+                            const auto& lib = m_buildingTextures[ti];
+                            if (lib.pixels.size() != px.size() || px.size() < 4) continue;
+                            bool same = true;
+                            const size_t stride = std::max<size_t>(4, px.size() / 256 & ~size_t(3));
+                            for (size_t bi = 0; bi + 2 < px.size() && same; bi += stride) {
+                                if (px[bi] != lib.pixels[bi] || px[bi+1] != lib.pixels[bi+1] ||
+                                    px[bi+2] != lib.pixels[bi+2]) same = false;
+                            }
+                            if (same) { found = ti; break; }
+                        }
+                    }
                     if (found >= 0) {
                         m_texInHand = found;
                         m_texCarouselTimer = 2.5f;
                         // Sampling is an act of taste -- if you reached for
                         // it, it belongs in the palette.
-                        if (!m_texFavs.count(t->second)) {
-                            m_texFavs.insert(t->second);
+                        if (!texIsFav(found)) {
+                            m_texFavs.insert(texKey(found));
                             saveTexFavs();
-                            m_screenMessage = "in hand + hearted: " + t->second +
+                            m_screenMessage = "in hand + hearted: " + texKey(found) +
                                               " (" + std::to_string(m_texFavs.size()) + " held dear)";
                         } else {
-                            m_screenMessage = "in hand: " + t->second;
+                            m_screenMessage = "in hand: " + texKey(found);
                         }
                     } else {
                         m_screenMessage = "that plate holds no paint the roller remembers";
@@ -33912,9 +33943,33 @@ private:
     float m_texRotation = 0.0f;      // roller rotation, degrees
     float m_liftSpeed = 2.6f;        // lift glide, m/s
     float m_nudgeStep = 0.25f;       // block surgery arrow step, units
+    float m_devFly = 0.0f;           // flight is a privilege: 0 locks C-freecam
+                                     // and double-space fly (a small test pilot
+                                     // discovered both by donkeying around)
     bool m_devConsoleOpen = false;
     char m_devConsoleBuf[160] = {0};
     std::vector<std::string> m_devConsoleLog;
+    std::vector<std::string> m_devHistory;   // spoken commands, oldest first
+    int m_devHistoryPos = -1;                // -1 = composing fresh
+    static int devConsoleHistoryCb(ImGuiInputTextCallbackData* data) {
+        auto* self = static_cast<TerrainEditor*>(data->UserData);
+        if (self->m_devHistory.empty()) return 0;
+        const int n = static_cast<int>(self->m_devHistory.size());
+        if (data->EventKey == ImGuiKey_UpArrow) {
+            self->m_devHistoryPos = self->m_devHistoryPos < 0
+                ? n - 1 : std::max(0, self->m_devHistoryPos - 1);
+        } else if (data->EventKey == ImGuiKey_DownArrow) {
+            if (self->m_devHistoryPos < 0) return 0;
+            ++self->m_devHistoryPos;
+        } else return 0;
+        data->DeleteChars(0, data->BufTextLen);
+        if (self->m_devHistoryPos >= n) {
+            self->m_devHistoryPos = -1;      // walked past the newest: fresh line
+        } else {
+            data->InsertChars(0, self->m_devHistory[self->m_devHistoryPos].c_str());
+        }
+        return 0;
+    }
     struct DevParam { const char* name; float* value; float lo; float hi; const char* what; };
     std::vector<DevParam> devParams() {
         return {
@@ -33924,6 +33979,7 @@ private:
             {"lift_speed", &m_liftSpeed,       0.5f,  20.0f, "lift glide m/s"},
             {"nudge_step", &m_nudgeStep,       0.05f, 4.0f,  "arrow surgery step"},
             {"rot_snap",   &m_buildRotateSnap, 1.0f,  90.0f, "Z/X/C rotation snap degrees"},
+            {"dev_fly",    &m_devFly,          0.0f,  1.0f,  "1 = C freecam + double-space fly"},
         };
     }
     void devConsoleRun(const std::string& lineIn) {
@@ -34004,7 +34060,15 @@ private:
             ImGui::SetNextItemWidth(-1);
             ImGui::SetKeyboardFocusHere();
             if (ImGui::InputText("##devcmd", m_devConsoleBuf, sizeof m_devConsoleBuf,
-                                 ImGuiInputTextFlags_EnterReturnsTrue)) {
+                                 ImGuiInputTextFlags_EnterReturnsTrue |
+                                 ImGuiInputTextFlags_CallbackHistory,
+                                 &TerrainEditor::devConsoleHistoryCb, this)) {
+                if (m_devConsoleBuf[0]) {
+                    // history keeps every spoken command once per streak
+                    if (m_devHistory.empty() || m_devHistory.back() != m_devConsoleBuf)
+                        m_devHistory.push_back(m_devConsoleBuf);
+                }
+                m_devHistoryPos = -1;
                 devConsoleRun(m_devConsoleBuf);
                 m_devConsoleBuf[0] = 0;
             }
@@ -34020,6 +34084,15 @@ private:
     bool m_texFavsLoaded = false;
     std::string texFavPath() const {
         return std::string(CMAKE_SOURCE_DIR) + "/texture_favorites.txt";
+    }
+    // A texture's true address: shelf/name. Bare stems collide -- eleven
+    // shelves each grew their own plate_2 -- so identity is qualified, with
+    // bare legacy names still honoured on the way in.
+    std::string texKey(int ti) const {
+        return m_buildingTextures[ti].category + "/" + m_buildingTextures[ti].name;
+    }
+    bool texIsFav(int ti) const {
+        return m_texFavs.count(texKey(ti)) || m_texFavs.count(m_buildingTextures[ti].name);
     }
     void loadTexFavs() {
         if (m_texFavsLoaded) return;

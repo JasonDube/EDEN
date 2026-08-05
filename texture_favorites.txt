@@ -12,6 +12,7 @@ mirc_industrial_001
 mirc_industrial_002
 plate
 plate_101
+plate_104
 plate_105
 plate_107
 plate_108
@@ -30,6 +31,7 @@ plate_121
 plate_122
 plate_126
 plate_127
+plate_13
 plate_135
 plate_141
 plate_142
@@ -86,15 +88,20 @@ plate_28
 plate_29
 plate_3
 plate_31
+plate_32
 plate_33
 plate_35
 plate_38
 plate_4
+plate_42
 plate_44
+plate_45
 plate_47
 plate_5
+plate_52
 plate_53
 plate_6
+plate_64
 plate_65
 plate_69
 plate_70
