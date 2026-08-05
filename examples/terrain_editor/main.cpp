@@ -3161,6 +3161,68 @@ protected:
                     IM_COL32(240, 240, 245, 255), label.c_str());
     }
 
+    // THE ROLLER'S CAROUSEL: what's in hand, drawn as HUD -- display only,
+    // never a window, never the mouse. The held swatch sits above the
+    // hotbar line; while cycling, its neighbours fan out beside it.
+    void renderTexInHand() {
+        if (!m_isPlayMode || m_texInHand < 0) return;
+        const auto& infos = m_editorUI.getBuildingTextureInfos();
+        if (m_texInHand >= static_cast<int>(infos.size())) return;
+        const float w = static_cast<float>(getWindow().getWidth());
+        const float h = static_cast<float>(getWindow().getHeight());
+        auto* dl = ImGui::GetForegroundDrawList();
+        const bool fan = m_texCarouselTimer > 0.0f;
+        if (fan) m_texCarouselTimer -= ImGui::GetIO().DeltaTime;
+        const float cx = w * 0.5f, cy = h - 96.0f;
+        // The fan shows what scrolling will actually reach: the favourites
+        // ring when the held swatch lives on it, the library otherwise.
+        std::vector<int> ring;
+        const bool heldIsFav = m_texInHand >= 0 &&
+            m_texFavs.count(infos[m_texInHand].name) > 0;
+        const bool fanFavs = !m_texRingAll && m_texFavs.size() >= 2 && heldIsFav;
+        for (int ti = 0; ti < static_cast<int>(infos.size()); ++ti)
+            if (!fanFavs || m_texFavs.count(infos[ti].name))
+                ring.push_back(ti);
+        int held = 0;
+        for (int ri = 0; ri < static_cast<int>(ring.size()); ++ri)
+            if (ring[ri] == m_texInHand) { held = ri; break; }
+        const int n = static_cast<int>(ring.size());
+        const int span = fan ? std::min(3, (n - 1) / 2) : 0;
+        for (int off = -span; off <= span; ++off) {
+            const int ti = ring[((held + off) % n + n) % n];
+            const float size = off == 0 ? 52.0f : 34.0f;
+            const float x = cx + off * 46.0f - size * 0.5f;
+            const float y = cy - size * 0.5f;
+            const ImVec2 p0(x, y), p1(x + size, y + size);
+            if (infos[ti].descriptor)
+                dl->AddImage(reinterpret_cast<ImTextureID>(infos[ti].descriptor), p0, p1);
+            dl->AddRect(p0, p1, off == 0 ? IM_COL32(255, 235, 90, 255)
+                                         : IM_COL32(160, 160, 170, 120),
+                        3.0f, 0, off == 0 ? 2.5f : 1.0f);
+            if (m_texFavs.count(infos[ti].name))
+                dl->AddText(ImVec2(p1.x - 11, p0.y - 3), IM_COL32(255, 120, 140, 255), "*");
+        }
+        const std::string& nm = infos[m_texInHand].name;
+        const ImVec2 ts = ImGui::CalcTextSize(nm.c_str());
+        dl->AddRectFilled(ImVec2(cx - ts.x * 0.5f - 6, cy + 32),
+                          ImVec2(cx + ts.x * 0.5f + 6, cy + 32 + ts.y + 6),
+                          IM_COL32(0, 0, 0, 170), 4.0f);
+        dl->AddText(ImVec2(cx - ts.x * 0.5f, cy + 35),
+                    IM_COL32(255, 235, 90, 255), nm.c_str());
+        if (fan) {
+            char hintBuf[160];
+            std::snprintf(hintBuf, sizeof hintBuf,
+                          "%s   Ctrl+scroll library / Shift+scroll favourites   H heart   F paint   Shift+F flood   MMB sample",
+                          m_texCycling ? (m_texRingAll ? "shopping the LIBRARY -- tap Shift to lock in"
+                                                       : "browsing FAVOURITES -- tap Shift to lock in")
+                                       : "Shift+scroll to browse");
+            const char* hint = hintBuf;
+            const ImVec2 hs = ImGui::CalcTextSize(hint);
+            dl->AddText(ImVec2(cx - hs.x * 0.5f, cy - 52),
+                        IM_COL32(200, 200, 210, 200), hint);
+        }
+    }
+
     // Parse the ServerManager slot a server-rack object controls from its
     // targetLevel ("server://N"). Returns -1 if it isn't a tagged server.
     int serverIndexOf(const SceneObject* o) const {
@@ -3358,6 +3420,8 @@ protected:
         renderNewLevelDialog();   // available in both edit and play mode
         renderEditBuildPanel();   // edit-mode Build tools panel
         renderHitboxNameTag();    // F10: name the block under the cursor
+        renderTexInHand();        // the roller's held-texture carousel
+        renderDevConsole();       // tilde: direct parameter surgery
 
         if (m_isPlayMode) {
             renderPlayModeUI();
@@ -5330,7 +5394,7 @@ private:
         // opaque plate of one ship -- the selected piece's ship if one is
         // selected, else the nearest hull. Glass keeps its glaze; sockets
         // are painted intent, not plates.
-        m_editorUI.setFloodShipTextureCallback([this](int texIndex, float uScale, float vScale, int rotationDeg) -> std::string {
+        m_floodShipFn = [this](int texIndex, float uScale, float vScale, int rotationDeg) -> std::string {
             if (texIndex < 0 || texIndex >= static_cast<int>(m_buildingTextures.size()))
                 return "pick a texture swatch first";
             auto shipPrefix = [](const std::string& n) -> std::string {
@@ -5369,11 +5433,20 @@ private:
             return "flooded " + std::to_string(painted) + " plates of " +
                    prefix.substr(0, prefix.size() - 1) + " with " +
                    m_buildingTextures[texIndex].name;
-        });
+        };
+        m_editorUI.setFloodShipTextureCallback(m_floodShipFn);
 
         m_applyBuildingTextureImpl = [this](SceneObject* target, int textureIndex, float uScale, float vScale, int rotationDeg) {
             if (!target || textureIndex < 0 || textureIndex >= static_cast<int>(m_buildingTextures.size())) return;
             auto& tex = m_buildingTextures[textureIndex];
+            // The piece remembers its paint -- the roller's eyedropper (MMB)
+            // reads this tag back. Merge, never replace: lifts and materials
+            // share the rail.
+            {
+                auto md = target->getModelMetadata();
+                md["tex"] = tex.name;
+                target->setModelMetadata(md);
+            }
             // For alpha textures, boost transparency toward frosted glass (min 40% opaque)
             auto pixels = tex.pixels;
             if (tex.hasAlpha) {
@@ -16662,12 +16735,12 @@ private:
                 float step = 0.0f;
                 if (up || dn || lf || rt) {
                     if (nudgeHeld == 0.0f) {
-                        step = 0.25f;              // the tap
+                        step = m_nudgeStep;        // the tap
                         nudgeRepeat = 0.35f;       // grace before the walk
                     } else {
                         nudgeRepeat -= deltaTime;
                         if (nudgeRepeat <= 0.0f) {
-                            step = 0.25f;          // the walk: ~10 steps/s
+                            step = m_nudgeStep;    // the walk: ~10 steps/s
                             nudgeRepeat = 0.1f;
                         }
                     }
@@ -16784,6 +16857,146 @@ private:
                 }
             }
         }
+        // THE ROLLER ("apply textures in play mode... without dislodging
+        // the mouse"): a texture is a thing you HOLD. Shift+scroll cycles
+        // the library in hand, F paints the block under the crosshair,
+        // Shift+F floods the whole ship, MMB eyedrops off any painted
+        // block. The carousel below is display-only.
+        if (m_isPlayMode && !m_inConversation && !m_quickChatMode &&
+            !m_showSiloConfig && !m_playModeCursorVisible &&
+            !ImGui::GetIO().WantCaptureKeyboard) {
+            loadTexFavs();
+            const bool shiftHeldTex = Input::isKeyDown(Input::KEY_LEFT_SHIFT) ||
+                                      Input::isKeyDown(Input::KEY_RIGHT_SHIFT);
+            const bool ctrlHeldTex = Input::isKeyDown(Input::KEY_LEFT_CONTROL) ||
+                                     Input::isKeyDown(Input::KEY_RIGHT_CONTROL);
+            const float texScroll = Input::getScrollDelta();
+            // THE LAZY CYCLE: Shift+scroll opens browsing mode; after that
+            // the bare wheel keeps cycling, hands off Shift. Tapping Shift
+            // again locks the choice in. (m_texCycleArmed = shift has been
+            // released since entering, so the opening chord can't also be
+            // the closing tap.)
+            static bool wasShiftTex = false;
+            if (m_texCycling) {
+                if (!shiftHeldTex) m_texCycleArmed = true;
+                if (shiftHeldTex && !ctrlHeldTex && !wasShiftTex && m_texCycleArmed &&
+                    texScroll == 0.0f) {
+                    m_texCycling = false;
+                    m_screenMessage = m_texInHand >= 0
+                        ? ("locked in: " + m_buildingTextures[m_texInHand].name)
+                        : "browsing closed";
+                    m_screenMessageTimer = 1.5f;
+                }
+                if (m_texCycling) m_texCarouselTimer = std::max(m_texCarouselTimer, 0.4f);
+            }
+            wasShiftTex = shiftHeldTex;
+            if ((shiftHeldTex || ctrlHeldTex || m_texCycling) && texScroll != 0.0f &&
+                !m_buildingTextures.empty()) {
+                if ((shiftHeldTex || ctrlHeldTex) && !m_texCycling) {
+                    m_texCycling = true;
+                    m_texCycleArmed = false;
+                }
+                // Favourites are the working palette; the full library is a
+                // Ctrl away. No favourites yet -> the full library, so the
+                // first session still works.
+                // THE STICKY RING: modifiers pick the department, the bare
+                // wheel stays lazy inside it. Ctrl+scroll -> the library,
+                // and it STAYS the library hands-free; Shift+scroll -> the
+                // favourites, likewise. (Held-modifier rings meant dropping
+                // Ctrl snapped you back into the two-favourite bounce.)
+                // One favourite is a colour, not a palette: favourites only
+                // become a ring at two.
+                if (ctrlHeldTex) m_texRingAll = true;
+                else if (shiftHeldTex) m_texRingAll = false;
+                const bool favMode = !m_texRingAll && m_texFavs.size() >= 2;
+                std::vector<int> ring;
+                for (int ti = 0; ti < static_cast<int>(m_buildingTextures.size()); ++ti)
+                    if (!favMode || m_texFavs.count(m_buildingTextures[ti].name))
+                        ring.push_back(ti);
+                if (!ring.empty()) {
+                    int pos = 0;
+                    for (int ri = 0; ri < static_cast<int>(ring.size()); ++ri)
+                        if (ring[ri] >= m_texInHand) { pos = ri; break; }
+                    const bool onRing = m_texInHand >= 0 && pos < (int)ring.size() &&
+                                        ring[pos] == m_texInHand;
+                    if (onRing || m_texInHand < 0)
+                        pos = (pos + (texScroll < 0 ? 1 : -1) + (int)ring.size()) % (int)ring.size();
+                    m_texInHand = ring[pos];
+                    m_texCarouselTimer = 2.5f;
+                }
+            }
+            // H hearts the held texture -- curate as you browse.
+            if (Input::isKeyPressed(Input::KEY_H) && m_texInHand >= 0) {
+                const std::string& nm = m_buildingTextures[m_texInHand].name;
+                if (m_texFavs.count(nm)) {
+                    m_texFavs.erase(nm);
+                    m_screenMessage = nm + " struck from the favourites";
+                } else {
+                    m_texFavs.insert(nm);
+                    m_screenMessage = nm + " is a favourite now (" +
+                                      std::to_string(m_texFavs.size()) + " held dear)";
+                }
+                saveTexFavs();
+                m_screenMessageTimer = 2.0f;
+                m_texCarouselTimer = 2.0f;
+            }
+            // The aimed block: crosshair ray against platform pieces.
+            auto aimedPiece = [this]() -> SceneObject* {
+                const glm::vec3 o = m_camera.getPosition();
+                const glm::vec3 d = m_camera.getFront();
+                SceneObject* best = nullptr;
+                float bestD = 30.0f;
+                for (auto& so : m_sceneObjects) {
+                    if (!so || !so->isVisible()) continue;
+                    const auto& bt = so->getBuildingType();
+                    if (bt != "platform_wall" && bt != "platform_slab") continue;
+                    const float t = so->getWorldBounds().intersect(o, d);
+                    if (t >= 0.0f && t < bestD) { bestD = t; best = so.get(); }
+                }
+                return best;
+            };
+            if (Input::isMouseButtonPressed(Input::MOUSE_MIDDLE)) {
+                if (SceneObject* hit = aimedPiece()) {
+                    const auto& md = hit->getModelMetadata();
+                    auto t = md.find("tex");
+                    int found = -1;
+                    if (t != md.end())
+                        for (int ti = 0; ti < static_cast<int>(m_buildingTextures.size()); ++ti)
+                            if (m_buildingTextures[ti].name == t->second) { found = ti; break; }
+                    if (found >= 0) {
+                        m_texInHand = found;
+                        m_texCarouselTimer = 2.5f;
+                        // Sampling is an act of taste -- if you reached for
+                        // it, it belongs in the palette.
+                        if (!m_texFavs.count(t->second)) {
+                            m_texFavs.insert(t->second);
+                            saveTexFavs();
+                            m_screenMessage = "in hand + hearted: " + t->second +
+                                              " (" + std::to_string(m_texFavs.size()) + " held dear)";
+                        } else {
+                            m_screenMessage = "in hand: " + t->second;
+                        }
+                    } else {
+                        m_screenMessage = "that plate holds no paint the roller remembers";
+                    }
+                    m_screenMessageTimer = 2.0f;
+                }
+            }
+            if (Input::isKeyPressed(Input::KEY_F) && m_texInHand >= 0) {
+                if (shiftHeldTex) {
+                    m_screenMessage = m_floodShipFn
+                        ? m_floodShipFn(m_texInHand, m_texScaleU, m_texScaleV,
+                                        static_cast<int>(m_texRotation))
+                        : std::string("the flood is not wired");
+                    m_screenMessageTimer = 2.5f;
+                } else if (SceneObject* hit = aimedPiece()) {
+                    applyBuildingTextureToObject(hit, m_texInHand, m_texScaleU, m_texScaleV,
+                                                 static_cast<int>(m_texRotation));
+                    m_texCarouselTimer = 1.2f;
+                }
+            }
+        }
+
         // Cars in motion glide toward their called floor.
         if (!m_liftTarget.empty()) {
             for (auto it = m_liftTarget.begin(); it != m_liftTarget.end();) {
@@ -16793,7 +17006,7 @@ private:
                 if (!car) { it = m_liftTarget.erase(it); continue; }
                 glm::vec3 p = car->getTransform().getPosition();
                 const float dy = it->second - p.y;
-                const float step = 2.6f * deltaTime;
+                const float step = m_liftSpeed * deltaTime;
                 if (std::abs(dy) <= step) {
                     p.y = it->second;
                     car->getTransform().setPosition(p);
@@ -33683,6 +33896,143 @@ private:
     float       m_lastBuildCost = 0.0f; // refunded when she is re-laid
     std::unordered_map<std::string, float> m_liftTarget;  // car name -> called floor y
     std::unordered_map<std::string, int> m_liftCarFloor;  // car name -> floor it occupies
+    // THE ROLLER: texture-in-hand painting in play mode -- no cursor, no
+    // panel. Shift+scroll cycles, F paints the aimed block, Shift+F floods
+    // the ship, MMB eyedrops. The carousel is HUD-only; the mouse is never
+    // dislodged.
+    int   m_texInHand = -1;
+    float m_texCarouselTimer = 0.0f;
+    bool  m_texCycling = false;      // the lazy cycle: bare wheel browses
+    bool  m_texCycleArmed = false;   // shift released since entering
+    bool  m_texRingAll = false;      // sticky department: library vs favourites
+    // THE TILDE CONSOLE: direct parameter surgery ("tex_scale = 1.0").
+    // Every knob lives in this registry; the console is just a mouth for it.
+    float m_texScaleU = 0.5f;        // roller tiling, U axis
+    float m_texScaleV = 0.5f;        // roller tiling, V axis
+    float m_texRotation = 0.0f;      // roller rotation, degrees
+    float m_liftSpeed = 2.6f;        // lift glide, m/s
+    float m_nudgeStep = 0.25f;       // block surgery arrow step, units
+    bool m_devConsoleOpen = false;
+    char m_devConsoleBuf[160] = {0};
+    std::vector<std::string> m_devConsoleLog;
+    struct DevParam { const char* name; float* value; float lo; float hi; const char* what; };
+    std::vector<DevParam> devParams() {
+        return {
+            {"tex_scaleU", &m_texScaleU,       0.02f, 8.0f,  "roller tiling, U axis"},
+            {"tex_scaleV", &m_texScaleV,       0.02f, 8.0f,  "roller tiling, V axis"},
+            {"tex_rot",    &m_texRotation,     0.0f,  360.0f,"roller rotation degrees"},
+            {"lift_speed", &m_liftSpeed,       0.5f,  20.0f, "lift glide m/s"},
+            {"nudge_step", &m_nudgeStep,       0.05f, 4.0f,  "arrow surgery step"},
+            {"rot_snap",   &m_buildRotateSnap, 1.0f,  90.0f, "Z/X/C rotation snap degrees"},
+        };
+    }
+    void devConsoleRun(const std::string& lineIn) {
+        std::string s = lineIn;
+        for (auto& ch : s) if (ch == '=') ch = ' ';
+        std::istringstream in(s);
+        std::string name; in >> name;
+        if (name.empty()) return;
+        m_devConsoleLog.push_back("> " + lineIn);
+        if (name == "tex_scale") {
+            // the both-axes shorthand: one number squares the tiling
+            float v;
+            if (in >> v) {
+                m_texScaleU = m_texScaleV = std::clamp(v, 0.02f, 8.0f);
+                char row[120];
+                std::snprintf(row, sizeof row, "  tex_scaleU = tex_scaleV = %g", m_texScaleU);
+                m_devConsoleLog.push_back(row);
+            } else {
+                char row[120];
+                std::snprintf(row, sizeof row, "  tex_scaleU = %g   tex_scaleV = %g",
+                              m_texScaleU, m_texScaleV);
+                m_devConsoleLog.push_back(row);
+            }
+            return;
+        }
+        if (name == "help" || name == "list") {
+            for (const auto& p : devParams()) {
+                char row[160];
+                std::snprintf(row, sizeof row, "  %-11s %-8.3g (%g..%g) %s",
+                              p.name, *p.value, p.lo, p.hi, p.what);
+                m_devConsoleLog.push_back(row);
+            }
+            return;
+        }
+        for (const auto& p : devParams()) {
+            if (name != p.name) continue;
+            float v;
+            if (in >> v) {
+                *p.value = std::clamp(v, p.lo, p.hi);
+                char row[120];
+                std::snprintf(row, sizeof row, "  %s = %g", p.name, *p.value);
+                m_devConsoleLog.push_back(row);
+            } else {
+                char row[120];
+                std::snprintf(row, sizeof row, "  %s = %g   (%s)", p.name, *p.value, p.what);
+                m_devConsoleLog.push_back(row);
+            }
+            return;
+        }
+        m_devConsoleLog.push_back("  no such knob -- 'list' names them all");
+    }
+    void renderDevConsole() {
+        // tilde toggles; the raw key is read past ImGui so it also closes
+        // while the field has focus (the stray backtick is stripped below)
+        static bool wasTilde = false;
+        const bool tilde = Input::isKeyDown(96);   // GLFW_KEY_GRAVE_ACCENT
+        if (tilde && !wasTilde) {
+            m_devConsoleOpen = !m_devConsoleOpen;
+            m_devConsoleBuf[0] = 0;
+        }
+        wasTilde = tilde;
+        if (!m_devConsoleOpen) return;
+        {   // strip the backtick the toggle key types into the field
+            size_t bl = std::strlen(m_devConsoleBuf);
+            while (bl > 0 && (m_devConsoleBuf[bl-1] == '`' || m_devConsoleBuf[bl-1] == '~'))
+                m_devConsoleBuf[--bl] = 0;
+        }
+        const float w = static_cast<float>(getWindow().getWidth());
+        ImGui::SetNextWindowPos(ImVec2(w * 0.5f - 320.0f, 8.0f));
+        ImGui::SetNextWindowSize(ImVec2(640.0f, 0.0f));
+        ImGui::SetNextWindowBgAlpha(0.82f);
+        if (ImGui::Begin("##DevConsole", nullptr,
+                         ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+                         ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings)) {
+            const int start = std::max(0, (int)m_devConsoleLog.size() - 8);
+            for (int li = start; li < (int)m_devConsoleLog.size(); ++li)
+                ImGui::TextUnformatted(m_devConsoleLog[li].c_str());
+            ImGui::SetNextItemWidth(-1);
+            ImGui::SetKeyboardFocusHere();
+            if (ImGui::InputText("##devcmd", m_devConsoleBuf, sizeof m_devConsoleBuf,
+                                 ImGuiInputTextFlags_EnterReturnsTrue)) {
+                devConsoleRun(m_devConsoleBuf);
+                m_devConsoleBuf[0] = 0;
+            }
+            ImGui::TextDisabled("name = value   |   name   |   list   |   ~ closes");
+        }
+        ImGui::End();
+    }
+    std::function<std::string(int, float, float, int)> m_floodShipFn;
+    // FAVORITES ("a huge amount of textures we have to go through"): H
+    // hearts the held texture; Shift+scroll cycles favourites only,
+    // Ctrl+Shift+scroll the whole library. One name per line on disk.
+    std::set<std::string> m_texFavs;
+    bool m_texFavsLoaded = false;
+    std::string texFavPath() const {
+        return std::string(CMAKE_SOURCE_DIR) + "/texture_favorites.txt";
+    }
+    void loadTexFavs() {
+        if (m_texFavsLoaded) return;
+        m_texFavsLoaded = true;
+        std::ifstream f(texFavPath());
+        std::string line;
+        while (std::getline(f, line))
+            if (!line.empty()) m_texFavs.insert(line);
+    }
+    void saveTexFavs() {
+        std::ofstream f(texFavPath());
+        for (const auto& s : m_texFavs) f << s << "\n";
+    }
 
     enum class PlayerZone { Silo, Basement, Outside, Void };
     PlayerZone m_playerZone = PlayerZone::Outside;

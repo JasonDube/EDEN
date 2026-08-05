@@ -522,6 +522,7 @@ public:
         int width = 0, height = 0;
     };
     void setBuildingTextures(const std::vector<BuildingTextureInfo>& textures) { m_buildingTextures = textures; }
+    const std::vector<BuildingTextureInfo>& getBuildingTextureInfos() const { return m_buildingTextures; }
     int getSelectedBuildingTexture() const { return m_selectedBuildingTexture; }
     void setSelectedBuildingTexture(int idx) { m_selectedBuildingTexture = idx; }
     int getBuildingTextureCount() const { return static_cast<int>(m_buildingTextures.size()); }
