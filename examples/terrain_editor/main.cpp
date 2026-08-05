@@ -17028,6 +17028,52 @@ private:
             }
         }
 
+        // THE DOORS BREATHE: panels with door metadata watch for the
+        // player near their doorway and glide open, then shut behind. All
+        // motion is INCREMENTAL along the panel's own axis -- a progress
+        // scalar, no absolute stops -- so a door aboard a moving ship
+        // still works (the lesson the lift had to learn the hard way,
+        // applied at birth).
+        if (m_isPlayMode) {
+            const glm::vec3 eye = m_camera.getPosition();
+            for (auto& so : m_sceneObjects) {
+                if (!so) continue;
+                const auto& md = so->getModelMetadata();
+                if (md.find("door") == md.end()) continue;
+                auto axIt = md.find("door_axis");
+                auto sgIt = md.find("door_sign");
+                auto lnIt = md.find("door_len");
+                if (axIt == md.end() || sgIt == md.end() || lnIt == md.end()) continue;
+                const bool axisX = (axIt->second == "x");
+                const float sign = std::strtof(sgIt->second.c_str(), nullptr);
+                const float len = std::strtof(lnIt->second.c_str(), nullptr);
+                if (len <= 0.01f) continue;
+                float& prog = m_doorOpen[so->getName()];
+                glm::vec3 p = so->getTransform().getPosition();
+                // the doorway's resting centre: current pos minus travel
+                glm::vec3 rest = p;
+                (axisX ? rest.x : rest.z) -= prog * len * sign;
+                const AABB wb = so->getWorldBounds();
+                const float wallH = wb.max.y - wb.min.y;
+                const float along = axisX ? std::abs(eye.x - rest.x)
+                                          : std::abs(eye.z - rest.z);
+                const float across = axisX ? std::abs(eye.z - rest.z)
+                                           : std::abs(eye.x - rest.x);
+                const bool near = along < len + 1.4f && across < 2.4f &&
+                                  eye.y > rest.y - 1.0f &&
+                                  eye.y < rest.y + wallH + 1.6f;
+                const float target = near ? 1.0f : 0.0f;
+                if (std::abs(prog - target) < 1e-4f) continue;
+                const float rate = (m_doorSpeed / len) * deltaTime;
+                const float next = target > prog ? std::min(prog + rate, 1.0f)
+                                                 : std::max(prog - rate, 0.0f);
+                const float delta = (next - prog) * len * sign;
+                (axisX ? p.x : p.z) += delta;
+                so->getTransform().setPosition(p);
+                prog = next;
+            }
+        }
+
         // Cars in motion glide toward their called floor.
         if (!m_liftTarget.empty()) {
             for (auto it = m_liftTarget.begin(); it != m_liftTarget.end();) {
@@ -33927,6 +33973,8 @@ private:
     float       m_lastBuildCost = 0.0f; // refunded when she is re-laid
     std::unordered_map<std::string, float> m_liftTarget;  // car name -> called floor y
     std::unordered_map<std::string, int> m_liftCarFloor;  // car name -> floor it occupies
+    std::unordered_map<std::string, float> m_doorOpen;    // panel name -> openness 0..1
+    float m_doorSpeed = 3.0f;                             // panel glide, m/s
     // THE ROLLER: texture-in-hand painting in play mode -- no cursor, no
     // panel. Shift+scroll cycles, F paints the aimed block, Shift+F floods
     // the ship, MMB eyedrops. The carousel is HUD-only; the mouse is never
@@ -33980,6 +34028,7 @@ private:
             {"nudge_step", &m_nudgeStep,       0.05f, 4.0f,  "arrow surgery step"},
             {"rot_snap",   &m_buildRotateSnap, 1.0f,  90.0f, "Z/X/C rotation snap degrees"},
             {"dev_fly",    &m_devFly,          0.0f,  1.0f,  "1 = C freecam + double-space fly"},
+            {"door_speed", &m_doorSpeed,       0.5f,  15.0f, "door panel glide m/s"},
         };
     }
     void devConsoleRun(const std::string& lineIn) {

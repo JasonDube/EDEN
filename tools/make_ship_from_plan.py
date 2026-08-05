@@ -543,6 +543,102 @@ for i, (x, y, w, h) in enumerate(windows):
                      wx(x, w), deck_top, wz(y, h),
                      w*CELL, LOFT[y], h*CELL, (0.45, 0.70, 1.00, 0.22)))
 
+# ---- DOORS: a D run becomes a sliding doorway -------------------------------
+# Doors make doorways the way letters make sockets: adjacent D cells in a
+# wall line cluster into ONE assembly. A single cell hangs one panel that
+# pockets into its flanking wall; a run hangs the classic split pair,
+# parting to opposite sides. D cells in open floor (no wall line) stay
+# plain walkable floor, as they always were. Panels are thinner than the
+# wall and stop a hair short of the roof -- the plane ledger holds. The
+# slide is INCREMENTAL at runtime (a progress scalar, no absolute stops),
+# so doors are motion-proof by construction: they will work on a flying
+# ship the day the lifts still cannot.
+DOOR_T = 0.35
+DOOR_COL = (0.48, 0.51, 0.58, 1.0)
+door_count = 0
+
+def hang_doors(cellfn, base_y_fn, wall_h_fn, sfx):
+    global door_count
+    solidf = lambda x, y: cellfn(x, y) in ('#', 'W', 'X', 'F')
+    claimed = set()
+    runs = []
+    for y in range(H):
+        x = 0
+        while x < W:
+            if cellfn(x, y) == 'D' and (x, y) not in claimed and cellfn(x + 1, y) == 'D':
+                n = 0
+                while cellfn(x + n, y) == 'D':
+                    n += 1
+                for i in range(n):
+                    claimed.add((x + i, y))
+                runs.append(('x', x, y, n))
+                x += n
+            else:
+                x += 1
+    for x in range(W):
+        y = 0
+        while y < H:
+            if cellfn(x, y) == 'D' and (x, y) not in claimed and cellfn(x, y + 1) == 'D':
+                n = 0
+                while cellfn(x, y + n) == 'D':
+                    n += 1
+                for i in range(n):
+                    claimed.add((x, y + i))
+                runs.append(('z', x, y, n))
+                y += n
+            else:
+                y += 1
+    for y in range(H):
+        for x in range(W):
+            if cellfn(x, y) != 'D' or (x, y) in claimed:
+                continue
+            if solidf(x - 1, y) or solidf(x + 1, y):
+                runs.append(('x', x, y, 1))
+            elif solidf(x, y - 1) or solidf(x, y + 1):
+                runs.append(('z', x, y, 1))
+            # no wall line at all: an open-floor D, no panel
+
+    def panel(name, px, by, pz, sx, wh, sz, axis, sign, length):
+        o = prim(name, "platform_wall", px, by, pz, sx, wh, sz, DOOR_COL)
+        o["metadata"] = {"door": "1", "door_axis": axis,
+                         "door_sign": f"{sign:g}", "door_len": f"{length:.2f}"}
+        objs.append(o)
+
+    for (ax, x, y, n) in runs:
+        door_count += 1
+        by = base_y_fn(x, y)
+        wh = wall_h_fn(x, y) - 0.03
+        if ax == 'x':
+            X0 = ORIGIN_X + (x - W / 2.0) * CELL
+            zc = ORIGIN_Z + (y + 0.5 - H / 2.0) * CELL
+            if n == 1:
+                sign = -1.0 if solidf(x - 1, y) else 1.0
+                plen = CELL - 0.04
+                panel(f"{stem}_door{sfx}_{door_count}", X0 + CELL / 2.0, by, zc,
+                      plen, wh, DOOR_T, "x", sign, plen + 0.12)
+            else:
+                plen = n * CELL / 2.0 - 0.04
+                panel(f"{stem}_door{sfx}_{door_count}_a",
+                      X0 + n * CELL * 0.25, by, zc, plen, wh, DOOR_T, "x", -1.0, plen + 0.12)
+                panel(f"{stem}_door{sfx}_{door_count}_b",
+                      X0 + n * CELL * 0.75, by, zc, plen, wh, DOOR_T, "x", 1.0, plen + 0.12)
+        else:
+            Z0 = ORIGIN_Z + (y - H / 2.0) * CELL
+            xc = ORIGIN_X + (x + 0.5 - W / 2.0) * CELL
+            if n == 1:
+                sign = -1.0 if solidf(x, y - 1) else 1.0
+                plen = CELL - 0.04
+                panel(f"{stem}_door{sfx}_{door_count}", xc, by, Z0 + CELL / 2.0,
+                      DOOR_T, wh, plen, "z", sign, plen + 0.12)
+            else:
+                plen = n * CELL / 2.0 - 0.04
+                panel(f"{stem}_door{sfx}_{door_count}_a",
+                      xc, by, Z0 + n * CELL * 0.25, DOOR_T, wh, plen, "z", -1.0, plen + 0.12)
+                panel(f"{stem}_door{sfx}_{door_count}_b",
+                      xc, by, Z0 + n * CELL * 0.75, DOOR_T, wh, plen, "z", 1.0, plen + 0.12)
+
+hang_doors(cell, lambda x, y: deck_top, lambda x, y: LOFT[y], "")
+
 # ---- ROOFS: the honest lid --------------------------------------------------
 # Flat-built ships were open to the sky -- floors, walls, and then nothing.
 # Every room and every wall-top now gets a roof plate at its loft height,
@@ -1218,6 +1314,9 @@ for dk in range(1, len(layers)):
                              sw*CELL, 0.06, sh*CELL, color, collide=False))
             objs[-1]["metadata"] = {"socket": role}
 
+    hang_doors(cD, lambda x, y, _f=d_floor_top: _f,
+               lambda x, y: WALL_H, sfx)
+
     # this storey's roof -- the next storey's floor
     roof_counts_d = {}
     hole_d = SHAFT_HOLES.get(dk, set())
@@ -1318,6 +1417,8 @@ for r in rooms:
 print(f"{dst}: {len(floors)} room plates + {len(frames)} frame plates, {len(walls)} wall runs, "
       f"{sum(1 for y in range(H) for x in range(W) if cell(x,y)=='D')} door cells, "
       f"{len(sockets)} sockets {[(ROLE[c][0], w, h) for (c,x,y,w,h) in sockets]}")
+if door_count:
+    print(f"doors: {door_count} doorway(s) hung -- they will breathe in play")
 if mast_blobs:
     print(f"masts: {len(mast_blobs)} comms ({round(mast_cost)} CR) -- her voice stands topside")
 if not any(c == 'B' for (c, *_ ) in sockets):
